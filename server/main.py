@@ -137,9 +137,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
-    _mount_api(app, settings.api_base_path)
+    _mount_api(app, settings.api_base_path, env=settings.env)
     for legacy in settings.api_legacy_base_paths:
-        _mount_api(app, legacy)
+        _mount_api(app, legacy, env=settings.env)
 
     if settings.api_legacy_base_paths:
         _install_deprecation_middleware(
@@ -152,13 +152,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _mount_api(app: FastAPI, prefix: str) -> None:
-    # ping is registered per-prefix so the deprecation middleware stamps
-    # /v1/ping responses just like the routed endpoints.
+def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
+    # ping / health are registered per-prefix so the deprecation middleware
+    # stamps /v1/* responses just like the routed endpoints. The root /health
+    # also stays mounted in create_app() for infra probes that don't carry a
+    # version prefix (load balancers, kubelet).
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
+    async def health() -> dict[str, str]:
+        return {"status": "ok", "env": env}
+
     app.add_api_route(f"{prefix}/ping", ping, methods=["GET"], tags=["meta"])
+    app.add_api_route(f"{prefix}/health", health, methods=["GET"], tags=["meta"])
     app.include_router(devices_routes.router, prefix=prefix)
     app.include_router(live_activities_routes.router, prefix=prefix)
     app.include_router(schedule_routes.router, prefix=prefix)
