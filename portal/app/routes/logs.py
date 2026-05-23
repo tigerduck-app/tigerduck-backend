@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from ..logs import (
     ANDROID_NEEDLES,
+    ANNOUNCEMENT_NEEDLES,
     APPLE_NEEDLES,
     DEFAULT_TAIL,
     MAX_TAIL,
@@ -21,11 +22,12 @@ from ..logs import (
 router = APIRouter(prefix="/api/logs")
 
 TABS: list[dict] = [
-    {"id": "backend", "label": "Backend",  "kind": "raw",    "container": "tigerduck-internal", "needles": None},
-    {"id": "db",      "label": "DB",       "kind": "raw",    "container": "tigerduck-db",       "needles": None},
-    {"id": "portal",  "label": "Portal",   "kind": "raw",    "container": "tigerduck-portal",   "needles": None},
-    {"id": "android", "label": "Android",  "kind": "filter", "container": "tigerduck-internal", "needles": ANDROID_NEEDLES},
-    {"id": "apple",   "label": "Apple",    "kind": "filter", "container": "tigerduck-internal", "needles": APPLE_NEEDLES},
+    {"id": "backend",      "label": "Backend",      "kind": "raw",    "container": "tigerduck-internal", "needles": None},
+    {"id": "announcement", "label": "Announcement", "kind": "filter", "container": "tigerduck-internal", "needles": ANNOUNCEMENT_NEEDLES},
+    {"id": "db",           "label": "DB",           "kind": "raw",    "container": "tigerduck-db",       "needles": None},
+    {"id": "portal",       "label": "Portal",       "kind": "raw",    "container": "tigerduck-portal",   "needles": None},
+    {"id": "android",      "label": "Android",      "kind": "filter", "container": "tigerduck-internal", "needles": ANDROID_NEEDLES},
+    {"id": "apple",        "label": "Apple",        "kind": "filter", "container": "tigerduck-internal", "needles": APPLE_NEEDLES},
 ]
 TABS_BY_ID = {t["id"]: t for t in TABS}
 

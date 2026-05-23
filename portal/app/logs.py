@@ -131,3 +131,8 @@ def filter_lines(text: str, needles: list[str]) -> str:
 # per-section search bar narrows further.
 ANDROID_NEEDLES = ["fcm", "android", "firebase"]
 APPLE_NEEDLES = ["apns", "apple", "live_activity", "live-activity", "pts"]
+# Bulletin / announcement-related lines. Covers the structlog event keys
+# (`bulletins.*`), the module name (`server.bulletins`, `server.routes.bulletins`),
+# and the human word so admin POST/PATCH paths surface alongside scraper
+# + dispatcher activity.
+ANNOUNCEMENT_NEEDLES = ["bulletin", "announcement"]
