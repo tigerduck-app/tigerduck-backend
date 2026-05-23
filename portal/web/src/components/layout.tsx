@@ -9,6 +9,7 @@ import {
   Smartphone,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { useEnv } from "@/hooks/use-env";
 import { cn } from "@/lib/cn";
 
@@ -39,8 +40,8 @@ export function Layout() {
   const items = NAV.filter((n) => !n.devOnly || isDev);
 
   return (
-    <div className="flex h-full min-h-screen bg-background">
-      <aside className="hidden w-60 shrink-0 flex-col border-r border-border bg-card/30 lg:flex">
+    <div className="flex min-h-screen bg-background">
+      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border bg-card/30 lg:flex">
         <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
           <img
             src="/static/tigerduck-logo.png"
@@ -71,17 +72,20 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto space-y-1.5 border-t border-border px-5 py-4 text-xs text-muted-foreground">
-          <div className="flex items-center gap-2">
-            <span>Mode</span>
-            <EnvBadge env={env.data?.env} />
-          </div>
-          {env.data?.apns_env ? (
+        <div className="mt-auto space-y-3 border-t border-border px-3 py-4">
+          <div className="space-y-1.5 px-2 text-xs text-muted-foreground">
             <div className="flex items-center gap-2">
-              <span>APNs</span>
-              <EnvBadge env={env.data.apns_env} />
+              <span>Mode</span>
+              <EnvBadge env={env.data?.env} />
             </div>
-          ) : null}
+            {env.data?.apns_env ? (
+              <div className="flex items-center gap-2">
+                <span>APNs</span>
+                <EnvBadge env={env.data.apns_env} />
+              </div>
+            ) : null}
+          </div>
+          <ThemeToggle />
         </div>
       </aside>
 
@@ -128,6 +132,9 @@ function MobileNav({ items }: { items: NavItem[] }) {
           </option>
         ))}
       </select>
+      <div className="w-32">
+        <ThemeToggle />
+      </div>
     </header>
   );
 }

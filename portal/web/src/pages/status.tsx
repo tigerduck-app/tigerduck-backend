@@ -256,23 +256,26 @@ function StatusContent({ data }: { data: StatusPayload }) {
 
       <Section title="LLM">
         <Card>
-          <CardContent className="text-sm">
-            <code>{env.llm_base_url || "(unset)"}</code> —{" "}
-            {llm.reachable ? (
-              <span className="inline-flex items-center gap-1 text-success">
-                <CheckCircle2 className="h-4 w-4" /> reachable ({llm.status_code},{" "}
-                {llm.latency_ms}ms)
-              </span>
-            ) : (
-              <span className="inline-flex items-center gap-1 text-destructive">
-                <XCircle className="h-4 w-4" /> not reachable — {llm.detail}
-              </span>
-            )}
+          <CardContent className="space-y-2 text-sm">
+            <div className="font-mono text-xs text-muted-foreground">
+              {env.llm_base_url || "(unset)"}
+            </div>
+            <div>
+              {llm.reachable ? (
+                <span className="inline-flex items-center gap-1 text-success">
+                  <CheckCircle2 className="h-4 w-4" /> reachable (
+                  {llm.status_code}, {llm.latency_ms}ms)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-destructive">
+                  <XCircle className="h-4 w-4" /> not reachable — {llm.detail}
+                </span>
+              )}
+            </div>
             {env.skip_llm_probe && (
-              <span className="text-muted-foreground">
-                {" "}
-                (but probe is skipped at startup, so this doesn't block boot)
-              </span>
+              <div className="text-xs text-muted-foreground">
+                Probe is skipped at startup, so this doesn't block boot.
+              </div>
             )}
           </CardContent>
         </Card>

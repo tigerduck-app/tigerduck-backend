@@ -10,6 +10,29 @@
       rel="stylesheet"
       href="https://rsms.me/inter/inter.css"
     />
+    <script>
+      // Inline so the .dark class lands on <html> before the first
+      // paint — otherwise the body briefly flashes in light mode while
+      // React boots and reads localStorage. Mirrors the resolver inside
+      // hooks/use-theme.ts; keep them in sync.
+      (function () {
+        try {
+          var stored = localStorage.getItem("tigerduck.portal.theme");
+          var theme = stored === "light" || stored === "dark" ? stored : "system";
+          var resolved =
+            theme === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : theme;
+          document.documentElement.classList.toggle("dark", resolved === "dark");
+          document.documentElement.style.colorScheme = resolved;
+        } catch (_) {
+          // localStorage unavailable; fall back to light (the default
+          // CSS variables, no .dark class).
+        }
+      })();
+    </script>
   </head>
   <body class="h-full bg-background text-foreground antialiased">
     <div id="root" class="h-full"></div>
