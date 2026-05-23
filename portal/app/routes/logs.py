@@ -7,6 +7,7 @@ page load. Tail width and the search box live on each tab.
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import PlainTextResponse
 
 from ..logs import (
     ANDROID_NEEDLES,
@@ -55,3 +56,22 @@ async def logs_page(request: Request, source: str = "backend", tail: int = DEFAU
             "log_text": text,
         },
     )
+
+
+@router.get("/logs/data", response_class=PlainTextResponse)
+async def logs_data(source: str = "backend", tail: int = DEFAULT_TAIL):
+    """Plain-text tail for the live-update poller in logs.html.
+
+    Returns the same content the HTML page would render (raw or
+    needle-filtered, depending on the tab). On engine error returns the
+    detail string with status 200 so the JS poller just shows it inline
+    rather than treating a transient docker socket hiccup as fatal.
+    """
+    tab = TABS_BY_ID.get(source) or TABS_BY_ID["backend"]
+    tail = max(1, min(tail, MAX_TAIL))
+    res = await container_logs(tab["container"], tail=tail)
+    if not res["ok"]:
+        return res.get("detail") or "log unavailable"
+    if tab["kind"] == "filter":
+        return filter_lines(res["text"], tab["needles"])
+    return res["text"]

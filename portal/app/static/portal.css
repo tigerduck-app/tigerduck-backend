@@ -203,6 +203,14 @@ button.warn   { background: var(--pill-skipped-bg); color: var(--pill-skipped-fg
     font-size: 1em;
 }
 .log-count { font-size: 0.9em; }
+.live-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9em;
+    user-select: none;
+    white-space: nowrap;
+}
 .tail-form {
     display: flex;
     align-items: end;
