@@ -1,25 +1,21 @@
-"""Announcement composer.
+"""Announcement composer proxies (JSON-only).
 
-Lets an operator author a new bulletin or patch an existing one. New
-bulletins are inserted directly into the `bulletins` table with
-`processing_state='processed'` so the dispatcher's regular tick fans
-them out on its next pass — the same path LLM-classified bulletins
-take. Patches update display fields only and don't re-fire the push.
-
-Available in both dev and prod. In prod the page's JS pops a confirm
-dialog before any mutation so a stray tab doesn't accidentally
-broadcast to every registered device.
+The portal forwards reads + writes to the backend's
+`/v2/bulletins` + `/v2/bulletins/admin` endpoints over the docker
+network. Writes go through `admin/*` which is gated by the
+`X-Push-Token` shared secret on the backend; the portal attaches that
+header here so the SPA never sees the secret.
 """
 from __future__ import annotations
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..status import BACKEND_INTERNAL_URL
 
-router = APIRouter()
+router = APIRouter(prefix="/api/announcement")
 
 
 async def _backend_request(
@@ -31,7 +27,7 @@ async def _backend_request(
     params: dict | None = None,
     timeout_s: float = 15.0,
 ) -> httpx.Response:
-    """Call `tigerduck-internal:40000/v2<path>` over the docker network."""
+    """Call `tigerduck-internal:40000/v2<path>` with X-Push-Token."""
     secret = request.app.state.settings.api_shared_secret
     headers: dict[str, str] = {}
     if secret:
@@ -44,7 +40,7 @@ async def _backend_request(
 
 
 def _proxy_json(r: httpx.Response) -> JSONResponse:
-    """Mirror upstream status + body so the page's JS gets the real error."""
+    """Mirror upstream status + body so the SPA gets the real detail."""
     try:
         body = r.json() if r.content else {}
     except ValueError:
@@ -52,39 +48,24 @@ def _proxy_json(r: httpx.Response) -> JSONResponse:
     return JSONResponse(status_code=r.status_code, content=body)
 
 
-# --- Page render ----------------------------------------------------------
-
-
-@router.get("/announcement", response_class=HTMLResponse)
-async def page(request: Request) -> HTMLResponse:
-    """Initial render — table is paged in via fetch() so a slow backend
-    doesn't block the page shell. Taxonomy is fetched once and embedded
-    so the org / tag dropdowns render without an extra round-trip."""
-    taxonomy: dict | None = None
-    taxonomy_error: str | None = None
-    try:
-        r = await _backend_request(request, "GET", "/bulletins/taxonomy")
-        if r.status_code == 200:
-            taxonomy = r.json()
-        else:
-            taxonomy_error = f"backend HTTP {r.status_code}: {r.text[:200]}"
-    except httpx.HTTPError as exc:
-        taxonomy_error = f"{type(exc).__name__}: {exc}"
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "announcement.html",
-        {
-            "taxonomy": taxonomy,
-            "taxonomy_error": taxonomy_error,
-        },
+def _proxy_error(exc: httpx.HTTPError) -> JSONResponse:
+    return JSONResponse(
+        status_code=502,
+        content={"detail": f"backend call failed: {type(exc).__name__}: {exc}"},
     )
 
 
-# --- JSON proxies ---------------------------------------------------------
+@router.get("/taxonomy")
+async def taxonomy(request: Request) -> JSONResponse:
+    try:
+        r = await _backend_request(request, "GET", "/bulletins/taxonomy")
+    except httpx.HTTPError as exc:
+        return _proxy_error(exc)
+    return _proxy_json(r)
 
 
-@router.get("/announcement/api/list", response_class=JSONResponse)
-async def api_list(
+@router.get("/list")
+async def list_bulletins(
     request: Request,
     limit: int = 30,
     cursor: int | None = None,
@@ -96,30 +77,23 @@ async def api_list(
     try:
         r = await _backend_request(request, "GET", "/bulletins", params=params)
     except httpx.HTTPError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"detail": f"backend call failed: {type(exc).__name__}: {exc}"},
-        )
+        return _proxy_error(exc)
     return _proxy_json(r)
 
 
-@router.get("/announcement/api/{bulletin_id}", response_class=JSONResponse)
-async def api_get(bulletin_id: int, request: Request) -> JSONResponse:
+@router.get("/{bulletin_id}")
+async def get_bulletin(bulletin_id: int, request: Request) -> JSONResponse:
     try:
         r = await _backend_request(request, "GET", f"/bulletins/{bulletin_id}")
     except httpx.HTTPError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"detail": f"backend call failed: {type(exc).__name__}: {exc}"},
-        )
+        return _proxy_error(exc)
     return _proxy_json(r)
 
 
 class _CreateSubmission(BaseModel):
     # Length limits mirror BulletinAdminCreateRequest so a malformed
-    # payload fails fast on the portal side instead of paying a
-    # cross-container hop. Extra fields are rejected so a typo'd key
-    # in the UI doesn't get silently dropped on the wire.
+    # payload 422s before paying a cross-container hop. extra=forbid so
+    # a typo'd UI key doesn't get silently dropped on the wire.
     model_config = ConfigDict(extra="forbid")
 
     title: str = Field(min_length=1, max_length=500)
@@ -137,8 +111,8 @@ class _CreateSubmission(BaseModel):
     )
 
 
-@router.post("/announcement/api/create", response_class=JSONResponse)
-async def api_create(
+@router.post("")
+async def create_bulletin(
     payload: _CreateSubmission, request: Request
 ) -> JSONResponse:
     try:
@@ -146,10 +120,7 @@ async def api_create(
             request, "POST", "/bulletins/admin", json=payload.model_dump()
         )
     except httpx.HTTPError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"detail": f"backend call failed: {type(exc).__name__}: {exc}"},
-        )
+        return _proxy_error(exc)
     return _proxy_json(r)
 
 
@@ -166,22 +137,19 @@ class _UpdateSubmission(BaseModel):
     importance: str | None = Field(default=None, max_length=16)
 
 
-@router.patch("/announcement/api/{bulletin_id}", response_class=JSONResponse)
-async def api_update(
+@router.patch("/{bulletin_id}")
+async def update_bulletin(
     bulletin_id: int, payload: _UpdateSubmission, request: Request
 ) -> JSONResponse:
     if bulletin_id <= 0:
         raise HTTPException(status_code=422, detail="bulletin_id must be positive")
-    # exclude_unset so the backend's PATCH sees only the fields the
-    # operator actually changed — omitted keys leave columns untouched.
+    # exclude_unset → backend's PATCH only sees keys the operator
+    # actually changed; omitted columns are left alone.
     body = payload.model_dump(exclude_unset=True)
     try:
         r = await _backend_request(
             request, "PATCH", f"/bulletins/admin/{bulletin_id}", json=body
         )
     except httpx.HTTPError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"detail": f"backend call failed: {type(exc).__name__}: {exc}"},
-        )
+        return _proxy_error(exc)
     return _proxy_json(r)

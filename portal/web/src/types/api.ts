@@ -1,0 +1,133 @@
+// JSON shapes returned by the portal's /api/* endpoints. These mirror
+// the FastAPI route return values (and, for the announcement page, the
+// upstream backend schemas it proxies). Keep them in sync if you change
+// either side.
+
+export type EnvInfo = {
+  env: "development" | "production" | string;
+  apns_env: string;
+  log_level: string;
+  llm_base_url: string;
+  skip_llm_probe: boolean;
+  backend_public_url: string;
+  portal_public_url: string;
+  host_lan_ips: string[];
+};
+
+export type FilePresence = {
+  present: boolean;
+  path: string;
+  size_bytes?: number;
+};
+
+export type ContainerInfo = {
+  name: string;
+  state: string;
+  health?: string | null;
+  started_at?: string;
+  restart_count?: number;
+  image?: string;
+  detail?: string;
+};
+
+export type PostgresHealth = {
+  reachable: boolean;
+  alembic_head?: string | null;
+  rows?: Record<string, number | string>;
+  detail?: string;
+};
+
+export type LlmHealth = {
+  reachable: boolean;
+  status_code?: number;
+  latency_ms?: number;
+  url?: string;
+  detail?: string;
+};
+
+export type BackendVersion = {
+  ok: boolean;
+  version?: string;
+  api_base_path?: string;
+  detail?: string;
+};
+
+export type StatusPayload = {
+  env: EnvInfo;
+  containers: ContainerInfo[];
+  postgres: PostgresHealth;
+  llm: LlmHealth;
+  backend_version: BackendVersion;
+  secrets: {
+    apns_key: FilePresence;
+    fcm_credentials: FilePresence;
+  };
+};
+
+export type LogsTab = {
+  id: string;
+  label: string;
+  kind: "raw" | "filter";
+  container: string;
+  needles?: string[] | null;
+};
+
+export type LogsPayload = {
+  ok: boolean;
+  text: string;
+  detail?: string;
+};
+
+export type DeviceInfo = {
+  device_id: string;
+  user_id: string;
+  bundle_id: string;
+  apns_env?: string | null;
+  has_pts_token: boolean;
+  has_device_token: boolean;
+  active_live_activities: number;
+  updated_at: string;
+};
+
+// Backend's GET /v2/bulletins/taxonomy shape: each entry has an `id`
+// (the enum value) and a human-readable `label`. The taxonomy endpoint
+// itself does NOT publish importance — that's a fixed Literal in the
+// admin create schema, so the UI hardcodes the option list.
+export type TaxonomyEntry = {
+  id: string;
+  label: string;
+};
+
+export type Taxonomy = {
+  orgs: TaxonomyEntry[];
+  tags: TaxonomyEntry[];
+  default_tags: string[];
+};
+
+export type Importance = "low" | "normal" | "high";
+
+export type BulletinSummary = {
+  id: number;
+  external_id: string;
+  source: string;
+  source_url: string;
+  title: string;
+  title_clean: string | null;
+  summary: string | null;
+  canonical_org: string | null;
+  content_tags: string[];
+  importance: Importance | null;
+  posted_at: string | null;
+  is_deleted: boolean;
+};
+
+export type BulletinDetail = BulletinSummary & {
+  body_clean: string | null;
+  body_md: string | null;
+  raw_publisher: string | null;
+};
+
+export type BulletinList = {
+  items: BulletinSummary[];
+  next_cursor: number | null;
+};
