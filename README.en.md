@@ -58,29 +58,35 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 
 ```
        Public                                          host (macOS / Linux)
-   ┌──────────────┐                              ┌──────────────────────────┐
-   │  iOS / And.  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal      │
-   └──────────────┘              -manager        │  (FastAPI + APScheduler) │
-                                                 │           │              │
-                                                 │           ├── APNs ─────┐│
-                                                 │           ├── FCM ─────┐││
-                                                 │           ▼            │││
-                                                 │  ┌────────────────┐    │││
-                                                 │  │ tigerduck-db   │    │││
-                                                 │  │ (Postgres 17)  │    │││
-                                                 │  └────────────────┘    │││
-                                                 │           ▲            │││
-                                                 │           │            │││
-                                                 │  ┌────────────────┐    │││
-                                                 │  │ llama-server   │◀───┘││
-                                                 │  │ (native, Metal)│     ││
-                                                 │  └────────────────┘     ││
-                                                 └──────────────────────────┘
+   ┌──────────────┐                              ┌────────────────────────────┐
+   │  iOS / And.  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal        │
+   └──────────────┘              -manager  ──┐   │  (FastAPI + APScheduler)   │
+                                             │   │           │                │
+   ┌──────────────┐                          │   │           ├── APNs        │
+   │ Admin browser│ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal         │
+   └──────────────┘   (Zero Trust)           │   │  (FastAPI + Jinja, :40010)│
+                                             │   │           │                │
+                                             │   │           ▼                │
+                                             │   │  ┌────────────────┐        │
+                                             │   │  │ tigerduck-db   │        │
+                                             │   │  │ (Postgres 17)  │        │
+                                             │   │  └────────────────┘        │
+                                             │   │           ▲                │
+                                             │   │           │                │
+                                             │   │  ┌────────────────┐        │
+                                             │   │  │ llama-server   │◀───────┘
+                                             │   │  │ (native, Metal)│
+                                             │   │  └────────────────┘
+                                             │   └────────────────────────────┘
+                                             │
+                                             └── proxy-net carries both backend and portal
 ```
 
 - **`tigerduck-db` network**: internal-only bridge — Postgres has no route to the public internet.
-- **`proxy-net`**: shared with nginx-proxy-manager; only the backend container is on it.
+- **`proxy-net`**: shared with nginx-proxy-manager; both backend and portal join it.
+- **`tigerduck-host` (dev only)**: bridge added by `docker-compose.dev.yml` so backend `:40000` and portal `:40010` can publish to host ports.
 - **llama-server**: runs natively on the host (Docker Desktop / macOS can't pass through Metal GPU). The backend reaches it via `host.docker.internal`.
+- **portal**: ships without an app-level auth gate — front it with Cloudflare Zero Trust Application (or any auth-proxy) if you need one. The `admins` table + audit log are kept for record-keeping; flip `require_admin` in `portal/app/auth.py` to make them load-bearing.
 
 ## Deployment
 
@@ -100,13 +106,14 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 git clone https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
-# 1. Copy the template and fill in NTUST / APNs / Postgres / LLM credentials
+# 1. Copy the template. Defaults to development mode (which auto-loads
+#    docker-compose.dev.yml); for production deploys, flip TIGERDUCK_ENV.
 cp .env.example .env
 
 # 2. Drop the APNs key at server/secrets/AuthKey_<KEY_ID>.p8 (already gitignored)
 
 # 3. Boot the stack (postgres + backend)
-./start.sh                       # equivalent to docker compose up -d --build + tail log
+./start.sh                       # docker compose up -d --build + tail log
 
 # 4. Health check
 docker compose exec backend curl -sS localhost:40000/health
@@ -114,12 +121,25 @@ docker compose exec backend curl -sS localhost:40000/health
 
 ### Operator scripts
 
+All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they additionally load `docker-compose.dev.yml` (publishes backend `:40000` + portal `:40010` to the host via a non-internal bridge network — the prod-only `proxy-net` is dropped because there's no NPM locally). The mode lives in `.env`; the scripts pick the right compose files automatically.
+
 | Script | Purpose |
 |---|---|
-| `./start.sh` | `docker compose up -d --build` and tail the backend log |
+| `./start.sh` | `docker compose up -d --build`, then prints a status block (mode, ports, skip-LLM, …) |
 | `./stop.sh` | `docker compose down` (volume preserved) |
-| `./logs.sh` | Tail the backend log |
-| `./clean-db.sh` | **Destructive** — drops the postgres volume; full reset |
+| `./logs.sh` | Tail a service (defaults to `backend`) |
+| `./clean-db.sh` | **Destructive** — drops the postgres volume; full reset (does NOT touch the portal's `tigerduck_portal_data` volume) |
+
+### Admin portal
+
+`tigerduck-portal` is a sibling compose service that comes up alongside the backend. Dev mode publishes it at `http://localhost:40010`; production typically lives behind cloudflared / Cloudflare Zero Trust if you want a signin gate (the portal itself does not enforce one). It can:
+
+- Show stack status (containers via the docker engine UDS, postgres row counts, LLM reachability, APNs/FCM secret presence)
+- Manage the admin record list (descriptive today; gate enforcement is opt-in via `require_admin`)
+- Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + portal's SQLite + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
+- Custom-push placeholder (TODO, ships as a stub)
+
+Full design: [`docs/portal-design.md`](docs/portal-design.md).
 
 ### LLM (host side)
 
@@ -194,9 +214,16 @@ tigerduck-backend/
 │   ├── secrets/                 # APNs .p8 (gitignored)
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest (unit + integration)
+├── portal/                      # Admin portal — separate FastAPI app (see docs/portal-design.md)
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   └── app/                     # main / config / db (SQLite) / auth / status / routes / templates / static
 ├── scripts/                     # One-shot tools (backfill, seed, etc.)
 ├── deploy/launchd/              # macOS launchd plist (llama-server and other host-side services)
-├── docker-compose.yml / Dockerfile / entrypoint.sh
+├── docker-compose.yml           # Base (backend + postgres + portal, all on proxy-net)
+├── docker-compose.dev.yml       # Auto-loaded when TIGERDUCK_ENV=development; publishes ports + swaps to a host bridge
+├── _compose-files.sh            # Shared: derives compose -f flags from TIGERDUCK_ENV
+├── Dockerfile / entrypoint.sh   # Backend container
 ├── start.sh / stop.sh / logs.sh / clean-db.sh
 ├── .env.example
 └── pyproject.toml / uv.lock

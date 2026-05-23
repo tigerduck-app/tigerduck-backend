@@ -89,7 +89,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         apns_topic=settings.apns_topic_live_activity,
     )
 
-    await _wait_for_llm(settings)
+    if settings.skip_llm_probe:
+        logger.info("llm.skipped", base_url=settings.llm_base_url)
+    else:
+        await _wait_for_llm(settings)
 
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)

@@ -15,6 +15,7 @@
 #   ./clean-db.sh --yes
 set -euo pipefail
 cd "$(dirname "$0")"
+source ./_compose-files.sh
 
 confirm=true
 if [[ "${1:-}" == "--yes" ]]; then
@@ -43,7 +44,7 @@ EOF
 fi
 
 echo "[clean-db] docker compose down"
-docker compose down
+docker compose "${COMPOSE_FILE_ARGS[@]}" down
 
 for vol in tigerduck_tigerduck_pgdata tigerduck_pgdata tigerduck_pgdataw; do
     if docker volume inspect "$vol" >/dev/null 2>&1; then
@@ -53,8 +54,7 @@ for vol in tigerduck_tigerduck_pgdata tigerduck_pgdata tigerduck_pgdataw; do
 done
 
 echo "[clean-db] docker compose up -d --build"
-docker compose up -d --build
-
+docker compose "${COMPOSE_FILE_ARGS[@]}" up -d --build
 echo
-echo "[clean-db] tailing backend log (Ctrl-C to detach)..."
-exec docker compose logs -f --tail=100 backend
+echo "[clean-db] stack is up. logs: ./logs.sh"
+print_stack_status

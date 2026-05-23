@@ -1,0 +1,42 @@
+{% extends "_base.html" %}
+{% block title %}Admins — TigerDuck portal{% endblock %}
+{% block body %}
+
+<h1>Admins</h1>
+
+<p class="dim">
+    Record of operators with portal access. The portal itself does not enforce a signin gate today
+    (front it with Cloudflare Zero Trust if you need one); this list and the audit log capture who
+    has been granted access conceptually. The bootstrap admin
+    (<code>TIGERDUCK_PORTAL_BOOTSTRAP_ADMIN</code>) is re-added on every startup, so removal is reversible.
+</p>
+
+<table>
+    <thead><tr><th>Email</th><th>Added</th><th>Added by</th><th>Notes</th><th></th></tr></thead>
+    <tbody>
+    {% for a in admins %}
+        <tr>
+            <td><code>{{ a.email }}</code>{% if a.email == bootstrap_admin %} <span class="pill dev">bootstrap</span>{% endif %}</td>
+            <td class="dim">{{ a.added_at }}</td>
+            <td class="dim">{{ a.added_by }}</td>
+            <td>{{ a.notes or "" }}</td>
+            <td>
+                <form method="post" action="/admins/{{ a.email }}/delete" onsubmit="return confirm('Remove {{ a.email }}?')">
+                    <button type="submit" class="danger">Remove</button>
+                </form>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+
+<section>
+    <h2>Add admin</h2>
+    <form method="post" action="/admins">
+        <label>Email <input type="email" name="email" required placeholder="you@example.com"></label>
+        <label>Notes <input type="text" name="notes" placeholder="optional"></label>
+        <button type="submit">Add</button>
+    </form>
+</section>
+
+{% endblock %}

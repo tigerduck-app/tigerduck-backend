@@ -9,3 +9,12 @@ server/secrets/
 
 # Local editor/tool auto-backups of .env
 .duckversions/
+
+# Personal compose override. The canonical dev story is the committed
+# docker-compose.dev.yml + TIGERDUCK_ENV=development in .env; this entry
+# exists so contributors can still drop in a per-machine tweak (custom
+# port, mount, etc.) without committing it.
+docker-compose.override.yml
+
+# macOS Finder metadata
+.DS_Store

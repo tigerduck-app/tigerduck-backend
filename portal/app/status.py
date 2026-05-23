@@ -1,0 +1,168 @@
+"""Status-page data gathering.
+
+Each function returns a small dict that the Jinja template renders. All
+checks fail SAFE — a missing file, an unreachable DB, or a docker socket
+that's been remounted RO are all reflected in the returned dict instead
+of raising. The status page should always render even when the world is
+on fire.
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+from typing import Any
+
+import asyncpg
+import httpx
+
+
+DOCKER_SOCK = "/var/run/docker.sock"
+
+
+async def llm_health(llm_base_url: str, timeout_s: float = 3.0) -> dict[str, Any]:
+    """Try a single GET against the configured LLM /models endpoint."""
+    if not llm_base_url:
+        return {"reachable": False, "detail": "TIGERDUCK_LLM_BASE_URL not set"}
+    url = llm_base_url.rstrip("/") + "/models"
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            r = await client.get(url)
+            return {
+                "reachable": r.status_code < 400,
+                "status_code": r.status_code,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+                "url": url,
+            }
+    except httpx.HTTPError as exc:
+        return {
+            "reachable": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+            "url": url,
+        }
+
+
+async def postgres_health(database_url: str, timeout_s: float = 3.0) -> dict[str, Any]:
+    """Connect, count rows in a few core tables. Returns shape:
+    {"reachable": bool, "alembic_head": str|None, "rows": {...}}.
+    """
+    if not database_url:
+        return {"reachable": False, "detail": "TIGERDUCK_DATABASE_URL not set"}
+
+    # asyncpg wants the postgres:// scheme, not postgresql+asyncpg://.
+    asyncpg_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    try:
+        conn = await asyncio.wait_for(asyncpg.connect(asyncpg_url), timeout=timeout_s)
+    except (asyncio.TimeoutError, OSError, asyncpg.PostgresError) as exc:
+        return {"reachable": False, "detail": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        alembic_head = await conn.fetchval(
+            "SELECT version_num FROM alembic_version LIMIT 1"
+        )
+        rows: dict[str, int | str] = {}
+        for table in ("device_registrations", "bulletins", "scheduled_pushes"):
+            try:
+                rows[table] = await conn.fetchval(
+                    f"SELECT count(*) FROM {table}"
+                )
+            except asyncpg.PostgresError as exc:
+                rows[table] = f"error: {exc}"
+    finally:
+        await conn.close()
+
+    return {
+        "reachable": True,
+        "alembic_head": alembic_head,
+        "rows": rows,
+    }
+
+
+async def docker_containers(timeout_s: float = 3.0) -> list[dict[str, Any]]:
+    """Query the docker engine API over the mounted unix socket.
+
+    Why HTTP-over-UDS instead of shelling out to `docker inspect`: the
+    portal container doesn't ship the docker CLI (and shouldn't — saves
+    ~150 MB and the `docker.io` Debian package's CLI placement is
+    distribution-dependent). The engine's REST API is the contract.
+
+    Containers that don't exist are omitted (not an error — a fresh
+    install hasn't started the backend yet). Hard failures (socket
+    missing, engine unreachable) surface as a single synthetic row so
+    the page still tells the operator something is wrong.
+    """
+    names = ["tigerduck-db", "tigerduck-internal", "tigerduck-portal"]
+    if not Path(DOCKER_SOCK).exists():
+        return [
+            {
+                "name": "(docker socket)",
+                "state": "unreachable",
+                "detail": f"{DOCKER_SOCK} not mounted into the portal container",
+            }
+        ]
+
+    rows: list[dict[str, Any]] = []
+    transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCK)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://docker",
+            timeout=timeout_s,
+        ) as client:
+            for name in names:
+                try:
+                    r = await client.get(f"/containers/{name}/json")
+                except httpx.HTTPError as exc:
+                    rows.append(
+                        {
+                            "name": name,
+                            "state": "unreachable",
+                            "detail": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    continue
+                if r.status_code == 404:
+                    continue
+                if r.status_code >= 400:
+                    rows.append(
+                        {
+                            "name": name,
+                            "state": "error",
+                            "detail": f"engine HTTP {r.status_code}",
+                        }
+                    )
+                    continue
+                payload = r.json()
+                state = payload.get("State", {})
+                rows.append(
+                    {
+                        "name": name,
+                        "state": state.get("Status", "?"),
+                        "health": (state.get("Health") or {}).get("Status"),
+                        "started_at": state.get("StartedAt"),
+                        "restart_count": payload.get("RestartCount", 0),
+                        "image": payload.get("Config", {}).get("Image", ""),
+                    }
+                )
+    finally:
+        await transport.aclose()
+    return rows
+
+
+def file_presence(path_str: str) -> dict[str, Any]:
+    """Return {present, path, size_bytes?} for a secrets file. We DO NOT
+    return contents — that's the whole point of file_presence vs reading."""
+    if not path_str:
+        return {"present": False, "path": "(unset)"}
+    p = Path(path_str)
+    if not p.is_absolute():
+        # backend resolves relative to /app inside the container; from
+        # the portal we look at the mounted host path.
+        p = Path("/backend-secrets") / p.name
+    try:
+        if p.exists():
+            return {"present": True, "path": str(p), "size_bytes": p.stat().st_size}
+    except OSError:
+        pass
+    return {"present": False, "path": str(p)}

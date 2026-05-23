@@ -62,6 +62,31 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  portal:
+    build: ./portal
+    container_name: tigerduck-portal
+    restart: unless-stopped
+    # tigerduck-db so the status page can directly query postgres + export
+    # can pg_dump; proxy-net so nginx-proxy-manager / cloudflared can
+    # reach it in prod. The dev override swaps proxy-net for a host bridge
+    # so port 40010 publishes.
+    networks: [tigerduck-db, proxy-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      # SQLite + audit log persist across container recreate.
+      - tigerduck_portal_data:/data
+      # Read-only docker socket lets the status page talk to the engine
+      # API (HTTP-over-UDS) for `containers/{name}/json`. NO write ops
+      # (start/stop/restart) per the design: the import flow asks the
+      # user to restart manually.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mirror the backend's secrets mount RO so the status page can
+      # report "is the .p8 / fcm.json on disk?" without exposing contents.
+      - ./server/secrets:/backend-secrets:ro
+
 networks:
   tigerduck-db:
     # Explicit name avoids the "<project>_<key>" prefix that compose adds by
@@ -76,3 +101,4 @@ networks:
 
 volumes:
   tigerduck_pgdata:
+  tigerduck_portal_data:

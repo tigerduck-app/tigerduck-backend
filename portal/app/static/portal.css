@@ -1,0 +1,166 @@
+/* TigerDuck portal — minimal styling, no framework.
+   Dark/light auto via prefers-color-scheme. */
+
+:root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --dim: #6a6a6a;
+    --line: #e2e2e2;
+    --pill-dev-bg: #d8efd8;
+    --pill-dev-fg: #1f6b1f;
+    --pill-prod-bg: #fbe1e1;
+    --pill-prod-fg: #8c1e1e;
+    --pill-unknown-bg: #ececec;
+    --pill-unknown-fg: #444;
+    --pill-skipped-bg: #fff3cd;
+    --pill-skipped-fg: #8a6d00;
+    --pill-engaged-bg: #cfe6ff;
+    --pill-engaged-fg: #1c4e83;
+    --ok: #1f6b1f;
+    --bad: #8c1e1e;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #0f1115;
+        --fg: #e4e4e4;
+        --dim: #8a8a8a;
+        --line: #2a2d34;
+        --pill-dev-bg: #1f3a1f;
+        --pill-dev-fg: #a8e0a8;
+        --pill-prod-bg: #4a1c1c;
+        --pill-prod-fg: #f0a8a8;
+        --pill-unknown-bg: #2a2a2a;
+        --pill-unknown-fg: #ccc;
+        --pill-skipped-bg: #3a3415;
+        --pill-skipped-fg: #ffd86b;
+        --pill-engaged-bg: #1c2d44;
+        --pill-engaged-fg: #9ec5ff;
+        --ok: #84d484;
+        --bad: #ef8a8a;
+    }
+}
+
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+}
+
+header {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--line);
+}
+header .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.1em;
+    color: var(--fg);
+    text-decoration: none;
+}
+header .brand-logo {
+    width: 32px;
+    height: 32px;
+    border-radius: 7px;
+    display: block;
+}
+header .brand-title { line-height: 1; }
+header nav { display: flex; gap: 16px; margin-left: auto; }
+header nav a {
+    color: var(--fg);
+    text-decoration: none;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+header nav a:hover { background: var(--line); }
+
+main { padding: 24px; max-width: 1100px; }
+footer { padding: 12px 24px; border-top: 1px solid var(--line); font-size: 0.85em; }
+
+.dim { color: var(--dim); }
+.ok { color: var(--ok); font-weight: 600; }
+.bad { color: var(--bad); font-weight: 600; }
+
+h1 { margin-top: 0; }
+section { margin-top: 32px; }
+section h2 { margin-bottom: 8px; }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+}
+th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--line);
+}
+th { font-weight: 600; font-size: 0.9em; color: var(--dim); }
+
+code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.92em;
+}
+
+.pills { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.pill {
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.8em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.pill.dev      { background: var(--pill-dev-bg); color: var(--pill-dev-fg); }
+.pill.prod     { background: var(--pill-prod-bg); color: var(--pill-prod-fg); }
+.pill.unknown  { background: var(--pill-unknown-bg); color: var(--pill-unknown-fg); }
+.pill.skipped  { background: var(--pill-skipped-bg); color: var(--pill-skipped-fg); }
+.pill.engaged  { background: var(--pill-engaged-bg); color: var(--pill-engaged-fg); }
+
+.state-running { color: var(--ok); font-weight: 600; }
+.state-exited, .state-dead { color: var(--bad); font-weight: 600; }
+
+form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin-top: 8px; }
+form label { display: flex; flex-direction: column; font-size: 0.85em; color: var(--dim); }
+form input[type=email], form input[type=text] {
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.95em;
+}
+button {
+    padding: 6px 14px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--line);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.9em;
+}
+button:hover { filter: brightness(1.08); }
+button.danger { background: var(--pill-prod-bg); color: var(--pill-prod-fg); border-color: transparent; }
+button.warn   { background: var(--pill-skipped-bg); color: var(--pill-skipped-fg); border-color: transparent; }
+
+.banner {
+    padding: 12px 16px;
+    border-radius: 6px;
+    background: var(--pill-unknown-bg);
+    margin-bottom: 16px;
+}
+.banner.ok { background: var(--pill-dev-bg); color: var(--pill-dev-fg); }
+.banner pre {
+    margin: 8px 0 0;
+    padding: 8px 12px;
+    background: rgba(0,0,0,0.06);
+    border-radius: 4px;
+    overflow-x: auto;
+}

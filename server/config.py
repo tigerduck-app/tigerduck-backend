@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
     llm_temperature: float = 0.2
+    # Dev-only escape hatch: when true, server/main.py's _wait_for_llm
+    # returns immediately instead of polling the LLM /models endpoint
+    # for up to 60s. Useful when iterating locally without llama-server
+    # running (e.g. UI / push work that doesn't touch bulletins). The
+    # bulletin classification job still tries the LLM on its own ticks
+    # and self-heals once llama-server is back up.
+    skip_llm_probe: bool = False
 
     @property
     def apns_topic_live_activity(self) -> str:

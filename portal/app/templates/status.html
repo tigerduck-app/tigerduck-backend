@@ -1,0 +1,107 @@
+{% extends "_base.html" %}
+{% block title %}Status — TigerDuck portal{% endblock %}
+{% block body %}
+
+<h1>Stack status</h1>
+
+<div class="pills">
+    {% if env == "development" %}
+        <span class="pill dev">DEV</span>
+    {% elif env == "production" %}
+        <span class="pill prod">PROD</span>
+    {% else %}
+        <span class="pill unknown">{{ env or "(unset)" }}</span>
+    {% endif %}
+    <span class="pill {% if apns_env == 'development' %}dev{% elif apns_env == 'production' %}prod{% else %}unknown{% endif %}">
+        APNs: {{ apns_env or "?" }}
+    </span>
+    <span class="pill {% if skip_llm_probe %}skipped{% else %}engaged{% endif %}">
+        LLM probe: {{ "SKIPPED" if skip_llm_probe else "ENGAGED" }}
+    </span>
+</div>
+
+<section>
+    <h2>Containers</h2>
+    {% if containers %}
+    <table>
+        <thead><tr><th>Name</th><th>State</th><th>Health</th><th>Restarts</th><th>Image</th></tr></thead>
+        <tbody>
+        {% for c in containers %}
+            <tr>
+                <td><code>{{ c.name }}</code></td>
+                <td class="state state-{{ c.state }}">{{ c.state }}{% if c.detail %} <span class="dim">({{ c.detail }})</span>{% endif %}</td>
+                <td>{{ c.health or "—" }}</td>
+                <td>{{ c.restart_count if c.restart_count is defined else "—" }}</td>
+                <td><code class="dim">{{ c.image or "—" }}</code></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+        <p class="dim">No containers visible — the docker socket may not be mounted, or none of the expected containers exist yet.</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>Postgres</h2>
+    {% if postgres.reachable %}
+        <p>Reachable. Alembic head: <code>{{ postgres.alembic_head or "?" }}</code></p>
+        <table>
+            <thead><tr><th>Table</th><th>Rows</th></tr></thead>
+            <tbody>
+            {% for table, count in postgres.rows.items() %}
+                <tr><td><code>{{ table }}</code></td><td>{{ count }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p class="bad">Not reachable — {{ postgres.detail }}</p>
+    {% endif %}
+</section>
+
+<section>
+    <h2>LLM</h2>
+    <p>
+        <code>{{ llm_base_url or "(unset)" }}</code> —
+        {% if llm.reachable %}
+            <span class="ok">reachable</span> ({{ llm.status_code }}, {{ llm.latency_ms }}ms)
+        {% else %}
+            <span class="bad">not reachable</span> — {{ llm.detail }}
+        {% endif %}
+        {% if skip_llm_probe %}
+            <span class="dim">(but probe is skipped at startup, so this doesn't block boot)</span>
+        {% endif %}
+    </p>
+</section>
+
+<section>
+    <h2>Secrets on disk</h2>
+    <table>
+        <thead><tr><th>File</th><th>Path</th><th>Present?</th><th>Size</th></tr></thead>
+        <tbody>
+            <tr>
+                <td>APNs key</td>
+                <td><code>{{ secrets.apns_key.path }}</code></td>
+                <td>{% if secrets.apns_key.present %}<span class="ok">yes</span>{% else %}<span class="bad">no</span>{% endif %}</td>
+                <td>{{ secrets.apns_key.size_bytes if secrets.apns_key.present else "—" }}</td>
+            </tr>
+            <tr>
+                <td>FCM credentials</td>
+                <td><code>{{ secrets.fcm_credentials.path }}</code></td>
+                <td>{% if secrets.fcm_credentials.present %}<span class="ok">yes</span>{% else %}<span class="bad">no</span>{% endif %}</td>
+                <td>{{ secrets.fcm_credentials.size_bytes if secrets.fcm_credentials.present else "—" }}</td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+<section>
+    <h2>Notes</h2>
+    <ul class="dim">
+        <li>Mode and LLM-probe toggles live in <code>.env</code>. Edit them and run <code>./start.sh</code> from a terminal — the portal observes, it doesn't drive.</li>
+        <li>To restart the backend after an import, run <code>./stop.sh &amp;&amp; ./start.sh</code> from the host.</li>
+        <li>Log level: <code>{{ log_level }}</code>.</li>
+    </ul>
+</section>
+
+{% endblock %}

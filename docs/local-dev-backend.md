@@ -62,42 +62,46 @@ the iOS side.
 
 ### 2. Start a local backend
 
-The repo's prod-shaped `backend/start.sh` does not publish the backend port
-to the host (it expects nginx-proxy-manager to proxy in over a docker
-network). For local dev, you need the port reachable from your iPhone.
+The backend lives in a separate repo: `git clone
+git@github.com:tigerduck-app/tigerduck-backend.git`.
 
-Easiest path: add a `docker-compose.override.yml` next to
-`backend/docker-compose.yml`:
+Fill `.env` (see `.env.example`). The template ships with development
+defaults, so most keys just need a real value:
 
-```yaml
-services:
-  backend:
-    ports:
-      - "40000:40000"
-    networks:
-      - tigerduck-db
-      # drop proxy-net — there is no NPM locally
-```
-
-Then fill `backend/.env` (see `backend/.env.example`). Key values for dev:
-
-- `TIGERDUCK_ENV=development`
-- `TIGERDUCK_APNS_ENV=development` ← the critical one
-- `TIGERDUCK_API_SHARED_SECRET=…` ← copy this into `DebugAPIToken` below
-- `POSTGRES_PASSWORD=…` ← only used by your local stack
+- `TIGERDUCK_ENV=development` ← already the default. Tells `./start.sh`
+  to auto-load `docker-compose.dev.yml`, which publishes port 40000 to
+  the host and drops the prod-only `proxy-net`.
+- `TIGERDUCK_APNS_ENV=development` ← critical; mismatched envs are the
+  most common cause of silent push failures.
+- `POSTGRES_PASSWORD=…` ← any random string. Also paste it into
+  `TIGERDUCK_DATABASE_URL` so the URL has the same password.
+  Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+- `TIGERDUCK_API_SHARED_SECRET=…` ← any random string. Copy this into
+  `Secrets.plist["DebugAPIToken"]` on the iOS side.
 
 APNs `.p8` key file: same key works for both `development` and
 `production` envs (Apple's auth keys are env-agnostic). Drop it at
-`backend/server/secrets/AuthKey_<KEY_ID>.p8`.
+`server/secrets/AuthKey_<KEY_ID>.p8` and fill the matching
+`TIGERDUCK_APNS_KEY_ID` / `TEAM_ID` / `KEY_PATH`.
 
 Bring it up:
 
 ```sh
-cd backend
+cd tigerduck-backend
 ./start.sh   # docker compose up -d --build && tails the log
 ```
 
-The backend should now respond on `http://<your-mac-LAN-IP>:40000/v2`.
+The backend should now respond on `http://<your-mac-LAN-IP>:40000/v2`
+(Simulator can also reach it via `http://localhost:40000/v2`).
+
+If you need to drop in a per-machine compose tweak (extra mount,
+different port mapping), put it in `docker-compose.override.yml` — it's
+gitignored and auto-loaded by Compose.
+
+If `./start.sh` ever errors with **"network proxy-net declared as
+external, but could not be found"**, it means `TIGERDUCK_ENV` in `.env`
+isn't `development`. Either fix it, or run `./stop.sh && ./start.sh`
+after editing.
 
 ### 3. Fill `Secrets.plist` on the iOS side
 
@@ -162,9 +166,10 @@ push arrive" failures we have seen.
 
 | Concern | iOS-side | Backend-side |
 |---|---|---|
-| URL resolution | `PushCoordinator.resolveServerURL` | n/a |
-| Shared secret read | `PushCoordinator.resolveSharedSecret` | `TIGERDUCK_API_SHARED_SECRET` |
+| URL resolution | `PushServerConfig.resolveServerURL` | n/a |
+| Shared secret read | `PushServerConfig.resolveSharedSecret` | `TIGERDUCK_API_SHARED_SECRET` |
 | APNs env constant | `PushAPNsEnv.resolvedForBuild` | `TIGERDUCK_APNS_ENV` |
 | ATS exception | `swift/TigerDuck/Info.plist` (`NSAllowsLocalNetworking`) | n/a |
 | Production endpoint | `AppConstants.productionPushServerURL` | nginx-proxy-manager → tigerduck-internal:40000 |
-| Per-dev override | `Secrets.plist["DebugServerURL"]` | n/a |
+| Per-dev override (`Secrets.plist`) | `Secrets.plist["DebugServerURL"]` (gitignored) | n/a |
+| Runtime override (Debug builds, persists across reinstall) | Settings → Developer → API endpoint, stored in Keychain via `DebugEndpointStore` | n/a |

@@ -58,29 +58,35 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ```
        公網                                            host (macOS / Linux)
-   ┌──────────────┐                              ┌──────────────────────────┐
-   │  iOS / 安卓  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal      │
-   └──────────────┘              -manager        │  (FastAPI + APScheduler) │
-                                                 │           │              │
-                                                 │           ├── APNs ─────┐│
-                                                 │           ├── FCM ─────┐││
-                                                 │           ▼            │││
-                                                 │  ┌────────────────┐    │││
-                                                 │  │ tigerduck-db   │    │││
-                                                 │  │ (Postgres 17)  │    │││
-                                                 │  └────────────────┘    │││
-                                                 │           ▲            │││
-                                                 │           │            │││
-                                                 │  ┌────────────────┐    │││
-                                                 │  │ llama-server   │◀───┘││
-                                                 │  │ (native, Metal)│     ││
-                                                 │  └────────────────┘     ││
-                                                 └──────────────────────────┘
+   ┌──────────────┐                              ┌────────────────────────────┐
+   │  iOS / 安卓  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal        │
+   └──────────────┘              -manager  ──┐   │  (FastAPI + APScheduler)   │
+                                             │   │           │                │
+   ┌──────────────┐                          │   │           ├── APNs        │
+   │ 管理者瀏覽器 │ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal         │
+   └──────────────┘   (Zero Trust)           │   │  (FastAPI + Jinja, :40010)│
+                                             │   │           │                │
+                                             │   │           ▼                │
+                                             │   │  ┌────────────────┐        │
+                                             │   │  │ tigerduck-db   │        │
+                                             │   │  │ (Postgres 17)  │        │
+                                             │   │  └────────────────┘        │
+                                             │   │           ▲                │
+                                             │   │           │                │
+                                             │   │  ┌────────────────┐        │
+                                             │   │  │ llama-server   │◀───────┘
+                                             │   │  │ (native, Metal)│
+                                             │   │  └────────────────┘
+                                             │   └────────────────────────────┘
+                                             │
+                                             └── proxy-net 上同時掛 backend 和 portal
 ```
 
 - **`tigerduck-db` 網路**：internal-only bridge，postgres 完全沒有外網路由
-- **`proxy-net`**：與 nginx-proxy-manager 共用；只有 backend 容器加入
+- **`proxy-net`**：與 nginx-proxy-manager 共用；backend + portal 都加入
+- **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 能 publish 到 host port
 - **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
+- **portal**：本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy。`admins` 表與 audit log 仍會保留做紀錄；要把它變成實際的 gate，改 `portal/app/auth.py` 裡的 `require_admin` 就行
 
 ## 取得與部署
 
@@ -100,13 +106,14 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 git clone https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
-# 1. 複製範本，填入 NTUST / APNs / Postgres / LLM 設定
+# 1. 複製範本。預設是 development 模式（會自動載入 docker-compose.dev.yml）；
+#    正式部署請把 TIGERDUCK_ENV 改成 production。
 cp .env.example .env
 
 # 2. 把 APNs 私鑰丟到 server/secrets/AuthKey_<KEY_ID>.p8（已 gitignored）
 
 # 3. 啟動 stack（postgres + backend）
-./start.sh                       # 等同 docker compose up -d --build + 跟 log
+./start.sh                       # docker compose up -d --build + 跟 log
 
 # 4. 健康檢查
 docker compose exec backend curl -sS localhost:40000/health
@@ -114,12 +121,25 @@ docker compose exec backend curl -sS localhost:40000/health
 
 ### 操作腳本
 
+四個腳本都會讀 `.env` 裡的 `TIGERDUCK_ENV`，遇到 `development` 就額外載入 `docker-compose.dev.yml`（把 backend 40000 / portal 40010 publish 到 host，並用一條非 internal 的橋接網路規避 proxy-net 在本機沒有 NPM 的問題）。換句話說：把 mode 寫在 `.env`，腳本自己會挑對的 compose 檔。
+
 | 腳本 | 用途 |
 |---|---|
-| `./start.sh` | `docker compose up -d --build` 後 tail backend log |
+| `./start.sh` | `docker compose up -d --build` 後印 mode/ports/skip-LLM 等狀態摘要 |
 | `./stop.sh` | `docker compose down`（保留 volume） |
-| `./logs.sh` | tail backend log |
-| `./clean-db.sh` | **危險** — 砍掉 postgres volume，整個資料重來 |
+| `./logs.sh` | tail 指定 service（預設 backend） |
+| `./clean-db.sh` | **危險** — 砍掉 postgres volume，整個資料重來（不影響 portal 的 `tigerduck_portal_data` volume） |
+
+### 管理介面（portal）
+
+`tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
+
+- 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
+- 維護 admin email 清單（目前是紀錄性質；要當成 gate 用，改 `require_admin` 就會生效）
+- 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + portal 的 SQLite + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
+- 預留「自訂推播」分頁（TODO，先放空殼）
+
+詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
 
 ### LLM（host 端）
 
@@ -194,9 +214,16 @@ tigerduck-backend/
 │   ├── secrets/                 # APNs .p8（gitignored）
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest（單元 + 整合）
+├── portal/                      # 管理介面 — 另一個 FastAPI app（見 docs/portal-design.md）
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   └── app/                     # main / config / db (SQLite) / auth / status / routes / templates / static
 ├── scripts/                     # backfill / seed 等一次性腳本
 ├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
-├── docker-compose.yml / Dockerfile / entrypoint.sh
+├── docker-compose.yml           # 基底（backend + postgres + portal，都掛 proxy-net）
+├── docker-compose.dev.yml       # TIGERDUCK_ENV=development 時自動載入，publish ports + 換成 host bridge
+├── _compose-files.sh            # 共用：根據 TIGERDUCK_ENV 算出要載入哪些 compose 檔
+├── Dockerfile / entrypoint.sh   # backend 容器
 ├── start.sh / stop.sh / logs.sh / clean-db.sh
 ├── .env.example
 └── pyproject.toml / uv.lock
