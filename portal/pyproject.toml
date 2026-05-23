@@ -1,7 +1,7 @@
 [project]
 name = "tigerduck-portal"
 version = "0.1.0"
-description = "Admin portal for the TigerDuck backend stack. Cloudflare Zero Trust handles auth; portal observes container/DB state and exposes admin/audit/export-import."
+description = "Stateless operator portal for the TigerDuck backend stack. Surfaces stack status, per-container logs, and pg_dump-based export/import. No app-level auth — front with Cloudflare Zero Trust (or any auth-proxy) if a signin gate is required."
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",

@@ -81,12 +81,10 @@ services:
       # so we hand it the comma-joined IPs to render on the status page.
       TIGERDUCK_HOST_LAN_IPS: ${TIGERDUCK_HOST_LAN_IPS:-}
     volumes:
-      # SQLite + audit log persist across container recreate.
-      - tigerduck_portal_data:/data
       # Read-only docker socket lets the status page talk to the engine
-      # API (HTTP-over-UDS) for `containers/{name}/json`. NO write ops
-      # (start/stop/restart) per the design: the import flow asks the
-      # user to restart manually.
+      # API (HTTP-over-UDS) for `containers/{name}/json` + `logs`. NO
+      # write ops (start/stop/restart) per the design: the import flow
+      # asks the user to restart manually.
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # Mirror the backend's secrets mount RO so the status page can
       # report "is the .p8 / fcm.json on disk?" without exposing contents.
@@ -106,4 +104,3 @@ networks:
 
 volumes:
   tigerduck_pgdata:
-  tigerduck_portal_data:

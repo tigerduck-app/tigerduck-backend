@@ -36,14 +36,14 @@ Even though migrations are reversible in principle, it is cheap insurance
 and the only thing that protects you from operator error.
 
 **Preferred path — portal export button.** Visit the portal (dev:
-`http://localhost:40010/backup`, prod: through your cloudflared URL),
+`http://localhost:40010/backup`, prod: through your auth-proxy URL),
 click "Download backup." You get a `tigerduck-export-<timestamp>.tar.gz`
-containing `pg_dump --format=custom` of the tigerduck DB, the portal's
-own SQLite (admins + audit log), and a manifest. To restore: same page,
-"Restore" form — then restart the backend as prompted.
+containing `pg_dump --format=custom` of the tigerduck DB plus a
+manifest. To restore: same page, "Restore" form — then restart the
+backend as prompted.
 
-**Manual fallback** — when the portal isn't running yet (fresh install,
-or upgrade from a pre-portal commit):
+**Manual fallback** — when the portal isn't running (fresh install or
+upgrade from a pre-portal commit):
 
 ```bash
 # From the repo root, while the postgres container is running:
@@ -53,11 +53,9 @@ docker compose exec -T postgres \
 ```
 
 `--format=custom` is restorable with `pg_restore` and supports parallel
-restore. `--no-owner` makes the dump portable across roles.
-
-The portal accepts a bare `pg_dump` file (no `.tar.gz` wrapper) for
-exactly this case — the import form will treat it as a postgres-only
-backup and skip the SQLite swap step.
+restore. `--no-owner` makes the dump portable across roles. The portal
+also accepts this bare `pg_dump` file (no `.tar.gz` wrapper) so you can
+import a manual dump through the UI.
 
 To restore that dump into an empty database directly (bypassing the
 portal):
@@ -66,19 +64,6 @@ portal):
 docker compose exec -T postgres \
   pg_restore -U tigerduck -d tigerduck --clean --if-exists --no-owner \
   < backup-YYYYMMDD-HHMMSS.dump
-```
-
-### Portal state — separate volume
-
-The portal owns a SQLite file at `/data/portal.db` on the
-`tigerduck_portal_data` docker volume. This is **not** wiped by
-`./clean-db.sh` (which only nukes postgres) — by design, so a DB reset
-doesn't lock you out of the portal. To wipe portal state explicitly:
-
-```bash
-docker compose down
-docker volume rm tigerduck_tigerduck_portal_data
-./start.sh   # portal re-bootstraps from TIGERDUCK_PORTAL_BOOTSTRAP_ADMIN
 ```
 
 ---

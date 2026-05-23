@@ -1,34 +1,27 @@
-"""Export / import the full stateful surface.
+"""Export / import the backend postgres database.
 
 Export bundles:
   - postgres.dump   pg_dump --format=custom of the tigerduck DB
-  - portal.db       SQLite file copy
-  - manifest.json   { version, exported_at, backend_version }
+  - manifest.json   { version, exported_at }
 
-Import accepts the same .tar.gz OR a bare postgres.dump (for migrating
-an existing install whose portal doesn't exist yet). After restore, the
-portal asks the user to manually restart the backend so the read-only
-docker socket scope stays tight.
+Import accepts the same .tar.gz OR a bare postgres.dump (pre-portal
+install path). The portal does not restart the backend — after restore
+it asks the user to run `./stop.sh && ./start.sh`, which keeps the
+docker socket mount read-only.
 """
 from __future__ import annotations
 
 import io
 import json
-import shutil
 import subprocess
 import tarfile
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, HTTPException, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
-
-from ..auth import get_settings, require_admin
-from ..config import Settings
-from ..db import log_action
 
 router = APIRouter(prefix="/backup")
 
@@ -53,33 +46,25 @@ def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
 
 
 @router.get("", response_class=HTMLResponse)
-async def page(
-    request: Request,
-    actor: Annotated[str, Depends(require_admin)],
-) -> HTMLResponse:
-    return request.app.state.templates.TemplateResponse(
-        request, "backup.html", {"actor": actor}
-    )
+async def page(request: Request) -> HTMLResponse:
+    return request.app.state.templates.TemplateResponse(request, "backup.html", {})
 
 
 @router.post("/export")
-async def export_bundle(
-    settings: Annotated[Settings, Depends(get_settings)],
-    actor: Annotated[str, Depends(require_admin)],
-) -> StreamingResponse:
+async def export_bundle(request: Request) -> StreamingResponse:
     """Build the .tar.gz in a temp dir, then stream it to the client.
 
     Building on disk first (instead of streaming pg_dump → tar live)
     keeps the memory footprint flat and lets pg_dump fail loudly before
     we've sent any bytes.
     """
+    settings = request.app.state.settings
     ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     bundle_name = f"tigerduck-export-{ts}"
 
     with tempfile.TemporaryDirectory(prefix="tigerduck-export-") as tmp:
         tmpdir = Path(tmp)
 
-        # pg_dump
         pg_args, pg_env = _pg_env(settings.database_url)
         pg_dump_path = tmpdir / "postgres.dump"
         with pg_dump_path.open("wb") as fh:
@@ -96,32 +81,17 @@ async def export_bundle(
                 f"pg_dump failed: {proc.stderr.decode(errors='replace')[:500]}",
             )
 
-        # portal.db copy
-        portal_db_path = Path(settings.portal_db_path)
-        if portal_db_path.exists():
-            shutil.copy(portal_db_path, tmpdir / "portal.db")
-
-        # manifest
         manifest = {
             "version": BUNDLE_VERSION,
             "exported_at": ts,
-            "exported_by": actor,
             "backend_env": settings.env,
         }
         (tmpdir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
-        # tar.gz the directory contents
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             tar.add(tmpdir, arcname=bundle_name)
         buf.seek(0)
-
-        log_action(
-            settings.portal_db_path,
-            actor,
-            "backup.export",
-            json.dumps({"bundle": bundle_name}),
-        )
 
     return StreamingResponse(
         buf,
@@ -131,19 +101,16 @@ async def export_bundle(
 
 
 @router.post("/import")
-async def import_bundle(
-    settings: Annotated[Settings, Depends(get_settings)],
-    actor: Annotated[str, Depends(require_admin)],
-    file: UploadFile,
-) -> RedirectResponse:
+async def import_bundle(request: Request, file: UploadFile) -> RedirectResponse:
     """Accept either:
       * a .tar.gz produced by the export endpoint above
       * a bare pg_dump custom-format file (for migrating a pre-portal install)
 
     Backend container stays up; we restore the DB over the network and
-    swap portal.db in place. User is asked to restart manually so the
-    portal can stick to a read-only docker socket.
+    ask the user to restart the backend manually so the portal can stick
+    to a read-only docker socket.
     """
+    settings = request.app.state.settings
     payload = await file.read()
     if not payload:
         raise HTTPException(400, "empty upload")
@@ -176,12 +143,9 @@ async def import_bundle(
                     )
 
             pg_dump_path = content / "postgres.dump"
-            portal_db_in_bundle = content / "portal.db"
         else:
-            # Bare pg_dump path
             pg_dump_path = tmpdir / "postgres.dump"
             pg_dump_path.write_bytes(payload)
-            portal_db_in_bundle = None
 
         if not pg_dump_path.exists():
             raise HTTPException(400, "no postgres.dump in upload")
@@ -202,17 +166,6 @@ async def import_bundle(
                 f"pg_restore failed: {proc.stderr.decode(errors='replace')[:500]}",
             )
 
-        if portal_db_in_bundle and portal_db_in_bundle.exists():
-            # Swap the SQLite file. New requests open a fresh connection,
-            # so we don't need to coordinate with existing ones.
-            shutil.copy(portal_db_in_bundle, settings.portal_db_path)
-
-    log_action(
-        settings.portal_db_path,
-        actor,
-        "backup.import",
-        json.dumps({"filename": file.filename}),
-    )
     return RedirectResponse(
         "/backup?imported=1",
         status_code=status.HTTP_303_SEE_OTHER,

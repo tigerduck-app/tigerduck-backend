@@ -86,7 +86,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **`proxy-net`**：與 nginx-proxy-manager 共用；backend + portal 都加入
 - **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 能 publish 到 host port
 - **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
-- **portal**：本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy。`admins` 表與 audit log 仍會保留做紀錄；要把它變成實際的 gate，改 `portal/app/auth.py` 裡的 `require_admin` 就行
+- **portal**：stateless 只讀的操作介面，本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy
 
 ## 取得與部署
 
@@ -135,7 +135,7 @@ docker compose exec backend curl -sS localhost:40000/health
 `tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
 
 - 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
-- 維護 admin email 清單（目前是紀錄性質；要當成 gate 用，改 `require_admin` 就會生效）
+- 看每個 container 的 log（5 個 tab：Backend / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Android / Apple 是針對 backend log 做關鍵字過濾
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + portal 的 SQLite + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 預留「自訂推播」分頁（TODO，先放空殼）
 

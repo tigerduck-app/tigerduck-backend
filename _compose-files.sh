@@ -106,8 +106,7 @@ print_stack_status() {
         *)               skip_llm="no (waits up to 60s for LLM at startup)" ;;
     esac
 
-    local bootstrap_admin backend_version
-    bootstrap_admin="$(_dotenv_value TIGERDUCK_PORTAL_BOOTSTRAP_ADMIN)"
+    local backend_version
     # Read straight off disk so we don't depend on the backend being up
     # (and don't pay an HTTP round-trip here). Authoritative source is
     # server/__init__.py::__version__.
@@ -124,7 +123,6 @@ print_stack_status() {
     echo "  apns env         : ${apns_env:-(unset)}"
     echo "  llm probe        : ${skip_llm}"
     echo "  llm url          : ${llm_url:-(unset)}"
-    echo "  portal bootstrap : ${bootstrap_admin:-(unset — local dev allowed)}"
     if [[ -n "${TIGERDUCK_HOST_LAN_IPS:-}" ]]; then
         # Print one URL per IP per port so the user can copy/paste a
         # phone-reachable address directly from the terminal.

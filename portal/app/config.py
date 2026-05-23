@@ -1,8 +1,8 @@
 """Portal config — pydantic-settings reads env at startup.
 
-All keys use the `TIGERDUCK_PORTAL_` prefix EXCEPT the database/llm/etc.
-values that are shared with the backend (those keep the backend's
-`TIGERDUCK_` prefix so a single .env feeds both services).
+Cross-prefix: most keys are backend's `TIGERDUCK_*` (so a single .env
+feeds both services), with a few portal-only keys under the
+`TIGERDUCK_PORTAL_*` prefix.
 """
 from __future__ import annotations
 
@@ -10,21 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Portal-side settings.
-
-    Note: we don't use a prefix because we need to read BOTH portal-
-    specific keys (TIGERDUCK_PORTAL_*) and backend keys (TIGERDUCK_*).
-    Field-name → env-var alias is set explicitly via the `alias` arg.
-    """
-
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
-
-    # --- Portal own state ---
-    portal_db_path: str = "/data/portal.db"
-    # Email seeded into the admins table on every startup so a lockout
-    # is impossible. Empty (default) means "no bootstrap" — useful for
-    # smoke tests but in real use this should be set.
-    portal_bootstrap_admin: str = ""
 
     # --- Shared with backend (for the status page) ---
     env: str = "production"
@@ -49,10 +35,6 @@ class Settings(BaseSettings):
     # Comma-separated input is parsed in from_env.
     host_lan_ips: list[str] = []
 
-    # --- Cloudflare Access (when fronted by cloudflared) ---
-    # Header name CF Access injects. Override only for tests.
-    cf_access_email_header: str = "Cf-Access-Authenticated-User-Email"
-
     @classmethod
     def from_env(cls) -> "Settings":
         """Map TIGERDUCK_* / TIGERDUCK_PORTAL_* env vars onto fields.
@@ -73,12 +55,6 @@ class Settings(BaseSettings):
             default_backend = "http://tigerduck-internal:40000"
             default_portal = "http://tigerduck-portal:40010"
         return cls(
-            portal_db_path=env.get(
-                "TIGERDUCK_PORTAL_DB_PATH", "/data/portal.db"
-            ),
-            portal_bootstrap_admin=env.get(
-                "TIGERDUCK_PORTAL_BOOTSTRAP_ADMIN", ""
-            ),
             env=env_mode,
             apns_env=env.get("TIGERDUCK_APNS_ENV", ""),
             skip_llm_probe=(
@@ -103,8 +79,4 @@ class Settings(BaseSettings):
                 for ip in env.get("TIGERDUCK_HOST_LAN_IPS", "").split(",")
                 if ip.strip()
             ],
-            cf_access_email_header=env.get(
-                "TIGERDUCK_PORTAL_CF_ACCESS_HEADER",
-                "Cf-Access-Authenticated-User-Email",
-            ),
         )

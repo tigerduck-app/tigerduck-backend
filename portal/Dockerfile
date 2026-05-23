@@ -39,10 +39,6 @@ RUN pip install --upgrade pip \
 
 COPY app ./app
 
-# Created by the docker volume mount; this just documents the path so
-# the SQLite DB path resolves consistently in dev runs too.
-VOLUME ["/data"]
-
 EXPOSE 40010
 
 # Lifespan-driven schema migration runs on startup (see app.db).

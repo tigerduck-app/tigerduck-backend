@@ -151,11 +151,10 @@ into the backend container via `docker-compose.yml`.
   per-machine tweak file. The canonical dev override is the committed
   `docker-compose.dev.yml`.
 - ❌ Do not add app-level auth (basic-auth, sessions, JWT…) to the
-  portal. The portal trusts whatever is in front of it (Cloudflare Zero
-  Trust in prod, nothing in dev). The `admins` table + audit log are
-  record-keeping, not a gate; if a gate becomes necessary, flip
-  `require_admin` to enforce the admin-list check instead of layering a
-  parallel auth system inside the app.
+  portal. The portal is stateless and trusts whatever is in front of
+  it (Cloudflare Zero Trust in prod, nothing in dev). Add an
+  auth-proxy if a gate becomes necessary, rather than re-introducing
+  an admin list / session store inside the portal.
 - ❌ Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow

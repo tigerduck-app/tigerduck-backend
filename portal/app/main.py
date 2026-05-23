@@ -1,9 +1,8 @@
 """TigerDuck portal — FastAPI entrypoint.
 
-Single-process uvicorn. SQLite for portal-local state, asyncpg for
-reading the backend DB on the status page. No auth middleware — the
-`require_admin` dependency on each route does the Cloudflare-header
-check (see app/auth.py for why).
+Single-process uvicorn. Stateless: postgres is owned by the backend
+container, status data is fetched on each request. No auth — front with
+Cloudflare Zero Trust (or any other auth-proxy) if you need a gate.
 """
 from __future__ import annotations
 
@@ -16,14 +15,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import Settings
-from .db import init_db
-from .routes import admins, backup, custom_push, logs, status
+from .routes import backup, custom_push, logs, status
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = Settings.from_env()
-    init_db(settings.portal_db_path, settings.portal_bootstrap_admin)
 
     app_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(app_dir / "templates"))
@@ -41,6 +38,5 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 app.include_router(status.router)
 app.include_router(logs.router)
-app.include_router(admins.router)
 app.include_router(backup.router)
 app.include_router(custom_push.router)

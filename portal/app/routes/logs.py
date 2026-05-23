@@ -6,11 +6,8 @@ page load. Tail width and the search box live on each tab.
 """
 from __future__ import annotations
 
-from typing import Annotated
+from fastapi import APIRouter, Request
 
-from fastapi import APIRouter, Depends, Request
-
-from ..auth import require_admin
 from ..logs import (
     ANDROID_NEEDLES,
     APPLE_NEEDLES,
@@ -35,12 +32,7 @@ TABS_BY_ID = {t["id"]: t for t in TABS}
 
 
 @router.get("/logs")
-async def logs_page(
-    request: Request,
-    actor: Annotated[str, Depends(require_admin)],
-    source: str = "backend",
-    tail: int = DEFAULT_TAIL,
-):
+async def logs_page(request: Request, source: str = "backend", tail: int = DEFAULT_TAIL):
     tab = TABS_BY_ID.get(source) or TABS_BY_ID["backend"]
     tail = max(1, min(tail, MAX_TAIL))
 
@@ -54,7 +46,6 @@ async def logs_page(
         request,
         "logs.html",
         {
-            "actor": actor,
             "tabs": TABS,
             "active": tab,
             "tail": tail,
