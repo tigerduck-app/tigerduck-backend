@@ -9,12 +9,12 @@ const badgeVariants = cva(
       variant: {
         default: "border-transparent bg-primary/10 text-primary",
         secondary: "border-transparent bg-secondary text-secondary-foreground",
-        success:
-          "border-transparent bg-success/15 text-success-foreground/90 dark:text-success",
-        warning:
-          "border-transparent bg-warning/15 text-warning-foreground dark:text-warning",
-        destructive:
-          "border-transparent bg-destructive/15 text-destructive",
+        // Saturated text on a 15%-tint background reads in both modes —
+        // the *-foreground tokens are near-white and were invisible on
+        // the pale light-mode bg.
+        success: "border-transparent bg-success/15 text-success",
+        warning: "border-transparent bg-warning/20 text-warning",
+        destructive: "border-transparent bg-destructive/15 text-destructive",
         outline: "border-border text-foreground",
         muted: "border-transparent bg-muted text-muted-foreground",
       },

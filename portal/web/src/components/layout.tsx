@@ -73,14 +73,14 @@ export function Layout() {
           ))}
         </nav>
         <div className="mt-auto space-y-3 border-t border-border px-3 py-4">
-          <div className="space-y-1.5 px-2 text-xs text-muted-foreground">
+          <div className="space-y-1.5 px-2 text-xs text-foreground/80">
             <div className="flex items-center gap-2">
-              <span>Mode</span>
+              <span className="font-medium">Mode</span>
               <EnvBadge env={env.data?.env} />
             </div>
             {env.data?.apns_env ? (
               <div className="flex items-center gap-2">
-                <span>APNs</span>
+                <span className="font-medium">APNs</span>
                 <EnvBadge env={env.data.apns_env} />
               </div>
             ) : null}
