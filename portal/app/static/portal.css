@@ -257,3 +257,85 @@ pre.log {
     border-radius: 4px;
     overflow-x: auto;
 }
+
+/* /test page — stacked form, narrow inputs, device table. */
+.test-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    align-items: start;
+}
+.test-form fieldset {
+    grid-column: 1 / -1;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px 14px 14px;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+.test-form fieldset legend {
+    padding: 0 6px;
+    color: var(--dim);
+    font-size: 0.85em;
+}
+.test-form fieldset.kind-picker {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+}
+.test-form .full { grid-column: 1 / -1; }
+.test-form input[type=text],
+.test-form textarea {
+    padding: 6px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 0.95em;
+    font-family: inherit;
+}
+.test-form textarea { resize: vertical; min-height: 64px; }
+.test-form button[type=submit] {
+    grid-column: 1 / -1;
+    justify-self: start;
+}
+
+.devices {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    font-size: 0.92em;
+}
+.devices th, .devices td {
+    text-align: left;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: middle;
+}
+.devices th { color: var(--dim); font-weight: 500; font-size: 0.85em; }
+.devices code.device-id {
+    font-size: 0.88em;
+    word-break: break-all;
+}
+
+.result {
+    margin-top: 12px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    background: rgba(0,0,0,0.06);
+    border: 1px solid var(--line);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85em;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 40vh;
+    overflow: auto;
+}
+.result.ok  { border-color: var(--ok); }
+.result.bad { border-color: var(--bad); }
+@media (prefers-color-scheme: dark) {
+    .result { background: rgba(255,255,255,0.04); }
+}

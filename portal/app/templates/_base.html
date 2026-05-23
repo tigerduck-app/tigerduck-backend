@@ -19,6 +19,9 @@
         <a href="/logs">Logs</a>
         <a href="/backup">Backup</a>
         <a href="/custom-push">Custom push</a>
+        {% if env == "development" %}
+        <a href="/test">Test push</a>
+        {% endif %}
     </nav>
 </header>
 
