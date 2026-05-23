@@ -1,6 +1,6 @@
 [project]
 name = "backend"
-version = "0.1.0"
+version = "2.1.0"
 description = "TigerDuck push notification server (FastAPI + APScheduler + APNs + bulletin LLM classifier)"
 requires-python = ">=3.13"
 dependencies = [
