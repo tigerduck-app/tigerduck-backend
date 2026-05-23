@@ -187,6 +187,7 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     app.include_router(debug_routes.router, prefix=prefix)
     app.include_router(bulletins_routes.router, prefix=prefix)
     app.include_router(bulletins_routes.device_router, prefix=prefix)
+    app.include_router(bulletins_routes.admin_router, prefix=prefix)
 
 
 def _install_deprecation_middleware(

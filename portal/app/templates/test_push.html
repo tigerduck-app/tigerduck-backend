@@ -1,41 +1,16 @@
 {% extends "_base.html" %}
-{% block title %}Test push — TigerDuck Backend Portal{% endblock %}
+{% block title %}Apple test push — TigerDuck Backend Portal{% endblock %}
 {% block body %}
 
-<h1>Test push</h1>
+<h1>Apple test push</h1>
 <p class="dim">
     Fires synthetic pushes through the backend's
     <code>/v2/_debug/*</code> surface. No DB writes — pass/fail here
-    means the APNs path itself works.
+    means the APNs path itself works. For broadcasting an actual
+    announcement (DB-backed, also visible in the iOS Announcement tab),
+    use <a href="/announcement">Announcement</a>.
 </p>
 
-<nav class="tabs" role="tablist">
-    <a class="tab {% if tab == 'announcement' %}active{% endif %}" href="/test?tab=announcement">Announcement</a>
-    <a class="tab {% if tab == 'apple' %}active{% endif %}" href="/test?tab=apple">Apple</a>
-</nav>
-
-{% if tab == 'announcement' %}
-<section>
-    <h2>Fan-out alert to all Apple devices</h2>
-    <p class="dim">
-        Same payload shape as a real bulletin alert. Targets every
-        registered Apple device that has a non-empty alert token.
-    </p>
-    <form id="alert-form" class="test-form">
-        <label>
-            Title
-            <input type="text" name="title" required maxlength="200"
-                   value="Test announcement">
-        </label>
-        <label class="full">
-            Body
-            <textarea name="body" required rows="3" maxlength="2000">This is a synthetic push from the portal.</textarea>
-        </label>
-        <button type="submit">Send</button>
-    </form>
-    <pre id="alert-result" class="result" hidden></pre>
-</section>
-{% else %}
 <section>
     <h2>Devices</h2>
     {% if devices_error %}
@@ -120,7 +95,6 @@
     </form>
     <pre id="apple-result" class="result" hidden></pre>
 </section>
-{% endif %}
 
 <script>
 (function() {
@@ -156,18 +130,6 @@
         try { body = await res.json(); }
         catch (e) { body = { raw: await clone.text() }; }
         showResult(pre, res.status, body);
-    }
-
-    const alertForm = document.getElementById("alert-form");
-    if (alertForm) {
-        alertForm.addEventListener("submit", function(ev) {
-            ev.preventDefault();
-            const f = new FormData(alertForm);
-            submitJSON("/test/api/send_alert", {
-                title: f.get("title"),
-                body: f.get("body"),
-            }, document.getElementById("alert-result"));
-        });
     }
 
     const appleForm = document.getElementById("apple-form");

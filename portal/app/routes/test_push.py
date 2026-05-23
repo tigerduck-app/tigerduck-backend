@@ -1,11 +1,16 @@
 """Dev-only test push page.
 
-Fires synthetic alert / Live Activity pushes via the backend's
-`/v2/_debug/*` surface so an operator can verify the APNs path without
-waiting for a real bulletin or class slot to elapse. None of the
-underlying endpoints write to the bulletins / scheduled_pushes /
-live_activity_update_tokens tables — pass / fail here reflects the
-APNs transport itself.
+Fires synthetic Live Activity / single-device alert pushes via the
+backend's `/v2/_debug/*` surface so an operator can verify the APNs
+path without waiting for a real bulletin or class slot to elapse.
+None of the underlying endpoints write to the
+scheduled_pushes / live_activity_update_tokens tables — pass / fail
+here reflects the APNs transport itself.
+
+Fan-out alerts (the operator-authored "announcement" flow) moved to
+the new `/announcement` page, which writes to the `bulletins` table
+so the row also surfaces in the iOS Announcement tab. This page is
+now Apple-devices-only.
 
 Gated three ways:
   * `_require_dev` here returns 404 in prod.
@@ -14,8 +19,6 @@ Gated three ways:
   * The nav link in `_base.html` is wrapped in `{% if env == "development" %}`.
 """
 from __future__ import annotations
-
-from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -87,26 +90,21 @@ async def _proxy_post(
 
 
 @router.get("", response_class=HTMLResponse, dependencies=[Depends(_require_dev)])
-async def page(
-    request: Request,
-    tab: Literal["announcement", "apple"] = "announcement",
-) -> HTMLResponse:
+async def page(request: Request) -> HTMLResponse:
     devices: list[dict] = []
     devices_error: str | None = None
-    if tab == "apple":
-        try:
-            r = await _backend_call(request, "GET", "/devices")
-            if r.status_code == 200:
-                devices = r.json()
-            else:
-                devices_error = f"backend HTTP {r.status_code}: {r.text[:200]}"
-        except httpx.HTTPError as exc:
-            devices_error = f"{type(exc).__name__}: {exc}"
+    try:
+        r = await _backend_call(request, "GET", "/devices")
+        if r.status_code == 200:
+            devices = r.json()
+        else:
+            devices_error = f"backend HTTP {r.status_code}: {r.text[:200]}"
+    except httpx.HTTPError as exc:
+        devices_error = f"{type(exc).__name__}: {exc}"
     return request.app.state.templates.TemplateResponse(
         request,
         "test_push.html",
         {
-            "tab": tab,
             "devices": devices,
             "devices_error": devices_error,
         },

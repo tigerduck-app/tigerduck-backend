@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from .config import Settings
-from .routes import backup, custom_push, logs, status, test_push
+from .routes import announcement, backup, custom_push, logs, status, test_push
 
 
 @asynccontextmanager
@@ -44,5 +44,6 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 app.include_router(status.router)
 app.include_router(logs.router)
 app.include_router(backup.router)
+app.include_router(announcement.router)
 app.include_router(custom_push.router)
 app.include_router(test_push.router)

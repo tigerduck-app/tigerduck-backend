@@ -7,13 +7,21 @@ secret since it mutates per-device state.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.bulletins.models import Bulletin, BulletinSubscription
+from server.bulletins.models import (
+    Bulletin,
+    BulletinProcessingState,
+    BulletinSubscription,
+)
 from server.bulletins.schemas import (
+    BulletinAdminCreateRequest,
+    BulletinAdminUpdateRequest,
     BulletinDetail,
     BulletinListResponse,
     BulletinSummary,
@@ -41,6 +49,15 @@ router = APIRouter(prefix="/bulletins", tags=["bulletins"])
 device_router = APIRouter(
     prefix="/devices",
     tags=["bulletin-subscriptions"],
+    dependencies=[Depends(require_shared_secret)],
+)
+# Operator surface used by the portal /announcement page. Authoring a
+# bulletin from the portal inserts directly into the `bulletins` table;
+# the dispatcher's regular tick fans it out to subscribed devices on its
+# next pass (no need to re-enter the LLM pipeline).
+admin_router = APIRouter(
+    prefix="/bulletins/admin",
+    tags=["bulletin-admin"],
     dependencies=[Depends(require_shared_secret)],
 )
 
@@ -94,6 +111,7 @@ def _to_summary(row: Bulletin) -> BulletinSummary:
         source_url=row.source_url,
         posted_at=row.posted_at,
         is_deleted=row.is_deleted,
+        source=row.source,
     )
 
 
@@ -304,4 +322,120 @@ async def replace_subscriptions(
     )
     return SubscriptionsResponse(
         device_id=device_id, rules=[_rule_from_db(r) for r in rows]
+    )
+
+
+# -- Admin / manual injection ----------------------------------------------
+
+
+# Marker stored in `bulletins.source` for portal-authored rows. Lets the
+# portal UI flag them visually and gives operators a one-shot DELETE
+# predicate when cleaning up after testing.
+_MANUAL_SOURCE = "manual"
+
+
+@admin_router.post(
+    "",
+    response_model=BulletinDetail,
+    status_code=status.HTTP_201_CREATED,
+)
+async def admin_create_bulletin(
+    payload: BulletinAdminCreateRequest, session: SessionDep
+) -> BulletinDetail:
+    """Insert a manual bulletin and queue it for push fan-out.
+
+    `external_id` is timestamped so the operator can keep posting test
+    rows without hitting `(source, external_id)` uniqueness. The row is
+    born with `processing_state='processed'` so the dispatcher tick
+    picks it up exactly like any LLM-finished row.
+    """
+    now = datetime.now(timezone.utc)
+    external_id = f"manual-{int(now.timestamp() * 1000)}"
+    row = Bulletin(
+        source=_MANUAL_SOURCE,
+        external_id=external_id,
+        source_url=payload.source_url,
+        title=payload.title,
+        title_clean=payload.title_clean or payload.title,
+        summary=payload.summary,
+        body_clean=payload.body_clean,
+        body_md=payload.body_md,
+        canonical_org=payload.canonical_org.value,
+        content_tags=[t.value for t in payload.content_tags],
+        importance=payload.importance,
+        posted_at=now,
+        processing_state=BulletinProcessingState.processed.value,
+        processing_attempts=0,
+        is_deleted=False,
+    )
+    session.add(row)
+    await session.flush()
+    await session.refresh(row)
+    logger.info(
+        "bulletin.admin.created",
+        bulletin_id=row.id,
+        external_id=row.external_id,
+        canonical_org=row.canonical_org,
+        content_tags=row.content_tags,
+    )
+    base = _to_summary(row).model_dump()
+    return BulletinDetail(
+        **base,
+        body_clean=row.body_clean,
+        body_md=row.body_md,
+        raw_publisher=row.raw_publisher,
+    )
+
+
+@admin_router.patch("/{bulletin_id}", response_model=BulletinDetail)
+async def admin_update_bulletin(
+    bulletin_id: int,
+    payload: BulletinAdminUpdateRequest,
+    session: SessionDep,
+) -> BulletinDetail:
+    """Patch display fields on an existing bulletin.
+
+    Only updates keys present in the request body — omitted keys leave
+    the column untouched. The push fan-out is NOT re-fired; this only
+    affects what the iOS Announcement tab renders on its next refresh.
+    """
+    row = await session.get(Bulletin, bulletin_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="bulletin not found")
+
+    data = payload.model_dump(exclude_unset=True)
+    if "canonical_org" in data and data["canonical_org"] is not None:
+        data["canonical_org"] = data["canonical_org"].value
+    if "content_tags" in data and data["content_tags"] is not None:
+        data["content_tags"] = [t.value for t in data["content_tags"]]
+
+    changed_fields: list[str] = []
+    for key, value in data.items():
+        if value is None and key in {
+            "title",
+            "canonical_org",
+            "content_tags",
+            "importance",
+        }:
+            # Required-ish columns — protect them from a payload that
+            # explicitly nulls them out. Optional fields (summary/body)
+            # are allowed to round-trip back to NULL.
+            continue
+        if getattr(row, key) != value:
+            setattr(row, key, value)
+            changed_fields.append(key)
+
+    await session.flush()
+    await session.refresh(row)
+    logger.info(
+        "bulletin.admin.updated",
+        bulletin_id=row.id,
+        changed_fields=changed_fields,
+    )
+    base = _to_summary(row).model_dump()
+    return BulletinDetail(
+        **base,
+        body_clean=row.body_clean,
+        body_md=row.body_md,
+        raw_publisher=row.raw_publisher,
     )
