@@ -75,31 +75,46 @@ async def llm_health(llm_base_url: str, timeout_s: float = 3.0) -> dict[str, Any
 async def postgres_health(database_url: str, timeout_s: float = 3.0) -> dict[str, Any]:
     """Connect, count rows in a few core tables. Returns shape:
     {"reachable": bool, "alembic_head": str|None, "rows": {...}}.
+
+    Uses asyncpg's own timeout= for connect (asyncio.wait_for around it
+    can leave an in-progress TCP/TLS handshake running after cancellation
+    and leak a socket). Per-query timeouts cap each fetchval at the
+    remaining wall-time budget so a status-page hit can't hang
+    indefinitely if postgres is holding a lock (e.g. mid-pg_restore).
     """
     if not database_url:
         return {"reachable": False, "detail": "TIGERDUCK_DATABASE_URL not set"}
 
     # asyncpg wants the postgres:// scheme, not postgresql+asyncpg://.
     asyncpg_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    conn: asyncpg.Connection | None = None
     try:
-        conn = await asyncio.wait_for(asyncpg.connect(asyncpg_url), timeout=timeout_s)
-    except (asyncio.TimeoutError, OSError, asyncpg.PostgresError) as exc:
-        return {"reachable": False, "detail": f"{type(exc).__name__}: {exc}"}
+        try:
+            conn = await asyncpg.connect(asyncpg_url, timeout=timeout_s)
+        except (asyncio.TimeoutError, OSError, asyncpg.PostgresError) as exc:
+            return {"reachable": False, "detail": f"{type(exc).__name__}: {exc}"}
 
-    try:
-        alembic_head = await conn.fetchval(
-            "SELECT version_num FROM alembic_version LIMIT 1"
-        )
+        try:
+            alembic_head = await asyncio.wait_for(
+                conn.fetchval("SELECT version_num FROM alembic_version LIMIT 1"),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            alembic_head = None
         rows: dict[str, int | str] = {}
         for table in ("device_registrations", "bulletins", "scheduled_pushes"):
             try:
-                rows[table] = await conn.fetchval(
-                    f"SELECT count(*) FROM {table}"
+                rows[table] = await asyncio.wait_for(
+                    conn.fetchval(f"SELECT count(*) FROM {table}"),
+                    timeout=timeout_s,
                 )
+            except asyncio.TimeoutError:
+                rows[table] = "error: timed out"
             except asyncpg.PostgresError as exc:
                 rows[table] = f"error: {exc}"
     finally:
-        await conn.close()
+        if conn is not None:
+            await conn.close()
 
     return {
         "reachable": True,

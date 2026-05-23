@@ -1,6 +1,8 @@
 """Status page — read-only home of the portal."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
@@ -25,10 +27,17 @@ async def health() -> JSONResponse:
 @router.get("/", response_class=HTMLResponse)
 async def status_page(request: Request) -> HTMLResponse:
     settings = request.app.state.settings
-    pg = await postgres_health(settings.database_url)
-    llm = await llm_health(settings.llm_base_url)
-    containers = await docker_containers()
-    version_info = await backend_version()
+    # Fan these out — they're independent and each has its own timeout,
+    # so running serially makes the worst case (everything down) ≈ 11 s
+    # of wall time. gather drops it to the longest single timeout (~3 s),
+    # which matters exactly when an operator hits this page to diagnose
+    # a hung stack.
+    pg, llm, containers, version_info = await asyncio.gather(
+        postgres_health(settings.database_url),
+        llm_health(settings.llm_base_url),
+        docker_containers(),
+        backend_version(),
+    )
     secrets = {
         "apns_key": file_presence(settings.apns_key_path),
         "fcm_credentials": file_presence(settings.fcm_credentials_path),

@@ -6,8 +6,14 @@
 
 <div class="banner">
     <strong>Coming soon.</strong>
-    Send a one-off notification to a specific device (or a group of devices) for testing.
-    Tracked as a TODO in <code>docs/portal-design.md</code>.
+    Send a real one-off notification to a specific device (or a group
+    of devices) from the operator. Tracked as a TODO in
+    <code>docs/portal-design.md</code>.
+    {% if env == "development" %}
+    <br><br>
+    For verifying the APNs transport itself (no DB writes, synthetic
+    payloads), use the dev-only <a href="/test">Test push</a> page.
+    {% endif %}
 </div>
 
 {% endblock %}

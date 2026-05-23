@@ -50,7 +50,11 @@ class Settings(BaseSettings):
         import os
 
         env = os.environ
-        env_mode = env.get("TIGERDUCK_ENV", "production")
+        # Default matches the backend's pydantic-settings fallback when
+        # TIGERDUCK_ENV is unset — both sides agree the key-missing case
+        # is "development". Prod deploys must set TIGERDUCK_ENV=production
+        # explicitly (covered in MIGRATE.md / docs/local-dev-backend.md).
+        env_mode = env.get("TIGERDUCK_ENV", "development")
         # Match _compose-files.sh's URL choices so the status page and
         # the start.sh stdout never disagree.
         if env_mode == "development":

@@ -20,7 +20,7 @@ from typing import Literal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..status import BACKEND_INTERNAL_URL
 
@@ -63,6 +63,29 @@ def _proxy_json(r: httpx.Response) -> JSONResponse:
     return JSONResponse(status_code=r.status_code, content=body)
 
 
+async def _proxy_post(
+    request: Request, path: str, payload: BaseModel
+) -> JSONResponse:
+    """POST to the backend's `/v2/_debug<path>` and mirror the response.
+
+    Wraps `_backend_call` with httpx error handling so a network hiccup
+    or backend restart returns a structured 502 to the page's JS rather
+    than an unhandled exception that becomes a FastAPI 500 + traceback.
+    """
+    try:
+        r = await _backend_call(
+            request, "POST", path, json=payload.model_dump()
+        )
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "detail": f"backend call failed: {type(exc).__name__}: {exc}"
+            },
+        )
+    return _proxy_json(r)
+
+
 @router.get("", response_class=HTMLResponse, dependencies=[Depends(_require_dev)])
 async def page(
     request: Request,
@@ -98,8 +121,11 @@ async def page(
 
 
 class _AlertSubmission(BaseModel):
-    title: str
-    body: str
+    # Length limits mirror the backend's _SendAlertRequest so we 422
+    # locally instead of paying a cross-container round-trip for an
+    # obviously-bad payload.
+    title: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=2000)
     device_ids: list[str] | None = None
 
 
@@ -111,20 +137,18 @@ class _AlertSubmission(BaseModel):
 async def api_send_alert(
     payload: _AlertSubmission, request: Request
 ) -> JSONResponse:
-    r = await _backend_call(
-        request, "POST", "/send_alert", json=payload.model_dump()
-    )
-    return _proxy_json(r)
+    return await _proxy_post(request, "/send_alert", payload)
 
 
 class _LiveActivitySubmission(BaseModel):
-    device_id: str
-    scenario: str
-    title: str
-    subtitle: str = ""
-    location_text: str = ""
+    # Length limits mirror the backend's _SendLiveActivityRequest.
+    device_id: str = Field(min_length=1)
+    scenario: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=120)
+    subtitle: str = Field(default="", max_length=200)
+    location_text: str = Field(default="", max_length=120)
     countdown_target_iso: str | None = None
-    source_id: str = "debug-test"
+    source_id: str = Field(default="debug-test", min_length=1)
 
 
 @router.post(
@@ -135,14 +159,11 @@ class _LiveActivitySubmission(BaseModel):
 async def api_send_live_activity(
     payload: _LiveActivitySubmission, request: Request
 ) -> JSONResponse:
-    r = await _backend_call(
-        request, "POST", "/send_live_activity", json=payload.model_dump()
-    )
-    return _proxy_json(r)
+    return await _proxy_post(request, "/send_live_activity", payload)
 
 
 class _EndLiveActivitySubmission(BaseModel):
-    activity_id: str
+    activity_id: str = Field(min_length=1)
 
 
 @router.post(
@@ -153,7 +174,4 @@ class _EndLiveActivitySubmission(BaseModel):
 async def api_end_live_activity(
     payload: _EndLiveActivitySubmission, request: Request
 ) -> JSONResponse:
-    r = await _backend_call(
-        request, "POST", "/end_live_activity", json=payload.model_dump()
-    )
-    return _proxy_json(r)
+    return await _proxy_post(request, "/end_live_activity", payload)

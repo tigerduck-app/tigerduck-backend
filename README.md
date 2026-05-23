@@ -128,7 +128,7 @@ docker compose exec backend curl -sS localhost:40000/health
 | `./start.sh` | `docker compose up -d --build` 後印 mode/ports/skip-LLM 等狀態摘要 |
 | `./stop.sh` | `docker compose down`（保留 volume） |
 | `./logs.sh` | tail 指定 service（預設 backend） |
-| `./clean-db.sh` | **危險** — 砍掉 postgres volume，整個資料重來（不影響 portal 的 `tigerduck_portal_data` volume） |
+| `./clean-db.sh` | **危險** — 砍掉 postgres volume，整個資料重來。portal 本身是無狀態的，沒有 volume 要保留 |
 
 ### 管理介面（portal）
 

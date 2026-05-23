@@ -128,7 +128,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 | `./start.sh` | `docker compose up -d --build`, then prints a status block (mode, ports, skip-LLM, …) |
 | `./stop.sh` | `docker compose down` (volume preserved) |
 | `./logs.sh` | Tail a service (defaults to `backend`) |
-| `./clean-db.sh` | **Destructive** — drops the postgres volume; full reset (does NOT touch the portal's `tigerduck_portal_data` volume) |
+| `./clean-db.sh` | **Destructive** — drops the postgres volume; full reset. The portal itself is stateless, so there's no portal volume to preserve |
 
 ### Operator portal
 
