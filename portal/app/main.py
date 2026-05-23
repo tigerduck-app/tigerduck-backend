@@ -1,4 +1,4 @@
-"""TigerDuck portal — FastAPI entrypoint.
+"""TigerDuck Backend Portal — FastAPI entrypoint.
 
 Single-process uvicorn. Stateless: postgres is owned by the backend
 container, status data is fetched on each request. No auth — front with
@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-app = FastAPI(title="TigerDuck portal", lifespan=lifespan)
+app = FastAPI(title="TigerDuck Backend Portal", lifespan=lifespan)
 
 # Mount static FIRST so the route prefix doesn't shadow the file server.
 _static_dir = Path(__file__).resolve().parent / "static"
