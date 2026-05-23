@@ -21,6 +21,89 @@
 </div>
 
 <section>
+    <h2>Overview</h2>
+    <p class="dim">Same fields <code>./start.sh</code> prints when the stack comes up.</p>
+    <table class="overview">
+        <tbody>
+            <tr>
+                <th>Mode</th>
+                <td><code>{{ env or "(unset, treated as prod)" }}</code></td>
+            </tr>
+            <tr>
+                <th>Log level</th>
+                <td><code>{{ log_level or "INFO (default)" }}</code></td>
+            </tr>
+            <tr>
+                <th>Backend version</th>
+                <td>
+                    {% if backend_version.ok %}
+                        <code>{{ backend_version.version }}</code>
+                        <span class="dim">api {{ backend_version.api_base_path }}</span>
+                    {% else %}
+                        <span class="bad">unreachable</span>
+                        <span class="dim">— {{ backend_version.detail }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>Backend</th>
+                <td><a href="{{ backend_public_url }}" target="_blank" rel="noopener"><code>{{ backend_public_url }}</code></a></td>
+            </tr>
+            <tr>
+                <th>Portal</th>
+                <td><a href="{{ portal_public_url }}" target="_blank" rel="noopener"><code>{{ portal_public_url }}</code></a></td>
+            </tr>
+            <tr>
+                <th>APNs env</th>
+                <td><code>{{ apns_env or "(unset)" }}</code></td>
+            </tr>
+            <tr>
+                <th>LLM probe</th>
+                <td>
+                    {% if skip_llm_probe %}
+                        <code>skipped</code> <span class="dim">— probe returns immediately</span>
+                    {% else %}
+                        <code>engaged</code> <span class="dim">— waits up to 60s for LLM at startup</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>LLM URL</th>
+                <td><code>{{ llm_base_url or "(unset)" }}</code></td>
+            </tr>
+            <tr>
+                <th>Portal bootstrap</th>
+                <td><code>{{ portal_bootstrap_admin or "(unset — local dev allowed)" }}</code></td>
+            </tr>
+            <tr>
+                <th>LAN backend</th>
+                <td>
+                    {% if host_lan_ips %}
+                        {% for ip in host_lan_ips %}
+                            <a href="http://{{ ip }}:40000" target="_blank" rel="noopener"><code>http://{{ ip }}:40000</code></a>{% if not loop.last %} &nbsp; {% endif %}
+                        {% endfor %}
+                    {% else %}
+                        <span class="dim">(no LAN IP threaded in — start.sh detects en*/eth*/wlan*)</span>
+                    {% endif %}
+                </td>
+            </tr>
+            <tr>
+                <th>LAN portal</th>
+                <td>
+                    {% if host_lan_ips %}
+                        {% for ip in host_lan_ips %}
+                            <a href="http://{{ ip }}:40010" target="_blank" rel="noopener"><code>http://{{ ip }}:40010</code></a>{% if not loop.last %} &nbsp; {% endif %}
+                        {% endfor %}
+                    {% else %}
+                        <span class="dim">(no LAN IP threaded in — start.sh detects en*/eth*/wlan*)</span>
+                    {% endif %}
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+<section>
     <h2>Containers</h2>
     {% if containers %}
     <table>

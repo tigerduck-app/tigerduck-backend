@@ -1,96 +1,72 @@
 {% extends "_base.html" %}
-{% block title %}Logs — TigerDuck portal{% endblock %}
+{% block title %}Logs — {{ active.label }} — TigerDuck portal{% endblock %}
+{% block body_class %}wide{% endblock %}
 {% block body %}
 
 <h1>Logs</h1>
 
+<nav class="tabs">
+    {% for t in tabs %}
+        <a href="/logs?source={{ t.id }}&tail={{ tail }}"
+           class="tab {% if t.id == active.id %}active{% endif %}">
+            {{ t.label }}
+        </a>
+    {% endfor %}
+</nav>
+
 <p class="dim">
-    Pulled from the docker engine (last {{ tail }} lines per container; raise
-    via <code>?tail=N</code>, up to {{ max_tail }}). The android / apple
-    sections are filtered slices of the backend log. Reload to refresh.
+    {% if active.kind == "raw" %}
+        Container <code>{{ active.container }}</code> — last {{ tail }} lines (raw stdout + stderr).
+    {% else %}
+        Backend container lines matching:
+        {% for n in active.needles %}<code>{{ n }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+    {% endif %}
+    Reload to refresh.
 </p>
 
 <form method="get" action="/logs" class="tail-form">
+    <input type="hidden" name="source" value="{{ active.id }}">
     <label>Tail
         <input type="number" name="tail" min="1" max="{{ max_tail }}" value="{{ tail }}">
     </label>
     <button type="submit">Reload</button>
 </form>
 
-{% macro log_section(slug, title, hint, text, ok=True, detail=None) %}
-<section class="log-section" id="section-{{ slug }}">
-    <h2>{{ title }}</h2>
-    {% if hint %}<p class="dim">{{ hint }}</p>{% endif %}
-    {% if not ok %}
-        <p class="bad">{{ detail or "log unavailable" }}</p>
-    {% else %}
-        <div class="log-controls">
-            <input type="search" class="log-search" data-target="log-{{ slug }}"
-                   placeholder="filter lines…" autocomplete="off">
-            <span class="dim log-count" data-for="log-{{ slug }}"></span>
-        </div>
-        <pre class="log" id="log-{{ slug }}">{{ text or "(empty)" }}</pre>
-    {% endif %}
-</section>
-{% endmacro %}
-
-{% for c in containers %}
-    {{ log_section(
-        "container-" ~ c.name,
-        "Container — " ~ c.name,
-        None,
-        c.text,
-        ok=c.ok,
-        detail=c.detail
-    ) }}
-{% endfor %}
-
-{{ log_section(
-    "android",
-    "Android (FCM)",
-    "Backend lines matching: fcm, android, firebase.",
-    android_text,
-    ok=has_backend,
-    detail="backend log unavailable — see the container section above"
-) }}
-
-{{ log_section(
-    "apple",
-    "Apple (APNs)",
-    "Backend lines matching: apns, apple, live-activity, pts.",
-    apple_text,
-    ok=has_backend,
-    detail="backend log unavailable — see the container section above"
-) }}
+{% if not log_ok %}
+    <p class="bad">{{ log_detail or "log unavailable" }}</p>
+{% else %}
+    <div class="log-controls">
+        <input type="search" id="log-search" placeholder="filter lines…" autocomplete="off">
+        <span class="dim log-count" id="log-count"></span>
+    </div>
+    <pre class="log" id="log-pane">{{ log_text or "(empty)" }}</pre>
+{% endif %}
 
 <script>
-// Per-section live filter. Splits the <pre>'s text into lines once,
-// then on each input keystroke rebuilds the visible text from the
-// matching subset. Case-insensitive substring; empty input shows all.
 (function () {
-    document.querySelectorAll('.log-search').forEach(function (input) {
-        var targetId = input.dataset.target;
-        var pre = document.getElementById(targetId);
-        if (!pre) return;
-        var counter = document.querySelector('.log-count[data-for="' + targetId + '"]');
-        var allLines = (pre.textContent || '').split('\n');
-        var total = allLines.length;
-        function render() {
-            var q = input.value.trim().toLowerCase();
-            if (!q) {
-                pre.textContent = allLines.join('\n');
-                if (counter) counter.textContent = total + ' lines';
-                return;
-            }
-            var matched = allLines.filter(function (l) {
-                return l.toLowerCase().indexOf(q) !== -1;
-            });
-            pre.textContent = matched.join('\n');
-            if (counter) counter.textContent = matched.length + ' / ' + total + ' lines';
+    var pane = document.getElementById('log-pane');
+    var input = document.getElementById('log-search');
+    var counter = document.getElementById('log-count');
+    if (!pane || !input) return;
+    var allLines = (pane.textContent || '').split('\n');
+    var total = allLines.length;
+    function render() {
+        var q = input.value.trim().toLowerCase();
+        if (!q) {
+            pane.textContent = allLines.join('\n');
+            counter.textContent = total + ' lines';
+            return;
         }
-        input.addEventListener('input', render);
-        if (counter) counter.textContent = total + ' lines';
-    });
+        var matched = allLines.filter(function (l) {
+            return l.toLowerCase().indexOf(q) !== -1;
+        });
+        pane.textContent = matched.join('\n');
+        counter.textContent = matched.length + ' / ' + total + ' lines';
+    }
+    input.addEventListener('input', render);
+    counter.textContent = total + ' lines';
+    // Jump to the bottom so the most recent lines are visible on load.
+    pane.scrollTop = pane.scrollHeight;
 })();
 </script>
 

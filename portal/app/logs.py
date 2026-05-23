@@ -12,10 +12,22 @@ substring-matching backend log lines. This keeps the wire format simple
 """
 from __future__ import annotations
 
+import re
 import struct
 from typing import Any
 
 import httpx
+
+# Strip ANSI CSI / SGR sequences emitted by structlog's ConsoleRenderer
+# (and anything else that thinks it's writing to a real terminal). The
+# escape byte itself (ESC = 0x1b) becomes invisible in the browser, so
+# without this the user sees the bracket-codes like `[36m` next to every
+# key=value pair.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 from .status import DOCKER_SOCK
 
@@ -53,8 +65,8 @@ def _demux(blob: bytes) -> str:
         # Some engines/setups still hand back raw text (TTY-enabled
         # containers, or older API versions). Fall back gracefully so a
         # display happens regardless.
-        return blob.decode("utf-8", errors="replace")
-    return out.decode("utf-8", errors="replace")
+        return _strip_ansi(blob.decode("utf-8", errors="replace"))
+    return _strip_ansi(out.decode("utf-8", errors="replace"))
 
 
 async def container_logs(

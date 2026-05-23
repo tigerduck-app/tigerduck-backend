@@ -15,6 +15,7 @@ import httpx  # noqa: E402
 import structlog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 
+from server import __version__
 from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory
 from server.logging_setup import configure as configure_logging
@@ -127,7 +128,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="TigerDuck Push Server",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.settings = settings
@@ -135,6 +136,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
+
+    @app.get("/version", tags=["meta"])
+    async def version() -> dict[str, str]:
+        # Unversioned on purpose — operator tooling (portal status,
+        # start.sh) shouldn't have to know the api_base_path to ask
+        # what's running. The same body is re-served under each api
+        # prefix below so /v1 and /v2 clients have it too.
+        return {"version": __version__, "api_base_path": settings.api_base_path}
 
     @app.get(f"{settings.api_base_path}/ping", tags=["meta"])
     async def ping() -> dict[str, str]:
@@ -166,8 +175,12 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": env}
 
+    async def version() -> dict[str, str]:
+        return {"version": __version__, "api_base_path": prefix}
+
     app.add_api_route(f"{prefix}/ping", ping, methods=["GET"], tags=["meta"])
     app.add_api_route(f"{prefix}/health", health, methods=["GET"], tags=["meta"])
+    app.add_api_route(f"{prefix}/version", version, methods=["GET"], tags=["meta"])
     app.include_router(devices_routes.router, prefix=prefix)
     app.include_router(live_activities_routes.router, prefix=prefix)
     app.include_router(schedule_routes.router, prefix=prefix)

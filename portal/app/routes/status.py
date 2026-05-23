@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from ..auth import current_user_email, get_settings, require_admin
 from ..config import Settings
 from ..status import (
+    backend_version,
     docker_containers,
     file_presence,
     llm_health,
@@ -34,6 +35,7 @@ async def status_page(
     pg = await postgres_health(settings.database_url)
     llm = await llm_health(settings.llm_base_url)
     containers = await docker_containers()
+    version_info = await backend_version()
     secrets = {
         "apns_key": file_presence(settings.apns_key_path),
         "fcm_credentials": file_presence(settings.fcm_credentials_path),
@@ -50,9 +52,14 @@ async def status_page(
             "log_level": settings.log_level,
             "skip_llm_probe": settings.skip_llm_probe,
             "llm_base_url": settings.llm_base_url,
+            "backend_public_url": settings.backend_public_url,
+            "portal_public_url": settings.portal_public_url,
+            "portal_bootstrap_admin": settings.portal_bootstrap_admin,
+            "host_lan_ips": settings.host_lan_ips,
             "containers": containers,
             "postgres": pg,
             "llm": llm,
             "secrets": secrets,
+            "backend_version": version_info,
         },
     )

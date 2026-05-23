@@ -75,6 +75,11 @@ services:
       postgres:
         condition: service_healthy
     env_file: .env
+    environment:
+      # Set by _compose-files.sh (sourced by start.sh) — the portal has
+      # no view of the host's network interfaces from inside its netns,
+      # so we hand it the comma-joined IPs to render on the status page.
+      TIGERDUCK_HOST_LAN_IPS: ${TIGERDUCK_HOST_LAN_IPS:-}
     volumes:
       # SQLite + audit log persist across container recreate.
       - tigerduck_portal_data:/data

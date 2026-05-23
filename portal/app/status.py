@@ -19,6 +19,35 @@ import httpx
 
 DOCKER_SOCK = "/var/run/docker.sock"
 
+# The portal sits on the same compose network as the backend container,
+# so its DNS name is always reachable regardless of dev/prod port
+# publishing. Public URLs in Settings are for what we DISPLAY to the
+# user (clickable links); intra-stack health pings use this.
+BACKEND_INTERNAL_URL = "http://tigerduck-internal:40000"
+
+
+async def backend_version(timeout_s: float = 2.0) -> dict[str, Any]:
+    """Ask the backend what version it is. Returns
+    `{ok, version?, api_base_path?, detail?}`. Fails safe so the status
+    page still renders if the backend is restarting."""
+    url = f"{BACKEND_INTERNAL_URL}/version"
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            r = await client.get(url)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    if r.status_code >= 400:
+        return {"ok": False, "detail": f"HTTP {r.status_code}"}
+    try:
+        body = r.json()
+    except ValueError:
+        return {"ok": False, "detail": "non-JSON response"}
+    return {
+        "ok": True,
+        "version": body.get("version"),
+        "api_base_path": body.get("api_base_path"),
+    }
+
 
 async def llm_health(llm_base_url: str, timeout_s: float = 3.0) -> dict[str, Any]:
     """Try a single GET against the configured LLM /models endpoint."""
