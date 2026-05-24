@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -122,3 +122,21 @@ async def client(
         app.state.engine = prepared_engine
         app.state.session_factory = build_session_factory(prepared_engine)
         yield ac
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def db_session(
+    prepared_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    """Yield a per-test AsyncSession against a freshly reset schema.
+
+    Used by unit tests that exercise DB helpers without going through the
+    HTTP transport (e.g. custom-push targeting resolver).
+    """
+    async with prepared_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = build_session_factory(prepared_engine)
+    async with factory() as s:
+        yield s
