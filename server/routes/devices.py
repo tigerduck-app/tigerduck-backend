@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.db import SessionDep
 from server.models import DeviceRegistration
 from server.schemas import (
+    DevicePreferencesRequest,
+    DevicePreferencesResponse,
     DeviceRegisterRequest,
     DeviceRegisterResponse,
     DeviceUnregisterRequest,
@@ -46,6 +48,8 @@ async def register_device(
             bundle_id=payload.bundle_id,
             attrs_type=attrs_type,
             apns_env=apns_env,
+            device_class=payload.device_class,
+            server_push_enabled=payload.server_push_enabled,
         )
         .on_conflict_do_update(
             index_elements=[DeviceRegistration.device_id],
@@ -57,6 +61,8 @@ async def register_device(
                 "bundle_id": payload.bundle_id,
                 "attrs_type": attrs_type,
                 "apns_env": apns_env,
+                "device_class": payload.device_class,
+                "server_push_enabled": payload.server_push_enabled,
                 "updated_at": func.now(),
             },
         )
@@ -101,12 +107,36 @@ async def get_device(device_id: str, session: SessionDep) -> DeviceRegisterRespo
     )
     device = result.scalar_one_or_none()
     if device is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail="device not found")
     return DeviceRegisterResponse(
         device_id=device.device_id,
         user_id=device.user_id,
         platform=device.platform,
         registered_at=device.updated_at,
+    )
+
+
+@router.patch(
+    "/{device_id}/preferences",
+    response_model=DevicePreferencesResponse,
+)
+async def update_device_preferences(
+    device_id: str,
+    payload: DevicePreferencesRequest,
+    session: SessionDep,
+) -> DevicePreferencesResponse:
+    """Flip a single device's user-facing push preferences."""
+    device = await session.get(DeviceRegistration, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="device not found")
+    device.server_push_enabled = payload.server_push_enabled
+    await session.flush()
+    logger.info(
+        "device.preferences.updated",
+        device_id=device_id,
+        server_push_enabled=payload.server_push_enabled,
+    )
+    return DevicePreferencesResponse(
+        device_id=device.device_id,
+        server_push_enabled=device.server_push_enabled,
     )

@@ -63,3 +63,35 @@ async def test_register_rejects_invalid_apns_env(client: AsyncClient):
     payload = await _register_payload(apns_env="staging")
     response = await client.post("/v2/devices/register", json=payload)
     assert response.status_code == 422
+
+
+async def test_register_persists_device_class_and_opt_in(client: AsyncClient):
+    payload = await _register_payload(
+        device_id="iphone-d1",
+        device_class="iphone",
+        server_push_enabled=True,
+    )
+    resp = await client.post("/v2/devices/register", json=payload)
+    assert resp.status_code == 200, resp.text
+
+
+async def test_patch_preferences_flips_server_push_enabled(client: AsyncClient):
+    p = await _register_payload(device_id="iphone-d2", device_class="iphone")
+    await client.post("/v2/devices/register", json=p)
+    resp = await client.patch(
+        "/v2/devices/iphone-d2/preferences",
+        json={"server_push_enabled": False},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "device_id": "iphone-d2",
+        "server_push_enabled": False,
+    }
+
+
+async def test_patch_preferences_404_for_unknown_device(client: AsyncClient):
+    resp = await client.patch(
+        "/v2/devices/does-not-exist/preferences",
+        json={"server_push_enabled": False},
+    )
+    assert resp.status_code == 404
