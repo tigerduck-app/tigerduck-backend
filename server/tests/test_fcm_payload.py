@@ -27,6 +27,9 @@ def test_data_values_are_all_strings() -> None:
         "bulletin_id": "42",
         "source_url": "https://x/42",
         "canonical_org": "oaa",
+        "kind": "bulletin",
+        "force_ring": "true",
+        "android_channel_id": "bulletins_sound",
     }
     assert all(isinstance(v, str) for v in req.data.values())
 
