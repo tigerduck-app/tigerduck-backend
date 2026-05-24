@@ -131,3 +131,38 @@ export type BulletinList = {
   items: BulletinSummary[];
   next_cursor: number | null;
 };
+
+export type CustomPushTargetClass = "iphone" | "ipad" | "android";
+
+export type CustomPushTargetFilter = {
+  target_classes: CustomPushTargetClass[];
+  user_id?: string;
+  device_id?: string;
+};
+
+export type CustomPushPreviewResponse = {
+  matched: Record<string, number>;
+};
+
+export type CustomPushRequest = CustomPushTargetFilter & {
+  title: string;
+  body: string;
+  keeps_record: boolean;
+  force_ring: boolean;
+};
+
+export type CustomPushSendResponse = {
+  request_id: string;
+  kind: "record" | "popup";
+  matched: number;
+  queued: number;
+};
+
+export type CustomPushRecentItem = {
+  id: string;
+  kind: "record" | "popup";
+  title: string;
+  target_classes: string[];
+  total: number;
+  sent_at: string | null;
+};
