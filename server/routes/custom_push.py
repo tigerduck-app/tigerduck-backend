@@ -1,0 +1,246 @@
+"""Operator endpoints for one-off custom pushes."""
+
+from __future__ import annotations
+
+import hashlib
+import secrets
+from datetime import datetime, timezone
+from typing import Literal
+
+import structlog
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import insert, select
+
+from server.bulletins.models import (
+    Bulletin,
+    BulletinProcessingState,
+)
+from server.bulletins.taxonomy import CanonicalOrg, ContentTag
+from server.db import SessionDep
+from server.models import CustomPushDispatch, CustomPushStatus
+from server.push.custom_push_targeting import (
+    TargetFilter,
+    count_by_class,
+    resolve_target_device_ids,
+)
+from server.security import require_shared_secret
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter(
+    prefix="/custom-push",
+    tags=["custom-push"],
+    dependencies=[Depends(require_shared_secret)],
+)
+
+
+class _CustomPushTargetFilter(BaseModel):
+    target_classes: list[Literal["iphone", "ipad", "android"]] = Field(min_length=1)
+    user_id: str | None = Field(default=None, max_length=64)
+    device_id: str | None = Field(default=None, max_length=128)
+
+
+class CustomPushRequest(_CustomPushTargetFilter):
+    title: str = Field(min_length=1, max_length=500)
+    body: str = Field(min_length=1, max_length=2000)
+    keeps_record: bool
+    force_ring: bool
+
+
+class PreviewResponse(BaseModel):
+    matched: dict[str, int]
+
+
+class SendResponse(BaseModel):
+    request_id: str
+    kind: Literal["record", "popup"]
+    matched: int
+    queued: int
+
+
+class RecentItem(BaseModel):
+    id: str
+    kind: Literal["record", "popup"]
+    title: str
+    target_classes: list[str]
+    total: int
+    sent_at: datetime | None
+
+
+@router.post("/preview", response_model=PreviewResponse)
+async def preview(
+    body: _CustomPushTargetFilter, session: SessionDep
+) -> PreviewResponse:
+    filt = TargetFilter(
+        target_classes=list(body.target_classes),
+        user_id=body.user_id,
+        device_id=body.device_id,
+    )
+    counts = await count_by_class(session, filt)
+    return PreviewResponse(matched=counts)
+
+
+@router.post("", response_model=SendResponse)
+async def send(
+    body: CustomPushRequest, session: SessionDep
+) -> SendResponse:
+    filt = TargetFilter(
+        target_classes=list(body.target_classes),
+        user_id=body.user_id,
+        device_id=body.device_id,
+    )
+    now = datetime.now(timezone.utc)
+    request_id = secrets.token_hex(8)  # 16 chars
+
+    if body.keeps_record:
+        external_id = f"custom-{int(now.timestamp() * 1000)}"
+        bulletin = Bulletin(
+            source="custom_push",
+            external_id=external_id,
+            source_url="",
+            title=body.title,
+            title_clean=body.title,
+            summary=body.body,
+            body_clean=body.body,
+            canonical_org=CanonicalOrg.server.value,
+            content_tags=[ContentTag.server_notification.value],
+            importance="normal",
+            posted_at=now,
+            processing_state=BulletinProcessingState.processed.value,
+            processing_attempts=0,
+            is_deleted=False,
+            dispatch_filter_json={
+                "target_classes": list(body.target_classes),
+                "user_id": body.user_id,
+                "device_id": body.device_id,
+                "force_ring": body.force_ring,
+            },
+        )
+        session.add(bulletin)
+        await session.flush()
+
+        matched_ids = await resolve_target_device_ids(session, filt)
+        logger.info(
+            "custom_push.send.record",
+            request_id=request_id,
+            bulletin_id=bulletin.id,
+            matched=len(matched_ids),
+        )
+        return SendResponse(
+            request_id=request_id,
+            kind="record",
+            matched=len(matched_ids),
+            queued=len(matched_ids),
+        )
+
+    # Pure-notification path
+    matched_ids = await resolve_target_device_ids(session, filt)
+    if matched_ids:
+        rows = []
+        for did in matched_ids:
+            nid_input = f"{request_id}:{did}".encode()
+            nid = hashlib.sha1(nid_input).hexdigest()[:32]
+            rows.append({
+                "request_id": request_id,
+                "device_id": did,
+                "title": body.title,
+                "body": body.body,
+                "force_ring": body.force_ring,
+                "notification_id": nid,
+                "status": CustomPushStatus.pending.value,
+                "attempts": 0,
+            })
+        await session.execute(insert(CustomPushDispatch).values(rows))
+    logger.info(
+        "custom_push.send.popup",
+        request_id=request_id,
+        matched=len(matched_ids),
+    )
+    return SendResponse(
+        request_id=request_id,
+        kind="popup",
+        matched=len(matched_ids),
+        queued=len(matched_ids),
+    )
+
+
+@router.get("/recent", response_model=list[RecentItem])
+async def recent(
+    session: SessionDep,
+    limit: int = Query(default=30, ge=1, le=100),
+) -> list[RecentItem]:
+    from sqlalchemy import func as sqlfunc
+
+    from server.bulletins.models import BulletinDispatch
+
+    bulletin_rows = (
+        (
+            await session.execute(
+                select(Bulletin)
+                .where(Bulletin.source == "custom_push")
+                .order_by(Bulletin.posted_at.desc().nulls_last(), Bulletin.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    items: list[RecentItem] = []
+    for b in bulletin_rows:
+        # Count rows via a tiny SELECT — keeps the eager-load surface small.
+        total = (await session.execute(
+            select(sqlfunc.count())
+            .select_from(BulletinDispatch)
+            .where(BulletinDispatch.bulletin_id == b.id)
+        )).scalar_one()
+        items.append(
+            RecentItem(
+                id=f"b{b.id}",
+                kind="record",
+                title=b.title,
+                target_classes=(b.dispatch_filter_json or {}).get(
+                    "target_classes", []
+                ),
+                total=int(total),
+                sent_at=b.notified_at or b.posted_at,
+            )
+        )
+
+    popup_rows = (
+        await session.execute(
+            select(
+                CustomPushDispatch.request_id,
+                CustomPushDispatch.title,
+                CustomPushDispatch.created_at,
+                CustomPushDispatch.sent_at,
+            ).order_by(CustomPushDispatch.created_at.desc()).limit(limit * 10)
+        )
+    ).all()
+    by_request: dict[str, dict] = {}
+    for req_id, title, created_at, sent_at in popup_rows:
+        rec = by_request.setdefault(
+            req_id,
+            {"title": title, "total": 0, "sent_at": sent_at, "created_at": created_at},
+        )
+        rec["total"] += 1
+        if sent_at and (rec["sent_at"] is None or sent_at > rec["sent_at"]):
+            rec["sent_at"] = sent_at
+
+    for req_id, rec in by_request.items():
+        items.append(
+            RecentItem(
+                id=f"r{req_id}",
+                kind="popup",
+                title=rec["title"],
+                target_classes=[],
+                total=rec["total"],
+                sent_at=rec["sent_at"] or rec["created_at"],
+            )
+        )
+
+    items.sort(
+        key=lambda i: (i.sent_at or datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+    return items[:limit]

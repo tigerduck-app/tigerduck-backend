@@ -21,6 +21,7 @@ from server.db import build_engine, build_session_factory
 from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
 from server.routes import bulletins as bulletins_routes
+from server.routes import custom_push as custom_push_routes
 from server.routes import debug as debug_routes
 from server.routes import devices as devices_routes
 from server.routes import live_activities as live_activities_routes
@@ -188,6 +189,7 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     app.include_router(bulletins_routes.router, prefix=prefix)
     app.include_router(bulletins_routes.device_router, prefix=prefix)
     app.include_router(bulletins_routes.admin_router, prefix=prefix)
+    app.include_router(custom_push_routes.router, prefix=prefix)
 
 
 def _install_deprecation_middleware(
