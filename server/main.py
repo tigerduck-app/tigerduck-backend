@@ -23,6 +23,7 @@ from server.push.router import build_router
 from server.routes import bulletins as bulletins_routes
 from server.routes import custom_push as custom_push_routes
 from server.routes import debug as debug_routes
+from server.routes import device_lists as device_lists_routes
 from server.routes import devices as devices_routes
 from server.routes import live_activities as live_activities_routes
 from server.routes import schedule as schedule_routes
@@ -190,6 +191,7 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     app.include_router(bulletins_routes.device_router, prefix=prefix)
     app.include_router(bulletins_routes.admin_router, prefix=prefix)
     app.include_router(custom_push_routes.router, prefix=prefix)
+    app.include_router(device_lists_routes.router, prefix=prefix)
 
 
 def _install_deprecation_middleware(

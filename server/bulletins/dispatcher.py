@@ -132,6 +132,7 @@ async def _dispatch_one(
                 ),
                 user_id=bulletin.dispatch_filter_json.get("user_id"),
                 device_id=bulletin.dispatch_filter_json.get("device_id"),
+                list_id=bulletin.dispatch_filter_json.get("list_id"),
             )
             device_ids = await resolve_target_device_ids(session, filt)
         else:

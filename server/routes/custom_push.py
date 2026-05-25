@@ -41,6 +41,7 @@ class _CustomPushTargetFilter(BaseModel):
     target_classes: list[Literal["iphone", "ipad", "android"]] = Field(min_length=1)
     user_id: str | None = Field(default=None, max_length=64)
     device_id: str | None = Field(default=None, max_length=128)
+    list_id: int | None = Field(default=None, ge=1)
 
 
 class CustomPushRequest(_CustomPushTargetFilter):
@@ -84,6 +85,7 @@ async def preview(
         target_classes=list(body.target_classes),
         user_id=body.user_id,
         device_id=body.device_id,
+        list_id=body.list_id,
     )
     counts = await count_by_class(session, filt)
     return PreviewResponse(matched=counts)
@@ -100,6 +102,7 @@ async def send(
         target_classes=list(body.target_classes),
         user_id=body.user_id,
         device_id=body.device_id,
+        list_id=body.list_id,
     )
     now = datetime.now(timezone.utc)
     request_id = secrets.token_hex(8)  # 16 chars
@@ -125,6 +128,7 @@ async def send(
                 "target_classes": list(body.target_classes),
                 "user_id": body.user_id,
                 "device_id": body.device_id,
+                "list_id": body.list_id,
                 "force_ring": body.force_ring,
             },
         )

@@ -60,15 +60,32 @@ async def list_devices(
     session: SessionDep,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    search: str | None = Query(
+        default=None,
+        max_length=128,
+        description=(
+            "Case-insensitive substring match against device_id or "
+            "user_id. Whitespace-only treated as no filter."
+        ),
+    ),
 ) -> DeviceListResponse:
     """List registered devices, newest first. Used by the portal admin page."""
-    total = (
-        await session.execute(select(func.count()).select_from(DeviceRegistration))
-    ).scalar_one()
+    base = select(DeviceRegistration)
+    count_base = select(func.count()).select_from(DeviceRegistration)
+    if search and search.strip():
+        needle = f"%{search.strip().lower()}%"
+        # ilike on the two ID-bearing columns. No FCM/APNs token search —
+        # those columns are operator-only and we don't want them queryable
+        # from the portal even by accident.
+        clause = func.lower(DeviceRegistration.device_id).like(needle) | func.lower(
+            DeviceRegistration.user_id
+        ).like(needle)
+        base = base.where(clause)
+        count_base = count_base.where(clause)
+    total = (await session.execute(count_base)).scalar_one()
     rows = (
         await session.execute(
-            select(DeviceRegistration)
-            .order_by(
+            base.order_by(
                 DeviceRegistration.updated_at.desc(),
                 DeviceRegistration.device_id,
             )

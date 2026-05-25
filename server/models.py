@@ -177,6 +177,59 @@ def build_push_id(device_id: str, source_id: str, scenario: str) -> str:
     return f"{device_id}:{source_id}:{scenario}"
 
 
+class DeviceList(Base):
+    """Operator-managed named bucket of devices.
+
+    Lets the custom-push UI target an ad-hoc cohort (e.g. "beta-android",
+    "spring-2026-pilot") without having to re-enter device IDs every time.
+    A device may live in any number of lists; the `device_list_members`
+    join table is the source of truth for membership.
+    """
+
+    __tablename__ = "device_lists"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), unique=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    members: Mapped[list["DeviceListMember"]] = relationship(
+        back_populates="list", cascade="all, delete-orphan"
+    )
+
+
+class DeviceListMember(Base):
+    __tablename__ = "device_list_members"
+
+    list_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("device_lists.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    device_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("device_registrations.device_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    list: Mapped[DeviceList] = relationship(back_populates="members")
+
+    # Reverse-direction lookups ("which lists is this device in?") drive
+    # the row-level "Add to list" dropdown on the portal devices page —
+    # without this index that's a seqscan on every page render.
+    __table_args__ = (
+        Index("ix_device_list_members_device_id", "device_id"),
+    )
+
+
 class CustomPushStatus(StrEnum):
     pending = "pending"
     sent = "sent"
