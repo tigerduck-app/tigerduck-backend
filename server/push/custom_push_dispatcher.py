@@ -5,6 +5,7 @@ but stores no bulletin row — pure-notification only.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import structlog
@@ -29,8 +30,28 @@ logger = structlog.get_logger(__name__)
 
 MAX_ATTEMPTS = 3
 
+# Serializes the periodic scheduler tick against the immediate kick fired
+# from `POST /custom-push`. Without it, both could SELECT the same
+# `pending` rows and double-send. Module-level Lock is fine because the
+# backend runs as a single process; if that ever changes, swap for a
+# PostgreSQL advisory lock or `with_for_update(skip_locked=True)`.
+_dispatch_lock = asyncio.Lock()
+
 
 async def dispatch_pending_custom_pushes(
+    session_factory: async_sessionmaker[AsyncSession],
+    router: PushRouter,
+    settings: Settings,
+    *,
+    batch_limit: int = 100,
+) -> None:
+    async with _dispatch_lock:
+        await _dispatch_pending_custom_pushes_locked(
+            session_factory, router, settings, batch_limit=batch_limit
+        )
+
+
+async def _dispatch_pending_custom_pushes_locked(
     session_factory: async_sessionmaker[AsyncSession],
     router: PushRouter,
     settings: Settings,
@@ -63,6 +84,12 @@ async def dispatch_pending_custom_pushes(
 
         for dispatch, device in rows:
             if device.platform == DevicePlatform.android.value:
+                # Android stores the FCM registration token in
+                # `pts_token_hex` (the column is platform-overloaded so
+                # we don't need a schema change for the second channel).
+                if not device.pts_token_hex:
+                    _cancel(dispatch, "android device has no FCM token", ts)
+                    continue
                 android_requests.append(
                     build_custom_push_popup_fcm(
                         fcm_token=device.pts_token_hex,
@@ -74,9 +101,15 @@ async def dispatch_pending_custom_pushes(
                 )
                 android_dispatch_ids.append(dispatch.id)
                 continue
-            # Apple path
+            # Apple path. APNs alert pushes use the standard device token,
+            # not the Live Activity PTS token — `pts_token_hex` would
+            # silently 400 on Apple's side because that token's topic
+            # ends in `.push-type.liveactivity`.
+            if not device.device_token_hex:
+                _cancel(dispatch, "apple device has no standard APNs token", ts)
+                continue
             req = build_custom_push_popup_apns(
-                device_token=device.pts_token_hex,
+                device_token=device.device_token_hex,
                 bundle_id=device.bundle_id,
                 title=dispatch.title,
                 body=dispatch.body,
@@ -106,6 +139,21 @@ async def dispatch_pending_custom_pushes(
                     _mark(dispatch, results_by_id[dispatch.id], ts)
 
         await session.commit()
+
+
+def _cancel(dispatch: CustomPushDispatch, reason: str, ts: datetime) -> None:
+    """Terminal-fail a dispatch that can't be sent (missing token, etc.)
+    so it doesn't get retried forever on the next scheduler tick.
+    """
+    dispatch.status = CustomPushStatus.failed.value
+    dispatch.attempts += 1
+    dispatch.last_error = reason
+    logger.info(
+        "custom_push.dispatch.cancelled",
+        dispatch_id=dispatch.id,
+        device_id=dispatch.device_id,
+        reason=reason,
+    )
 
 
 def _mark(dispatch: CustomPushDispatch, result: SendResult, ts: datetime) -> None:

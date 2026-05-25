@@ -8,10 +8,11 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import insert, select
 
+from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.models import (
     Bulletin,
     BulletinProcessingState,
@@ -19,6 +20,7 @@ from server.bulletins.models import (
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 from server.db import SessionDep
 from server.models import CustomPushDispatch, CustomPushStatus
+from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.custom_push_targeting import (
     TargetFilter,
     count_by_class,
@@ -66,6 +68,12 @@ class RecentItem(BaseModel):
     target_classes: list[str]
     total: int
     sent_at: datetime | None
+    # True until the dispatcher has actually fanned the message out.
+    # For "record" rows: Bulletin.notified_at still NULL.
+    # For "popup" rows: at least one CustomPushDispatch still pending.
+    # Drives the portal's "queueing" badge so an operator can tell a
+    # fresh-but-not-yet-sent row apart from a real zero-match send.
+    is_queueing: bool = False
 
 
 @router.post("/preview", response_model=PreviewResponse)
@@ -83,7 +91,10 @@ async def preview(
 
 @router.post("", response_model=SendResponse)
 async def send(
-    body: CustomPushRequest, session: SessionDep
+    body: CustomPushRequest,
+    session: SessionDep,
+    request: Request,
+    background: BackgroundTasks,
 ) -> SendResponse:
     filt = TargetFilter(
         target_classes=list(body.target_classes),
@@ -127,6 +138,12 @@ async def send(
             bulletin_id=bulletin.id,
             matched=len(matched_ids),
         )
+        # Fire the bulletin dispatcher as soon as the response is on the
+        # wire. SessionDep commits between the route returning and the
+        # background task running, so the new Bulletin row is visible.
+        # The dispatcher's module-level lock serializes against the
+        # periodic scheduler tick — no double-send.
+        background.add_task(_kick_bulletin_dispatch, request.app)
         return SendResponse(
             request_id=request_id,
             kind="record",
@@ -157,12 +174,42 @@ async def send(
         request_id=request_id,
         matched=len(matched_ids),
     )
+    # Same immediate-fire pattern as the record path above. Skipped when
+    # nothing matched — no rows to drain.
+    if matched_ids:
+        background.add_task(_kick_custom_push_dispatch, request.app)
     return SendResponse(
         request_id=request_id,
         kind="popup",
         matched=len(matched_ids),
         queued=len(matched_ids),
     )
+
+
+async def _kick_custom_push_dispatch(app: FastAPI) -> None:
+    """Drain pending popup dispatches immediately after a send.
+    Logs and swallows exceptions — the next scheduler tick will retry
+    anything left over."""
+    try:
+        await dispatch_pending_custom_pushes(
+            app.state.session_factory,
+            app.state.router,
+            app.state.settings,
+        )
+    except Exception as exc:
+        logger.warning("custom_push.kick.failed", error=str(exc))
+
+
+async def _kick_bulletin_dispatch(app: FastAPI) -> None:
+    """Same as `_kick_custom_push_dispatch` but for the record (bulletin) path."""
+    try:
+        await bulletin_jobs.dispatch_job(
+            app.state.session_factory,
+            app.state.router,
+            app.state.settings,
+        )
+    except Exception as exc:
+        logger.warning("custom_push.bulletin_kick.failed", error=str(exc))
 
 
 @router.get("/recent", response_model=list[RecentItem])
@@ -204,6 +251,7 @@ async def recent(
                 ),
                 total=int(total),
                 sent_at=b.notified_at or b.posted_at,
+                is_queueing=b.notified_at is None,
             )
         )
 
@@ -214,16 +262,25 @@ async def recent(
                 CustomPushDispatch.title,
                 CustomPushDispatch.created_at,
                 CustomPushDispatch.sent_at,
+                CustomPushDispatch.status,
             ).order_by(CustomPushDispatch.created_at.desc()).limit(limit * 10)
         )
     ).all()
     by_request: dict[str, dict] = {}
-    for req_id, title, created_at, sent_at in popup_rows:
+    for req_id, title, created_at, sent_at, status in popup_rows:
         rec = by_request.setdefault(
             req_id,
-            {"title": title, "total": 0, "sent_at": sent_at, "created_at": created_at},
+            {
+                "title": title,
+                "total": 0,
+                "sent_at": sent_at,
+                "created_at": created_at,
+                "pending": 0,
+            },
         )
         rec["total"] += 1
+        if status == CustomPushStatus.pending.value:
+            rec["pending"] += 1
         if sent_at and (rec["sent_at"] is None or sent_at > rec["sent_at"]):
             rec["sent_at"] = sent_at
 
@@ -236,6 +293,7 @@ async def recent(
                 target_classes=[],
                 total=rec["total"],
                 sent_at=rec["sent_at"] or rec["created_at"],
+                is_queueing=rec["pending"] > 0,
             )
         )
 

@@ -83,6 +83,7 @@ async def test_drains_pending_and_sends_to_correct_transport(
         await s.execute(insert(DeviceRegistration).values(
             device_id="p1", user_id="u", platform="apple",
             pts_token_hex="ab" * 32,
+            device_token_hex="cd" * 32,
             bundle_id="org.ntust.app.TigerDuck",
             attrs_type="TigerDuckActivityAttributes", apns_env="development",
             device_class="iphone", server_push_enabled=True,
@@ -130,6 +131,7 @@ async def test_failed_send_increments_attempts(
         await s.execute(insert(DeviceRegistration).values(
             device_id="p-fail", user_id="u", platform="apple",
             pts_token_hex="ff" * 32,
+            device_token_hex="ee" * 32,
             bundle_id="org.ntust.app.TigerDuck",
             attrs_type="TigerDuckActivityAttributes", apns_env="development",
             device_class="iphone", server_push_enabled=True,
