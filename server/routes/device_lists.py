@@ -163,9 +163,13 @@ async def update_list(
     lst = await session.get(DeviceList, list_id)
     if lst is None:
         raise HTTPException(status_code=404, detail="list not found")
-    if body.name is not None:
+    # Use model_fields_set so PATCH can distinguish "omitted" (leave
+    # unchanged) from "explicitly null" (clear to NULL). Without this the
+    # caller has no way to clear `description` once set.
+    provided = body.model_fields_set
+    if "name" in provided and body.name is not None:
         lst.name = body.name.strip()
-    if body.description is not None:
+    if "description" in provided:
         lst.description = body.description
     try:
         await session.flush()
