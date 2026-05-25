@@ -63,6 +63,13 @@ function StatusContent({ data }: { data: StatusPayload }) {
     secrets,
   } = data;
 
+  // Backend mounts FastAPI under /v2 (or whatever api_base_path reports).
+  // Display the rooted URL so the link lands directly on the API surface
+  // teams paste into curl / Postman, not the 404 you get hitting the
+  // bare host.
+  const apiBase = version.api_base_path || "/v2";
+  const backendApiUrl = `${env.backend_public_url.replace(/\/+$/, "")}${apiBase}`;
+
   return (
     <div className="space-y-8">
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -104,8 +111,8 @@ function StatusContent({ data }: { data: StatusPayload }) {
               <Row
                 label="Backend"
                 value={
-                  <ExternalLinkValue href={env.backend_public_url}>
-                    {env.backend_public_url}
+                  <ExternalLinkValue href={backendApiUrl}>
+                    {backendApiUrl}
                   </ExternalLinkValue>
                 }
               />
@@ -126,14 +133,14 @@ function StatusContent({ data }: { data: StatusPayload }) {
                 value={
                   env.host_lan_ips.length ? (
                     <div className="flex flex-wrap gap-2">
-                      {env.host_lan_ips.map((ip) => (
-                        <ExternalLinkValue
-                          key={ip}
-                          href={`http://${ip}:40000`}
-                        >
-                          {`http://${ip}:40000`}
-                        </ExternalLinkValue>
-                      ))}
+                      {env.host_lan_ips.map((ip) => {
+                        const api = `http://${ip}:40000${apiBase}`;
+                        return (
+                          <ExternalLinkValue key={ip} href={api}>
+                            {api}
+                          </ExternalLinkValue>
+                        );
+                      })}
                     </div>
                   ) : (
                     <span className="text-muted-foreground">

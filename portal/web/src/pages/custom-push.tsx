@@ -110,6 +110,13 @@ export function CustomPushPage() {
     queryKey: ["custom-push-recent"],
     queryFn: () =>
       api<CustomPushRecentItem[]>(`${API_PREFIX}/custom-push/recent?limit=30`),
+    // Live-update without manual refresh. 2s while anything is still
+    // queueing (scheduler tick is on the order of seconds, so the
+    // operator sees total/sent_at fill in quickly) and 10s otherwise so
+    // sends from other browser tabs / direct API calls also show up.
+    refetchInterval: (q) =>
+      q.state.data?.some((r) => r.is_queueing) ? 2000 : 10_000,
+    refetchOnWindowFocus: true,
   });
 
   const previewMut = useMutation({
@@ -378,7 +385,15 @@ export function CustomPushPage() {
                   <TableCell className="text-xs">
                     {r.target_classes.join(" + ") || "—"}
                   </TableCell>
-                  <TableCell className="tabular-nums">{r.total}</TableCell>
+                  <TableCell className="tabular-nums">
+                    {r.is_queueing ? (
+                      <Badge variant="warning" className="text-[10px] uppercase">
+                        queueing
+                      </Badge>
+                    ) : (
+                      r.total
+                    )}
+                  </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {r.sent_at ? r.sent_at.replace("T", " ").slice(0, 16) : "—"}
                   </TableCell>

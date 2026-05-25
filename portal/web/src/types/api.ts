@@ -165,4 +165,5 @@ export type CustomPushRecentItem = {
   target_classes: string[];
   total: number;
   sent_at: string | null;
+  is_queueing: boolean;
 };
