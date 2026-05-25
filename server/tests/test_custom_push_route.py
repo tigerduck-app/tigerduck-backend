@@ -21,12 +21,16 @@ def _session_factory(client: AsyncClient) -> async_sessionmaker:
 
 
 async def _register_payload(**overrides) -> dict:
+    # Mirror a real Apple registration: both standard APNs alert token
+    # (device_token_hex) and PTS Live-Activity token (pts_token_hex). The
+    # custom-push targeting gate requires device_token_hex on Apple.
     base = {
         "user_id": "u1",
         "device_id": "p1",
         "platform": "apple",
         "device_class": "iphone",
         "pts_token_hex": "ab" * 16,
+        "device_token_hex": "cd" * 32,
         "bundle_id": "org.ntust.app.TigerDuck",
         "attrs_type": "TigerDuckActivityAttributes",
         "apns_env": "development",

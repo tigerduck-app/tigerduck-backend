@@ -17,10 +17,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.models import DeviceListMember, DeviceRegistration
+from server.models import DeviceListMember, DevicePlatform, DeviceRegistration
 
 TargetClass = Literal["iphone", "ipad", "android"]
 
@@ -66,9 +66,24 @@ async def resolve_target_device_ids(
         else None
     )
 
+    # Apple alert pushes consume the standard APNs `device_token_hex`;
+    # Android pushes go via FCM (token stored in `pts_token_hex`). Mirrors
+    # the gate in `server/bulletins/matcher.py` — keep them in sync.
+    token_clause = or_(
+        and_(
+            DeviceRegistration.platform == DevicePlatform.apple.value,
+            DeviceRegistration.device_token_hex.isnot(None),
+            DeviceRegistration.device_token_hex != "",
+        ),
+        and_(
+            DeviceRegistration.platform == DevicePlatform.android.value,
+            DeviceRegistration.pts_token_hex.isnot(None),
+            DeviceRegistration.pts_token_hex != "",
+        ),
+    )
     stmt = select(DeviceRegistration.device_id).where(
         DeviceRegistration.server_push_enabled.is_(True),
-        DeviceRegistration.pts_token_hex != "",
+        token_clause,
         or_(class_clause, legacy_clause) if legacy_clause is not None else class_clause,
     )
     if filt.user_id is not None:

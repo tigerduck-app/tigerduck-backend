@@ -15,12 +15,15 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def _seed(session, **overrides):
+    # Apple defaults include device_token_hex (standard APNs alert token) —
+    # that's what custom-push targeting actually requires for Apple. Android
+    # callers should override platform + clear apple-specific fields.
     defaults = {
         "device_id": "d-default",
         "user_id": "u",
         "platform": "apple",
         "pts_token_hex": "tok",
-        "device_token_hex": None,
+        "device_token_hex": "alert-tok",
         "bundle_id": "org.ntust.app.TigerDuck",
         "attrs_type": "TigerDuckActivityAttributes",
         "apns_env": "development",
@@ -84,12 +87,46 @@ async def test_server_push_disabled_excluded(db_session):
     assert ids == []
 
 
-async def test_empty_token_excluded(db_session):
-    await _seed(db_session, device_id="p1", pts_token_hex="")
+async def test_apple_without_device_token_excluded(db_session):
+    # Apple devices need the standard APNs alert token; a PTS-only device
+    # would be created-then-cancelled by the dispatcher.
+    await _seed(db_session, device_id="p1", device_token_hex=None)
     ids = await resolve_target_device_ids(
         db_session, TargetFilter(target_classes=["iphone"])
     )
     assert ids == []
+
+
+async def test_apple_with_empty_device_token_excluded(db_session):
+    await _seed(db_session, device_id="p1", device_token_hex="")
+    ids = await resolve_target_device_ids(
+        db_session, TargetFilter(target_classes=["iphone"])
+    )
+    assert ids == []
+
+
+async def test_android_without_fcm_token_excluded(db_session):
+    await _seed(
+        db_session, device_id="a1", platform="android", device_class="android",
+        attrs_type="", apns_env="", device_token_hex=None, pts_token_hex="",
+    )
+    ids = await resolve_target_device_ids(
+        db_session, TargetFilter(target_classes=["android"])
+    )
+    assert ids == []
+
+
+async def test_android_with_fcm_token_matches(db_session):
+    # Android keeps the FCM registration token in pts_token_hex and has no
+    # standard APNs token — make sure the new gate still admits it.
+    await _seed(
+        db_session, device_id="a1", platform="android", device_class="android",
+        attrs_type="", apns_env="", device_token_hex=None, pts_token_hex="fcm-tok",
+    )
+    ids = await resolve_target_device_ids(
+        db_session, TargetFilter(target_classes=["android"])
+    )
+    assert ids == ["a1"]
 
 
 async def test_user_id_filter(db_session):
