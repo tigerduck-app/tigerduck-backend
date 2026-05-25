@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -24,6 +27,72 @@ router = APIRouter(
     dependencies=[Depends(require_shared_secret)],
 )
 logger = structlog.get_logger(__name__)
+
+
+class DeviceListItem(BaseModel):
+    """Operator-facing summary of a `device_registrations` row.
+
+    Token columns are reported as booleans only — the raw hex never
+    leaves the backend container. The portal's devices page reads this
+    via the `/api/devices` proxy.
+    """
+
+    device_id: str
+    user_id: str
+    platform: str
+    device_class: str
+    bundle_id: str
+    apns_env: str
+    server_push_enabled: bool
+    has_pts_token: bool
+    has_device_token: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeviceListResponse(BaseModel):
+    items: list[DeviceListItem]
+    total: int
+
+
+@router.get("", response_model=DeviceListResponse)
+async def list_devices(
+    session: SessionDep,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+) -> DeviceListResponse:
+    """List registered devices, newest first. Used by the portal admin page."""
+    total = (
+        await session.execute(select(func.count()).select_from(DeviceRegistration))
+    ).scalar_one()
+    rows = (
+        await session.execute(
+            select(DeviceRegistration)
+            .order_by(
+                DeviceRegistration.updated_at.desc(),
+                DeviceRegistration.device_id,
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).scalars().all()
+    items = [
+        DeviceListItem(
+            device_id=d.device_id,
+            user_id=d.user_id,
+            platform=d.platform,
+            device_class=d.device_class,
+            bundle_id=d.bundle_id,
+            apns_env=d.apns_env,
+            server_push_enabled=d.server_push_enabled,
+            has_pts_token=bool(d.pts_token_hex),
+            has_device_token=bool(d.device_token_hex),
+            created_at=d.created_at,
+            updated_at=d.updated_at,
+        )
+        for d in rows
+    ]
+    return DeviceListResponse(items=items, total=int(total))
 
 
 @router.post("/register", response_model=DeviceRegisterResponse)

@@ -95,3 +95,26 @@ async def test_patch_preferences_404_for_unknown_device(client: AsyncClient):
         json={"server_push_enabled": False},
     )
     assert resp.status_code == 404
+
+
+async def test_list_devices_returns_registered_rows(client: AsyncClient):
+    await client.post(
+        "/v2/devices/register",
+        json=await _register_payload(device_id="list-a", user_id="u1"),
+    )
+    await client.post(
+        "/v2/devices/register",
+        json=await _register_payload(device_id="list-b", user_id="u2"),
+    )
+
+    resp = await client.get("/v2/devices")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] >= 2
+    ids = {item["device_id"] for item in body["items"]}
+    assert {"list-a", "list-b"}.issubset(ids)
+    sample = next(i for i in body["items"] if i["device_id"] == "list-a")
+    # Tokens are reported as presence booleans only — the raw hex never
+    # leaves the backend.
+    assert sample["has_pts_token"] is True
+    assert "pts_token_hex" not in sample

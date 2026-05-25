@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Megaphone, Send, Plus, Minus } from "lucide-react";
+import { Loader2, Megaphone, Send, Plus, Minus } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -186,6 +186,8 @@ export function CustomPushPage() {
           )
         }
       />
+
+      <GoingPushes items={recentQ.data ?? []} />
 
       <Card>
         <CardHeader>
@@ -439,4 +441,59 @@ function asMessage(e: unknown): string {
   if (e instanceof ApiError) return `HTTP ${e.status} — ${e.message}`;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+function GoingPushes({ items }: { items: CustomPushRecentItem[] }) {
+  const going = items.filter((r) => r.is_queueing);
+  if (going.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          <CardTitle>Going pushes</CardTitle>
+        </div>
+        <CardDescription>
+          Queued sends the dispatcher hasn't fanned out yet. Refreshes every 2s.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>#</TableHead>
+              <TableHead>Kind</TableHead>
+              <TableHead>Title</TableHead>
+              <TableHead>Targets</TableHead>
+              <TableHead>Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {going.map((r) => (
+              <TableRow key={r.id}>
+                <TableCell className="font-mono text-xs">{r.id}</TableCell>
+                <TableCell>
+                  <Badge
+                    variant={r.kind === "record" ? "default" : "secondary"}
+                    className="text-[10px] uppercase"
+                  >
+                    {r.kind}
+                  </Badge>
+                </TableCell>
+                <TableCell className="max-w-md truncate">{r.title}</TableCell>
+                <TableCell className="text-xs">
+                  {r.target_classes.join(" + ") || "—"}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="warning" className="text-[10px] uppercase">
+                    queueing
+                  </Badge>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
 }

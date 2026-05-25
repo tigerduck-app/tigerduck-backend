@@ -3,6 +3,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import {
   Activity,
   HardDrive,
+  List,
   Megaphone,
   ScrollText,
   Send,
@@ -12,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useEnv } from "@/hooks/use-env";
 import { cn } from "@/lib/cn";
+import type { ApnsConfig, FcmConfig } from "@/types/api";
 
 type NavItem = {
   to: string;
@@ -26,6 +28,7 @@ const NAV: NavItem[] = [
   { to: "/backup", label: "Backup", icon: HardDrive },
   { to: "/announcement", label: "Announcement", icon: Megaphone },
   { to: "/custom-push", label: "Custom push", icon: Send },
+  { to: "/devices", label: "Devices", icon: List },
   {
     to: "/test",
     label: "Apple test push",
@@ -78,12 +81,14 @@ export function Layout() {
               <span className="font-medium">Mode</span>
               <EnvBadge env={env.data?.env} />
             </div>
-            {env.data?.apns_env ? (
-              <div className="flex items-center gap-2">
-                <span className="font-medium">APNs</span>
-                <EnvBadge env={env.data.apns_env} />
-              </div>
-            ) : null}
+            <div className="flex items-center gap-2">
+              <span className="font-medium">APNs</span>
+              <ApnsBadge apns={env.data?.apns_config} />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium">FCM</span>
+              <FcmBadge fcm={env.data?.fcm_config} />
+            </div>
           </div>
           <ThemeToggle />
         </div>
@@ -106,6 +111,43 @@ function EnvBadge({ env }: { env: string | undefined }) {
   if (env === "production") return <Badge variant="warning">prod</Badge>;
   if (env === "development") return <Badge variant="success">dev</Badge>;
   return <Badge variant="muted">{env}</Badge>;
+}
+
+// Mirrors the FCM SummaryCard on the status page: project_id when env +
+// JSON agree, "mismatch" when both present but differ, "disabled" when
+// anything is missing or nothing is configured at all.
+function FcmBadge({ fcm }: { fcm: FcmConfig | undefined }) {
+  if (!fcm) return <Badge variant="muted">unknown</Badge>;
+  if (fcm.state === "ok") {
+    return <Badge variant="default">{fcm.project_id}</Badge>;
+  }
+  if (fcm.state === "mismatch") {
+    return (
+      <Badge variant="warning" title={fcm.detail}>
+        mismatch
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="muted" title={fcm.detail}>
+      disabled
+    </Badge>
+  );
+}
+
+// APNs has no "mismatch" — the .p8 file is just a private key. When all
+// three (team id, key id, file) are present we surface the apns_env;
+// otherwise the badge says disabled and the dashboard explains why.
+function ApnsBadge({ apns }: { apns: ApnsConfig | undefined }) {
+  if (!apns) return <Badge variant="muted">unknown</Badge>;
+  if (apns.state !== "ok") {
+    return (
+      <Badge variant="muted" title={apns.detail}>
+        disabled
+      </Badge>
+    );
+  }
+  return <EnvBadge env={apns.apns_env} />;
 }
 
 function MobileNav({ items }: { items: NavItem[] }) {
