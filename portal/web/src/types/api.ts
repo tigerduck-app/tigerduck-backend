@@ -181,6 +181,37 @@ export type CustomPushTargetFilter = {
   target_classes: CustomPushTargetClass[];
   user_id?: string;
   device_id?: string;
+  list_id?: number;
+};
+
+export type DeviceList = {
+  id: number;
+  name: string;
+  description: string | null;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DeviceListMemberRow = {
+  device_id: string;
+  user_id: string;
+  platform: string;
+  device_class: string;
+  added_at: string;
+};
+
+export type DeviceListMembersResponse = {
+  list_id: number;
+  list_name: string;
+  items: DeviceListMemberRow[];
+  total: number;
+};
+
+export type AddMembersResponse = {
+  added: number;
+  already_present: number;
+  unknown: number;
 };
 
 export type CustomPushPreviewResponse = {

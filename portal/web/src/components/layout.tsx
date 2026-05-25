@@ -3,6 +3,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import {
   Activity,
   HardDrive,
+  Layers,
   List,
   Megaphone,
   ScrollText,
@@ -29,6 +30,7 @@ const NAV: NavItem[] = [
   { to: "/announcement", label: "Announcement", icon: Megaphone },
   { to: "/custom-push", label: "Custom push", icon: Send },
   { to: "/devices", label: "Devices", icon: List },
+  { to: "/lists", label: "Lists", icon: Layers },
   {
     to: "/test",
     label: "Apple test push",

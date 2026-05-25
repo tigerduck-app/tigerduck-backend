@@ -23,12 +23,18 @@ async def list_devices(request: Request) -> JSONResponse:
         headers["X-Push-Token"] = secret
     limit = request.query_params.get("limit", "200")
     offset = request.query_params.get("offset", "0")
+    search = request.query_params.get("search")
+    params: dict[str, str] = {"limit": limit, "offset": offset}
+    # Pass-through only when there's something to search — `?search=`
+    # with an empty value would otherwise round-trip as a string filter
+    # against empty, which the backend treats as no-op anyway but adds
+    # log noise.
+    if search and search.strip():
+        params["search"] = search
     url = f"{BACKEND_INTERNAL_URL}/v2/devices"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                url, headers=headers, params={"limit": limit, "offset": offset}
-            )
+            r = await client.get(url, headers=headers, params=params)
     except httpx.HTTPError as exc:
         return JSONResponse(
             status_code=502,

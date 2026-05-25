@@ -24,6 +24,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -40,6 +47,7 @@ import type {
   CustomPushRequest,
   CustomPushSendResponse,
   CustomPushTargetClass,
+  DeviceList,
 } from "@/types/api";
 
 // Matches the portal's other pages (e.g. announcement.tsx uses
@@ -55,6 +63,9 @@ type FormState = {
   target_iphone: boolean;
   target_ipad: boolean;
   target_android: boolean;
+  // Empty string means "no list filter". Stored as string to match the
+  // Select primitive's value contract; converted to int before sending.
+  list_id: string;
   user_id: string;
   device_id: string;
   show_advanced: boolean;
@@ -68,6 +79,7 @@ const EMPTY: FormState = {
   target_iphone: true,
   target_ipad: true,
   target_android: true,
+  list_id: "",
   user_id: "",
   device_id: "",
   show_advanced: false,
@@ -93,6 +105,7 @@ function buildRequest(f: FormState): CustomPushRequest {
   const d = f.device_id.trim();
   if (u) req.user_id = u;
   if (d) req.device_id = d;
+  if (f.list_id) req.list_id = Number(f.list_id);
   return req;
 }
 
@@ -119,6 +132,11 @@ export function CustomPushPage() {
     refetchOnWindowFocus: true,
   });
 
+  const listsQ = useQuery<DeviceList[]>({
+    queryKey: ["device-lists"],
+    queryFn: () => api<DeviceList[]>("/api/device-lists"),
+  });
+
   const previewMut = useMutation({
     mutationFn: () =>
       api<CustomPushPreviewResponse>(`${API_PREFIX}/custom-push/preview`, {
@@ -127,6 +145,7 @@ export function CustomPushPage() {
           target_classes: selectedClasses(form),
           ...(form.user_id.trim() ? { user_id: form.user_id.trim() } : {}),
           ...(form.device_id.trim() ? { device_id: form.device_id.trim() } : {}),
+          ...(form.list_id ? { list_id: Number(form.list_id) } : {}),
         },
       }),
     onSuccess: (r) => setPreviewCounts(r.matched),
@@ -276,6 +295,42 @@ export function CustomPushPage() {
                   Android
                 </label>
               </div>
+            </div>
+
+            <div className="grid gap-1.5">
+              <Label htmlFor="target-list">Target list (optional)</Label>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={form.list_id}
+                  onValueChange={(v) => setForm({ ...form, list_id: v })}
+                >
+                  <SelectTrigger id="target-list" className="w-72">
+                    <SelectValue placeholder="No list filter — all matching devices" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(listsQ.data ?? []).map((l) => (
+                      <SelectItem key={l.id} value={String(l.id)}>
+                        {l.name} · {l.member_count}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {form.list_id && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setForm({ ...form, list_id: "" })}
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                When set, ANDs with the class checkboxes — e.g. pick
+                "beta-android" + check Android to send only to Android
+                beta members.
+              </p>
             </div>
 
             <div>

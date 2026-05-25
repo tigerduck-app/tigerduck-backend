@@ -30,6 +30,7 @@ from .routes import (
     announcement,
     backup,
     custom_push,
+    device_lists,
     devices,
     logs,
     status,
@@ -73,6 +74,7 @@ app.include_router(backup.router)
 app.include_router(announcement.router)
 app.include_router(custom_push.router)
 app.include_router(devices.router)
+app.include_router(device_lists.router)
 app.include_router(test_push.router)
 
 
