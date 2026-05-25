@@ -24,6 +24,8 @@ def test_data_values_are_all_strings() -> None:
     assert req.title == "t"
     assert req.body == "b"
     assert req.data == {
+        "title": "t",
+        "body": "b",
         "bulletin_id": "42",
         "source_url": "https://x/42",
         "canonical_org": "oaa",

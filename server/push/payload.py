@@ -292,12 +292,19 @@ def build_fcm_alert_request(
     audible (`bulletins_sound`) or silent (`bulletins_silent`) channel —
     the Android client must have both channels registered before any
     custom-push lands.
+
+    `title` and `body` ride inside `data` because the message is sent
+    data-only (see `fcm_client.send()` for why) — the Android client reads
+    them out of `data` to construct the system notification with the
+    deep-link PendingIntent attached.
     """
     return FcmRequest(
         token=fcm_token,
         title=title,
         body=body,
         data={
+            "title": title,
+            "body": body,
             "bulletin_id": str(bulletin_id),
             "source_url": source_url,
             "canonical_org": canonical_org,

@@ -48,16 +48,20 @@ class FcmSender:
         import firebase_admin
         from firebase_admin import messaging
 
+        # Data-only — no `notification` payload. With a notification payload
+        # the FCM SDK auto-displays the OS notification when the app is
+        # backgrounded/killed and onMessageReceived is bypassed, so the
+        # deep-link PendingIntent the Android client attaches never gets
+        # wired up and tapping the notification just opens the launcher.
+        # Title/body ride in `data` (see build_fcm_alert_request /
+        # build_custom_push_popup_fcm); the client constructs the system
+        # notification itself.
         msg = messaging.Message(
             token=request.token,
-            notification=messaging.Notification(
-                title=request.title, body=request.body
-            ),
             data=request.data,
             android=messaging.AndroidConfig(
                 priority="high",
                 ttl=timedelta(seconds=request.ttl_seconds),
-                notification=messaging.AndroidNotification(channel_id="bulletins"),
             ),
         )
         try:
@@ -126,16 +130,15 @@ class FcmSender:
         chunk_size = 500
         for start in range(0, len(requests), chunk_size):
             chunk = requests[start : start + chunk_size]
+            # Data-only — see `send()` for the rationale. Title/body live
+            # inside `data` so the Android client can render the notification
+            # itself and attach the deep-link PendingIntent.
             msg = messaging.MulticastMessage(
                 tokens=[r.token for r in chunk],
-                notification=messaging.Notification(
-                    title=first.title, body=first.body
-                ),
                 data=first.data,
                 android=messaging.AndroidConfig(
                     priority="high",
                     ttl=timedelta(seconds=first.ttl_seconds),
-                    notification=messaging.AndroidNotification(channel_id="bulletins"),
                 ),
             )
             try:

@@ -68,6 +68,25 @@ def test_fcm_bulletin_channel_id_sound_when_force_ring_true():
     assert req.data["android_channel_id"] == "bulletins_sound"
 
 
+def test_fcm_bulletin_data_carries_title_and_body():
+    # The Android client renders the system notification itself from
+    # data-only FCM messages (so the deep-link PendingIntent gets attached);
+    # `title`/`body` MUST be in `data`, not just on the FcmRequest envelope.
+    req = build_fcm_alert_request(
+        fcm_token="tok",
+        title="hello",
+        body="world",
+        bulletin_id=42,
+        source_url="https://x",
+        canonical_org="server",
+        kind="custom_push_bulletin",
+        force_ring=True,
+    )
+    assert req.data["title"] == "hello"
+    assert req.data["body"] == "world"
+    assert req.data["bulletin_id"] == "42"
+
+
 def test_apns_popup_payload_carries_title_body_id():
     req = build_custom_push_popup_apns(
         device_token="tok",
