@@ -10,7 +10,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import insert, select
+from sqlalchemy import case, func as sqlfunc, insert, select
 
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.models import (
@@ -221,30 +221,30 @@ async def recent(
     session: SessionDep,
     limit: int = Query(default=30, ge=1, le=100),
 ) -> list[RecentItem]:
-    from sqlalchemy import func as sqlfunc
-
     from server.bulletins.models import BulletinDispatch
 
-    bulletin_rows = (
-        (
-            await session.execute(
-                select(Bulletin)
-                .where(Bulletin.source == "custom_push")
-                .order_by(Bulletin.posted_at.desc().nulls_last(), Bulletin.id.desc())
-                .limit(limit)
-            )
+    # Bulletin counts via GROUP BY subquery (was N+1 — one COUNT per row).
+    dispatch_counts = (
+        select(
+            BulletinDispatch.bulletin_id.label("bulletin_id"),
+            sqlfunc.count().label("c"),
         )
-        .scalars()
-        .all()
+        .group_by(BulletinDispatch.bulletin_id)
+        .subquery()
     )
+    bulletin_rows = (
+        await session.execute(
+            select(Bulletin, sqlfunc.coalesce(dispatch_counts.c.c, 0))
+            .outerjoin(
+                dispatch_counts, dispatch_counts.c.bulletin_id == Bulletin.id
+            )
+            .where(Bulletin.source == "custom_push")
+            .order_by(Bulletin.posted_at.desc().nulls_last(), Bulletin.id.desc())
+            .limit(limit)
+        )
+    ).all()
     items: list[RecentItem] = []
-    for b in bulletin_rows:
-        # Count rows via a tiny SELECT — keeps the eager-load surface small.
-        total = (await session.execute(
-            select(sqlfunc.count())
-            .select_from(BulletinDispatch)
-            .where(BulletinDispatch.bulletin_id == b.id)
-        )).scalar_one()
+    for b, total in bulletin_rows:
         items.append(
             RecentItem(
                 id=f"b{b.id}",
@@ -259,45 +259,37 @@ async def recent(
             )
         )
 
-    popup_rows = (
-        await session.execute(
-            select(
-                CustomPushDispatch.request_id,
-                CustomPushDispatch.title,
-                CustomPushDispatch.created_at,
-                CustomPushDispatch.sent_at,
-                CustomPushDispatch.status,
-            ).order_by(CustomPushDispatch.created_at.desc()).limit(limit * 10)
+    # Aggregate popup dispatches by request_id in SQL. Previously a row-cap
+    # (limit*10) could be exhausted by one large send, hiding older sends.
+    popup_stmt = (
+        select(
+            CustomPushDispatch.request_id,
+            sqlfunc.max(CustomPushDispatch.title).label("title"),
+            sqlfunc.count().label("total"),
+            sqlfunc.max(CustomPushDispatch.created_at).label("created_at"),
+            sqlfunc.max(CustomPushDispatch.sent_at).label("sent_at"),
+            sqlfunc.sum(
+                case(
+                    (CustomPushDispatch.status == CustomPushStatus.pending.value, 1),
+                    else_=0,
+                )
+            ).label("pending"),
         )
-    ).all()
-    by_request: dict[str, dict] = {}
-    for req_id, title, created_at, sent_at, status in popup_rows:
-        rec = by_request.setdefault(
-            req_id,
-            {
-                "title": title,
-                "total": 0,
-                "sent_at": sent_at,
-                "created_at": created_at,
-                "pending": 0,
-            },
-        )
-        rec["total"] += 1
-        if status == CustomPushStatus.pending.value:
-            rec["pending"] += 1
-        if sent_at and (rec["sent_at"] is None or sent_at > rec["sent_at"]):
-            rec["sent_at"] = sent_at
-
-    for req_id, rec in by_request.items():
+        .group_by(CustomPushDispatch.request_id)
+        .order_by(sqlfunc.max(CustomPushDispatch.created_at).desc())
+        .limit(limit)
+    )
+    popup_rows = (await session.execute(popup_stmt)).all()
+    for req_id, title, total, created_at, sent_at, pending in popup_rows:
         items.append(
             RecentItem(
                 id=f"r{req_id}",
                 kind="popup",
-                title=rec["title"],
+                title=title,
                 target_classes=[],
-                total=rec["total"],
-                sent_at=rec["sent_at"] or rec["created_at"],
-                is_queueing=rec["pending"] > 0,
+                total=int(total),
+                sent_at=sent_at or created_at,
+                is_queueing=int(pending or 0) > 0,
             )
         )
 
