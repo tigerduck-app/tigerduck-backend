@@ -58,28 +58,28 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ```
        公網                                            host (macOS / Linux)
-   ┌──────────────┐                              ┌────────────────────────────┐
-   │  iOS / 安卓  │ ── HTTPS ──▶ nginx-proxy ──▶  │  tigerduck-internal        │
-   └──────────────┘              -manager  ──┐   │  (FastAPI + APScheduler)   │
-                                             │   │           │                │
-   ┌──────────────┐                          │   │           ├── APNs         │
-   │ 管理者瀏覽器 │ ── HTTPS ──▶ cloudflared ──┼──▶│  tigerduck-portal          │
-   └──────────────┘   (Zero Trust)           │   │  (FastAPI + Jinja, :40010) │
-                                             │   │           │                │
-                                             │   │           ▼                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ tigerduck-db   │        │
-                                             │   │  │ (Postgres 17)  │        │
-                                             │   │  └────────────────┘        │
-                                             │   │           ▲                │
-                                             │   │           │                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ llama-server   │        │
-                                             │   │  │ (native, Metal)│        │
-                                             │   │  └────────────────┘        │
-                                             │   └────────────────────────────┘
-                                             │
-                                             └── proxy-net 上同時掛 backend 和 portal
+   ┌──────────────┐                                ┌────────────────────────────┐
+   │  iOS / 安卓   │ ── HTTPS ──▶ nginx-proxy ──▶   │  tigerduck-internal        │
+   └──────────────┘              -manager  ────┐   │  (FastAPI + APScheduler)   │
+                                               │   │           │                │
+   ┌──────────────┐                            │   │           ├── APNs         │
+   │ 管理者瀏覽器   │ ── HTTPS ──▶ cloudflared ──┼──▶│  tigerduck-portal          │
+   └──────────────┘   (Zero Trust)             │   │  (FastAPI + Jinja, :40010) │
+                                               │   │           │                │
+                                               │   │           ▼                │
+                                               │   │  ┌────────────────┐        │
+                                               │   │  │ tigerduck-db   │        │
+                                               │   │  │ (Postgres 17)  │        │
+                                               │   │  └────────────────┘        │
+                                               │   │           ▲                │
+                                               │   │           │                │
+                                               │   │  ┌────────────────┐        │
+                                               │   │  │ llama-server   │        │
+                                               │   │  │ (native, Metal)│        │
+                                               │   │  └────────────────┘        │
+                                               │   └────────────────────────────┘
+                                               │
+                                               └── proxy-net 上同時掛 backend 和 portal
 ```
 
 - **`tigerduck-db` 網路**：internal-only bridge，postgres 完全沒有外網路由
