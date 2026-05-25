@@ -74,9 +74,9 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
                                               │   │           ▲                │
                                               │   │           │                │
                                               │   │  ┌────────────────┐        │
-                                              │   │  │ llama-server   │◀───────┘
-                                              │   │  │ (native, Metal)│
-                                              │   │  └────────────────┘
+                                              │   │  │ llama-server   │        │
+                                              │   │  │ (native, Metal)│        │
+                                              │   │  └────────────────┘        │
                                               │   └────────────────────────────┘
                                               │
                                               └── proxy-net carries both backend and portal
@@ -137,7 +137,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Show stack status (every field `./start.sh` prints, plus containers via the docker engine UDS, backend version via `/version`, postgres row counts, LLM reachability, APNs/FCM secret presence, host LAN IPs as clickable links)
 - Stream the last N lines of each container's logs with per-tab search; Android / Apple tabs are substring-filtered slices of the backend log
 - Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + portal's SQLite + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
-- Custom-push placeholder (TODO, ships as a stub)
+- Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 
 Full design: [`docs/portal-design.md`](docs/portal-design.md).
 
@@ -177,8 +177,15 @@ On macOS, `deploy/launchd/ai.tigerduck.llm.plist` wraps llama-server as a launch
 | `GET` | `/v2/bulletins/{id}` | Bulletin detail | none |
 | `GET` | `/v2/bulletins/taxonomy` | org / tag label mapping | none |
 | `GET/PUT` | `/v2/devices/{id}/subscriptions` | Subscription rules read/write | shared secret |
+| `PATCH` | `/v2/devices/{id}/preferences` | Device preferences (e.g. `server_push_enabled`) | shared secret |
 | `POST` | `/v2/live-activities/start-tokens` | Live Activity push-to-start token upload | shared secret |
 | `POST` | `/v2/schedule/sync` | Class-table sync (feeds the Live Activity scheduler) | shared secret |
+| `POST` | `/v2/custom-push/preview` | Preview custom-push payload before sending | shared secret |
+| `POST` | `/v2/custom-push` | Dispatch a custom push to a device or device list | shared secret |
+| `GET` | `/v2/custom-push/recent` | Recent custom-push dispatch history | shared secret |
+| `GET/POST` | `/v2/device-lists` | List / create named device cohorts | shared secret |
+| `GET/PATCH/DELETE` | `/v2/device-lists/{id}` | Read / update / delete a device list | shared secret |
+| `GET/POST/DELETE` | `/v2/device-lists/{id}/members` | Manage list membership | shared secret |
 
 `/v1/*` is kept as a deprecated alias; iOS clients ≥ 1.6.1 use `/v2`.
 
@@ -206,7 +213,7 @@ tigerduck-backend/
 │   ├── db.py / models.py        # SQLAlchemy async engine, DeviceRegistration
 │   ├── security.py              # shared-secret dependency
 │   ├── _ssl_compat.py           # Lenient OpenSSL 3 mode (NTUST's TLS chain is broken)
-│   ├── routes/                  # devices / schedule / bulletins / live_activities / debug
+│   ├── routes/                  # devices / schedule / bulletins / live_activities / custom_push / device_lists / debug
 │   ├── push/                    # apns_client / fcm_client / payload / router
 │   ├── scheduler/               # APScheduler runtime, dispatch, retention
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher / taxonomy
@@ -239,4 +246,4 @@ PRs and issues are welcome. Before submitting:
 
 ## License
 
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE), matching [tigerduck-app](https://github.com/tigerduck-app/tigerduck-app).
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE), matching [tigerduck-app](https://github.com/tigerduck-app/tigerduck-app) and [tigerduck-app-android](https://github.com/tigerduck-app/tigerduck-app-android).
