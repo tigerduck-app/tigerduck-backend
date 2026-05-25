@@ -57,29 +57,29 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ## Architecture
 
 ```
-       Public                                          host (macOS / Linux)
-   ┌──────────────┐                              ┌────────────────────────────┐
-   │  iOS / And.  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal        │
-   └──────────────┘              -manager  ──┐   │  (FastAPI + APScheduler)   │
-                                             │   │           │                │
-   ┌──────────────┐                          │   │           ├── APNs        │
-   │ Operator     │ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal         │
-   └──────────────┘   (Zero Trust)           │   │  (FastAPI + Jinja, :40010)│
-                                             │   │           │                │
-                                             │   │           ▼                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ tigerduck-db   │        │
-                                             │   │  │ (Postgres 17)  │        │
-                                             │   │  └────────────────┘        │
-                                             │   │           ▲                │
-                                             │   │           │                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ llama-server   │◀───────┘
-                                             │   │  │ (native, Metal)│
-                                             │   │  └────────────────┘
-                                             │   └────────────────────────────┘
-                                             │
-                                             └── proxy-net carries both backend and portal
+       Public                                           host (macOS / Linux)
+   ┌──────────────┐                               ┌────────────────────────────┐
+   │  iOS / And.  │ ── HTTPS ──▶ nginx-proxy ───▶ │  tigerduck-internal        │
+   └──────────────┘              -manager  ───┐   │  (FastAPI + APScheduler)   │
+                                              │   │           │                │
+   ┌──────────────┐                           │   │           ├── APNs         │
+   │ Operator     │ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal          │
+   └──────────────┘   (Zero Trust)            │   │  (FastAPI + Jinja, :40010) │
+                                              │   │           │                │
+                                              │   │           ▼                │
+                                              │   │  ┌────────────────┐        │
+                                              │   │  │ tigerduck-db   │        │
+                                              │   │  │ (Postgres 17)  │        │
+                                              │   │  └────────────────┘        │
+                                              │   │           ▲                │
+                                              │   │           │                │
+                                              │   │  ┌────────────────┐        │
+                                              │   │  │ llama-server   │◀───────┘
+                                              │   │  │ (native, Metal)│
+                                              │   │  └────────────────┘
+                                              │   └────────────────────────────┘
+                                              │
+                                              └── proxy-net carries both backend and portal
 ```
 
 - **`tigerduck-db` network**: internal-only bridge — Postgres has no route to the public internet.
