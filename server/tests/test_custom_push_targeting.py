@@ -157,3 +157,30 @@ async def test_count_by_class_basic(db_session):
         db_session, TargetFilter(target_classes=["iphone", "ipad"])
     )
     assert counts == {"iphone": 2, "ipad": 1, "total": 3}
+
+
+async def test_count_by_class_legacy_apple_single_class_attributed(db_session):
+    # Only one Apple class selected → the legacy (blank-class) row is
+    # unambiguously that class for counting purposes.
+    await _seed(db_session, device_id="legacy-a", device_class="")
+    counts = await count_by_class(
+        db_session, TargetFilter(target_classes=["ipad"])
+    )
+    assert counts == {"ipad": 1, "total": 1}
+
+
+async def test_count_by_class_legacy_apple_both_classes_bucketed(db_session):
+    # Both Apple classes selected → a blank-class row can't be told apart,
+    # so it must NOT skew iphone (and leave ipad showing 0); it lands in a
+    # dedicated bucket while the total still reflects it.
+    await _seed(db_session, device_id="legacy-a", device_class="")
+    await _seed(db_session, device_id="p1", device_class="iphone")
+    counts = await count_by_class(
+        db_session, TargetFilter(target_classes=["iphone", "ipad"])
+    )
+    assert counts == {
+        "iphone": 1,
+        "ipad": 0,
+        "apple (unspecified)": 1,
+        "total": 2,
+    }

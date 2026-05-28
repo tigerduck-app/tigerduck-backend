@@ -125,15 +125,19 @@ async def count_by_class(
     for device_class, platform in rows:
         if device_class in counts:
             counts[device_class] += 1
-        elif device_class == "" and "iphone" in counts and platform == "apple":
-            counts["iphone"] += 1
-        elif (
-            device_class == ""
-            and "ipad" in counts
-            and "iphone" not in counts
-            and platform == "apple"
-        ):
-            counts["ipad"] += 1
+        elif device_class == "" and platform == "apple":
+            # Legacy Apple rows predate device_class and can't be told
+            # apart as iPhone vs iPad. If exactly one Apple class is
+            # selected, attribute to it; if both are, the split is
+            # unknowable, so bucket separately rather than skewing iPhone
+            # (and leaving iPad showing 0 while these rows are targeted).
+            apple_selected = [c for c in ("iphone", "ipad") if c in counts]
+            if len(apple_selected) == 1:
+                counts[apple_selected[0]] += 1
+            else:
+                counts["apple (unspecified)"] = (
+                    counts.get("apple (unspecified)", 0) + 1
+                )
         elif device_class == "" and "android" in counts and platform == "android":
             counts["android"] += 1
     return {**counts, "total": sum(counts.values())}

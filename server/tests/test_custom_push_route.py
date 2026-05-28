@@ -131,6 +131,57 @@ async def test_send_pure_creates_one_dispatch_per_device(client: AsyncClient):
         assert all(r.force_ring is False for r in rows)
 
 
+async def test_two_record_sends_same_instant_both_queue(client: AsyncClient):
+    # external_id is derived from the unique request_id, not the clock, so
+    # two record pushes created back-to-back can't collide on the
+    # (source, external_id) unique constraint.
+    await client.post(
+        "/v2/devices/register",
+        json=await _register_payload(device_id="p1", device_class="iphone"),
+    )
+    for _ in range(2):
+        resp = await client.post(
+            "/v2/custom-push",
+            json={
+                "target_classes": ["iphone"],
+                "title": "dup",
+                "body": "x",
+                "keeps_record": True,
+                "force_ring": True,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+
+    factory = _session_factory(client)
+    async with factory() as s:
+        bulletins = (
+            await s.execute(select(Bulletin).where(Bulletin.source == "custom_push"))
+        ).scalars().all()
+        assert len(bulletins) == 2
+        assert len({b.external_id for b in bulletins}) == 2
+
+
+async def test_recent_popup_surfaces_target_classes(client: AsyncClient):
+    await client.post(
+        "/v2/devices/register",
+        json=await _register_payload(device_id="p1", device_class="iphone"),
+    )
+    await client.post(
+        "/v2/custom-push",
+        json={
+            "target_classes": ["iphone"],
+            "title": "pop",
+            "body": "y",
+            "keeps_record": False,
+            "force_ring": True,
+        },
+    )
+    resp = await client.get("/v2/custom-push/recent?limit=10")
+    assert resp.status_code == 200
+    popup = next(i for i in resp.json() if i["kind"] == "popup")
+    assert popup["target_classes"] == ["iphone"]
+
+
 async def test_send_empty_target_classes_rejected(client: AsyncClient):
     resp = await client.post(
         "/v2/custom-push",

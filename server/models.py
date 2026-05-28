@@ -257,6 +257,12 @@ class CustomPushDispatch(Base):
     body: Mapped[str] = mapped_column(Text)
     force_ring: Mapped[bool] = mapped_column(Boolean, default=True)
     notification_id: Mapped[str] = mapped_column(String(64))
+    # Comma-joined target classes (e.g. "iphone,ipad") for `/recent` audit
+    # display. Same value across every row of a request — the record path
+    # keeps the equivalent in `Bulletin.dispatch_filter_json`.
+    target_classes: Mapped[str] = mapped_column(
+        String(64), default="", server_default=""
+    )
 
     status: Mapped[str] = mapped_column(
         String(16), default=CustomPushStatus.pending.value

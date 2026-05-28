@@ -108,7 +108,7 @@ async def send(
     request_id = secrets.token_hex(8)  # 16 chars
 
     if body.keeps_record:
-        external_id = f"custom-{int(now.timestamp() * 1000)}"
+        external_id = f"custom-{request_id}"
         bulletin = Bulletin(
             source="custom_push",
             external_id=external_id,
@@ -158,6 +158,7 @@ async def send(
     # Pure-notification path
     matched_ids = await resolve_target_device_ids(session, filt)
     if matched_ids:
+        target_classes = ",".join(body.target_classes)
         rows = []
         for did in matched_ids:
             nid_input = f"{request_id}:{did}".encode()
@@ -169,6 +170,7 @@ async def send(
                 "body": body.body,
                 "force_ring": body.force_ring,
                 "notification_id": nid,
+                "target_classes": target_classes,
                 "status": CustomPushStatus.pending.value,
                 "attempts": 0,
             })
@@ -265,6 +267,8 @@ async def recent(
         select(
             CustomPushDispatch.request_id,
             sqlfunc.max(CustomPushDispatch.title).label("title"),
+            # Same value across all rows of a request — max() just picks it.
+            sqlfunc.max(CustomPushDispatch.target_classes).label("target_classes"),
             sqlfunc.count().label("total"),
             sqlfunc.max(CustomPushDispatch.created_at).label("created_at"),
             sqlfunc.max(CustomPushDispatch.sent_at).label("sent_at"),
@@ -280,13 +284,13 @@ async def recent(
         .limit(limit)
     )
     popup_rows = (await session.execute(popup_stmt)).all()
-    for req_id, title, total, created_at, sent_at, pending in popup_rows:
+    for req_id, title, target_classes, total, created_at, sent_at, pending in popup_rows:
         items.append(
             RecentItem(
                 id=f"r{req_id}",
                 kind="popup",
                 title=title,
-                target_classes=[],
+                target_classes=target_classes.split(",") if target_classes else [],
                 total=int(total),
                 sent_at=sent_at or created_at,
                 is_queueing=int(pending or 0) > 0,

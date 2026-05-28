@@ -103,20 +103,18 @@ class FcmSender:
             )
 
     async def send_multi(self, requests: list[FcmRequest]) -> list[SendResult]:
-        """Fan one bulletin out to many devices in a single batched RPC.
+        """Fan many devices out in a single batched RPC.
 
         firebase-admin's `messaging.send` opens a fresh TLS connection per
-        call, which scales linearly in the number of subscribers. For the
-        bulletin path every request in a batch shares title/body/data and
-        only differs by token, so `send_each_for_multicast` collapses the
-        whole fan-out into ~ceil(N/500) round trips with internal
-        thread-pool concurrency. Returns one SendResult per input request,
-        in the same order.
-
-        Empty input is a no-op (no RPC). All requests in `requests` MUST
-        share the same title/body/data/ttl — caller's responsibility (the
-        bulletin dispatcher already builds one per-(bulletin,device) but
-        every (bulletin,*) tuple has identical content).
+        call, which scales linearly in the number of subscribers.
+        `messaging.send_each` collapses up to 500 messages into one batched
+        call with internal thread-pool concurrency (~ceil(N/500) round
+        trips). Unlike `send_each_for_multicast` it sends a distinct
+        `Message` per token, so each request keeps its OWN `data`/`ttl` —
+        the custom-push popup dispatcher stamps a per-device
+        `notification_id` into `data` and must not have it overwritten by
+        the first request's. Returns one SendResult per input request, in
+        the same order. Empty input is a no-op (no RPC).
         """
         import firebase_admin
         from firebase_admin import messaging
@@ -124,27 +122,29 @@ class FcmSender:
         if not requests:
             return []
 
-        first = requests[0]
         results: list[SendResult] = []
-        # Google caps `send_each_for_multicast` at 500 tokens per call.
+        # Google caps `send_each` at 500 messages per call.
         chunk_size = 500
         for start in range(0, len(requests), chunk_size):
             chunk = requests[start : start + chunk_size]
             # Data-only — see `send()` for the rationale. Title/body live
             # inside `data` so the Android client can render the notification
             # itself and attach the deep-link PendingIntent.
-            msg = messaging.MulticastMessage(
-                tokens=[r.token for r in chunk],
-                data=first.data,
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    ttl=timedelta(seconds=first.ttl_seconds),
-                ),
-            )
+            msgs = [
+                messaging.Message(
+                    token=r.token,
+                    data=r.data,
+                    android=messaging.AndroidConfig(
+                        priority="high",
+                        ttl=timedelta(seconds=r.ttl_seconds),
+                    ),
+                )
+                for r in chunk
+            ]
             try:
                 batch = await asyncio.wait_for(
                     asyncio.to_thread(
-                        messaging.send_each_for_multicast, msg, app=self._app
+                        messaging.send_each, msgs, app=self._app
                     ),
                     timeout=self._send_timeout,
                 )

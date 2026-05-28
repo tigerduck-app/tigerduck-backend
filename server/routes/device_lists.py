@@ -12,7 +12,7 @@ from datetime import datetime
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -43,11 +43,32 @@ class DeviceListCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=1000)
 
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str) -> str:
+        # min_length runs on the raw value, so trim here and reject a
+        # whitespace-only name rather than storing "" (an unusable list
+        # that also burns the unique empty-name slot).
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
+
 
 class DeviceListUpdateRequest(BaseModel):
     # All-optional patch payload — omit a field to leave it unchanged.
     name: str | None = Field(default=None, min_length=1, max_length=128)
     description: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("name must not be blank")
+        return v
 
 
 class DeviceListMemberItem(BaseModel):
@@ -109,7 +130,7 @@ async def list_lists(session: SessionDep) -> list[DeviceListSummary]:
 async def create_list(
     body: DeviceListCreateRequest, session: SessionDep
 ) -> DeviceListSummary:
-    lst = DeviceList(name=body.name.strip(), description=body.description)
+    lst = DeviceList(name=body.name, description=body.description)
     session.add(lst)
     try:
         await session.flush()
@@ -168,7 +189,7 @@ async def update_list(
     # caller has no way to clear `description` once set.
     provided = body.model_fields_set
     if "name" in provided and body.name is not None:
-        lst.name = body.name.strip()
+        lst.name = body.name
     if "description" in provided:
         lst.description = body.description
     try:
