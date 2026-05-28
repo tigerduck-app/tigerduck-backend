@@ -12,6 +12,8 @@ export type EnvInfo = {
   backend_public_url: string;
   portal_public_url: string;
   host_lan_ips: string[];
+  fcm_config: FcmConfig;
+  apns_config: ApnsConfig;
 };
 
 export type FilePresence = {
@@ -52,6 +54,26 @@ export type BackendVersion = {
   detail?: string;
 };
 
+// `state` discriminator:
+//   ok        — env value present, file readable, contents agree
+//   mismatch  — both env + file present but values differ (FCM only)
+//   missing   — at least one side configured, the other absent
+//   disabled  — nothing configured at all (intentional / recording stub)
+export type FcmConfig = {
+  state: "ok" | "mismatch" | "missing" | "disabled";
+  project_id?: string;
+  json_project_id?: string;
+  detail?: string;
+};
+
+export type ApnsConfig = {
+  state: "ok" | "missing" | "disabled";
+  apns_env: string;
+  team_id?: string;
+  key_id?: string;
+  detail?: string;
+};
+
 export type StatusPayload = {
   env: EnvInfo;
   containers: ContainerInfo[];
@@ -62,6 +84,8 @@ export type StatusPayload = {
     apns_key: FilePresence;
     fcm_credentials: FilePresence;
   };
+  fcm_config: FcmConfig;
+  apns_config: ApnsConfig;
 };
 
 export type LogsTab = {
@@ -87,6 +111,25 @@ export type DeviceInfo = {
   has_device_token: boolean;
   active_live_activities: number;
   updated_at: string;
+};
+
+export type DeviceRow = {
+  device_id: string;
+  user_id: string;
+  platform: string;
+  device_class: string;
+  bundle_id: string;
+  apns_env: string;
+  server_push_enabled: boolean;
+  has_pts_token: boolean;
+  has_device_token: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DevicesPayload = {
+  items: DeviceRow[];
+  total: number;
 };
 
 // Backend's GET /v2/bulletins/taxonomy shape: each entry has an `id`
@@ -130,4 +173,71 @@ export type BulletinDetail = BulletinSummary & {
 export type BulletinList = {
   items: BulletinSummary[];
   next_cursor: number | null;
+};
+
+export type CustomPushTargetClass = "iphone" | "ipad" | "android";
+
+export type CustomPushTargetFilter = {
+  target_classes: CustomPushTargetClass[];
+  user_id?: string;
+  device_id?: string;
+  list_id?: number;
+};
+
+export type DeviceList = {
+  id: number;
+  name: string;
+  description: string | null;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DeviceListMemberRow = {
+  device_id: string;
+  user_id: string;
+  platform: string;
+  device_class: string;
+  added_at: string;
+};
+
+export type DeviceListMembersResponse = {
+  list_id: number;
+  list_name: string;
+  items: DeviceListMemberRow[];
+  total: number;
+};
+
+export type AddMembersResponse = {
+  added: number;
+  already_present: number;
+  unknown: number;
+};
+
+export type CustomPushPreviewResponse = {
+  matched: Record<string, number>;
+};
+
+export type CustomPushRequest = CustomPushTargetFilter & {
+  title: string;
+  body: string;
+  keeps_record: boolean;
+  force_ring: boolean;
+};
+
+export type CustomPushSendResponse = {
+  request_id: string;
+  kind: "record" | "popup";
+  matched: number;
+  queued: number;
+};
+
+export type CustomPushRecentItem = {
+  id: string;
+  kind: "record" | "popup";
+  title: string;
+  target_classes: string[];
+  total: number;
+  sent_at: string | null;
+  is_queueing: boolean;
 };

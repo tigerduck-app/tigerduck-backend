@@ -26,7 +26,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
-from .routes import announcement, backup, logs, status, test_push
+from .routes import (
+    announcement,
+    backup,
+    custom_push,
+    device_lists,
+    devices,
+    logs,
+    status,
+    test_push,
+)
 
 
 _APP_DIR = Path(__file__).resolve().parent
@@ -63,6 +72,9 @@ app.include_router(status.liveness_router)
 app.include_router(logs.router)
 app.include_router(backup.router)
 app.include_router(announcement.router)
+app.include_router(custom_push.router)
+app.include_router(devices.router)
+app.include_router(device_lists.router)
 app.include_router(test_push.router)
 
 

@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = ""
     apns_key_path: str = ""
+    apns_team_id: str = ""
+    apns_key_id: str = ""
     fcm_credentials_path: str = ""
+    fcm_project_id: str = ""
     # Forwarded as `X-Push-Token` when the portal proxies to the backend's
     # /v2/_debug/* surface (test-push page). Same value the iOS app reads
     # from Secrets.plist. Empty in prod is fine — the test page itself is
@@ -74,9 +77,12 @@ class Settings(BaseSettings):
             log_level=env.get("TIGERDUCK_LOG_LEVEL", "INFO"),
             database_url=env.get("TIGERDUCK_DATABASE_URL", ""),
             apns_key_path=env.get("TIGERDUCK_APNS_KEY_PATH", ""),
+            apns_team_id=env.get("TIGERDUCK_APNS_TEAM_ID", ""),
+            apns_key_id=env.get("TIGERDUCK_APNS_KEY_ID", ""),
             fcm_credentials_path=env.get(
                 "TIGERDUCK_FCM_CREDENTIALS_PATH", ""
             ),
+            fcm_project_id=env.get("TIGERDUCK_FCM_PROJECT_ID", ""),
             backend_public_url=env.get(
                 "TIGERDUCK_BACKEND_PUBLIC_URL", default_backend
             ),

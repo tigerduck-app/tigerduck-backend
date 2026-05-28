@@ -15,6 +15,7 @@ from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
@@ -66,6 +67,9 @@ def build_scheduler(
     async def bulletin_dispatch() -> None:
         await bulletin_jobs.dispatch_job(session_factory, router, settings)
 
+    async def custom_push_dispatch() -> None:
+        await dispatch_pending_custom_pushes(session_factory, router, settings)
+
     async def bulletin_retention() -> None:
         await bulletin_jobs.retention_job(session_factory, settings)
 
@@ -100,6 +104,14 @@ def build_scheduler(
         bulletin_dispatch,
         trigger=IntervalTrigger(seconds=settings.bulletin_dispatch_interval_seconds),
         id="bulletin_dispatch",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+    scheduler.add_job(
+        custom_push_dispatch,
+        trigger=IntervalTrigger(seconds=settings.bulletin_dispatch_interval_seconds),
+        id="custom_push_dispatch",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=30,

@@ -126,8 +126,14 @@ async def test_android_device_receives_fcm_push(
 async def test_android_device_without_token_is_cancelled(
     prepared_engine: AsyncEngine, test_settings: Settings
 ) -> None:
-    """An android row that somehow lost its FCM token cancels the dispatch
-    rather than retrying forever."""
+    """A pending dispatch whose android device has no FCM token is cancelled
+    at send time rather than retried forever.
+
+    `match_device_ids` now filters tokenless devices up front, so a fresh
+    fan-out never produces a dispatch row for one. The dispatcher's cancel
+    path is still reachable for a row created while the device had a token
+    that was later cleared — we seed that pending row directly here.
+    """
     factory = async_sessionmaker(prepared_engine, expire_on_commit=False)
 
     async with factory() as session:
@@ -136,24 +142,12 @@ async def test_android_device_without_token_is_cancelled(
                 device_id="dev-android-empty",
                 user_id="u-empty",
                 platform=DevicePlatform.android.value,
-                # Empty token must not be allowed by the schema constraint
-                # (min_length=1 at the API layer), but the model column
-                # tolerates "" — exercise that defensive path.
+                # Token cleared after the dispatch row below was created.
                 pts_token_hex="",
                 device_token_hex=None,
                 bundle_id="org.ntust.app.tigerduck",
                 attrs_type="",
                 apns_env="",
-            )
-        )
-        await session.flush()
-        session.add(
-            BulletinSubscription(
-                device_id="dev-android-empty",
-                name="any-scholarship",
-                orgs=[],
-                tags=[ContentTag.scholarship.value],
-                mode=SubscriptionMode.AND.value,
             )
         )
         bulletin = Bulletin(
@@ -171,6 +165,14 @@ async def test_android_device_without_token_is_cancelled(
             processing_state=BulletinProcessingState.processed.value,
         )
         session.add(bulletin)
+        await session.flush()
+        session.add(
+            BulletinDispatch(
+                bulletin_id=bulletin.id,
+                device_id="dev-android-empty",
+                status=BulletinDispatchStatus.pending.value,
+            )
+        )
         await session.commit()
         bulletin_id = bulletin.id
 

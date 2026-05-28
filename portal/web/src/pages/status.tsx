@@ -24,7 +24,7 @@ import {
 import { PageHeader, Section } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api } from "@/lib/api";
-import type { StatusPayload } from "@/types/api";
+import type { ApnsConfig, FcmConfig, StatusPayload } from "@/types/api";
 
 export function StatusPage() {
   const q = useQuery<StatusPayload>({
@@ -61,11 +61,20 @@ function StatusContent({ data }: { data: StatusPayload }) {
     llm,
     backend_version: version,
     secrets,
+    fcm_config: fcm,
+    apns_config: apns,
   } = data;
+
+  // Backend mounts FastAPI under /v2 (or whatever api_base_path reports).
+  // Display the rooted URL so the link lands directly on the API surface
+  // teams paste into curl / Postman, not the 404 you get hitting the
+  // bare host.
+  const apiBase = version.api_base_path || "/v2";
+  const backendApiUrl = `${env.backend_public_url.replace(/\/+$/, "")}${apiBase}`;
 
   return (
     <div className="space-y-8">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <SummaryCard
           label="Mode"
           value={env.env || "(unset)"}
@@ -73,8 +82,15 @@ function StatusContent({ data }: { data: StatusPayload }) {
         />
         <SummaryCard
           label="APNs"
-          value={env.apns_env || "?"}
-          tone={env.apns_env === "production" ? "warning" : "success"}
+          value={apnsSummaryValue(apns)}
+          tone={apnsSummaryTone(apns)}
+          detail={apns.state === "ok" ? undefined : apns.detail}
+        />
+        <SummaryCard
+          label="FCM"
+          value={fcmSummaryValue(fcm)}
+          tone={fcmSummaryTone(fcm)}
+          detail={fcm.state === "ok" ? undefined : fcm.detail}
         />
         <SummaryCard
           label="Backend"
@@ -104,8 +120,8 @@ function StatusContent({ data }: { data: StatusPayload }) {
               <Row
                 label="Backend"
                 value={
-                  <ExternalLinkValue href={env.backend_public_url}>
-                    {env.backend_public_url}
+                  <ExternalLinkValue href={backendApiUrl}>
+                    {backendApiUrl}
                   </ExternalLinkValue>
                 }
               />
@@ -126,14 +142,14 @@ function StatusContent({ data }: { data: StatusPayload }) {
                 value={
                   env.host_lan_ips.length ? (
                     <div className="flex flex-wrap gap-2">
-                      {env.host_lan_ips.map((ip) => (
-                        <ExternalLinkValue
-                          key={ip}
-                          href={`http://${ip}:40000`}
-                        >
-                          {`http://${ip}:40000`}
-                        </ExternalLinkValue>
-                      ))}
+                      {env.host_lan_ips.map((ip) => {
+                        const api = `http://${ip}:40000${apiBase}`;
+                        return (
+                          <ExternalLinkValue key={ip} href={api}>
+                            {api}
+                          </ExternalLinkValue>
+                        );
+                      })}
                     </div>
                   ) : (
                     <span className="text-muted-foreground">
@@ -422,11 +438,44 @@ function SecretRow({
   );
 }
 
+// FCM badge text reflects the cross-check between TIGERDUCK_FCM_PROJECT_ID
+// and the service-account JSON's project_id. The status helpers in
+// portal/app/status.py are the source of truth for which state applies.
+function fcmSummaryValue(fcm: FcmConfig): string {
+  if (fcm.state === "ok") return fcm.project_id || "?";
+  if (fcm.state === "mismatch") return "mismatch";
+  if (fcm.state === "missing") return "disabled";
+  return "disabled";
+}
+
+function fcmSummaryTone(
+  fcm: FcmConfig,
+): "default" | "success" | "warning" | "destructive" | "muted" {
+  if (fcm.state === "ok") return "default";
+  if (fcm.state === "mismatch") return "warning";
+  return "muted";
+}
+
+// APNs has no "mismatch" — there's nothing to compare against the .p8
+// private key — so the badge collapses to env (dev/prod) when ok, or to
+// "disabled" when anything is missing.
+function apnsSummaryValue(apns: ApnsConfig): string {
+  if (apns.state === "ok") return apns.apns_env || "?";
+  return "disabled";
+}
+
+function apnsSummaryTone(
+  apns: ApnsConfig,
+): "default" | "success" | "warning" | "destructive" | "muted" {
+  if (apns.state !== "ok") return "muted";
+  return apns.apns_env === "production" ? "warning" : "success";
+}
+
 function StatusSkeleton() {
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {[0, 1, 2, 3].map((i) => (
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+        {[0, 1, 2, 3, 4].map((i) => (
           <Skeleton key={i} className="h-24" />
         ))}
       </div>

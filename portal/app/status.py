@@ -9,6 +9,7 @@ on fire.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -192,6 +193,126 @@ async def docker_containers(timeout_s: float = 3.0) -> list[dict[str, Any]]:
     finally:
         await transport.aclose()
     return rows
+
+
+def _resolve_secret_path(path_str: str) -> Path | None:
+    """Map a configured secret path onto the portal container's view.
+
+    Backend resolves relative paths against /app; the portal sees the same
+    directory mounted at /backend-secrets. Returns None when path_str is
+    empty (caller decides whether 'not configured' is OK).
+    """
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = Path("/backend-secrets") / p.name
+    return p
+
+
+def fcm_config(env_project_id: str, path_str: str) -> dict[str, Any]:
+    """Cross-check the env-declared FCM project id against the JSON file.
+
+    States:
+      * `ok`        — env value present, JSON readable, project ids match
+      * `mismatch`  — both present but the JSON's project_id differs
+      * `missing`   — exactly one of (env value, JSON file) present
+      * `disabled`  — neither configured (intentional — recording stub)
+
+    `project_id` in the response is the env value when present, otherwise
+    the JSON's project_id when only that side exists, otherwise None.
+    """
+    env_pid = env_project_id.strip() or None
+    p = _resolve_secret_path(path_str)
+    json_pid: str | None = None
+    json_error: str | None = None
+    if p is not None:
+        try:
+            if p.exists():
+                with p.open("r", encoding="utf-8") as f:
+                    body = json.load(f)
+                pid = body.get("project_id")
+                if pid:
+                    json_pid = str(pid)
+                else:
+                    json_error = "project_id missing in JSON"
+            else:
+                json_error = "file not found"
+        except (OSError, ValueError) as exc:
+            json_error = f"{type(exc).__name__}: {exc}"
+
+    if env_pid is None and json_pid is None and json_error is None:
+        return {"state": "disabled", "detail": "not configured"}
+    if env_pid and json_pid and env_pid != json_pid:
+        return {
+            "state": "mismatch",
+            "project_id": env_pid,
+            "json_project_id": json_pid,
+            "detail": f"env={env_pid} but JSON={json_pid}",
+        }
+    if env_pid is None:
+        return {
+            "state": "missing",
+            "project_id": json_pid,
+            "detail": "TIGERDUCK_FCM_PROJECT_ID unset",
+        }
+    if json_pid is None:
+        return {
+            "state": "missing",
+            "project_id": env_pid,
+            "detail": json_error or "JSON missing",
+        }
+    return {"state": "ok", "project_id": env_pid}
+
+
+def apns_config(
+    apns_env: str,
+    team_id: str,
+    key_id: str,
+    key_path_str: str,
+) -> dict[str, Any]:
+    """Cross-check the env-declared APNs identity against the .p8 file.
+
+    There's nothing to "match" against a private key file (PEM body, no
+    embedded key id), so this is a presence check across the three pieces
+    APNs needs: team_id, key_id, and a readable .p8 at key_path.
+
+    States:
+      * `ok`        — all three present
+      * `missing`   — at least one present, others missing
+      * `disabled`  — nothing configured at all
+    """
+    team = team_id.strip() or None
+    key = key_id.strip() or None
+    p = _resolve_secret_path(key_path_str)
+    file_ok = p is not None and p.exists()
+
+    missing: list[str] = []
+    if team is None:
+        missing.append("TIGERDUCK_APNS_TEAM_ID")
+    if key is None:
+        missing.append("TIGERDUCK_APNS_KEY_ID")
+    if not file_ok:
+        missing.append(".p8 file")
+
+    if not missing:
+        return {
+            "state": "ok",
+            "apns_env": apns_env,
+            "team_id": team,
+            "key_id": key,
+        }
+    # `disabled` only when the operator hasn't started configuring at all —
+    # avoids flagging a fresh dev checkout as broken before keys are added.
+    if team is None and key is None and not file_ok:
+        return {"state": "disabled", "apns_env": apns_env, "detail": "not configured"}
+    return {
+        "state": "missing",
+        "apns_env": apns_env,
+        "team_id": team,
+        "key_id": key,
+        "detail": "missing " + ", ".join(missing),
+    }
 
 
 def file_presence(path_str: str) -> dict[str, Any]:

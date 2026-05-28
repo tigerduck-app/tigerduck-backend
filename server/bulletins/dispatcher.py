@@ -28,6 +28,10 @@ from server.bulletins.models import (
 from server.config import Settings
 from server.models import DevicePlatform, DeviceRegistration
 from server.push.apns_client import SendResult
+from server.push.custom_push_targeting import (
+    TargetFilter,
+    resolve_target_device_ids,
+)
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -117,11 +121,26 @@ async def _dispatch_one(
         if bulletin is None or bulletin.canonical_org is None:
             return (0, 0, 0, 0)
 
-        device_ids = await match_device_ids(
-            session,
-            canonical_org=bulletin.canonical_org,
-            content_tags=bulletin.content_tags or [],
-        )
+        if bulletin.dispatch_filter_json:
+            # Custom-push bulletins (`source='custom_push'`) skip the
+            # per-device subscription matcher entirely — the operator
+            # already picked the audience via TargetFilter at send time
+            # and we stamped it onto the row.
+            filt = TargetFilter(
+                target_classes=bulletin.dispatch_filter_json.get(
+                    "target_classes", []
+                ),
+                user_id=bulletin.dispatch_filter_json.get("user_id"),
+                device_id=bulletin.dispatch_filter_json.get("device_id"),
+                list_id=bulletin.dispatch_filter_json.get("list_id"),
+            )
+            device_ids = await resolve_target_device_ids(session, filt)
+        else:
+            device_ids = await match_device_ids(
+                session,
+                canonical_org=bulletin.canonical_org,
+                content_tags=bulletin.content_tags or [],
+            )
 
         if device_ids:
             await session.execute(
@@ -178,6 +197,7 @@ async def _dispatch_one(
                 continue  # handled in the main loop below
             title = bulletin.title_clean or bulletin.title
             body = bulletin.summary or bulletin.title_clean or bulletin.title
+            kind, force_ring = _kind_and_force_ring(bulletin)
             android_requests.append(
                 build_fcm_alert_request(
                     fcm_token=device.pts_token_hex,
@@ -186,6 +206,8 @@ async def _dispatch_one(
                     bulletin_id=bulletin.id,
                     source_url=bulletin.source_url,
                     canonical_org=bulletin.canonical_org or "",
+                    kind=kind,
+                    force_ring=force_ring,
                 )
             )
             android_dispatch_ids.append(dispatch.id)
@@ -228,6 +250,7 @@ async def _dispatch_one(
                     )
                     cancelled_count += 1
                     continue
+                kind, force_ring = _kind_and_force_ring(bulletin)
                 apns_req = build_alert_request(
                     device_token=device.device_token_hex,
                     bundle_id=device.bundle_id,
@@ -237,6 +260,8 @@ async def _dispatch_one(
                     source_url=bulletin.source_url,
                     canonical_org=bulletin.canonical_org or "",
                     now=ts,
+                    kind=kind,
+                    force_ring=force_ring,
                 )
                 result = await _send_apple_safely(router, apns_req)
 
@@ -312,6 +337,19 @@ async def _dispatch_one(
         await session.commit()
 
     return (sent_count, failed_count, cancelled_count, len(pending_rows))
+
+
+def _kind_and_force_ring(bulletin: Bulletin) -> tuple[str, bool]:
+    """Custom-push bulletins ride the same dispatcher but carry
+    `dispatch_filter_json` with operator-chosen `force_ring`; legacy
+    scraped bulletins fall back to the historic defaults so existing
+    payloads remain byte-identical."""
+    if bulletin.dispatch_filter_json:
+        return (
+            "custom_push_bulletin",
+            bool(bulletin.dispatch_filter_json.get("force_ring", True)),
+        )
+    return ("bulletin", True)
 
 
 async def _cancel_dispatch(

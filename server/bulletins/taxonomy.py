@@ -36,6 +36,7 @@ class CanonicalOrg(StrEnum):
     international = "international"
     safety = "safety"
     other = "other"
+    server = "server"
 
 
 class ContentTag(StrEnum):
@@ -52,6 +53,7 @@ class ContentTag(StrEnum):
     internship = "internship"
     international_exchange = "international_exchange"
     forwarded = "forwarded"
+    server_notification = "server_notification"
 
 
 class Importance(StrEnum):
@@ -80,6 +82,7 @@ ORG_LABELS: dict[CanonicalOrg, str] = {
     CanonicalOrg.international: "國際處",
     CanonicalOrg.safety: "安全",
     CanonicalOrg.other: "其他",
+    CanonicalOrg.server: "伺服器",
 }
 
 
@@ -97,6 +100,7 @@ TAG_LABELS: dict[ContentTag, str] = {
     ContentTag.internship: "實習",
     ContentTag.international_exchange: "國際",
     ContentTag.forwarded: "轉發",
+    ContentTag.server_notification: "伺服器通知",
 }
 
 

@@ -58,28 +58,28 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ```
        公網                                            host (macOS / Linux)
-   ┌──────────────┐                              ┌────────────────────────────┐
-   │  iOS / 安卓  │ ── HTTPS ──▶ nginx-proxy ──▶ │  tigerduck-internal        │
-   └──────────────┘              -manager  ──┐   │  (FastAPI + APScheduler)   │
-                                             │   │           │                │
-   ┌──────────────┐                          │   │           ├── APNs        │
-   │ 管理者瀏覽器 │ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal         │
-   └──────────────┘   (Zero Trust)           │   │  (FastAPI + Jinja, :40010)│
-                                             │   │           │                │
-                                             │   │           ▼                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ tigerduck-db   │        │
-                                             │   │  │ (Postgres 17)  │        │
-                                             │   │  └────────────────┘        │
-                                             │   │           ▲                │
-                                             │   │           │                │
-                                             │   │  ┌────────────────┐        │
-                                             │   │  │ llama-server   │◀───────┘
-                                             │   │  │ (native, Metal)│
-                                             │   │  └────────────────┘
-                                             │   └────────────────────────────┘
-                                             │
-                                             └── proxy-net 上同時掛 backend 和 portal
+   ┌──────────────┐                                ┌────────────────────────────┐
+   │  iOS / 安卓   │ ── HTTPS ──▶ nginx-proxy ──▶   │  tigerduck-internal        │
+   └──────────────┘              -manager  ────┐   │  (FastAPI + APScheduler)   │
+                                               │   │           │                │
+   ┌──────────────┐                            │   │           ├── APNs         │
+   │ 管理者瀏覽器   │ ── HTTPS ──▶ cloudflared ──┼──▶│  tigerduck-portal          │
+   └──────────────┘   (Zero Trust)             │   │  (FastAPI + Jinja, :40010) │
+                                               │   │           │                │
+                                               │   │           ▼                │
+                                               │   │  ┌────────────────┐        │
+                                               │   │  │ tigerduck-db   │        │
+                                               │   │  │ (Postgres 17)  │        │
+                                               │   │  └────────────────┘        │
+                                               │   │           ▲                │
+                                               │   │           │                │
+                                               │   │  ┌────────────────┐        │
+                                               │   │  │ llama-server   │        │
+                                               │   │  │ (native, Metal)│        │
+                                               │   │  └────────────────┘        │
+                                               │   └────────────────────────────┘
+                                               │
+                                               └── proxy-net 上同時掛 backend 和 portal
 ```
 
 - **`tigerduck-db` 網路**：internal-only bridge，postgres 完全沒有外網路由
@@ -137,7 +137,7 @@ docker compose exec backend curl -sS localhost:40000/health
 - 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
 - 看每個 container 的 log（5 個 tab：Backend / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Android / Apple 是針對 backend log 做關鍵字過濾
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + portal 的 SQLite + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
-- 預留「自訂推播」分頁（TODO，先放空殼）
+- 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 
 詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
 
@@ -177,8 +177,15 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v2/bulletins/{id}` | 公告詳情 | 無 |
 | `GET` | `/v2/bulletins/taxonomy` | 取得 org / tag 標籤對照 | 無 |
 | `GET/PUT` | `/v2/devices/{id}/subscriptions` | 訂閱規則讀寫 | shared secret |
+| `PATCH` | `/v2/devices/{id}/preferences` | 裝置偏好設定（如 `server_push_enabled`） | shared secret |
 | `POST` | `/v2/live-activities/start-tokens` | Live Activity push-to-start token 上報 | shared secret |
 | `POST` | `/v2/schedule/sync` | 課表同步（驅動 Live Activity 排程） | shared secret |
+| `POST` | `/v2/custom-push/preview` | 預覽自訂推播 payload | shared secret |
+| `POST` | `/v2/custom-push` | 對指定裝置或裝置清單發送自訂推播 | shared secret |
+| `GET` | `/v2/custom-push/recent` | 最近的自訂推播發送紀錄 | shared secret |
+| `GET/POST` | `/v2/device-lists` | 列出 / 新增裝置清單（命名群組） | shared secret |
+| `GET/PATCH/DELETE` | `/v2/device-lists/{id}` | 讀取 / 更新 / 刪除裝置清單 | shared secret |
+| `GET/POST/DELETE` | `/v2/device-lists/{id}/members` | 管理清單成員 | shared secret |
 
 `/v1/*` 保留為 deprecated alias，iOS 1.6.1 起改打 `/v2`。
 
@@ -206,7 +213,7 @@ tigerduck-backend/
 │   ├── db.py / models.py        # SQLAlchemy async engine、DeviceRegistration
 │   ├── security.py              # shared-secret dependency
 │   ├── _ssl_compat.py           # OpenSSL 3 寬容模式（NTUST TLS chain 是壞的）
-│   ├── routes/                  # devices / schedule / bulletins / live_activities / debug
+│   ├── routes/                  # devices / schedule / bulletins / live_activities / custom_push / device_lists / debug
 │   ├── push/                    # apns_client / fcm_client / payload / router
 │   ├── scheduler/               # APScheduler runtime、dispatch、retention
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher / taxonomy
@@ -239,4 +246,4 @@ tigerduck-backend/
 
 ## 授權
 
-本專案採用 [GNU Affero General Public License v3.0](LICENSE) 授權，與 [tigerduck-app](https://github.com/tigerduck-app/tigerduck-app) 一致。
+本專案採用 [GNU Affero General Public License v3.0](LICENSE) 授權，與 [tigerduck-app](https://github.com/tigerduck-app/tigerduck-app) 與 [tigerduck-app-android](https://github.com/tigerduck-app/tigerduck-app-android) 一致。

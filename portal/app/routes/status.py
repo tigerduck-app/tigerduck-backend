@@ -12,8 +12,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from ..status import (
+    apns_config,
     backend_version,
     docker_containers,
+    fcm_config,
     file_presence,
     llm_health,
     postgres_health,
@@ -36,6 +38,10 @@ async def env_info(request: Request) -> JSONResponse:
             "backend_public_url": s.backend_public_url,
             "portal_public_url": s.portal_public_url,
             "host_lan_ips": s.host_lan_ips,
+            "fcm_config": fcm_config(s.fcm_project_id, s.fcm_credentials_path),
+            "apns_config": apns_config(
+                s.apns_env, s.apns_team_id, s.apns_key_id, s.apns_key_path
+            ),
         }
     )
 
@@ -73,6 +79,15 @@ async def status_payload(request: Request) -> JSONResponse:
                 "apns_key": file_presence(settings.apns_key_path),
                 "fcm_credentials": file_presence(settings.fcm_credentials_path),
             },
+            "fcm_config": fcm_config(
+                settings.fcm_project_id, settings.fcm_credentials_path
+            ),
+            "apns_config": apns_config(
+                settings.apns_env,
+                settings.apns_team_id,
+                settings.apns_key_id,
+                settings.apns_key_path,
+            ),
         }
     )
 
