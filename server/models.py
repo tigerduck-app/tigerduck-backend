@@ -33,9 +33,11 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from server.db import Base
 
-# Register the v3 identity/auth tables on Base.metadata so create_all /
-# alembic autogenerate see them whenever the legacy models are imported.
+# Register the v3 identity/auth and sync tables on Base.metadata so
+# create_all / alembic autogenerate see them whenever the legacy models
+# are imported.
 import server.auth.models  # noqa: F401, E402
+import server.sync.models  # noqa: F401, E402
 
 
 class PushStatus(StrEnum):
