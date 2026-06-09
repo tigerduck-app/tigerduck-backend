@@ -11,6 +11,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
 from server.sync.changelog import RevisionExpired, read_changes
+from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -67,6 +68,24 @@ async def incremental_sync(
             }
             for c in page.changes
         ],
+    }
+
+
+@router.post("/initial-upload")
+async def initial_upload(
+    payload: InitialUploadRequest, auth: CurrentAuthDep, session: SessionDep
+):
+    """First-login import of the device's local data. Idempotent — safe to
+    re-send the whole body after a crash."""
+    result = await process_initial_upload(
+        session,
+        user_id=auth.user_id,
+        device_id=auth.device_id,
+        payload=payload,
+    )
+    return {
+        "counts": result.counts,
+        "current_revision": result.current_revision,
     }
 
 
