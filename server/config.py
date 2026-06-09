@@ -38,6 +38,39 @@ class Settings(BaseSettings):
     # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
     api_shared_secret: str = ""
 
+    # --- v3 user accounts / auth ---
+    api_v3_base_path: str = "/v3"
+    # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
+    # (login returns 503) — mirrors the api_shared_secret dev convention.
+    auth_jwt_secret: str = ""
+    # Separate HMAC-SHA-256 key for refresh-token hashing (key separation:
+    # a leaked JWT secret must not let an attacker forge refresh hashes).
+    auth_refresh_hmac_key: str = ""
+    auth_access_token_ttl_seconds: int = 900  # 15 min
+    auth_refresh_token_ttl_days: int = 90
+    # After a refresh rotation, the superseded token stays redeemable for
+    # this long so a client whose rotation response was lost in transit can
+    # retry without tripping reuse detection (which would log the whole
+    # device out). Reuse outside this window IS treated as theft.
+    auth_refresh_reuse_grace_seconds: int = 60
+    # Login rate limit: N attempts per window, applied independently to the
+    # student_id and the client IP. Protects both against credential
+    # stuffing and against our single server IP getting blocked by Moodle.
+    auth_login_max_attempts: int = 5
+    auth_login_window_seconds: int = 900
+
+    # --- Credential envelope encryption ---
+    # key_id -> base64-encoded 32-byte AES-256 key. Multiple entries allow
+    # key rotation: new rows encrypt with `credential_active_key_id`, old
+    # rows decrypt with whichever key_id they were written under.
+    # Env format: TIGERDUCK_CREDENTIAL_KEYS='{"v1":"<base64 32 bytes>"}'
+    credential_keys: dict[str, str] = Field(default_factory=dict)
+    credential_active_key_id: str = ""
+
+    # --- Moodle token verification (login-time check only) ---
+    moodle_base_url: str = "https://moodle.ntust.edu.tw"
+    moodle_verify_timeout_seconds: float = 10.0
+
     # --- Database ---
     # e.g. postgresql+asyncpg://tigerduck:password@localhost:5432/tigerduck
     database_url: str = Field(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from collections.abc import AsyncIterator
@@ -82,6 +83,10 @@ def test_settings() -> Settings:
         apns_env="development",
         scheduler_tick_seconds=99999,
         api_shared_secret="",
+        auth_jwt_secret="test-jwt-secret",
+        auth_refresh_hmac_key="test-hmac-key",
+        credential_keys={"v1": base64.b64encode(b"0" * 32).decode()},
+        credential_active_key_id="v1",
     )
 
 
