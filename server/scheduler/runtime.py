@@ -20,6 +20,7 @@ from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
 from server.sync.retention import purge_expired_changelog
+from server.syncjobs.executor import SyncWorker, run_sync_tick
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
@@ -39,8 +40,9 @@ def build_scheduler(
     settings: Settings,
     *,
     llm: LLMProvider | None = None,
+    sync_worker: SyncWorker | None = None,
 ) -> AsyncIOScheduler:
-    """Wire APScheduler with the five TigerDuck jobs:
+    """Wire APScheduler with the TigerDuck jobs:
 
     * `dispatcher_tick` — existing PTS dispatcher (Live Activity).
     * `bulletin_scrape` — fetch NTUST bulletin list every 10 min.
@@ -48,6 +50,9 @@ def build_scheduler(
     * `bulletin_dispatch` — fan out alert pushes every 60s.
     * `bulletin_retention` — prune aged-out soft-deleted bulletins daily.
     * `live_activity_token_retention` — prune terminal update-token rows daily.
+    * `sync_changelog_retention` — purge aged changelog entries daily.
+    * `sync_jobs_tick` — server-side academic sync executor every 30s
+      (only when a `sync_worker` is provided, i.e. credential keys exist).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -148,4 +153,17 @@ def build_scheduler(
         coalesce=True,
         misfire_grace_time=3600,
     )
+    if sync_worker is not None:
+
+        async def sync_jobs_tick() -> None:
+            await run_sync_tick(sync_worker)
+
+        scheduler.add_job(
+            sync_jobs_tick,
+            trigger=IntervalTrigger(seconds=settings.sync_job_tick_seconds),
+            id="sync_jobs_tick",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
     return scheduler

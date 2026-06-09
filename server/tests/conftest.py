@@ -82,6 +82,7 @@ def test_settings() -> Settings:
         database_url=database_url,
         apns_env="development",
         scheduler_tick_seconds=99999,
+        sync_job_tick_seconds=99999,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
         auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",
