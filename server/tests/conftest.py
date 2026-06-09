@@ -83,8 +83,8 @@ def test_settings() -> Settings:
         apns_env="development",
         scheduler_tick_seconds=99999,
         api_shared_secret="",
-        auth_jwt_secret="test-jwt-secret",
-        auth_refresh_hmac_key="test-hmac-key",
+        auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
+        auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",
         credential_keys={"v1": base64.b64encode(b"0" * 32).decode()},
         credential_active_key_id="v1",
     )
