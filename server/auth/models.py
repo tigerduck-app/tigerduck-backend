@@ -20,7 +20,6 @@ from enum import StrEnum
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
-    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
