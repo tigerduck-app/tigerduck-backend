@@ -20,6 +20,7 @@ from server.auth.models import (
     CredentialStatus,
     ExternalAccount,
     ExternalAccountCredential,
+    SessionRevokedReason,
     User,
     UserDevice,
     UserStatus,
@@ -46,6 +47,13 @@ class LoginResult:
     expires_in: int
     user: User
     device: UserDevice
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    access_token: str
+    refresh_token: str
+    expires_in: int
 
 
 def ensure_auth_configured(
@@ -152,6 +160,174 @@ async def login(
         user=user,
         device=device,
     )
+
+
+async def refresh(
+    session: AsyncSession, settings: Settings, *, refresh_token: str
+) -> RefreshResult:
+    """Rotate a refresh token.
+
+    Reuse semantics (security review 1.5): a token revoked by rotation can
+    be redeemed again within `auth_refresh_reuse_grace_seconds` IF its
+    successor was never used — that's a client retrying after losing the
+    rotation response. The lost successor is revoked and a fresh session is
+    chained in its place. Any other reuse is treated as theft: the whole
+    successor chain plus every active session on the same device is revoked.
+    """
+    if not settings.auth_jwt_secret or not settings.auth_refresh_hmac_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="auth_not_configured",
+        )
+
+    token_hash = hash_refresh_token(settings.auth_refresh_hmac_key, refresh_token)
+    auth_session = (
+        await session.execute(
+            select(AuthSession).where(AuthSession.refresh_token_hash == token_hash)
+        )
+    ).scalar_one_or_none()
+    if auth_session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_refresh_token",
+        )
+
+    now = datetime.now(UTC)
+
+    if auth_session.revoked_at is not None:
+        return await _handle_revoked_reuse(session, settings, auth_session, now)
+
+    if auth_session.expires_at <= now:
+        auth_session.revoked_at = now
+        auth_session.revoked_reason = SessionRevokedReason.expired.value
+        # The route's session dependency rolls back on exceptions — commit
+        # explicitly so the revocation outlives the 401 we're about to raise.
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh_token_expired",
+        )
+
+    return await _rotate(session, settings, auth_session, now)
+
+
+async def _rotate(
+    session: AsyncSession,
+    settings: Settings,
+    old: AuthSession,
+    now: datetime,
+) -> RefreshResult:
+    new_refresh_token = generate_refresh_token()
+    new_session = AuthSession(
+        user_id=old.user_id,
+        device_id=old.device_id,
+        refresh_token_hash=hash_refresh_token(
+            settings.auth_refresh_hmac_key, new_refresh_token
+        ),
+        expires_at=now + timedelta(days=settings.auth_refresh_token_ttl_days),
+    )
+    session.add(new_session)
+    await session.flush()
+
+    old.revoked_at = now
+    old.revoked_reason = SessionRevokedReason.rotated.value
+    old.replaced_by_session_id = new_session.id
+    old.last_used_at = now
+
+    access_token = issue_access_token(
+        settings.auth_jwt_secret,
+        user_id=str(old.user_id),
+        session_id=new_session.id,
+        device_id=str(old.device_id) if old.device_id else None,
+        ttl_seconds=settings.auth_access_token_ttl_seconds,
+        now=now,
+    )
+    return RefreshResult(
+        access_token=access_token,
+        refresh_token=new_refresh_token,
+        expires_in=settings.auth_access_token_ttl_seconds,
+    )
+
+
+async def _handle_revoked_reuse(
+    session: AsyncSession,
+    settings: Settings,
+    auth_session: AuthSession,
+    now: datetime,
+) -> RefreshResult:
+    grace = timedelta(seconds=settings.auth_refresh_reuse_grace_seconds)
+    successor = None
+    if auth_session.replaced_by_session_id is not None:
+        successor = await session.get(
+            AuthSession, auth_session.replaced_by_session_id
+        )
+
+    is_benign_retry = (
+        auth_session.revoked_reason == SessionRevokedReason.rotated.value
+        and auth_session.revoked_at is not None
+        and auth_session.revoked_at > now - grace
+        and successor is not None
+        and successor.revoked_at is None
+    )
+    if is_benign_retry:
+        assert successor is not None
+        # The successor token was lost in transit — kill it and chain a
+        # fresh session in its place.
+        successor.revoked_at = now
+        successor.revoked_reason = SessionRevokedReason.rotated.value
+        logger.info(
+            "auth.refresh.grace_retry",
+            session_id=auth_session.id,
+            lost_successor_id=successor.id,
+        )
+        return await _rotate(session, settings, auth_session, now)
+
+    auth_session.reuse_detected_at = now
+    await _revoke_family(session, auth_session, now)
+    logger.warning(
+        "auth.refresh.reuse_detected",
+        session_id=auth_session.id,
+        user_id=str(auth_session.user_id),
+    )
+    # Commit before raising: the session dependency rolls back on exceptions,
+    # and losing the family revocation would let the stolen chain live on.
+    await session.commit()
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="refresh_reuse_detected",
+    )
+
+
+async def _revoke_family(
+    session: AsyncSession, start: AuthSession, now: datetime
+) -> None:
+    """Revoke the forward successor chain of `start`, plus every active
+    session on the same device. The chain walk does not depend on the
+    nullable device_id, so theft is contained even for device-less rows."""
+    seen = {start.id}
+    current = start
+    while current.replaced_by_session_id is not None:
+        nxt = await session.get(AuthSession, current.replaced_by_session_id)
+        if nxt is None or nxt.id in seen:
+            break
+        if nxt.revoked_at is None:
+            nxt.revoked_at = now
+            nxt.revoked_reason = SessionRevokedReason.reuse_detected.value
+        seen.add(nxt.id)
+        current = nxt
+
+    if start.device_id is not None:
+        device_sessions = (
+            await session.execute(
+                select(AuthSession).where(
+                    AuthSession.device_id == start.device_id,
+                    AuthSession.revoked_at.is_(None),
+                )
+            )
+        ).scalars()
+        for row in device_sessions:
+            row.revoked_at = now
+            row.revoked_reason = SessionRevokedReason.reuse_detected.value
 
 
 async def _find_or_create_user(

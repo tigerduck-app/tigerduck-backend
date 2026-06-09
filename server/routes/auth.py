@@ -6,7 +6,13 @@ import structlog
 from fastapi import APIRouter, Request
 
 from server.auth import service
-from server.auth.schemas import LoginRequest, LoginResponse, UserOut
+from server.auth.schemas import (
+    LoginRequest,
+    LoginResponse,
+    RefreshRequest,
+    RefreshResponse,
+    UserOut,
+)
 from server.db import SessionDep
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -45,4 +51,20 @@ async def login(
             display_name=result.user.display_name,
         ),
         device_id=str(result.device.id),
+    )
+
+
+@router.post("/refresh", response_model=RefreshResponse)
+async def refresh(
+    payload: RefreshRequest, request: Request, session: SessionDep
+) -> RefreshResponse:
+    result = await service.refresh(
+        session,
+        request.app.state.settings,
+        refresh_token=payload.refresh_token,
+    )
+    return RefreshResponse(
+        access_token=result.access_token,
+        refresh_token=result.refresh_token,
+        expires_in=result.expires_in,
     )
