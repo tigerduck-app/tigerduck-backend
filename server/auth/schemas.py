@@ -51,3 +51,37 @@ class RefreshResponse(BaseModel):
     refresh_token: str
     token_type: Literal["Bearer"] = "Bearer"
     expires_in: int
+
+
+class PushTokenIn(BaseModel):
+    provider: Literal["apns", "fcm"]
+    token_kind: Literal["standard", "push_to_start", "live_activity_update"]
+    token_value: str = Field(min_length=1, max_length=512)
+    bundle_id: str | None = Field(default=None, max_length=128)
+    topic: str | None = Field(default=None, max_length=160)
+    environment: Literal["development", "production"] | None = None
+    scope_key: str = Field(default="", max_length=160)
+
+
+class DeviceRegisterV3Request(DeviceInfo):
+    push_token: PushTokenIn | None = None
+
+
+class DeviceRegisterV3Response(BaseModel):
+    device_id: str
+    push_token_id: int | None
+
+
+class DeviceItem(BaseModel):
+    id: str
+    client_device_id: str
+    platform: str
+    device_name: str | None
+    app_version: str | None
+    os_version: str | None
+    last_seen_at: str | None
+    created_at: str
+
+
+class DeviceListV3Response(BaseModel):
+    items: list[DeviceItem]
