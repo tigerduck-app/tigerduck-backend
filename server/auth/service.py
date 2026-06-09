@@ -35,6 +35,7 @@ from server.auth.tokens import (
     issue_access_token,
 )
 from server.config import Settings
+from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
 
@@ -126,6 +127,9 @@ async def login(
             now=now,
         )
         device = await _upsert_device(session, user=user, info=device_info, now=now)
+        await ensure_sync_jobs(
+            session, user_id=user.id, external_account_id=account.id
+        )
 
         refresh_token = generate_refresh_token()
         auth_session = AuthSession(
