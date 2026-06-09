@@ -246,3 +246,160 @@ async def test_policy_active_window_respected(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)
     assert fetcher.calls == []
+
+
+async def test_successful_run_upserts_and_reschedules(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(results=[_fa(1), _fa(2)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    executed = await run_sync_tick(worker)
+    assert executed == 1
+    assert fetcher.calls == ["tok-1"]
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.attempts == 0
+    assert job.last_success_at is not None
+    assert job.last_error is None
+    # rescheduled ~8h out (policy interval 28800s)
+    assert job.run_after > datetime.now(UTC) + timedelta(hours=7)
+
+    rows = (
+        (
+            await db_session.execute(
+                select(UserAssignment).where(UserAssignment.user_id == user.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+    assert run.fetched_count == 2
+    assert run.changed_count == 2
+    entries = (
+        (
+            await db_session.execute(
+                select(UserChangeLog).where(UserChangeLog.user_id == user.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(entries) == 2
+
+
+async def test_expired_token_refreshed_once_then_fetch_retried(
+    db_session, prepared_engine, test_settings
+):
+    user, account, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(results=[_fa(1)], errors=[MoodleTokenInvalid("dead")])
+    obtainer = StubObtainer(
+        result=ObtainedToken(token="fresh-tok", private_token=None)
+    )
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
+    )
+    await run_sync_tick(worker)
+
+    assert obtainer.calls == 1
+    assert fetcher.calls == ["tok-1", "fresh-tok"]
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_success_at is not None
+
+
+async def test_sso_auth_failure_disables_all_jobs_no_retry(
+    db_session, prepared_engine, test_settings
+):
+    user, account, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
+    obtainer = StubObtainer(error=SsoAuthFailed("invalidlogin"))
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
+    )
+    await run_sync_tick(worker)
+
+    assert obtainer.calls == 1  # the iron rule: exactly one SSO attempt
+    await db_session.refresh(job)
+    assert job.status == "disabled"
+    assert job.last_error == "credential_invalid"
+    await db_session.refresh(account)
+    assert account.credential_status == "invalid"
+    push = (
+        await db_session.execute(
+            select(PushJob).where(PushJob.user_id == user.id)
+        )
+    ).scalar_one()
+    assert push.scenario == "reauth_required"
+
+    # Next tick: disabled job is never claimed, SSO never re-attempted.
+    await run_sync_tick(worker)
+    assert obtainer.calls == 1
+
+
+async def test_network_failure_backs_off_then_terminal_after_max_attempts(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(
+        errors=[
+            MoodleUnreachable("net"),
+            MoodleUnreachable("net"),
+            MoodleUnreachable("net"),
+        ]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.attempts == 1
+    assert job.last_error.startswith("sync_failed")
+    assert job.run_after > datetime.now(UTC)  # backoff in the future
+
+    # Force-due and run twice more → terminal failed at max_attempts=3.
+    for _ in range(2):
+        job.run_after = datetime.now(UTC) - timedelta(seconds=1)
+        await db_session.commit()
+        await run_sync_tick(worker)
+        await db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.attempts == 3
+
+
+async def test_rate_limited_records_school_rate_limited(
+    db_session, prepared_engine, test_settings
+):
+    _, _, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(errors=[MoodleRateLimited("429")])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    await run_sync_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "school_rate_limited"
+
+
+async def test_sso_network_failure_is_retriable_not_disabling(
+    db_session, prepared_engine, test_settings
+):
+    _, account, job = await _setup_user_job(db_session)
+    fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
+    obtainer = StubObtainer(error=SsoUnavailable("timeout"))
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
+    )
+    await run_sync_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "pending"  # backoff retry, NOT disabled
+    assert job.attempts == 1
+    await db_session.refresh(account)
+    assert account.credential_status == "active"
