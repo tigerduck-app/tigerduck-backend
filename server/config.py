@@ -126,6 +126,23 @@ class Settings(BaseSettings):
     sync_changelog_retention_days: int = 30
     sync_changelog_retention_interval_hours: int = 24
 
+    # --- Server-side sync jobs (Phase 3) ---
+    sync_job_tick_seconds: int = 30
+    # Max jobs claimed per tick by ONE worker.
+    sync_job_batch_size: int = 5
+    # Cap on `status='running'` rows ACROSS all workers — counted before
+    # claiming so multiple instances can't collectively hammer the school
+    # APIs from our single egress IP (security review suggestion).
+    sync_job_global_concurrency: int = 5
+    sync_job_stale_lock_minutes: int = 10
+    # Retriable-failure backoff: base * 2^(attempts-1), capped.
+    sync_job_backoff_base_seconds: int = 300
+    sync_job_backoff_cap_seconds: int = 3600
+    # Pull-to-refresh per-user-per-job-type cooldown.
+    sync_job_manual_cooldown_seconds: int = 60
+    # Moodle webservice fetch timeout (sync worker, not login verify).
+    moodle_fetch_timeout_seconds: float = 20.0
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"
