@@ -120,6 +120,12 @@ class Settings(BaseSettings):
     live_activity_token_retention_days: int = 30
     live_activity_token_retention_interval_hours: int = 24
 
+    # --- Sync change log retention ---
+    # Entries older than this are purged; clients further behind than the
+    # purge watermark get HTTP 410 and full-sync.
+    sync_changelog_retention_days: int = 30
+    sync_changelog_retention_interval_hours: int = 24
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"

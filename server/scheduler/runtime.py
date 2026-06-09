@@ -19,6 +19,7 @@ from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
+from server.sync.retention import purge_expired_changelog
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
@@ -76,6 +77,9 @@ def build_scheduler(
     async def live_activity_token_retention() -> None:
         await prune_terminal_activity_tokens(session_factory, settings)
 
+    async def sync_changelog_retention() -> None:
+        await purge_expired_changelog(session_factory, settings)
+
     scheduler.add_job(
         pts_tick,
         trigger=IntervalTrigger(seconds=settings.scheduler_tick_seconds),
@@ -130,6 +134,16 @@ def build_scheduler(
             hours=settings.live_activity_token_retention_interval_hours
         ),
         id="live_activity_token_retention",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        sync_changelog_retention,
+        trigger=IntervalTrigger(
+            hours=settings.sync_changelog_retention_interval_hours
+        ),
+        id="sync_changelog_retention",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
