@@ -126,6 +126,9 @@ async def client(
         # transport context enters so our shared DB survives per-test cycles.
         app.state.engine = prepared_engine
         app.state.session_factory = build_session_factory(prepared_engine)
+        # Expose the app so tests can override app.state collaborators
+        # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
+        ac.app = app
         yield ac
 
 

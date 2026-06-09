@@ -16,10 +16,14 @@ import structlog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 
 from server import __version__
+from server.auth.crypto import CredentialCipher, CredentialCipherError
+from server.auth.moodle import HttpMoodleVerifier
+from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory
 from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
+from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
 from server.routes import custom_push as custom_push_routes
 from server.routes import debug as debug_routes
@@ -151,9 +155,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
+    # /v3 collaborators live on app.state (not lifespan) so tests can swap
+    # them before issuing requests. The cipher is None when credential keys
+    # are unconfigured — /v3 auth then answers 503 auth_not_configured.
+    app.state.moodle_verifier = HttpMoodleVerifier(
+        base_url=settings.moodle_base_url,
+        timeout_seconds=settings.moodle_verify_timeout_seconds,
+    )
+    app.state.login_limiter = SlidingWindowLimiter(
+        max_attempts=settings.auth_login_max_attempts,
+        window_seconds=settings.auth_login_window_seconds,
+    )
+    try:
+        app.state.credential_cipher = CredentialCipher.from_settings(settings)
+    except CredentialCipherError:
+        app.state.credential_cipher = None
+
     _mount_api(app, settings.api_base_path, env=settings.env)
     for legacy in settings.api_legacy_base_paths:
         _mount_api(app, legacy, env=settings.env)
+    if settings.api_v3_base_path:
+        _mount_api_v3(app, settings.api_v3_base_path)
 
     if settings.api_legacy_base_paths:
         _install_deprecation_middleware(
@@ -192,6 +214,12 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     app.include_router(bulletins_routes.admin_router, prefix=prefix)
     app.include_router(custom_push_routes.router, prefix=prefix)
     app.include_router(device_lists_routes.router, prefix=prefix)
+
+
+def _mount_api_v3(app: FastAPI, prefix: str) -> None:
+    """Mount the user-account (/v3) routers. Kept separate from _mount_api:
+    the v2/v1 surface is device-centric and frozen; v3 is user-centric."""
+    app.include_router(auth_routes.router, prefix=prefix)
 
 
 def _install_deprecation_middleware(
