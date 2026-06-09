@@ -62,6 +62,29 @@ class ChangePage:
     has_more: bool
 
 
+async def lock_sync_state(
+    session: AsyncSession, user_id: uuid.UUID
+) -> UserSyncState:
+    """Ensure the user's sync-state row exists and lock it (FOR UPDATE).
+
+    The lock is held until the transaction commits, serializing all of the
+    user's changelog appends. Bulk writers (initial upload) call this once
+    and pass the row to `append_change` to avoid re-locking per entity.
+    """
+    await session.execute(
+        pg_insert(UserSyncState)
+        .values(user_id=user_id)
+        .on_conflict_do_nothing(index_elements=["user_id"])
+    )
+    return (
+        await session.execute(
+            select(UserSyncState)
+            .where(UserSyncState.user_id == user_id)
+            .with_for_update()
+        )
+    ).scalar_one()
+
+
 async def append_change(
     session: AsyncSession,
     *,
@@ -71,26 +94,18 @@ async def append_change(
     operation: str,
     payload: dict | None = None,
     device_id: uuid.UUID | None = None,
+    locked_state: UserSyncState | None = None,
 ) -> int:
     """Append one changelog entry inside the caller's transaction.
 
     Payload must contain routing hints only (entity ids, field names,
     revision pointers) — never documents or sensitive data.
+
+    `locked_state`: pass the row from `lock_sync_state` when appending many
+    entries in one transaction; the lock is already held, so re-acquiring
+    it per entry would just add round-trips.
     """
-    # Ensure the sync-state row exists, then lock it. The lock is held to
-    # commit, serializing all of this user's appends (see module docstring).
-    await session.execute(
-        pg_insert(UserSyncState)
-        .values(user_id=user_id)
-        .on_conflict_do_nothing(index_elements=["user_id"])
-    )
-    state = (
-        await session.execute(
-            select(UserSyncState)
-            .where(UserSyncState.user_id == user_id)
-            .with_for_update()
-        )
-    ).scalar_one()
+    state = locked_state or await lock_sync_state(session, user_id)
 
     entry = UserChangeLog(
         user_id=user_id,

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -90,25 +90,30 @@ async def initial_upload(
 
 
 @router.get("/full")
-async def full_sync(auth: CurrentAuthDep, session: SessionDep):
+async def full_sync(auth: CurrentAuthDep, request: Request):
     """Authoritative snapshot of all user-scoped data + current_revision.
 
     Runs under REPEATABLE READ so every section and the revision watermark
     come from one consistent snapshot — a write landing mid-request can't
     produce a snapshot that disagrees with its revision.
-    """
-    # The auth dependency already ran a query on this session, which began
-    # a READ COMMITTED transaction — isolation can only be set on a fresh
-    # one. Close it (it held reads only) and start the snapshot transaction.
-    await session.commit()
-    await session.connection(
-        execution_options={"isolation_level": "REPEATABLE READ"}
-    )
 
+    Uses a dedicated session rather than the request-scoped one: mutating
+    the shared session's isolation level (and committing it mid-request)
+    would leak surprising state into the dependency's commit/rollback
+    handling and the pooled connection.
+    """
+    factory = request.app.state.session_factory
+    async with factory() as session:
+        await session.connection(
+            execution_options={"isolation_level": "REPEATABLE READ"}
+        )
+        return await _read_full_snapshot(session, auth.user_id)
+
+
+async def _read_full_snapshot(session, user_id):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
 
-    user_id = auth.user_id
     state = await session.get(UserSyncState, user_id)
     courses = await rows(select(UserCourse).where(UserCourse.user_id == user_id))
     course_overrides = await rows(

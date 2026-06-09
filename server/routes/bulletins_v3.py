@@ -253,11 +253,13 @@ async def put_state(
             )
         # Column triplet is (is_read, read_updated_at, read_device_id) — the
         # merge helper needs the timestamp/device prefix, not the bool name.
-        before = getattr(state, field_name)
-        effective = apply_field_boolean(
+        # Changelog keys off "merge applied", not "value flipped": even a
+        # same-value win advances the field's merge metadata, and other
+        # devices must learn about it or later equal-timestamp edits resolve
+        # differently on different devices.
+        if apply_field_boolean(
             state, field_name, merge_field, value, ts, auth.device_id, now
-        )
-        if effective and before != value:
+        ):
             changed_fields.append(field_name)
         if field_name == "is_read" and state.is_read and state.first_read_at is None:
             state.first_read_at = now

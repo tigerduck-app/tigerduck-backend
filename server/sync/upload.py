@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.sync.changelog import append_change
+from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import apply_field
 from server.sync.models import (
     UserAssignment,
@@ -32,7 +32,6 @@ from server.sync.models import (
     UserCourseOverride,
     UserCourseSkippedDate,
     UserSettingsDocument,
-    UserSyncState,
 )
 
 logger = structlog.get_logger(__name__)
@@ -166,6 +165,10 @@ async def process_initial_upload(
         "bulletin_subscriptions": 0,
     }
 
+    # Lock the user's sync-state row once for the whole upload — appending
+    # per entity would re-acquire the same lock hundreds of times.
+    locked_state = await lock_sync_state(session, user_id)
+
     async def log(entity_type: str, entity_id: str, hint: dict | None = None):
         await append_change(
             session,
@@ -175,6 +178,7 @@ async def process_initial_upload(
             operation="upsert",
             payload=hint,
             device_id=device_id,
+            locked_state=locked_state,
         )
 
     # --- Courses (skip existing: server copy is authoritative) ---
@@ -432,8 +436,7 @@ async def process_initial_upload(
         counts["bulletin_subscriptions"] += 1
         await log("bulletin_subscription", str(sub.id))
 
-    state = await session.get(UserSyncState, user_id)
-    current_revision = state.current_revision if state else 0
+    current_revision = locked_state.current_revision
     logger.info(
         "sync.initial_upload",
         user_id=str(user_id),

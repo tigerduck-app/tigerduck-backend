@@ -11,6 +11,12 @@ merge correctly); future timestamps are pulled back to now, so a device
 with a broken clock can't write a value that permanently outranks every
 honest edit for the next year. Ties lose: server state wins on equal
 timestamps, keeping replays idempotent.
+
+Idempotency caveat: replays are only exact for non-future client
+timestamps. A future timestamp clamps to arrival time, so a retried
+request clamps to a slightly later instant and re-applies (bumping the
+field's merge metadata, not its value). Harmless, but worth knowing when
+reading changelog traffic from clock-skewed devices.
 """
 
 from __future__ import annotations
