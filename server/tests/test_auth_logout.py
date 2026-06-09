@@ -27,10 +27,8 @@ async def do_login(client) -> dict:
 
 async def test_logout_revokes_session(client) -> None:
     login = await do_login(client)
-    response = await client.post(
-        "/v3/auth/logout",
-        headers={"Authorization": f"Bearer {login['access_token']}"},
-    )
+    headers = {"Authorization": f"Bearer {login['access_token']}"}
+    response = await client.post("/v3/auth/logout", headers=headers)
     assert response.status_code == 204
 
     # The session's refresh token must be dead now.
@@ -39,14 +37,22 @@ async def test_logout_revokes_session(client) -> None:
     )
     assert refresh.status_code == 401
 
+    # And the access JWT is cut immediately too — require_user checks the
+    # session row, it does not wait for the 15-minute JWT expiry.
+    protected = await client.get("/v3/devices", headers=headers)
+    assert protected.status_code == 401
+    assert protected.json()["detail"] == "session_revoked"
 
-async def test_logout_is_idempotent(client) -> None:
+
+async def test_second_logout_rejected_as_revoked(client) -> None:
     login = await do_login(client)
     headers = {"Authorization": f"Bearer {login['access_token']}"}
     first = await client.post("/v3/auth/logout", headers=headers)
     second = await client.post("/v3/auth/logout", headers=headers)
     assert first.status_code == 204
-    assert second.status_code == 204
+    # The access token died with the session, so a repeat logout is 401
+    # (not an error state the client needs to handle beyond "already out").
+    assert second.status_code == 401
 
 
 async def test_missing_bearer_401(client) -> None:

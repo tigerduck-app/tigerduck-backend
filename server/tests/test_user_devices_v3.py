@@ -166,10 +166,17 @@ async def test_delete_device_revokes_sessions_and_tokens(client) -> None:
         "/v3/auth/refresh", json={"refresh_token": login_phone["refresh_token"]}
     )
     assert dead.status_code == 401
+
+    # Phone's access JWT is cut immediately as well.
+    phone_access = await client.get("/v3/devices", headers=bearer(login_phone))
+    assert phone_access.status_code == 401
     alive = await client.post(
         "/v3/auth/refresh", json={"refresh_token": login_mac["refresh_token"]}
     )
     assert alive.status_code == 200
+    # Rotation revoked the mac's login session, so its original access JWT
+    # is dead too — subsequent calls must use the refreshed access token.
+    mac_headers = {"Authorization": f"Bearer {alive.json()['access_token']}"}
 
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
@@ -185,7 +192,8 @@ async def test_delete_device_revokes_sessions_and_tokens(client) -> None:
         assert device.deleted_at is not None
 
     # And the deleted device no longer shows in the list.
-    listing = await client.get("/v3/devices", headers=bearer(login_mac))
+    listing = await client.get("/v3/devices", headers=mac_headers)
+    assert listing.status_code == 200
     ids = {d["client_device_id"] for d in listing.json()["items"]}
     assert ids == {"mac-xyz"}
 

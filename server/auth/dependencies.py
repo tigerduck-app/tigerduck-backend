@@ -1,4 +1,11 @@
-"""FastAPI dependency: authenticate /v3 requests via Bearer access JWT."""
+"""FastAPI dependency: authenticate /v3 requests via Bearer access JWT.
+
+Besides verifying the JWT itself, this checks the backing auth_session is
+not revoked — so logout, device deletion, and refresh-reuse detection cut
+access immediately instead of "within 15 minutes when the JWT expires".
+One PK lookup per authenticated request; the session object is shared with
+the route handler via FastAPI's per-request dependency cache.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +15,9 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
+from server.auth.models import AuthSession
 from server.auth.tokens import InvalidAccessToken, decode_access_token
+from server.db import SessionDep
 
 
 @dataclass(frozen=True)
@@ -20,6 +29,7 @@ class CurrentAuth:
 
 async def require_user(
     request: Request,
+    session: SessionDep,
     authorization: str | None = Header(default=None),
 ) -> CurrentAuth:
     secret: str = request.app.state.settings.auth_jwt_secret
@@ -45,6 +55,14 @@ async def require_user(
             detail="invalid_access_token",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
+
+    auth_session = await session.get(AuthSession, claims.session_id)
+    if auth_session is None or auth_session.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session_revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id
     )

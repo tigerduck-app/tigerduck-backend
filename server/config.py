@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # stuffing and against our single server IP getting blocked by Moodle.
     auth_login_max_attempts: int = 5
     auth_login_window_seconds: int = 900
+    # Behind nginx-proxy-manager the socket peer is always the proxy, which
+    # would collapse every user into one per-IP rate-limit bucket. Enable
+    # this ONLY when a trusted proxy strips/sets X-Forwarded-For; when off,
+    # the header is ignored (it is client-spoofable without a proxy).
+    auth_trust_forwarded_for: bool = False
 
     # --- Credential envelope encryption ---
     # key_id -> base64-encoded 32-byte AES-256 key. Multiple entries allow

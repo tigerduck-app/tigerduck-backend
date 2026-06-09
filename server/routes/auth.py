@@ -22,6 +22,11 @@ logger = structlog.get_logger(__name__)
 
 
 def _client_ip(request: Request) -> str:
+    if request.app.state.settings.auth_trust_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            # First hop = original client when the trusted proxy appends.
+            return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 

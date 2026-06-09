@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
@@ -110,31 +111,43 @@ async def login(
         )
 
     now = datetime.now(UTC)
-    user = await _find_or_create_user(session, student_id=student_id, now=now)
-    account = await _upsert_external_account(session, user=user, student_id=student_id)
-    await _store_credentials(
-        session,
-        cipher=cipher,
-        account=account,
-        password=password,
-        moodle_token=moodle_token,
-        moodle_private_token=moodle_private_token,
-        now=now,
-    )
-    device = await _upsert_device(session, user=user, info=device_info, now=now)
+    try:
+        user = await _find_or_create_user(session, student_id=student_id, now=now)
+        account = await _upsert_external_account(
+            session, user=user, student_id=student_id
+        )
+        await _store_credentials(
+            session,
+            cipher=cipher,
+            account=account,
+            password=password,
+            moodle_token=moodle_token,
+            moodle_private_token=moodle_private_token,
+            now=now,
+        )
+        device = await _upsert_device(session, user=user, info=device_info, now=now)
 
-    refresh_token = generate_refresh_token()
-    auth_session = AuthSession(
-        user_id=user.id,
-        device_id=device.id,
-        refresh_token_hash=hash_refresh_token(
-            settings.auth_refresh_hmac_key, refresh_token
-        ),
-        expires_at=now + timedelta(days=settings.auth_refresh_token_ttl_days),
-    )
-    session.add(auth_session)
-    user.last_login_at = now
-    await session.flush()
+        refresh_token = generate_refresh_token()
+        auth_session = AuthSession(
+            user_id=user.id,
+            device_id=device.id,
+            refresh_token_hash=hash_refresh_token(
+                settings.auth_refresh_hmac_key, refresh_token
+            ),
+            expires_at=now + timedelta(days=settings.auth_refresh_token_ttl_days),
+        )
+        session.add(auth_session)
+        user.last_login_at = now
+        await session.flush()
+    except IntegrityError as exc:
+        # Two first-logins for the same student racing on the partial
+        # unique indexes: the loser gets a clean 409 and the client simply
+        # retries (the winner's rows are then found by the lookup paths).
+        logger.info("auth.login.conflict_retry", student_id=student_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="login_conflict_retry",
+        ) from exc
 
     access_token = issue_access_token(
         settings.auth_jwt_secret,
@@ -181,9 +194,14 @@ async def refresh(
         )
 
     token_hash = hash_refresh_token(settings.auth_refresh_hmac_key, refresh_token)
+    # Row lock: two concurrent refreshes with the same token serialize here;
+    # the loser then sees revoked_at set and flows through the grace path
+    # instead of forking the rotation chain or 500ing on the unique index.
     auth_session = (
         await session.execute(
-            select(AuthSession).where(AuthSession.refresh_token_hash == token_hash)
+            select(AuthSession)
+            .where(AuthSession.refresh_token_hash == token_hash)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if auth_session is None:
@@ -225,6 +243,7 @@ async def _rotate(
             settings.auth_refresh_hmac_key, new_refresh_token
         ),
         expires_at=now + timedelta(days=settings.auth_refresh_token_ttl_days),
+        last_used_at=now,
     )
     session.add(new_session)
     await session.flush()
