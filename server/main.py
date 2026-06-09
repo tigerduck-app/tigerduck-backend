@@ -26,6 +26,7 @@ from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
+from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import custom_push as custom_push_routes
 from server.routes import debug as debug_routes
 from server.routes import device_lists as device_lists_routes
@@ -229,6 +230,8 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
+    app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
+    app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
 
 
 def _install_deprecation_middleware(
