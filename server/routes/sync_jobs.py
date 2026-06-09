@@ -101,6 +101,9 @@ async def run_now(
         await ensure_sync_jobs(
             session, user_id=auth.user_id, external_account_id=account.id
         )
+        # Commit so the provisioning survives any error response below
+        # (SessionDep rolls back on exceptions).
+        await session.commit()
         job = (
             await session.execute(
                 select(SyncJob)
@@ -204,7 +207,9 @@ async def patch_policy(
 ):
     policy = (
         await session.execute(
-            select(SyncPolicy).where(SyncPolicy.job_type == job_type)
+            select(SyncPolicy)
+            .where(SyncPolicy.job_type == job_type)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if policy is None:

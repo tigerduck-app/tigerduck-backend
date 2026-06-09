@@ -40,7 +40,7 @@ from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential_blob,
     mark_credentials_invalid,
-    refresh_moodle_token,
+    refresh_moodle_token_durably,
 )
 from server.syncjobs.models import (
     SyncJob,
@@ -66,6 +66,11 @@ ERROR_SYNC_FAILED = "sync_failed"
 
 _DEFAULT_INTERVAL_SECONDS = 28800
 _DEFAULT_PRIORITY = 100
+# pg advisory lock key ("TD_SYNC") serializing the claim phase across all
+# workers — the running-count check and the claim must be atomic, or N
+# workers could each claim a full batch and collectively blow the global
+# concurrency cap.
+_CLAIM_LOCK_KEY = 0x54445F53594E43
 
 
 def default_worker_id() -> str:
@@ -115,9 +120,18 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
             return
         now = datetime.now(UTC)
         for job in jobs:
-            job.status = SyncJobStatus.pending.value
             job.locked_by = None
             job.locked_at = None
+            # A stale lock means a worker died (or hung) mid-run — count it
+            # as an attempt so a crash-looping job still terminates at
+            # max_attempts instead of retrying forever.
+            job.attempts += 1
+            job.last_failure_at = now
+            job.last_error = f"{ERROR_SYNC_FAILED}:stale_lock"
+            if job.attempts >= job.max_attempts:
+                job.status = SyncJobStatus.failed.value
+            else:
+                job.status = SyncJobStatus.pending.value
         await session.execute(
             update(SyncRun)
             .where(
@@ -138,6 +152,9 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
 async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
+        # Serialize the count+claim across workers (see _CLAIM_LOCK_KEY).
+        # Released automatically at transaction end.
+        await session.execute(select(func.pg_advisory_xact_lock(_CLAIM_LOCK_KEY)))
         running = (
             await session.execute(
                 select(func.count())
@@ -199,6 +216,20 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 )
             ).scalar_one()
             run = await session.get(SyncRun, run_id)
+            if (
+                job.status != SyncJobStatus.running.value
+                or job.locked_by != worker.worker_id
+            ):
+                # Stale-recovered (and possibly reclaimed by another worker)
+                # between our claim commit and now — never double-execute.
+                if run is not None and run.status == SyncRunStatus.running.value:
+                    run.status = SyncRunStatus.cancelled.value
+                    run.finished_at = datetime.now(UTC)
+                    run.error = "reclaimed_before_execution"
+                logger.warning(
+                    "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
+                )
+                return
             policy = (
                 await session.execute(
                     select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
@@ -217,12 +248,18 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 except MoodleTokenInvalid:
                     logger.info("syncjobs.token_expired", account_id=account.id)
             if fetched is None:
-                token = await refresh_moodle_token(
-                    session,
+                # Runs in its OWN committed transactions: the iron-rule
+                # marker must be durable, and the fresh token must survive
+                # a later fetch failure rolling this work session back.
+                # NOTE: no work-session statements may run between
+                # load_credential_blob above and this call — the pending
+                # last_used_at update must stay unflushed so the durable
+                # sessions can write the credential row without blocking.
+                token = await refresh_moodle_token_durably(
+                    worker.session_factory,
                     worker.cipher,
                     worker.token_obtainer,
-                    account=account,
-                    blob=blob,
+                    external_account_id=job.external_account_id,
                 )
                 fetched = await worker.fetcher.fetch_assignments(token=token)
 
