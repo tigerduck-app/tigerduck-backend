@@ -162,7 +162,7 @@ async def put_course_override(
             continue
         if field_name == "is_hidden" and value is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="is_hidden cannot be null",
             )
         if apply_field(
@@ -345,7 +345,7 @@ async def put_assignment_override(
             continue
         if field_name == "local_status" and value not in valid_statuses:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"local_status must be one of {sorted(valid_statuses)}",
             )
         if apply_field(

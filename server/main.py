@@ -32,6 +32,7 @@ from server.routes import device_lists as device_lists_routes
 from server.routes import devices as devices_routes
 from server.routes import live_activities as live_activities_routes
 from server.routes import schedule as schedule_routes
+from server.routes import settings_docs as settings_docs_routes
 from server.routes import sync as sync_routes
 from server.routes import user_devices as user_devices_routes
 from server.scheduler.runtime import build_scheduler
@@ -227,6 +228,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(sync_routes.router, prefix=prefix)
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
+    app.include_router(settings_docs_routes.router, prefix=prefix)
 
 
 def _install_deprecation_middleware(
