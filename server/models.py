@@ -38,6 +38,7 @@ from server.db import Base
 # are imported.
 import server.auth.models  # noqa: F401, E402
 import server.sync.models  # noqa: F401, E402
+import server.syncjobs.models  # noqa: F401, E402
 
 
 class PushStatus(StrEnum):
