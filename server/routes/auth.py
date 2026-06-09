@@ -1,9 +1,11 @@
-"""/v3 auth endpoints: login (refresh/logout added in later tasks)."""
+"""/v3 auth endpoints: login, refresh, logout."""
 
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, status
+
+from server.auth.dependencies import CurrentAuthDep
 
 from server.auth import service
 from server.auth.schemas import (
@@ -68,3 +70,9 @@ async def refresh(
         refresh_token=result.refresh_token,
         expires_in=result.expires_in,
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(auth: CurrentAuthDep, session: SessionDep) -> None:
+    """Revoke the calling session. Idempotent — repeated logouts 204."""
+    await service.logout(session, session_id=auth.session_id)

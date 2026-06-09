@@ -330,6 +330,17 @@ async def _revoke_family(
             row.revoked_reason = SessionRevokedReason.reuse_detected.value
 
 
+async def logout(session: AsyncSession, *, session_id: int) -> None:
+    auth_session = await session.get(AuthSession, session_id)
+    if auth_session is None or auth_session.revoked_at is not None:
+        return  # already gone — logout is idempotent
+    now = datetime.now(UTC)
+    auth_session.revoked_at = now
+    auth_session.revoked_reason = SessionRevokedReason.logout.value
+    auth_session.last_used_at = now
+    logger.info("auth.logout", session_id=session_id)
+
+
 async def _find_or_create_user(
     session: AsyncSession, *, student_id: str, now: datetime
 ) -> User:
