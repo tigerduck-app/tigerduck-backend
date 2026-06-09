@@ -23,6 +23,7 @@ from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory
 from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
+from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
 from server.routes import custom_push as custom_push_routes
@@ -224,6 +225,8 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(auth_routes.router, prefix=prefix)
     app.include_router(user_devices_routes.router, prefix=prefix)
     app.include_router(sync_routes.router, prefix=prefix)
+    app.include_router(academics_routes.courses_router, prefix=prefix)
+    app.include_router(academics_routes.assignments_router, prefix=prefix)
 
 
 def _install_deprecation_middleware(
