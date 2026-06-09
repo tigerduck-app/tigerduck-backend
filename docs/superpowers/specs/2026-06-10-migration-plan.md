@@ -74,7 +74,10 @@ No impact on existing users. New tables are additive.
 
 ### Rollback
 
-Drop new tables, remove `/v3/auth/*` routes. No data loss — existing flow unaffected.
+Disable /v3 auth routes via feature flag.
+Stop frontend rollout.
+Keep new tables intact.
+Do not drop data unless explicitly running a destructive rollback migration.
 
 ---
 

@@ -159,7 +159,7 @@ CREATE INDEX idx_auth_sessions_user_active
     ON auth_sessions (user_id) WHERE revoked_at IS NULL;
 ```
 
-Access token: 15 min JWT (stateless). Refresh token: 90 days, stored as SHA-256 hash.
+Access token: 15 min JWT (stateless). Refresh token: 90 days, stored as HMAC-SHA-256 hash.
 
 Refresh rotation: on use, old session gets `revoked_at + replaced_by_session_id`, new session created. If a revoked token is reused, `reuse_detected_at` is set and all sessions for that device are revoked.
 
@@ -226,6 +226,9 @@ Token kinds:
 ### `push_jobs`
 
 One row = one logical notification to a user. Does not track per-device delivery.
+Push stale lock recovery:
+jobs with status='processing' and locked_at < now() - interval '5 minutes'
+are reset to pending, attempts incremented, and available_at set with backoff.
 
 ```sql
 CREATE TABLE push_jobs (
@@ -483,6 +486,8 @@ CREATE INDEX idx_user_assignments_course
 ```
 
 `course_no` and `course_name` are snapshot fields — preserved even if `user_course_id` mapping fails.
+
+Reminder generation must join user_assignment_overrides; idx_user_assignments_due is only a pre-filter.
 
 ### `user_assignment_overrides`
 

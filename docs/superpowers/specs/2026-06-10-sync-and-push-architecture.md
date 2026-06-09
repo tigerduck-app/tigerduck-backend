@@ -34,7 +34,7 @@ Defines the auth flow, cross-device sync strategy, server-side academic data ref
 1. POST /v3/auth/refresh
    body: { refresh_token }
 2. Backend:
-   a. Hash the refresh token, look up auth_sessions
+   a. HNAC-Hash256 the refresh token, look up auth_sessions
    b. If valid and not revoked:
       - Revoke old session (revoked_at, revoked_reason='rotated', replaced_by_session_id)
       - Create new session with fresh refresh_token_hash
@@ -238,6 +238,9 @@ POST /v3/sync-jobs/run-now?job_type=moodle_assignments
 ```
 
 Backend queues a high-priority sync job (priority = 1). Client polls sync status or waits for `/v3/sync` delta.
+
+If an identical job is already running or pending with priority <= 1, return existing job status instead of creating another run.
+Apply per-user cooldown, e.g. one manual run per 60 seconds per job_type.
 
 If sync fails, backend returns appropriate error:
 - `credential_invalid`: user must re-login
