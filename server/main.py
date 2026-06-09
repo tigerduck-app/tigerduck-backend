@@ -20,7 +20,7 @@ from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
-from server.db import build_engine, build_session_factory
+from server.db import build_engine, build_session_factory, session_scope
 from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
 from server.routes import academics as academics_routes
@@ -37,6 +37,7 @@ from server.routes import settings_docs as settings_docs_routes
 from server.routes import sync as sync_routes
 from server.routes import user_devices as user_devices_routes
 from server.scheduler.runtime import build_scheduler
+from server.syncjobs.policies import ensure_default_policies
 
 logger = structlog.get_logger(__name__)
 
@@ -108,6 +109,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
+    async with session_scope(session_factory) as seed_session:
+        await ensure_default_policies(seed_session)
     router = build_router(settings)
     scheduler = build_scheduler(session_factory, router, settings)
 
