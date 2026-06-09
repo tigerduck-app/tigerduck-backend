@@ -255,6 +255,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(user_devices_routes.router, prefix=prefix)
     app.include_router(sync_routes.router, prefix=prefix)
     app.include_router(sync_jobs_routes.router, prefix=prefix)
+    app.include_router(sync_jobs_routes.admin_router, prefix=prefix)
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)

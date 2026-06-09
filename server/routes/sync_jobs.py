@@ -12,17 +12,24 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import ExternalAccount
 from server.auth.service import PROVIDER_NTUST_SSO
 from server.db import SessionDep
-from server.syncjobs.models import SyncJob, SyncJobStatus
+from server.security import require_shared_secret
+from server.syncjobs.models import SyncJob, SyncJobStatus, SyncPolicy
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 router = APIRouter(prefix="/sync-jobs", tags=["sync-jobs"])
+admin_router = APIRouter(
+    prefix="/admin/sync-policies",
+    tags=["admin"],
+    dependencies=[Depends(require_shared_secret)],
+)
 logger = structlog.get_logger(__name__)
 
 HandledJobType = Literal["moodle_assignments"]
@@ -151,3 +158,64 @@ async def run_now(
         job_type=job_type,
     )
     return _status_payload(job, queued=True)
+
+
+class SyncPolicyPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    default_interval_seconds: int | None = Field(default=None, gt=0)
+    active_from: datetime | None = None
+    active_until: datetime | None = None
+    priority: int | None = None
+    max_attempts: int | None = Field(default=None, gt=0)
+
+
+def _policy_to_dict(policy: SyncPolicy) -> dict:
+    return {
+        "job_type": policy.job_type,
+        "enabled": policy.enabled,
+        "default_interval_seconds": policy.default_interval_seconds,
+        "active_from": (
+            policy.active_from.isoformat() if policy.active_from else None
+        ),
+        "active_until": (
+            policy.active_until.isoformat() if policy.active_until else None
+        ),
+        "priority": policy.priority,
+        "max_attempts": policy.max_attempts,
+        "updated_at": policy.updated_at.isoformat(),
+    }
+
+
+@admin_router.get("")
+async def list_policies(session: SessionDep):
+    policies = (
+        (await session.execute(select(SyncPolicy).order_by(SyncPolicy.job_type)))
+        .scalars()
+        .all()
+    )
+    return {"policies": [_policy_to_dict(p) for p in policies]}
+
+
+@admin_router.patch("/{job_type}")
+async def patch_policy(
+    job_type: str, payload: SyncPolicyPatch, session: SessionDep
+):
+    policy = (
+        await session.execute(
+            select(SyncPolicy).where(SyncPolicy.job_type == job_type)
+        )
+    ).scalar_one_or_none()
+    if policy is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": "unknown_job_type"},
+        )
+    # exclude_unset: explicit nulls clear the active window, absent
+    # fields are left untouched.
+    updates = payload.model_dump(exclude_unset=True)
+    for field_name, value in updates.items():
+        setattr(policy, field_name, value)
+    logger.info("syncjobs.policy_patched", job_type=job_type, **updates)
+    return _policy_to_dict(policy)

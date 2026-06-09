@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from server.config import Settings
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
+from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
 # interpolate. Enforce a strict whitelist instead to neutralise SQL injection
@@ -127,6 +128,11 @@ async def client(
         # transport context enters so our shared DB survives per-test cycles.
         app.state.engine = prepared_engine
         app.state.session_factory = build_session_factory(prepared_engine)
+        # ASGITransport does not run the lifespan handler, so mirror its
+        # sync-policy seeding here for e2e tests that expect defaults.
+        async with app.state.session_factory() as seed_session:
+            await ensure_default_policies(seed_session)
+            await seed_session.commit()
         # Expose the app so tests can override app.state collaborators
         # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
         ac.app = app
