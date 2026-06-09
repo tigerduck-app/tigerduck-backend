@@ -394,3 +394,314 @@ class UserAssignmentOverride(Base):
             name="chk_local_status",
         ),
     )
+
+
+class UserSettingsDocument(Base):
+    """One JSONB settings document per (user, namespace). Revision is
+    server-incremented; clients submit base_revision for optimistic
+    concurrency (sync-and-push spec §2/§6)."""
+
+    __tablename__ = "user_settings_documents"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    namespace: Mapped[str] = mapped_column(String(64))
+    schema_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1"
+    )
+    document: Mapped[dict] = mapped_column(JSONB)
+    revision: Mapped[int] = mapped_column(BigInteger, default=1, server_default="1")
+    created_by_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_by_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "namespace IN ("
+            "'home_layout', 'appearance', 'assignment_display', "
+            "'notification', 'browser', 'language', "
+            "'schedule_display', 'watch', 'wearos')",
+            name="chk_settings_namespace",
+        ),
+        CheckConstraint("revision >= 1", name="chk_settings_revision"),
+        CheckConstraint(
+            "schema_version >= 1", name="chk_settings_schema_version"
+        ),
+        Index(
+            "ux_user_settings_namespace_active",
+            "user_id",
+            "namespace",
+            unique=True,
+            postgresql_where=sa.text("deleted_at IS NULL"),
+        ),
+        Index(
+            "idx_user_settings_user_updated",
+            "user_id",
+            "updated_at",
+            postgresql_where=sa.text("deleted_at IS NULL"),
+        ),
+    )
+
+
+class UserBulletinSubscription(Base):
+    __tablename__ = "user_bulletin_subscriptions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    orgs: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default="{}"
+    )
+    tags: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list, server_default="{}"
+    )
+    mode: Mapped[str] = mapped_column(
+        String(8), default=SubscriptionMode.and_.value, server_default="AND"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    revision: Mapped[int] = mapped_column(BigInteger, default=1, server_default="1")
+    created_by_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    updated_by_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        CheckConstraint("mode IN ('AND', 'OR')", name="chk_subscription_mode"),
+        CheckConstraint("revision >= 1", name="chk_subscription_revision"),
+        Index(
+            "idx_bulletin_subs_user_active",
+            "user_id",
+            postgresql_where=sa.text("enabled = true AND deleted_at IS NULL"),
+        ),
+    )
+
+
+class UserBulletinState(Base):
+    """Per-field merged read/starred/hidden flags for one (user, bulletin)."""
+
+    __tablename__ = "user_bulletin_states"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    bulletin_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("bulletins.id", ondelete="CASCADE")
+    )
+
+    is_read: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.text("false")
+    )
+    read_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    read_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    first_read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    is_starred: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.text("false")
+    )
+    starred_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    starred_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    is_hidden: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.text("false")
+    )
+    hidden_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    hidden_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "bulletin_id"),
+        Index(
+            "idx_bulletin_states_starred",
+            "user_id",
+            "starred_updated_at",
+            postgresql_where=sa.text("is_starred = true"),
+        ),
+        Index(
+            "idx_bulletin_states_hidden",
+            "user_id",
+            "hidden_updated_at",
+            postgresql_where=sa.text("is_hidden = true"),
+        ),
+    )
+
+
+class BulletinUserMatch(Base):
+    """A bulletin matched one of a user's subscription rules. Created in
+    Phase 2 for the unread query; the push columns are filled by the
+    Phase-4 user-level dispatch flow."""
+
+    __tablename__ = "bulletin_user_matches"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    bulletin_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("bulletins.id", ondelete="CASCADE")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    subscription_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("user_bulletin_subscriptions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    match_reason: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    push_job_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("push_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    pushed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    matched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("bulletin_id", "user_id"),
+        Index(
+            "idx_bulletin_matches_user", "user_id", sa.text("matched_at DESC")
+        ),
+        Index(
+            "idx_bulletin_matches_pending_push",
+            "pushed_at",
+            postgresql_where=sa.text("pushed_at IS NULL"),
+        ),
+    )
+
+
+class UserSyncState(Base):
+    """Per-user sync cursor. The row doubles as the per-user write lock for
+    changelog appends (`server/sync/changelog.py`) — locking it inside the
+    append transaction makes per-user commit order equal revision order, so
+    incremental readers can never permanently skip a revision."""
+
+    __tablename__ = "user_sync_state"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    current_revision: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0"
+    )
+    compacted_revision: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "current_revision >= compacted_revision", name="chk_user_sync_revision"
+        ),
+    )
+
+
+class UserChangeLog(Base):
+    """Append-only change feed. Payloads are routing hints only — never
+    documents, HTML, or anything sensitive (data-model spec §6)."""
+
+    __tablename__ = "user_change_log"
+
+    revision: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    entity_type: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(128))
+    operation: Mapped[str] = mapped_column(String(16))
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "operation IN ('upsert', 'delete')", name="chk_changelog_operation"
+        ),
+        CheckConstraint(
+            "entity_type IN ("
+            "'course', 'course_override', 'course_skipped_date', "
+            "'assignment', 'assignment_override', "
+            "'settings_document', "
+            "'bulletin_subscription', 'bulletin_state', 'bulletin_match')",
+            name="chk_changelog_entity_type",
+        ),
+        Index("idx_change_log_user_revision", "user_id", "revision"),
+        # Retention deletes by age — without this the daily purge seqscans.
+        Index("idx_change_log_created_at", "created_at"),
+    )
