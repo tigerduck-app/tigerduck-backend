@@ -222,3 +222,89 @@ async def test_mark_credentials_invalid_disables_and_notifies(db_session):
         .all()
     )
     assert len(pushes) == 1
+
+
+class ReloginThenObtainer:
+    """Simulates a user re-login landing while the SSO call is in flight:
+    rewrites the credential blob (fresh password, no marker) and then
+    returns/raises like StaticObtainer."""
+
+    def __init__(self, factory, cipher, account_id, *, result=None, error=None):
+        self._factory = factory
+        self._cipher = cipher
+        self._account_id = account_id
+        self._result = result
+        self._error = error
+
+    async def obtain_token(self, *, username, password):
+        async with self._factory() as session:
+            account = await session.get(ExternalAccount, self._account_id)
+            credential = await session.get(
+                ExternalAccountCredential, self._account_id
+            )
+            fresh = self._cipher.encrypt(
+                {"ntust_password": "new-pw", "password_verified": True},
+                build_credential_aad(account.id, account.provider),
+            )
+            credential.encryption_key_id = fresh.key_id
+            credential.ciphertext = fresh.ciphertext
+            credential.nonce = fresh.nonce
+            credential.aad = fresh.aad
+            await session.commit()
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+async def test_network_failure_restore_skipped_after_midflight_relogin(
+    db_session, prepared_engine
+):
+    """Greptile #2: SsoUnavailable must NOT restore the pre-attempt blob
+    over credentials a concurrent re-login just wrote."""
+    cipher = _cipher()
+    _, account, _ = await _setup(db_session, cipher)
+    factory = build_session_factory(prepared_engine)
+    obtainer = ReloginThenObtainer(
+        factory, cipher, account.id, error=SsoUnavailable("timeout")
+    )
+
+    with pytest.raises(SsoUnavailable):
+        await refresh_moodle_token_durably(
+            factory, cipher, obtainer, external_account_id=account.id
+        )
+
+    async with factory() as session:
+        _, blob = await load_credential_blob(
+            session, cipher, external_account_id=account.id
+        )
+    assert blob["ntust_password"] == "new-pw"  # re-login blob preserved
+    assert "token_cache" not in blob
+
+
+async def test_success_outcome_skipped_after_midflight_relogin(
+    db_session, prepared_engine
+):
+    """Greptile #2 (success path): the token outcome must not overwrite a
+    blob a concurrent re-login replaced; the minted token is still
+    returned for THIS run."""
+    cipher = _cipher()
+    _, account, _ = await _setup(db_session, cipher)
+    factory = build_session_factory(prepared_engine)
+    obtainer = ReloginThenObtainer(
+        factory,
+        cipher,
+        account.id,
+        result=ObtainedToken(token="fresh-tok", private_token=None),
+    )
+
+    token = await refresh_moodle_token_durably(
+        factory, cipher, obtainer, external_account_id=account.id
+    )
+    assert token == "fresh-tok"
+
+    async with factory() as session:
+        _, blob = await load_credential_blob(
+            session, cipher, external_account_id=account.id
+        )
+    assert blob["ntust_password"] == "new-pw"  # re-login blob preserved
+    assert "token_cache" not in blob

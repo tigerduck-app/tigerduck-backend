@@ -125,6 +125,42 @@ async def _store_blob(
         credential.rotated_at = rotated_at
 
 
+async def _lock_account_if_attempt_pending(
+    session: AsyncSession,
+    cipher: CredentialCipher,
+    *,
+    external_account_id: int,
+) -> tuple[ExternalAccount | None, bool]:
+    """Lock the account row and report whether the stored blob still
+    carries THIS worker's attempt marker. A concurrent re-login rewrites
+    the blob without the marker — that fresh credential must never be
+    clobbered by this worker's stale pre-attempt copy or its outcome."""
+    account = (
+        await session.execute(
+            select(ExternalAccount)
+            .where(ExternalAccount.id == external_account_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if account is None:
+        return None, False
+    credential = await session.get(ExternalAccountCredential, external_account_id)
+    if credential is None:
+        return account, False
+    try:
+        current = cipher.decrypt(
+            EncryptedBlob(
+                key_id=credential.encryption_key_id,
+                nonce=credential.nonce,
+                ciphertext=credential.ciphertext,
+                aad=credential.aad,
+            )
+        )
+    except CredentialCipherError:
+        return account, False
+    return account, bool(current.get(SSO_ATTEMPT_MARKER))
+
+
 async def refresh_moodle_token_durably(
     session_factory: async_sessionmaker[AsyncSession],
     cipher: CredentialCipher,
@@ -165,17 +201,19 @@ async def refresh_moodle_token_durably(
         # survives and the next run conservatively disables instead of
         # re-attempting — safety over availability.
         async with session_scope(session_factory) as session:
-            # Row lock: the restore must not clobber a blob a concurrent
-            # re-login wrote between the marker commit and now.
-            account = (
-                await session.execute(
-                    select(ExternalAccount)
-                    .where(ExternalAccount.id == external_account_id)
-                    .with_for_update()
-                )
-            ).scalar_one_or_none()
-            if account is not None:
+            # Restore only while OUR marker is still in place — a re-login
+            # that landed mid-flight rewrote the blob (marker gone) and
+            # now owns the row (greptile #2).
+            account, pending = await _lock_account_if_attempt_pending(
+                session, cipher, external_account_id=external_account_id
+            )
+            if account is not None and pending:
                 await _store_blob(session, cipher, account=account, blob=blob)
+            elif account is not None:
+                logger.info(
+                    "syncjobs.credentials.restore_skipped_newer_blob",
+                    account_id=external_account_id,
+                )
         raise
 
     now = datetime.now(UTC)
@@ -187,12 +225,23 @@ async def refresh_moodle_token_durably(
         "obtained_at": now.isoformat(),
     }
     async with session_scope(session_factory) as session:
-        account = await session.get(ExternalAccount, external_account_id)
+        account, pending = await _lock_account_if_attempt_pending(
+            session, cipher, external_account_id=external_account_id
+        )
         if account is None:
             raise CredentialInvalid("account_missing")
-        await _store_blob(
-            session, cipher, account=account, blob=new_blob, rotated_at=now
-        )
+        if pending:
+            await _store_blob(
+                session, cipher, account=account, blob=new_blob, rotated_at=now
+            )
+        else:
+            # A re-login replaced the blob while SSO was in flight — keep
+            # the fresh credentials; the token we minted is still good for
+            # THIS run, we just don't persist it over them (greptile #2).
+            logger.info(
+                "syncjobs.credentials.outcome_skipped_newer_blob",
+                account_id=external_account_id,
+            )
         account.last_auth_success_at = now
         account.last_auth_error = None
     logger.info(
