@@ -143,6 +143,25 @@ class Settings(BaseSettings):
     # Moodle webservice fetch timeout (sync worker, not login verify).
     moodle_fetch_timeout_seconds: float = 20.0
 
+    # --- User push pipeline (Phase 4) ---
+    push_pipeline_tick_seconds: int = 30
+    push_pipeline_batch_size: int = 10
+    push_job_stale_lock_minutes: int = 5
+    # Delay before a job with still-pending deliveries gets another round.
+    push_retry_round_delay_seconds: int = 60
+
+    # --- Assignment reminders (Phase 4a) ---
+    assignment_reminder_scan_interval_seconds: int = 300
+    # Server-side default when a user has no `notification` settings
+    # document. Deliberately lighter than the client's six-offset default.
+    assignment_reminder_default_offsets_hours: list[float] = Field(
+        default_factory=lambda: [24.0, 2.0]
+    )
+    # Assignments due further out than this are picked up by a later scan;
+    # offsets larger than the window are unsupported (the reminder would
+    # be born in the past).
+    assignment_reminder_window_hours: int = 168
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"
