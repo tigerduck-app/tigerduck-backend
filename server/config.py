@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     bulletin_scrape_interval_seconds: int = 600   # 10 min
     bulletin_process_interval_seconds: int = 60
     bulletin_dispatch_interval_seconds: int = 60
+    # Phase 4c: user-level (logged-in) bulletin fan-out via push_jobs.
+    bulletin_user_dispatch_interval_seconds: int = 60
+    bulletin_user_dispatch_batch_size: int = 10
     # Rows whose last_seen_at is older than N scrape cycles get is_deleted=true.
     bulletin_stale_cycles: int = 3
     # Max processing retries before giving up on a bulletin.

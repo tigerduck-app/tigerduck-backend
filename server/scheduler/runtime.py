@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
+from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
@@ -183,6 +184,9 @@ def build_scheduler(
         async def course_reminder_scan() -> None:
             await scan_course_reminders(session_factory, settings)
 
+        async def bulletin_user_dispatch() -> None:
+            await dispatch_user_bulletins(session_factory, settings)
+
         scheduler.add_job(
             push_pipeline_tick,
             trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
@@ -210,5 +214,15 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            bulletin_user_dispatch,
+            trigger=IntervalTrigger(
+                seconds=settings.bulletin_user_dispatch_interval_seconds
+            ),
+            id="bulletin_user_dispatch",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
         )
     return scheduler
