@@ -37,6 +37,7 @@ from server.routes import settings_docs as settings_docs_routes
 from server.routes import sync as sync_routes
 from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
+from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
 from server.syncjobs.executor import SyncWorker, default_worker_id
 from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpTokenObtainer
@@ -134,8 +135,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     else:
         logger.warning("syncjobs.disabled_no_credential_keys")
+    push_worker = PushPipelineWorker(
+        session_factory=session_factory,
+        settings=settings,
+        router=router,
+        worker_id=default_worker_id(),
+    )
     scheduler = build_scheduler(
-        session_factory, router, settings, sync_worker=sync_worker
+        session_factory,
+        router,
+        settings,
+        sync_worker=sync_worker,
+        push_worker=push_worker,
     )
 
     app.state.engine = engine

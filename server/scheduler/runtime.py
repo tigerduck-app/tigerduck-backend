@@ -19,6 +19,7 @@ from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
+from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 
@@ -41,6 +42,7 @@ def build_scheduler(
     *,
     llm: LLMProvider | None = None,
     sync_worker: SyncWorker | None = None,
+    push_worker: PushPipelineWorker | None = None,
 ) -> AsyncIOScheduler:
     """Wire APScheduler with the TigerDuck jobs:
 
@@ -53,6 +55,8 @@ def build_scheduler(
     * `sync_changelog_retention` — purge aged changelog entries daily.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
+    * `push_pipeline_tick` — user push_jobs delivery pipeline every 30s
+      (only when a `push_worker` is provided).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -162,6 +166,19 @@ def build_scheduler(
             sync_jobs_tick,
             trigger=IntervalTrigger(seconds=settings.sync_job_tick_seconds),
             id="sync_jobs_tick",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    if push_worker is not None:
+
+        async def push_pipeline_tick() -> None:
+            await run_push_tick(push_worker)
+
+        scheduler.add_job(
+            push_pipeline_tick,
+            trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
+            id="push_pipeline_tick",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=30,
