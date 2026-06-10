@@ -294,3 +294,49 @@ async def test_match_device_ids_union_across_multiple_rules(
             content_tags=[ContentTag.event.value],
         )
         assert "dev-multi" not in ids
+
+
+@_async
+async def test_match_device_ids_skips_linked_devices(
+    prepared_engine: AsyncEngine,
+) -> None:
+    """Review 1.8: a device linked to a logged-in v3 user gets bulletins
+    via the user-level push_jobs flow — the anonymous fan-out must skip it
+    or the phone rings twice for every bulletin."""
+    from server.auth.models import User
+
+    factory = async_sessionmaker(prepared_engine, expire_on_commit=False)
+    async with factory() as session:
+        user = User(student_id="B11015777")
+        session.add(user)
+        await session.flush()
+        session.add(
+            DeviceRegistration(
+                device_id="dev-linked",
+                user_id="u-linked",
+                pts_token_hex="pts-l",
+                device_token_hex="alert-l",
+                bundle_id="b",
+                attrs_type="a",
+                apns_env="development",
+                linked_user_id=user.id,
+            )
+        )
+        await session.flush()
+        session.add(
+            BulletinSubscription(
+                device_id="dev-linked",
+                orgs=[],
+                tags=[ContentTag.free_meal.value],
+                mode="AND",
+            )
+        )
+        await session.commit()
+
+    async with factory() as session:
+        ids = await match_device_ids(
+            session,
+            canonical_org=CanonicalOrg.library.value,
+            content_tags=[ContentTag.free_meal.value],
+        )
+    assert "dev-linked" not in ids
