@@ -57,7 +57,17 @@ def _entry_start_time(
         if raw is None:
             continue
         hour, _, minute = raw.partition(":")
-        starts.append(time(int(hour), int(minute)))
+        try:
+            starts.append(time(int(hour), int(minute)))
+        except ValueError:
+            # Malformed operator config ("HH:MM" expected) must degrade to
+            # "no reminder for this period", not crash the whole scan tick.
+            logger.warning(
+                "push.course_reminders.bad_period_time",
+                period=str(period),
+                value=raw,
+            )
+            continue
     if not starts:
         return None
     return day, min(starts)
@@ -163,6 +173,18 @@ async def scan_course_reminders(
     whose dedupe key no longer maps to an eligible (course, occurrence,
     offset) tuple are cancelled, under SKIP LOCKED so a job the pipeline
     is claiming concurrently is left alone.
+
+    Two deliberate semantics worth naming:
+    * The global pending scan is unbounded by user but bounded by
+      outstanding (not yet fired) course reminders — the cancellation
+      pass must examine all of them anyway (same call as 4a reminders).
+    * Once an occurrence's start time has PASSED, its keys drop out of
+      valid_keys and a still-pending job is cancelled: a "10 分鐘後上課"
+      reminder delivered after class started is worse than none. (4a
+      keeps past-fire keys valid; there the assignment is still due.)
+    * Occurrence math assumes a fixed-offset zone (Asia/Taipei has no
+      DST). A DST-observing `course_reminder_timezone` would be off by
+      the fold during transitions.
     """
     now = datetime.now(UTC)
     window_end = now + timedelta(hours=settings.course_reminder_window_hours)
@@ -187,11 +209,24 @@ async def scan_course_reminders(
             )
         ).all()
 
+        # Latest semester per user, preferring portal-sourced courses:
+        # `user_added` rows carry a free-form client semester string that
+        # could lexicographically outrank the real current semester (e.g.
+        # "9999") and silently mute every portal course's reminders.
         latest_semester: dict[uuid.UUID, str] = {}
+        portal_semester: dict[uuid.UUID, bool] = {}
         for course, _override in rows:
+            is_portal = course.source == "ntust_portal"
             current = latest_semester.get(course.user_id)
-            if current is None or course.semester > current:
+            if portal_semester.get(course.user_id) and not is_portal:
+                continue
+            if (
+                current is None
+                or (is_portal and not portal_semester[course.user_id])
+                or course.semester > current
+            ):
                 latest_semester[course.user_id] = course.semester
+                portal_semester[course.user_id] = is_portal
 
         eligible = [
             (course, override)

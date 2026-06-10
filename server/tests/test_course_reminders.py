@@ -324,3 +324,31 @@ async def test_imminent_valid_job_not_cancelled(
     await scan_course_reminders(factory, settings)
     await db_session.refresh(target)
     assert target.status == "pending"
+
+
+async def test_user_added_semester_string_cannot_mask_portal_courses(
+    db_session, prepared_engine, test_settings
+):
+    """A user_added course with a free-form "9999" semester must not win
+    the latest-semester guard over real portal courses."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    portal = _course(user, course_key="CS1", semester="1141", schedule_json=schedule)
+    weird = _course(
+        user,
+        course_key="CUSTOM1",
+        course_no=None,
+        semester="9999",
+        source="user_added",
+        schedule_json=schedule,
+    )
+    db_session.add_all([portal, weird])
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    created = await scan_course_reminders(
+        build_session_factory(prepared_engine), settings
+    )
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs)
+    assert {j.payload["user_course_id"] for j in jobs} == {portal.id}

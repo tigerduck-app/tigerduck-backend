@@ -178,13 +178,18 @@ async def _push_pending_matches(session: AsyncSession, now: datetime) -> int:
         job_id = result.scalar_one_or_none()
         if job_id is None:
             # An active job with this dedupe key already exists (re-run
-            # after a partial commit) — adopt it.
+            # after a partial commit) — adopt it. Filter to the statuses
+            # the dedupe index covers so an older cancelled/failed row
+            # can't shadow the live one.
             job_id = (
                 await session.execute(
                     select(PushJob.id)
                     .where(
                         PushJob.user_id == match.user_id,
                         PushJob.dedupe_key == dedupe_key,
+                        PushJob.status.in_(
+                            ["pending", "processing", "sent", "partial_failed"]
+                        ),
                     )
                     .order_by(PushJob.id.desc())
                     .limit(1)

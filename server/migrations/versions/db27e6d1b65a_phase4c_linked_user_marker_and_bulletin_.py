@@ -36,13 +36,21 @@ def upgrade() -> None:
     # Backfill: devices already registered by a logged-in v3 user_device
     # (matched on client_device_id) start out linked, so the anonymous
     # bulletin fan-out stops double-pushing to them immediately.
+    # DISTINCT ON keeps the pick deterministic when several users have an
+    # active user_device with the same client_device_id (account switch on
+    # one physical device) — newest last_seen_at wins, mirroring the
+    # re-derive logic in the /v2/devices/register route.
     op.execute(
         """
         UPDATE device_registrations dr
         SET linked_user_id = ud.user_id
-        FROM user_devices ud
+        FROM (
+            SELECT DISTINCT ON (client_device_id) client_device_id, user_id
+            FROM user_devices
+            WHERE deleted_at IS NULL
+            ORDER BY client_device_id, last_seen_at DESC NULLS LAST
+        ) ud
         WHERE ud.client_device_id = dr.device_id
-          AND ud.deleted_at IS NULL
         """
     )
     # ### end Alembic commands ###
