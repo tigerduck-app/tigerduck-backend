@@ -164,3 +164,47 @@ async def test_bulletin_state_unknown_bulletin_404(client) -> None:
         json={"is_read": True, "read_updated_at": "2026-06-08T10:00:00Z"},
     )
     assert response.status_code == 404
+
+
+async def test_delete_with_base_revision_cas(client) -> None:
+    """Greptile #3: DELETE accepts an optional base_revision — supplied
+    and stale → 409 with server state, nothing deleted; supplied and
+    current → 204. (Bare DELETE stays valid: independent-entity spec.)"""
+    login = await do_login(client)
+    create = await client.post(
+        "/v3/bulletin-subscriptions",
+        headers=bearer(login),
+        json={"orgs": ["教務處"]},
+    )
+    sub_id = create.json()["id"]
+
+    # Another device edits → revision 2.
+    patch = await client.patch(
+        f"/v3/bulletin-subscriptions/{sub_id}",
+        headers=bearer(login),
+        json={"base_revision": 1, "name": "edited elsewhere"},
+    )
+    assert patch.status_code == 200
+
+    # Delete decided on the stale revision-1 read → conflict, kept alive.
+    stale = await client.delete(
+        f"/v3/bulletin-subscriptions/{sub_id}?base_revision=1",
+        headers=bearer(login),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["server"]["revision"] == 2
+    listing = await client.get(
+        "/v3/bulletin-subscriptions", headers=bearer(login)
+    )
+    assert len(listing.json()["items"]) == 1
+
+    # Re-read and delete with the current revision → goes through.
+    ok = await client.delete(
+        f"/v3/bulletin-subscriptions/{sub_id}?base_revision=2",
+        headers=bearer(login),
+    )
+    assert ok.status_code == 204
+    listing = await client.get(
+        "/v3/bulletin-subscriptions", headers=bearer(login)
+    )
+    assert listing.json()["items"] == []

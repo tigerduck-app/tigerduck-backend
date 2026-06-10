@@ -168,11 +168,26 @@ async def patch_subscription(
     "/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT
 )
 async def delete_subscription(
-    subscription_id: int, auth: CurrentAuthDep, session: SessionDep
-) -> None:
+    subscription_id: int,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+    base_revision: int | None = Query(default=None),
+):
     subscription = await _get_owned_subscription(
         session, auth.user_id, subscription_id
     )
+    # Spec classifies subscriptions as independent entities (delete wins,
+    # natural merge), so base_revision stays OPTIONAL — but a client that
+    # supplies it gets the same CAS guard as PATCH: a delete decided on a
+    # stale read 409s instead of silently discarding a newer edit.
+    if base_revision is not None and subscription.revision != base_revision:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "error": "subscription_conflict",
+                "server": serializers.subscription_to_dict(subscription),
+            },
+        )
     subscription.deleted_at = datetime.now(UTC)
     subscription.updated_by_device_id = auth.device_id
     await append_change(
