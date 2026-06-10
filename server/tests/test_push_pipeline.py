@@ -196,3 +196,155 @@ async def test_stale_processing_exhausted_goes_failed(
     await run_push_tick(worker)
     await db_session.refresh(job)
     assert job.status == "failed"
+
+
+async def test_fanout_to_all_devices_and_partial_failed(
+    db_session, prepared_engine, test_settings
+):
+    user, _, _ = await _setup_user_device_token(db_session)
+    device2 = UserDevice(
+        user_id=user.id, client_device_id="dev-2", platform="android"
+    )
+    db_session.add(device2)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device2.id,
+            provider="fcm",
+            token_kind="standard",
+            token_hash="hash-fcm-1",
+            token_value="fcm-1",
+        )
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    android = ScriptedSender(
+        [SendResult(success=False, status="UNKNOWN", description="boom")] * 4
+    )
+    worker = _worker(prepared_engine, test_settings, apple=apple, android=android)
+
+    # Round 1: apns sent, fcm transient-pending → job re-queued.
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.attempts == 1
+
+    # Exhaust remaining rounds (delivery max_attempts=3, job max_attempts=3).
+    for _ in range(4):
+        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        await db_session.commit()
+        await run_push_tick(worker)
+        await db_session.refresh(job)
+        if job.status != "pending":
+            break
+    assert job.status == "partial_failed"
+    deliveries = (
+        (
+            await db_session.execute(
+                select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {d.status for d in deliveries} == {"sent", "failed"}
+
+
+async def test_unregistered_token_invalidated(
+    db_session, prepared_engine, test_settings
+):
+    user, _, token = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender(
+        [SendResult(success=False, status="410", description="Unregistered")]
+    )
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    await db_session.refresh(token)
+    assert token.status == "invalidated"
+    delivery = (
+        await db_session.execute(
+            select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+        )
+    ).scalar_one()
+    assert delivery.failure_code == "unregistered"
+
+
+async def test_no_active_tokens_fails_job(
+    db_session, prepared_engine, test_settings
+):
+    user, _, token = await _setup_user_device_token(
+        db_session, token_kwargs={"status": "invalidated"}
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings)
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.last_error == "no_active_tokens"
+
+
+async def test_device_targeted_job_only_hits_that_device(
+    db_session, prepared_engine, test_settings
+):
+    user, device1, _ = await _setup_user_device_token(db_session)
+    device2 = UserDevice(
+        user_id=user.id, client_device_id="dev-2", platform="ios"
+    )
+    db_session.add(device2)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device2.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-tok-2",
+            token_value="tok-2",
+        )
+    )
+    job = _job(user, device_id=device2.id)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert len(apple.requests) == 1
+    assert apple.requests[0].device_token == "tok-2"
+
+
+async def test_live_activity_tokens_excluded(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="live_activity_update",
+            token_hash="hash-la",
+            token_value="la-tok",
+            scope_key="assignment:1",
+        )
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+    assert len(apple.requests) == 1  # standard token only
