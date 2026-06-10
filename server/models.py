@@ -14,6 +14,7 @@ Design notes
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import StrEnum
 
@@ -28,7 +29,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from server.db import Base
@@ -84,6 +85,16 @@ class DeviceRegistration(Base):
     )
     server_push_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
+    )
+    # Phase 4c (review 1.8): set when this physical device is also a
+    # logged-in v3 user_device (matched on client_device_id). The anonymous
+    # bulletin fan-out skips linked devices — the user-level push_jobs flow
+    # owns their notifications, otherwise the device would receive every
+    # bulletin twice during the dual-track migration.
+    linked_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(

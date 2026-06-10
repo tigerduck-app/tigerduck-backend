@@ -145,3 +145,54 @@ async def test_assignment_unique_per_user_moodle_ids(db_session) -> None:
         )
     with pytest.raises(IntegrityError):
         await db_session.commit()
+
+
+async def test_bulletin_user_match_run_round_trip(db_session) -> None:
+    from server.bulletins.models import Bulletin
+    from server.sync.models import BulletinUserMatchRun
+
+    bulletin = Bulletin(
+        external_id="e-1",
+        title="t",
+        source_url="https://bulletin.ntust.edu.tw/x",
+        first_seen_at=datetime.now(UTC),
+        last_seen_at=datetime.now(UTC),
+    )
+    db_session.add(bulletin)
+    await db_session.flush()
+
+    db_session.add(BulletinUserMatchRun(bulletin_id=bulletin.id))
+    await db_session.commit()
+
+    run = (
+        await db_session.execute(select(BulletinUserMatchRun))
+    ).scalar_one()
+    assert run.bulletin_id == bulletin.id
+    assert run.matched_at is not None
+
+    # PK = bulletin_id → second run row for the same bulletin must fail.
+    db_session.add(BulletinUserMatchRun(bulletin_id=bulletin.id))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
+
+
+async def test_device_registration_linked_user_marker(db_session) -> None:
+    from server.models import DeviceRegistration
+
+    user = await make_user(db_session)
+    db_session.add(
+        DeviceRegistration(
+            device_id="dev-abc",
+            user_id="anon-1",
+            pts_token_hex="aa",
+            bundle_id="org.ntust.app.TigerDuck",
+            attrs_type="",
+            apns_env="development",
+            linked_user_id=user.id,
+        )
+    )
+    await db_session.commit()
+
+    row = await db_session.get(DeviceRegistration, "dev-abc")
+    assert row.linked_user_id == user.id

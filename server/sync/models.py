@@ -634,6 +634,25 @@ class BulletinUserMatch(Base):
     )
 
 
+class BulletinUserMatchRun(Base):
+    """Phase-4c cursor: one row once the user-level subscription matcher
+    has run for a bulletin. `bulletins.notified_at` is reserved for the
+    anonymous flow, so the user-level dispatcher needs its own done-marker
+    to keep the per-tick scan bounded."""
+
+    __tablename__ = "bulletin_user_match_runs"
+
+    bulletin_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("bulletins.id", ondelete="CASCADE"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    matched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 class UserSyncState(Base):
     """Per-user sync cursor. The row doubles as the per-user write lock for
     changelog appends (`server/sync/changelog.py`) — locking it inside the
