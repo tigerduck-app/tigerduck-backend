@@ -20,6 +20,7 @@ from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
 from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.reminders import scan_assignment_reminders
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 
@@ -175,6 +176,9 @@ def build_scheduler(
         async def push_pipeline_tick() -> None:
             await run_push_tick(push_worker)
 
+        async def assignment_reminder_scan() -> None:
+            await scan_assignment_reminders(session_factory, settings)
+
         scheduler.add_job(
             push_pipeline_tick,
             trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
@@ -182,5 +186,15 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=30,
+        )
+        scheduler.add_job(
+            assignment_reminder_scan,
+            trigger=IntervalTrigger(
+                seconds=settings.assignment_reminder_scan_interval_seconds
+            ),
+            id="assignment_reminder_scan",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
         )
     return scheduler
