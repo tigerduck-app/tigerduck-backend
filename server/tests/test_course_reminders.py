@@ -333,7 +333,9 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
     the latest-semester guard over real portal courses."""
     user = await _make_user(db_session)
     local, schedule = _occurrence_in(26)
-    portal = _course(user, course_key="CS1", semester="1141", schedule_json=schedule)
+    # Insert the user_added row FIRST: with no ORDER BY it tends to come
+    # back first, which is exactly the ordering that broke the original
+    # single-pass portal-first guard (final review, phase 4).
     weird = _course(
         user,
         course_key="CUSTOM1",
@@ -342,7 +344,10 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
         source="user_added",
         schedule_json=schedule,
     )
-    db_session.add_all([portal, weird])
+    db_session.add(weird)
+    await db_session.flush()
+    portal = _course(user, course_key="CS1", semester="1141", schedule_json=schedule)
+    db_session.add(portal)
     await db_session.commit()
 
     settings = _scan_settings(test_settings, local)

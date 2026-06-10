@@ -155,3 +155,33 @@ async def test_run_now_requires_auth(client):
         "/v3/sync-jobs/run-now?job_type=moodle_assignments"
     )
     assert response.status_code == 401
+
+async def test_run_now_no_job_and_invalid_credentials_409_without_provisioning(
+    client,
+):
+    """Final review F1 (phase 3): with no sync_jobs row and an invalid
+    account credential, run-now must 409 instead of provisioning a fresh
+    pending job the executor would only re-disable next tick."""
+    from server.auth.models import ExternalAccount
+    from server.sync.models import UserCourse  # noqa: F401 — model registry
+
+    headers = await _login(client)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        job = (await session.execute(select(SyncJob))).scalar_one()
+        await session.delete(job)
+        account = (
+            await session.execute(select(ExternalAccount))
+        ).scalar_one()
+        account.credential_status = "invalid"
+        await session.commit()
+
+    response = await client.post(
+        "/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "credential_invalid"
+
+    async with factory() as session:
+        jobs = (await session.execute(select(SyncJob))).scalars().all()
+        assert jobs == []  # nothing got provisioned

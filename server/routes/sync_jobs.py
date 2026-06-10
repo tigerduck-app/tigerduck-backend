@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.models import ExternalAccount
+from server.auth.models import CredentialStatus, ExternalAccount
 from server.auth.service import PROVIDER_NTUST_SSO
 from server.db import SessionDep
 from server.security import require_shared_secret
@@ -97,6 +97,14 @@ async def run_now(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": "sync_not_provisioned"},
+            )
+        if account.credential_status != CredentialStatus.active.value:
+            # Don't provision a fresh `pending` job that the executor
+            # would only re-disable on the next tick — surface the same
+            # 409 the disabled-job path returns.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "credential_invalid"},
             )
         await ensure_sync_jobs(
             session, user_id=auth.user_id, external_account_id=account.id

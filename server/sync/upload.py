@@ -130,15 +130,29 @@ class UploadSubscription(BaseModel):
 
 
 class InitialUploadRequest(BaseModel):
-    courses: list[UploadCourse] = Field(default_factory=list)
-    course_overrides: list[UploadCourseOverride] = Field(default_factory=list)
-    course_skipped_dates: list[UploadSkippedDate] = Field(default_factory=list)
-    assignments: list[UploadAssignment] = Field(default_factory=list)
-    assignment_overrides: list[UploadAssignmentOverride] = Field(
-        default_factory=list
+    # Bounded lists: the upload runs inside the per-user FOR UPDATE sync
+    # lock with a flush per entity — an unbounded body would let one JWT
+    # hold that lock (and a DB connection) for minutes. Limits sit an
+    # order of magnitude above any real student's data.
+    courses: list[UploadCourse] = Field(default_factory=list, max_length=500)
+    course_overrides: list[UploadCourseOverride] = Field(
+        default_factory=list, max_length=500
     )
-    settings_documents: list[UploadSettingsDocument] = Field(default_factory=list)
-    bulletin_subscriptions: list[UploadSubscription] = Field(default_factory=list)
+    course_skipped_dates: list[UploadSkippedDate] = Field(
+        default_factory=list, max_length=2000
+    )
+    assignments: list[UploadAssignment] = Field(
+        default_factory=list, max_length=5000
+    )
+    assignment_overrides: list[UploadAssignmentOverride] = Field(
+        default_factory=list, max_length=5000
+    )
+    settings_documents: list[UploadSettingsDocument] = Field(
+        default_factory=list, max_length=50
+    )
+    bulletin_subscriptions: list[UploadSubscription] = Field(
+        default_factory=list, max_length=200
+    )
 
 
 @dataclass

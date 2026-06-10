@@ -356,13 +356,15 @@ async def _record_failure(
         job.last_error = error
 
         if disable:
+            # Keep the ORM object in line with the bulk UPDATE inside
+            # mark_credentials_invalid — later code in this session must
+            # not observe a stale 'running'.
+            job.status = SyncJobStatus.disabled.value
             account = await session.get(ExternalAccount, job.external_account_id)
             if account is not None:
                 await mark_credentials_invalid(
                     session, account=account, user_id=job.user_id, error=error
                 )
-            else:
-                job.status = SyncJobStatus.disabled.value
             logger.warning("syncjobs.run_disabled", job_id=job_id, error=error)
             return
 

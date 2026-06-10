@@ -244,16 +244,30 @@ async def _deliver_round(
         logger.info("push.no_active_tokens", job_id=job.id)
         return
 
+    attempted = 0
     for delivery in deliveries:
         if delivery.status != PushDeliveryStatus.pending.value:
             continue
         if delivery.next_retry_at > now:
             continue
+        attempted += 1
         await _send_one(worker, session, job, delivery, now)
 
     statuses = [d.status for d in deliveries]
     pending = statuses.count(PushDeliveryStatus.pending.value)
     if pending:
+        if attempted == 0 and job.attempts + 1 >= job.max_attempts:
+            # Zero-work round (every pending delivery's next_retry_at was
+            # still in the future — clock skew vs the round delay). Don't
+            # let bookkeeping burn the job's LAST round and force-fail
+            # deliveries that never used their attempts; just come back.
+            job.status = PushJobStatus.pending.value
+            job.available_at = now + timedelta(
+                seconds=worker.settings.push_retry_round_delay_seconds
+            )
+            job.locked_by = None
+            job.locked_at = None
+            return
         if job.attempts + 1 < job.max_attempts:
             # Another round later — transient failures may clear up.
             job.attempts += 1

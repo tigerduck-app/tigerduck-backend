@@ -189,7 +189,7 @@ async def delete_subscription(
 async def get_states(
     auth: CurrentAuthDep,
     session: SessionDep,
-    bulletin_ids: str = Query(min_length=1),
+    bulletin_ids: str = Query(min_length=1, max_length=4096),
 ):
     try:
         ids = [int(x) for x in bulletin_ids.split(",") if x.strip()]
@@ -197,6 +197,11 @@ async def get_states(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="bulletin_ids must be comma-separated integers",
+        )
+    if len(ids) > 200:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="too many bulletin_ids (max 200)",
         )
     rows = (
         (

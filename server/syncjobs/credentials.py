@@ -27,7 +27,7 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -165,7 +165,15 @@ async def refresh_moodle_token_durably(
         # survives and the next run conservatively disables instead of
         # re-attempting — safety over availability.
         async with session_scope(session_factory) as session:
-            account = await session.get(ExternalAccount, external_account_id)
+            # Row lock: the restore must not clobber a blob a concurrent
+            # re-login wrote between the marker commit and now.
+            account = (
+                await session.execute(
+                    select(ExternalAccount)
+                    .where(ExternalAccount.id == external_account_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
             if account is not None:
                 await _store_blob(session, cipher, account=account, blob=blob)
         raise

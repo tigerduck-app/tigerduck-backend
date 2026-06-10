@@ -235,8 +235,23 @@ async def test_fanout_to_all_devices_and_partial_failed(
     assert job.attempts == 1
 
     # Exhaust remaining rounds (delivery max_attempts=3, job max_attempts=3).
+    # Each round must also pull pending deliveries' retry backoff into the
+    # past — a round that attempts nothing no longer burns job attempts.
     for _ in range(4):
         job.available_at = datetime.now(UTC) - timedelta(minutes=5)
+        for d in (
+            (
+                await db_session.execute(
+                    select(PushDelivery).where(
+                        PushDelivery.push_job_id == job.id,
+                        PushDelivery.status == "pending",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            d.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
         await db_session.commit()
         await run_push_tick(worker)
         await db_session.refresh(job)
@@ -246,7 +261,11 @@ async def test_fanout_to_all_devices_and_partial_failed(
     deliveries = (
         (
             await db_session.execute(
-                select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+                select(PushDelivery)
+                .where(PushDelivery.push_job_id == job.id)
+                # The loop above loaded these rows into the identity map;
+                # refresh them past expire_on_commit=False staleness.
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
@@ -414,6 +433,19 @@ async def test_exhausted_delivery_keeps_last_transport_error(
     worker = _worker(prepared_engine, test_settings, apple=apple)
     for _ in range(5):
         job.available_at = datetime.now(UTC) - timedelta(minutes=5)
+        for d in (
+            (
+                await db_session.execute(
+                    select(PushDelivery).where(
+                        PushDelivery.push_job_id == job.id,
+                        PushDelivery.status == "pending",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        ):
+            d.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
         await db_session.commit()
         await run_push_tick(worker)
         await db_session.refresh(job)
@@ -432,3 +464,48 @@ async def test_exhausted_delivery_keeps_last_transport_error(
     # The real transport error survives — not overwritten by
     # retries_exhausted bookkeeping.
     assert delivery.failure_code == "UNKNOWN"
+
+
+async def test_zero_work_round_does_not_burn_final_attempt(
+    db_session, prepared_engine, test_settings
+):
+    """Final review (phase 4 M2): a round where every pending delivery's
+    next_retry_at is still in the future must not consume the job's last
+    attempt and force-fail deliveries that never used theirs."""
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user, attempts=2, max_attempts=3)
+    db_session.add(job)
+    await db_session.flush()
+    delivery = PushDelivery(
+        push_job_id=job.id,
+        user_id=user.id,
+        device_id=(
+            await db_session.execute(select(UserDevice.id))
+        ).scalar_one(),
+        push_token_id=(
+            await db_session.execute(select(DevicePushToken.id))
+        ).scalar_one(),
+        provider="apns",
+        token_kind="standard",
+        token_hash="hash-tok-1",
+        next_retry_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    db_session.add(delivery)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"  # not failed
+    assert job.attempts == 2  # final attempt not burned
+    assert apple.requests == []
+
+    # Once the retry time arrives the delivery still gets its real shot.
+    delivery.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    job.available_at = datetime.now(UTC) - timedelta(minutes=5)
+    await db_session.commit()
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "sent"

@@ -213,20 +213,20 @@ async def scan_course_reminders(
         # `user_added` rows carry a free-form client semester string that
         # could lexicographically outrank the real current semester (e.g.
         # "9999") and silently mute every portal course's reminders.
-        latest_semester: dict[uuid.UUID, str] = {}
-        portal_semester: dict[uuid.UUID, bool] = {}
+        # Two buckets merged portal-last so the result is independent of
+        # row order (final review: a single-pass flag was order-sensitive).
+        portal_latest: dict[uuid.UUID, str] = {}
+        fallback_latest: dict[uuid.UUID, str] = {}
         for course, _override in rows:
-            is_portal = course.source == "ntust_portal"
-            current = latest_semester.get(course.user_id)
-            if portal_semester.get(course.user_id) and not is_portal:
-                continue
-            if (
-                current is None
-                or (is_portal and not portal_semester[course.user_id])
-                or course.semester > current
-            ):
-                latest_semester[course.user_id] = course.semester
-                portal_semester[course.user_id] = is_portal
+            bucket = (
+                portal_latest
+                if course.source == "ntust_portal"
+                else fallback_latest
+            )
+            current = bucket.get(course.user_id)
+            if current is None or course.semester > current:
+                bucket[course.user_id] = course.semester
+        latest_semester = {**fallback_latest, **portal_latest}
 
         eligible = [
             (course, override)
