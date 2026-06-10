@@ -48,7 +48,7 @@ import type {
 // gate on `platform` instead of `device_class` to catch the (rare but
 // real) older rows where `device_class` was left blank.
 const TABS: Array<{
-  key: "iphone" | "ipad" | "android";
+  key: "iphone" | "ipad" | "android" | "apple-deprecated";
   label: string;
   match: (d: DeviceRow) => boolean;
 }> = [
@@ -58,6 +58,11 @@ const TABS: Array<{
     key: "android",
     label: "Android",
     match: (d) => d.platform === "android",
+  },
+  {
+    key: "apple-deprecated",
+    label: "Apple (Deprecated)",
+    match: (d) => d.platform === "apple" && d.device_class === "",
   },
 ];
 
