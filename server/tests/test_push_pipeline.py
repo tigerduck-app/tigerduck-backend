@@ -93,11 +93,13 @@ def _job(user, **kwargs):
         dedupe_key=f"system:test:{kwargs.get('scenario', 's')}",
         channel="system",
         scenario="reauth_required",
-        fire_at=datetime.now(UTC) - timedelta(seconds=1),
-        # Explicit past value — the column's server_default now() is the
-        # INSERT transaction timestamp, which can land microseconds after
-        # the tick's claim cutoff and flake the test.
-        available_at=datetime.now(UTC) - timedelta(seconds=1),
+        # Explicit, COMFORTABLY past values. The column's server_default
+        # now() is the INSERT transaction timestamp (can land after the
+        # tick's claim cutoff), and a 1-second margin proved flaky when the
+        # host clock stepped backwards mid-run (NTP) — single-tick tests
+        # can't self-heal from a missed claim the way the loop tests do.
+        fire_at=datetime.now(UTC) - timedelta(minutes=5),
+        available_at=datetime.now(UTC) - timedelta(minutes=5),
         payload={"title": "t", "body": "b"},
     )
     defaults.update(kwargs)
@@ -234,7 +236,7 @@ async def test_fanout_to_all_devices_and_partial_failed(
 
     # Exhaust remaining rounds (delivery max_attempts=3, job max_attempts=3).
     for _ in range(4):
-        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        job.available_at = datetime.now(UTC) - timedelta(minutes=5)
         await db_session.commit()
         await run_push_tick(worker)
         await db_session.refresh(job)
@@ -377,7 +379,7 @@ async def test_all_skipped_after_token_dies_between_rounds(
         )
     ).scalar_one()
     for _ in range(4):
-        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        job.available_at = datetime.now(UTC) - timedelta(minutes=5)
         pending_delivery.next_retry_at = datetime.now(UTC) - timedelta(
             seconds=1
         )
@@ -411,7 +413,7 @@ async def test_exhausted_delivery_keeps_last_transport_error(
     )
     worker = _worker(prepared_engine, test_settings, apple=apple)
     for _ in range(5):
-        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        job.available_at = datetime.now(UTC) - timedelta(minutes=5)
         await db_session.commit()
         await run_push_tick(worker)
         await db_session.refresh(job)

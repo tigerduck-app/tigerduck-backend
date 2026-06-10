@@ -12,9 +12,24 @@ cancels pending jobs whose key is no longer valid.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, tzinfo
+import uuid
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 import structlog
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from server.auth.models import PushJob, PushJobStatus
+from server.config import Settings
+from server.db import session_scope
+from server.sync.models import (
+    UserCourse,
+    UserCourseOverride,
+    UserCourseSkippedDate,
+    UserSettingsDocument,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -83,3 +98,216 @@ def course_occurrences(
                 occurrences.add(occurrence.astimezone(window_start.tzinfo))
         local_date += timedelta(days=1)
     return sorted(occurrences)
+
+
+def _fmt_offset(minutes: float) -> str:
+    return f"{minutes:g}"
+
+
+def _dedupe_key(user_course_id: int, offset: float, start_epoch: int) -> str:
+    return (
+        f"course:{user_course_id}:reminder_{_fmt_offset(offset)}m:{start_epoch}"
+    )
+
+
+async def _course_prefs(
+    session: AsyncSession, user_ids: set[uuid.UUID], settings: Settings
+) -> dict[uuid.UUID, tuple[bool, list[float]]]:
+    """user_id → (enabled, offsets_minutes). Missing doc → server defaults.
+
+    Same shape as `reminders._notification_prefs` but reads the `courses`
+    section; the shared-default-tuple pattern is safe because entries are
+    replaced wholesale, never mutated.
+    """
+    docs = (
+        (
+            await session.execute(
+                select(UserSettingsDocument).where(
+                    UserSettingsDocument.user_id.in_(user_ids),
+                    UserSettingsDocument.namespace == "notification",
+                    UserSettingsDocument.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    default = (True, list(settings.course_reminder_default_offsets_minutes))
+    prefs: dict[uuid.UUID, tuple[bool, list[float]]] = dict.fromkeys(
+        user_ids, default
+    )
+    for doc in docs:
+        section = (doc.document or {}).get("courses") or {}
+        enabled = bool(section.get("enabled", True))
+        raw = section.get("reminder_offsets_minutes")
+        offsets = (
+            [float(value) for value in raw if isinstance(value, (int, float))]
+            if isinstance(raw, list)
+            else default[1]
+        )
+        prefs[doc.user_id] = (enabled, offsets)
+    return prefs
+
+
+async def scan_course_reminders(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+) -> int:
+    """One scan pass. Returns the number of push_jobs created.
+
+    Eligible courses: not deleted, enrolled, non-empty schedule, in the
+    user's LATEST semester (lexicographic max of "1141"-style strings —
+    older semesters must not keep firing weekly reminders), not hidden by
+    override. Occurrence dates listed in user_course_skipped_dates are
+    excluded. Cancellation mirrors assignment reminders: pending jobs
+    whose dedupe key no longer maps to an eligible (course, occurrence,
+    offset) tuple are cancelled, under SKIP LOCKED so a job the pipeline
+    is claiming concurrently is left alone.
+    """
+    now = datetime.now(UTC)
+    window_end = now + timedelta(hours=settings.course_reminder_window_hours)
+    tz = ZoneInfo(settings.course_reminder_timezone)
+    period_times = settings.course_period_start_times
+    created = 0
+    cancelled = 0
+
+    async with session_scope(session_factory) as session:
+        rows = (
+            await session.execute(
+                select(UserCourse, UserCourseOverride)
+                .outerjoin(
+                    UserCourseOverride,
+                    UserCourseOverride.user_course_id == UserCourse.id,
+                )
+                .where(
+                    UserCourse.deleted_at.is_(None),
+                    UserCourse.enrollment_status == "enrolled",
+                    func.jsonb_array_length(UserCourse.schedule_json) > 0,
+                )
+            )
+        ).all()
+
+        latest_semester: dict[uuid.UUID, str] = {}
+        for course, _override in rows:
+            current = latest_semester.get(course.user_id)
+            if current is None or course.semester > current:
+                latest_semester[course.user_id] = course.semester
+
+        eligible = [
+            (course, override)
+            for course, override in rows
+            if course.semester == latest_semester[course.user_id]
+            and not (override is not None and override.is_hidden)
+        ]
+        user_ids = {course.user_id for course, _ in eligible}
+
+        # SKIP LOCKED: don't fight the pipeline's claim — see
+        # reminders.scan_assignment_reminders for the race rationale.
+        pending_jobs = (
+            (
+                await session.execute(
+                    select(PushJob)
+                    .where(
+                        PushJob.channel == CHANNEL,
+                        PushJob.status == PushJobStatus.pending.value,
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        user_ids |= {job.user_id for job in pending_jobs}
+        if not user_ids:
+            return 0
+
+        prefs = await _course_prefs(session, user_ids, settings)
+
+        skipped: set[tuple[int, date]] = set()
+        course_ids = [course.id for course, _ in eligible]
+        if course_ids:
+            skip_rows = (
+                await session.execute(
+                    select(
+                        UserCourseSkippedDate.user_course_id,
+                        UserCourseSkippedDate.skipped_on,
+                    ).where(
+                        UserCourseSkippedDate.user_course_id.in_(course_ids),
+                        UserCourseSkippedDate.deleted_at.is_(None),
+                    )
+                )
+            ).all()
+            skipped = {(row.user_course_id, row.skipped_on) for row in skip_rows}
+
+        valid_keys: set[str] = set()
+        values: list[dict] = []
+        for course, override in eligible:
+            enabled, offsets = prefs[course.user_id]
+            if not enabled:
+                continue
+            occurrences = course_occurrences(
+                course.schedule_json,
+                window_start=now,
+                window_end=window_end,
+                tz=tz,
+                period_times=period_times,
+            )
+            display_name = (
+                override.custom_name
+                if override is not None and override.custom_name
+                else course.course_name
+            )
+            for occurrence in occurrences:
+                if (course.id, occurrence.astimezone(tz).date()) in skipped:
+                    continue
+                start_epoch = int(occurrence.timestamp())
+                for offset in offsets:
+                    fire_at = occurrence - timedelta(minutes=offset)
+                    key = _dedupe_key(course.id, offset, start_epoch)
+                    # Valid even when fire_at has passed — an already-due
+                    # pending job must not be cancelled mid-delivery.
+                    valid_keys.add(key)
+                    if fire_at <= now:
+                        continue
+                    body = f"{_fmt_offset(offset)} 分鐘後上課"
+                    if course.classroom:
+                        body += f" · {course.classroom}"
+                    values.append(
+                        {
+                            "user_id": course.user_id,
+                            "dedupe_key": key,
+                            "channel": CHANNEL,
+                            "scenario": f"reminder_{_fmt_offset(offset)}m",
+                            "fire_at": fire_at,
+                            "payload": {
+                                "kind": "course_reminder",
+                                "title": f"上課提醒：{display_name}",
+                                "body": body,
+                                "semester": course.semester,
+                                "course_key": course.course_key,
+                                "user_course_id": course.id,
+                                "starts_at": occurrence.isoformat(),
+                                "start_epoch": start_epoch,
+                                "offset_minutes": offset,
+                            },
+                        }
+                    )
+
+        if values:
+            result = await session.execute(
+                pg_insert(PushJob).values(values).on_conflict_do_nothing()
+            )
+            created = result.rowcount or 0
+
+        for job in pending_jobs:
+            if job.dedupe_key in valid_keys:
+                continue
+            job.status = PushJobStatus.cancelled.value
+            job.cancelled_at = now
+            cancelled += 1
+
+    if created or cancelled:
+        logger.info(
+            "push.course_reminders.scan", created=created, cancelled=cancelled
+        )
+    return created
