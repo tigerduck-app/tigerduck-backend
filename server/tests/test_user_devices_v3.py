@@ -235,3 +235,76 @@ async def test_session_revoked_when_own_device_deleted(client) -> None:
     async with factory() as session:
         rows = (await session.execute(select(AuthSession))).scalars().all()
         assert all(r.revoked_at is not None for r in rows)
+
+
+# --- Phase 4c: linked-user marker on device_registrations (review 1.8) ---
+
+
+V2_PAYLOAD = {
+    "user_id": "anon-1",
+    "device_id": "iphone-abc",
+    "pts_token_hex": "a1b2c3" * 10,
+    "bundle_id": "org.ntust.app.TigerDuck",
+    "attrs_type": "TigerDuckActivityAttributes",
+    "apns_env": "development",
+}
+
+
+async def _linked_user_id(client, device_id="iphone-abc"):
+    from server.models import DeviceRegistration
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = await session.get(DeviceRegistration, device_id)
+        return row.linked_user_id if row is not None else None
+
+
+async def test_v3_register_links_anonymous_registration(client) -> None:
+    assert (await client.post("/v2/devices/register", json=V2_PAYLOAD)).status_code == 200
+    login = await do_login(client)
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-abc", "platform": "ios"},
+    )
+    assert response.status_code == 200
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = (
+            await session.execute(
+                select(UserDevice).where(
+                    UserDevice.client_device_id == "iphone-abc"
+                )
+            )
+        ).scalar_one()
+        assert await _linked_user_id(client) == device.user_id
+
+
+async def test_v2_register_after_v3_rederives_marker(client) -> None:
+    login = await do_login(client)
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-abc", "platform": "ios"},
+    )
+    # Anonymous (dual-write) registration arrives AFTER the v3 one.
+    assert (await client.post("/v2/devices/register", json=V2_PAYLOAD)).status_code == 200
+    assert await _linked_user_id(client) is not None
+
+
+async def test_v3_device_delete_clears_marker(client) -> None:
+    await client.post("/v2/devices/register", json=V2_PAYLOAD)
+    login = await do_login(client)
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-abc", "platform": "ios"},
+    )
+    assert await _linked_user_id(client) is not None
+
+    response = await client.delete(
+        f"/v3/devices/{login['device_id']}", headers=bearer(login)
+    )
+    assert response.status_code == 204
+    assert await _linked_user_id(client) is None

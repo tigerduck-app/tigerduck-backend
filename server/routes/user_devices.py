@@ -14,7 +14,9 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
+
+from server.models import DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import (
@@ -72,6 +74,15 @@ async def register_device(
         push_token_id = await _upsert_push_token(
             session, device=device, token=payload.push_token, now=now
         )
+
+    # Phase 4c (review 1.8): if this physical device also has an anonymous
+    # v2 registration (same client device id), mark it as linked so the
+    # anonymous bulletin fan-out stops double-pushing to it.
+    await session.execute(
+        update(DeviceRegistration)
+        .where(DeviceRegistration.device_id == payload.client_device_id)
+        .values(linked_user_id=auth.user_id)
+    )
 
     logger.info(
         "device.v3.registered",
@@ -206,6 +217,17 @@ async def delete_device(
     ).scalars()
     for token in tokens:
         token.status = PushTokenStatus.invalidated.value
+
+    # Unlink the matching anonymous registration (if any) so the device
+    # falls back to the anonymous bulletin pipeline after sign-out.
+    await session.execute(
+        update(DeviceRegistration)
+        .where(
+            DeviceRegistration.device_id == device.client_device_id,
+            DeviceRegistration.linked_user_id == auth.user_id,
+        )
+        .values(linked_user_id=None)
+    )
 
     logger.info(
         "device.v3.deleted",
