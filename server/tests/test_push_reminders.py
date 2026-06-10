@@ -232,3 +232,35 @@ async def test_imminent_valid_job_not_cancelled(
     await scan_assignment_reminders(factory, test_settings)
     await db_session.refresh(target)
     assert target.status == "pending"  # still valid — not cancelled
+
+
+async def test_cancellation_is_user_scoped(
+    db_session, prepared_engine, test_settings
+):
+    """Greptile #1: two users share the same Moodle assignment (same id,
+    due, offset → same dedupe_key STRING). User B submitting must cancel
+    B's pending reminder even though user A's identical key stays valid."""
+    user_a = await _make_user(db_session, student_id="b11203058")
+    user_b = await _make_user(db_session, student_id="b11203059")
+    shared = dict(aid=42, due_in_hours=30.0)
+    a_row = _assignment(user_a, **shared)
+    b_row = _assignment(user_b, **shared)
+    # Identical due_at → identical due_epoch → identical dedupe_key.
+    b_row.due_at = a_row.due_at
+    db_session.add_all([a_row, b_row])
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    await scan_assignment_reminders(factory, test_settings)
+    jobs_b = await _jobs(db_session, user_b.id)
+    assert jobs_b and all(j.status == "pending" for j in jobs_b)
+
+    # B submits; A stays eligible with the same key string.
+    b_row.provider_is_submitted = True
+    await db_session.commit()
+
+    await scan_assignment_reminders(factory, test_settings)
+    jobs_a = await _jobs(db_session, user_a.id)
+    jobs_b = await _jobs(db_session, user_b.id)
+    assert all(j.status == "pending" for j in jobs_a)  # A untouched
+    assert all(j.status == "cancelled" for j in jobs_b)  # B cancelled

@@ -274,7 +274,11 @@ async def scan_course_reminders(
             ).all()
             skipped = {(row.user_course_id, row.skipped_on) for row in skip_rows}
 
-        valid_keys: set[str] = set()
+        # Scoped by user for symmetry with the assignment scan. Course
+        # keys embed the globally-unique user_course_id so the bare key
+        # would already be safe — but keeping the (user_id, key) shape
+        # stops anyone copying this pattern into a scan where it isn't.
+        valid_keys: set[tuple[uuid.UUID, str]] = set()
         values: list[dict] = []
         for course, override in eligible:
             enabled, offsets = prefs[course.user_id]
@@ -301,7 +305,7 @@ async def scan_course_reminders(
                     key = _dedupe_key(course.id, offset, start_epoch)
                     # Valid even when fire_at has passed — an already-due
                     # pending job must not be cancelled mid-delivery.
-                    valid_keys.add(key)
+                    valid_keys.add((course.user_id, key))
                     if fire_at <= now:
                         continue
                     body = f"{_fmt_offset(offset)} 分鐘後上課"
@@ -335,7 +339,7 @@ async def scan_course_reminders(
             created = result.rowcount or 0
 
         for job in pending_jobs:
-            if job.dedupe_key in valid_keys:
+            if (job.user_id, job.dedupe_key) in valid_keys:
                 continue
             job.status = PushJobStatus.cancelled.value
             job.cancelled_at = now

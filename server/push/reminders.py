@@ -148,7 +148,11 @@ async def scan_assignment_reminders(
 
         prefs = await _notification_prefs(session, user_ids, settings)
 
-        valid_keys: set[str] = set()
+        # Scoped by user: dedupe_key alone is NOT globally unique (the
+        # push_jobs index is (user_id, dedupe_key)) — two users sharing a
+        # Moodle assignment produce the same key string, and user A's
+        # still-eligible key must not keep user B's stale job alive.
+        valid_keys: set[tuple[uuid.UUID, str]] = set()
         values: list[dict] = []
         for assignment in eligible:
             enabled, offsets = prefs[assignment.user_id]
@@ -162,7 +166,7 @@ async def scan_assignment_reminders(
                 )
                 # Valid even when fire_at has passed — an already-due
                 # pending job must not be cancelled mid-delivery.
-                valid_keys.add(key)
+                valid_keys.add((assignment.user_id, key))
                 if fire_at <= now:
                     continue
                 values.append(
@@ -198,7 +202,7 @@ async def scan_assignment_reminders(
             created = result.rowcount or 0
 
         for job in pending_jobs:
-            if job.dedupe_key in valid_keys:
+            if (job.user_id, job.dedupe_key) in valid_keys:
                 continue
             job.status = PushJobStatus.cancelled.value
             job.cancelled_at = now
