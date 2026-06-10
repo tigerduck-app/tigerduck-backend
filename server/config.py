@@ -162,6 +162,38 @@ class Settings(BaseSettings):
     # be born in the past).
     assignment_reminder_window_hours: int = 168
 
+    # --- Course reminders (Phase 4b) ---
+    course_reminder_scan_interval_seconds: int = 600
+    course_reminder_window_hours: int = 48
+    # Minutes before class start; used when the user has no `notification`
+    # settings document (or no `courses.reminder_offsets_minutes`).
+    course_reminder_default_offsets_minutes: list[float] = Field(
+        default_factory=lambda: [10.0]
+    )
+    course_reminder_timezone: str = "Asia/Taipei"
+    # NTUST period number → local class start time (HH:MM). schedule_json
+    # periods are normalized via str() before lookup; unknown periods are
+    # ignored so a future timetable change degrades to "no reminder", not
+    # a crash.
+    course_period_start_times: dict[str, str] = Field(
+        default_factory=lambda: {
+            "1": "08:10",
+            "2": "09:10",
+            "3": "10:20",
+            "4": "11:20",
+            "5": "12:20",
+            "6": "13:20",
+            "7": "14:20",
+            "8": "15:30",
+            "9": "16:30",
+            "10": "17:30",
+            "A": "18:25",
+            "B": "19:20",
+            "C": "20:15",
+            "D": "21:10",
+        }
+    )
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"
