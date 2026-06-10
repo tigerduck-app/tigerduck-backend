@@ -185,3 +185,46 @@ async def test_run_now_no_job_and_invalid_credentials_409_without_provisioning(
     async with factory() as session:
         jobs = (await session.execute(select(SyncJob))).scalars().all()
         assert jobs == []  # nothing got provisioned
+
+async def test_run_now_disabled_policy_409_without_burning_cooldown(client):
+    """Greptile #4: with the policy disabled the executor never claims the
+    job — run-now must 409 up front instead of queueing + burning cooldown."""
+    from server.syncjobs.models import SyncPolicy
+
+    headers = await _login(client)
+    await _set_job(
+        client, run_after=datetime.now(UTC) + timedelta(hours=8), cursor={}
+    )
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        policy = (
+            await session.execute(
+                select(SyncPolicy).where(
+                    SyncPolicy.job_type == "moodle_assignments"
+                )
+            )
+        ).scalar_one()
+        policy.enabled = False
+        await session.commit()
+
+    try:
+        response = await client.post(
+            "/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["error"] == "policy_disabled"
+
+        job = await _get_job(client)
+        assert job.priority != 1  # not queued
+        assert "manual_requested_at" not in (job.cursor or {})  # no cooldown burned
+    finally:
+        async with factory() as session:
+            policy = (
+                await session.execute(
+                    select(SyncPolicy).where(
+                        SyncPolicy.job_type == "moodle_assignments"
+                    )
+                )
+            ).scalar_one()
+            policy.enabled = True
+            await session.commit()

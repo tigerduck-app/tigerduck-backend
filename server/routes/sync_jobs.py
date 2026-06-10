@@ -76,6 +76,26 @@ async def run_now(
     settings = request.app.state.settings
     now = datetime.now(UTC)
 
+    # Mirror the executor's claim eligibility (greptile #4): a disabled or
+    # out-of-window policy means the queued job would never be claimed —
+    # refuse up front instead of burning the cooldown on a dead queue.
+    policy = (
+        await session.execute(
+            select(SyncPolicy).where(SyncPolicy.job_type == job_type)
+        )
+    ).scalar_one_or_none()
+    policy_active = (
+        policy is not None
+        and policy.enabled
+        and (policy.active_from is None or policy.active_from <= now)
+        and (policy.active_until is None or policy.active_until > now)
+    )
+    if not policy_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"error": "policy_disabled"},
+        )
+
     job = (
         await session.execute(
             select(SyncJob)
