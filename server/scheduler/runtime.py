@@ -19,6 +19,7 @@ from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
+from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import scan_assignment_reminders
 from server.sync.retention import purge_expired_changelog
@@ -179,6 +180,9 @@ def build_scheduler(
         async def assignment_reminder_scan() -> None:
             await scan_assignment_reminders(session_factory, settings)
 
+        async def course_reminder_scan() -> None:
+            await scan_course_reminders(session_factory, settings)
+
         scheduler.add_job(
             push_pipeline_tick,
             trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
@@ -193,6 +197,16 @@ def build_scheduler(
                 seconds=settings.assignment_reminder_scan_interval_seconds
             ),
             id="assignment_reminder_scan",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            course_reminder_scan,
+            trigger=IntervalTrigger(
+                seconds=settings.course_reminder_scan_interval_seconds
+            ),
+            id="course_reminder_scan",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,

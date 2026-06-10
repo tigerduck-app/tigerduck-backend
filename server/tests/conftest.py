@@ -86,6 +86,7 @@ def test_settings() -> Settings:
         sync_job_tick_seconds=99999,
         push_pipeline_tick_seconds=99999,
         assignment_reminder_scan_interval_seconds=99999,
+        course_reminder_scan_interval_seconds=99999,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
         auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",
