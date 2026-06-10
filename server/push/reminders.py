@@ -122,14 +122,21 @@ async def scan_assignment_reminders(
         user_ids = {a.user_id for a in eligible}
 
         # Pending reminder jobs of EVERY user — also covers users whose
-        # last eligible assignment just got submitted/deleted.
+        # last eligible assignment just got submitted/deleted. The set is
+        # bounded by outstanding (not yet fired) reminders, which the
+        # cancellation pass must examine anyway. SKIP LOCKED: a row the
+        # pipeline is concurrently claiming must not be cancelled here —
+        # the scan would overwrite its `processing` status after the
+        # claim commits and silently drop the notification.
         pending_jobs = (
             (
                 await session.execute(
-                    select(PushJob).where(
+                    select(PushJob)
+                    .where(
                         PushJob.channel == CHANNEL,
                         PushJob.status == PushJobStatus.pending.value,
                     )
+                    .with_for_update(skip_locked=True)
                 )
             )
             .scalars()
@@ -176,7 +183,9 @@ async def scan_assignment_reminders(
                             "moodle_course_id": assignment.moodle_course_id,
                             "due_at": assignment.due_at.isoformat(),
                             "due_epoch": due_epoch,
-                            "moodle_url": assignment.moodle_url,
+                            # No moodle_url: client-uploaded URLs are
+                            # untrusted (could embed session params); the
+                            # client deep-links from the moodle ids.
                             "offset_hours": offset,
                         },
                     }

@@ -348,3 +348,85 @@ async def test_live_activity_tokens_excluded(
     worker = _worker(prepared_engine, test_settings, apple=apple)
     await run_push_tick(worker)
     assert len(apple.requests) == 1  # standard token only
+
+
+async def test_all_skipped_after_token_dies_between_rounds(
+    db_session, prepared_engine, test_settings
+):
+    user, _, token = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender(
+        [SendResult(success=False, status="UNKNOWN", description="blip")] * 2
+    )
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+
+    # Round 1: transient failure → delivery stays pending, job re-queued.
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "pending"
+
+    # Token dies between rounds; drive remaining rounds (also pull the
+    # delivery's retry backoff into the past so the round attempts it).
+    token.status = "invalidated"
+    pending_delivery = (
+        await db_session.execute(
+            select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+        )
+    ).scalar_one()
+    for _ in range(4):
+        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        pending_delivery.next_retry_at = datetime.now(UTC) - timedelta(
+            seconds=1
+        )
+        await db_session.commit()
+        await run_push_tick(worker)
+        await db_session.refresh(job)
+        await db_session.refresh(pending_delivery)
+        if job.status != "pending":
+            break
+
+    assert job.status == "failed"
+    assert job.last_error == "all_tokens_skipped"
+    delivery = (
+        await db_session.execute(
+            select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+        )
+    ).scalar_one()
+    assert delivery.status == "skipped"
+
+
+async def test_exhausted_delivery_keeps_last_transport_error(
+    db_session, prepared_engine, test_settings
+):
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender(
+        [SendResult(success=False, status="UNKNOWN", description="boom")] * 5
+    )
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    for _ in range(5):
+        job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+        await db_session.commit()
+        await run_push_tick(worker)
+        await db_session.refresh(job)
+        if job.status != "pending":
+            break
+
+    assert job.status == "failed"
+    delivery = (
+        await db_session.execute(
+            select(PushDelivery)
+            .where(PushDelivery.push_job_id == job.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert delivery.status == "failed"
+    # The real transport error survives — not overwritten by
+    # retries_exhausted bookkeeping.
+    assert delivery.failure_code == "UNKNOWN"

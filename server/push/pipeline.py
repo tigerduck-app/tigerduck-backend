@@ -267,18 +267,23 @@ async def _deliver_round(
         for delivery in deliveries:
             if delivery.status == PushDeliveryStatus.pending.value:
                 delivery.status = PushDeliveryStatus.failed.value
-                delivery.failure_code = "retries_exhausted"
+                # Keep the last real transport error if one was recorded.
+                if delivery.failure_code is None:
+                    delivery.failure_code = "retries_exhausted"
         statuses = [d.status for d in deliveries]
 
     sent = statuses.count(PushDeliveryStatus.sent.value)
     failed = statuses.count(PushDeliveryStatus.failed.value)
     if sent and not failed:
+        # skipped deliveries don't demote a sent job (spec §5).
         job.status = PushJobStatus.sent.value
     elif sent:
         job.status = PushJobStatus.partial_failed.value
     else:
         job.status = PushJobStatus.failed.value
-        job.last_error = "all_deliveries_failed"
+        job.last_error = (
+            "all_tokens_skipped" if not failed else "all_deliveries_failed"
+        )
     if sent:
         job.sent_at = now
     job.locked_by = None
@@ -345,4 +350,9 @@ async def _send_one(
     if delivery.attempts >= delivery.max_attempts:
         delivery.status = PushDeliveryStatus.failed.value
     else:
-        delivery.next_retry_at = now + timedelta(seconds=60 * delivery.attempts)
+        # Flat delay aligned with the job's round delay — a growing
+        # per-delivery backoff could outlive the job's remaining rounds
+        # and force-fail a delivery that never used all its attempts.
+        delivery.next_retry_at = now + timedelta(
+            seconds=worker.settings.push_retry_round_delay_seconds
+        )
