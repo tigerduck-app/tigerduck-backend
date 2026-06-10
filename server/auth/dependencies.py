@@ -63,6 +63,15 @@ async def require_user(
             detail="session_revoked",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # Defense-in-depth: the JWT's sub must own the session it points at.
+    # Not reachable today without the signing secret, but a free check on
+    # the row we already loaded.
+    if auth_session.user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session_user_mismatch",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id
     )

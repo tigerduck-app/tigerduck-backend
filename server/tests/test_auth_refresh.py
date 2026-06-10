@@ -152,3 +152,27 @@ async def test_expired_session_401(client) -> None:
     )
     assert response.status_code == 401
     assert response.json()["detail"] == "refresh_token_expired"
+
+async def test_grace_retry_is_one_shot(client) -> None:
+    """Final review F1: replaying token A a SECOND time within the grace
+    window must be treated as theft, not another benign retry — otherwise
+    an attacker holding A can mint unbounded live sessions for 60s."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+
+    first = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
+    assert first.status_code == 200
+
+    retry = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
+    assert retry.status_code == 200  # the one benign grace retry
+    token_c = retry.json()["refresh_token"]
+
+    second_retry = await client.post(
+        "/v3/auth/refresh", json={"refresh_token": token_a}
+    )
+    assert second_retry.status_code == 401
+    assert second_retry.json()["detail"] == "refresh_reuse_detected"
+
+    # Family revoked: the session minted by the first grace retry dies too.
+    dead = await client.post("/v3/auth/refresh", json={"refresh_token": token_c})
+    assert dead.status_code == 401

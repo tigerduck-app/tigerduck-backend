@@ -291,6 +291,12 @@ async def _handle_revoked_reuse(
         and auth_session.revoked_at > now - grace
         and successor is not None
         and successor.revoked_at is None
+        # One-shot: the grace path itself re-stamps revoked_at (via
+        # _rotate), which would otherwise keep the window sliding and let
+        # a holder of the old token mint live sessions indefinitely.
+        # reuse_detected_at doubles as the "grace consumed" marker — the
+        # token WAS reused, just benignly, exactly once.
+        and auth_session.reuse_detected_at is None
     )
     if is_benign_retry:
         assert successor is not None
@@ -303,7 +309,9 @@ async def _handle_revoked_reuse(
             session_id=auth_session.id,
             lost_successor_id=successor.id,
         )
-        return await _rotate(session, settings, auth_session, now)
+        result = await _rotate(session, settings, auth_session, now)
+        auth_session.reuse_detected_at = now
+        return result
 
     auth_session.reuse_detected_at = now
     await _revoke_family(session, auth_session, now)
