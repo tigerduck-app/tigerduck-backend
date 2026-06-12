@@ -23,6 +23,7 @@ import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.auth.models import DevicePushToken, PushTokenStatus, UserDevice
 from server.config import Settings
 from server.models import (
     DeviceRegistration,
@@ -166,9 +167,10 @@ async def dispatch_due_pushes(
 
         for token, device in activity_rows:
             dispatched += 1
+            update_token = await _resolve_update_token(session, token, device)
             try:
                 request = build_live_activity_end_request(
-                    update_token=token.update_token_hex,
+                    update_token=update_token,
                     bundle_id=device.bundle_id,
                     snapshot=token.snapshot_json,
                     now=ts,
@@ -218,6 +220,41 @@ async def dispatch_due_pushes(
 
 
 # --- Internals ---
+
+
+async def _resolve_update_token(
+    session: AsyncSession,
+    token: LiveActivityUpdateToken,
+    device: DeviceRegistration,
+) -> str:
+    """Phase 4d: prefer the freshest v3 `device_push_tokens` row for this
+    activity (token_kind='live_activity_update', scope_key
+    `{scenario}:{source_id}`, reachable via the device's linked user).
+    iOS rotates Live Activity update tokens; a logged-in app registers
+    rotations through /v3/devices/register, so the v3 row can be newer
+    than the v2 snapshot. The v2 column stays as the read fallback during
+    the migration (spec 4d)."""
+    if device.linked_user_id is None:
+        return token.update_token_hex
+    scope_key = f"{token.scenario}:{token.source_id}"
+    v3_token = (
+        await session.execute(
+            select(DevicePushToken.token_value)
+            .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
+            .where(
+                UserDevice.user_id == device.linked_user_id,
+                UserDevice.deleted_at.is_(None),
+                DevicePushToken.token_kind == "live_activity_update",
+                DevicePushToken.status == PushTokenStatus.active.value,
+                DevicePushToken.scope_key == scope_key,
+            )
+            .order_by(
+                DevicePushToken.created_at.desc(), DevicePushToken.id.desc()
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return v3_token or token.update_token_hex
 
 
 async def _send_safely(sender: PushSender, request: ApnsRequest) -> SendResult:

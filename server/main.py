@@ -16,18 +16,32 @@ import structlog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 
 from server import __version__
+from server.auth.crypto import CredentialCipher, CredentialCipherError
+from server.auth.moodle import HttpMoodleVerifier
+from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
-from server.db import build_engine, build_session_factory
+from server.db import build_engine, build_session_factory, session_scope
 from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
+from server.routes import academics as academics_routes
+from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
+from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import custom_push as custom_push_routes
 from server.routes import debug as debug_routes
 from server.routes import device_lists as device_lists_routes
 from server.routes import devices as devices_routes
 from server.routes import live_activities as live_activities_routes
 from server.routes import schedule as schedule_routes
+from server.routes import settings_docs as settings_docs_routes
+from server.routes import sync as sync_routes
+from server.routes import sync_jobs as sync_jobs_routes
+from server.routes import user_devices as user_devices_routes
+from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
+from server.syncjobs.executor import SyncWorker, default_worker_id
+from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpTokenObtainer
+from server.syncjobs.policies import ensure_default_policies
 
 logger = structlog.get_logger(__name__)
 
@@ -99,8 +113,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
+    async with session_scope(session_factory) as seed_session:
+        await ensure_default_policies(seed_session)
     router = build_router(settings)
-    scheduler = build_scheduler(session_factory, router, settings)
+    cipher = app.state.credential_cipher
+    sync_worker = None
+    if cipher is not None:
+        sync_worker = SyncWorker(
+            session_factory=session_factory,
+            settings=settings,
+            cipher=cipher,
+            fetcher=HttpAssignmentFetcher(
+                base_url=settings.moodle_base_url,
+                timeout_seconds=settings.moodle_fetch_timeout_seconds,
+            ),
+            token_obtainer=HttpTokenObtainer(
+                base_url=settings.moodle_base_url,
+                timeout_seconds=settings.moodle_fetch_timeout_seconds,
+            ),
+            worker_id=default_worker_id(),
+        )
+    else:
+        logger.warning("syncjobs.disabled_no_credential_keys")
+    push_worker = PushPipelineWorker(
+        session_factory=session_factory,
+        settings=settings,
+        router=router,
+        worker_id=default_worker_id(),
+    )
+    scheduler = build_scheduler(
+        session_factory,
+        router,
+        settings,
+        sync_worker=sync_worker,
+        push_worker=push_worker,
+    )
 
     app.state.engine = engine
     app.state.session_factory = session_factory
@@ -151,9 +198,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
+    # /v3 collaborators live on app.state (not lifespan) so tests can swap
+    # them before issuing requests. The cipher is None when credential keys
+    # are unconfigured — /v3 auth then answers 503 auth_not_configured.
+    app.state.moodle_verifier = HttpMoodleVerifier(
+        base_url=settings.moodle_base_url,
+        timeout_seconds=settings.moodle_verify_timeout_seconds,
+    )
+    app.state.login_limiter = SlidingWindowLimiter(
+        max_attempts=settings.auth_login_max_attempts,
+        window_seconds=settings.auth_login_window_seconds,
+    )
+    try:
+        app.state.credential_cipher = CredentialCipher.from_settings(settings)
+    except CredentialCipherError:
+        app.state.credential_cipher = None
+
     _mount_api(app, settings.api_base_path, env=settings.env)
     for legacy in settings.api_legacy_base_paths:
         _mount_api(app, legacy, env=settings.env)
+    if settings.api_v3_base_path:
+        _mount_api_v3(app, settings.api_v3_base_path)
 
     if settings.api_legacy_base_paths:
         _install_deprecation_middleware(
@@ -192,6 +257,21 @@ def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
     app.include_router(bulletins_routes.admin_router, prefix=prefix)
     app.include_router(custom_push_routes.router, prefix=prefix)
     app.include_router(device_lists_routes.router, prefix=prefix)
+
+
+def _mount_api_v3(app: FastAPI, prefix: str) -> None:
+    """Mount the user-account (/v3) routers. Kept separate from _mount_api:
+    the v2/v1 surface is device-centric and frozen; v3 is user-centric."""
+    app.include_router(auth_routes.router, prefix=prefix)
+    app.include_router(user_devices_routes.router, prefix=prefix)
+    app.include_router(sync_routes.router, prefix=prefix)
+    app.include_router(sync_jobs_routes.router, prefix=prefix)
+    app.include_router(sync_jobs_routes.admin_router, prefix=prefix)
+    app.include_router(academics_routes.courses_router, prefix=prefix)
+    app.include_router(academics_routes.assignments_router, prefix=prefix)
+    app.include_router(settings_docs_routes.router, prefix=prefix)
+    app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
+    app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
 
 
 def _install_deprecation_middleware(

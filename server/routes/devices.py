@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from server.auth.models import UserDevice
 from server.db import SessionDep
 from server.models import DeviceRegistration
 from server.schemas import (
@@ -123,6 +124,21 @@ async def register_device(
     # satisfied without a migration.
     attrs_type = payload.attrs_type or ""
     apns_env = payload.apns_env or ""
+    # Phase 4c (review 1.8): the app dual-writes /v2 and /v3 device
+    # registrations in either order. Re-derive the linked-user marker here
+    # so a v2 registration arriving AFTER the v3 one still gets flagged
+    # (and a device with no active v3 user_device gets unflagged).
+    linked_user_id = (
+        await session.execute(
+            select(UserDevice.user_id)
+            .where(
+                UserDevice.client_device_id == payload.device_id,
+                UserDevice.deleted_at.is_(None),
+            )
+            .order_by(UserDevice.last_seen_at.desc().nulls_last())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
     stmt = (
         pg_insert(DeviceRegistration)
         .values(
@@ -136,6 +152,7 @@ async def register_device(
             apns_env=apns_env,
             device_class=payload.device_class,
             server_push_enabled=payload.server_push_enabled,
+            linked_user_id=linked_user_id,
         )
         .on_conflict_do_update(
             index_elements=[DeviceRegistration.device_id],
@@ -149,6 +166,7 @@ async def register_device(
                 "apns_env": apns_env,
                 "device_class": payload.device_class,
                 "server_push_enabled": payload.server_push_enabled,
+                "linked_user_id": linked_user_id,
                 "updated_at": func.now(),
             },
         )

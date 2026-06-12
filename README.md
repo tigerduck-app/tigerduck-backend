@@ -16,31 +16,52 @@
 
 ## 總覽
 
-TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) iOS App 的後端服務，跑在 `api.tigerduck.app`。負責三件事：
+TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) iOS App 的後端服務，跑在 `api.tigerduck.app`。負責五件事：
 
-- 📣 **公告管線** — 抓取 NTUST 各處室公告 → 去重 → LLM 分類（canonical_org / content_tags / importance）→ 訂閱比對 → 推播
-- 📲 **推播服務** — APNs Push-to-Start（iOS Live Activity 啟動）、FCM fan-out（Android 推播）、bad-token 分類與清理
-- ⏰ **排程同步** — Live Activity token 重送、課表 schedule sync、retention 清理，全部走 APScheduler 單一 worker 在 FastAPI lifespan 內
+- 🔐 **帳號與認證（v3）** — NTUST SSO 登入驗證、JWT access + refresh rotation（盜用偵測滅族）、AES-256-GCM 憑證加密儲存、使用者裝置與 push token 管理
+- 🔄 **使用者資料同步（v3）** — 課表 / 作業 / 設定 / 公告訂閱的多裝置同步：client 初始上傳 + per-user changelog 增量下行，伺服器端再定期代抓 Moodle 作業權威更新
+- 📣 **公告管線** — 抓取 NTUST 各處室公告 → 去重 → LLM 分類（canonical_org / content_tags / importance）→ 訂閱比對 → 推播（匿名裝置與登入使用者雙軌）
+- 📲 **推播服務** — 登入使用者走 `push_jobs` → `push_deliveries` 兩階段投遞（作業 / 課程提醒、公告、系統通知）；APNs Push-to-Start（iOS Live Activity）、FCM fan-out（Android）、bad-token 分類與清理
+- ⏰ **排程同步** — server-side academic sync、推播 pipeline、提醒掃描、Live Activity token、retention 清理，全部走 APScheduler 單一 worker 在 FastAPI lifespan 內
 
 服務本身刻意做得「**容器化、可重起、無狀態**」：所有狀態都在 Postgres，重啟 backend 容器不會丟事件、scheduler 也會接著做。
 
 ## 功能模組
 
+### 🔐 帳號與認證（`server/auth/`）
+- **登入** — App 端完成 NTUST SSO 後，後端用 Moodle token 驗證身分（不代打 SSO，避免觸發學校 IP rate limit）
+- **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session，60 秒內的單次 grace 重試容忍掉線 client
+- **憑證保管** — NTUST 密碼以 AES-256-GCM + per-row AAD 加密存放（支援金鑰輪替），僅供伺服器端 Moodle token 刷新使用
+- **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token
+
+### 🔄 使用者同步（`server/sync/`）
+- **Client-authoritative 鏡像** — 課表（含 schedule_json）、作業快照、per-field overrides、設定文件（namespace + revision 樂觀並發）、公告訂閱與已讀狀態
+- **增量同步** — per-user changelog：revision 嚴格遞增（row lock 保證 commit 順序 = revision 順序），client 用 `since_revision` 拉增量；過舊回 410 觸發 full sync
+- **Retention** — changelog 定期壓縮清理，記錄 compacted revision 供 410 判斷
+
+### 🎓 Server-Side Academic Sync（`server/syncjobs/`）
+- **排程代抓** — `sync_policies`（admin 可調）× `sync_jobs`（登入時 provision）× `sync_runs`（審計）；executor 用 advisory lock + `FOR UPDATE SKIP LOCKED` 認領，多 worker 安全
+- **密碼鐵律** — 每次 SSO 嘗試前先 durably commit attempt marker，密碼最多用一次；認證類失敗絕不重試，直接停用同步並排一筆 reauth 系統通知
+- **作業鏡像** — 抓 Moodle 作業權威 upsert / 軟刪除，寫入 changelog 讓所有裝置同步
+- **Pull-to-refresh** — `POST /v3/sync-jobs/run-now`（per-user cooldown，policy 停用時拒絕）
+
 ### 📣 公告（`server/bulletins/`）
 - **scraper** — 從 NTUST 公告列表抓 HTML、解 metadata；TLS chain 是壞的所以走自簽 CA bundle 或 `verify=False`
 - **dedup** — `content_hash` 去重（同 source、同 hash 視為 repost，標 `skipped` 不重發推播）
 - **LLM 分類** — OpenAI-compatible API（預設指向 host 上的 [llama-server](https://github.com/ggml-org/llama.cpp)），輸出 `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`
-- **訂閱比對 + dispatch** — 比對每個裝置的 `BulletinSubscription` 規則，命中後送 APNs / FCM
+- **訂閱比對 + dispatch（雙軌）** — 匿名裝置比對 `BulletinSubscription` 走既有 `bulletin_dispatches`；登入使用者比對 `user_bulletin_subscriptions` 走 `bulletin_user_matches` + `push_jobs`。同一實體裝置登入後標記 `linked_user_id`，匿名管道跳過避免重複推播
 - **狀態機** — `pending` → `processed` / `skipped` / `failed`；`failed` 也會在 attempts 未滿前回到 `pending` 重試
 
-### 📲 推播
-- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end
+### 📲 推播（`server/push/`）
+- **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
+- **提醒來源** — 作業提醒（due 前 24h / 2h，依使用者 notification 設定）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
+- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；登入裝置優先採用 v3 註冊的 update token（v2 舊表為 fallback）
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token
-- **shared secret** — 寫入類路由（裝置註冊、訂閱寫入）需驗 `X-Shared-Secret`，讀類路由（公告 list / detail / taxonomy）開放
+- **認證** — v3 路由走 Bearer JWT；v2 寫入類路由（裝置註冊、訂閱寫入）驗 `X-Shared-Secret`，讀類路由（公告 list / detail / taxonomy）開放
 
 ### ⏰ 排程
 - **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send（見 [`docs/scheduler.md`](docs/scheduler.md)）
-- **tick 設計** — scrape / process / dispatch / retention 各自 interval trigger，互不阻塞
+- **tick 設計** — 公告 scrape / process / dispatch（匿名 + 使用者層）、sync jobs、推播 pipeline、作業 / 課程提醒掃描、retention 各自 interval trigger，互不阻塞；跨 worker 安全由 DB 鎖保證（advisory lock + `SKIP LOCKED`）
 
 ## 技術棧
 
@@ -189,6 +210,29 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 `/v1/*` 保留為 deprecated alias，iOS 1.6.1 起改打 `/v2`。
 
+## API 端點概覽（v3 — 使用者帳號）
+
+v3 是 user-centric 的新介面（v2 為 device-centric，維持凍結）。除標註外都走 `Authorization: Bearer <JWT>`。
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `POST` | `/v3/auth/login` | NTUST SSO 登入（Moodle token 驗證）→ access + refresh token | 無 |
+| `POST` | `/v3/auth/refresh` | refresh token rotation（重放偵測滅族） | refresh token |
+| `POST` | `/v3/auth/logout` | 撤銷目前 session | JWT |
+| `POST/GET` | `/v3/devices/register`、`/v3/devices` | 使用者裝置 + push token 註冊 / 列表 | JWT |
+| `DELETE` | `/v3/devices/{id}` | 刪除裝置（連動撤銷 session、失效 token） | JWT |
+| `POST` | `/v3/sync/initial-upload` | 初始上傳本機資料（課表 / 作業 / 設定 / 訂閱） | JWT |
+| `GET` | `/v3/sync?since_revision=N` | changelog 增量同步（過舊回 410） | JWT |
+| `GET` | `/v3/sync/full` | 全量快照 | JWT |
+| `GET` | `/v3/courses`、`/v3/assignments` | 課表 / 作業列表 | JWT |
+| `PUT` | `/v3/courses/{id}/override`、`/v3/courses/{id}/skipped-dates/{date}` | 課程覆寫 / 停課日 | JWT |
+| `PUT` | `/v3/assignments/{id}/override` | 作業本機狀態（完成 / 忽略 / 封存） | JWT |
+| `GET/PUT` | `/v3/settings/{namespace}` | 設定文件（revision 樂觀並發，衝突回 409） | JWT |
+| `GET/POST/PATCH/DELETE` | `/v3/bulletin-subscriptions[/{id}]` | 使用者公告訂閱規則（PATCH 用 base_revision；DELETE 可選帶） | JWT |
+| `GET/PUT` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |
+| `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh 觸發伺服器代抓（cooldown） | JWT |
+| `GET/PATCH` | `/v3/admin/sync-policies[/{job_type}]` | 同步策略管理 | shared secret |
+
 ## 開發
 
 ```bash
@@ -213,10 +257,13 @@ tigerduck-backend/
 │   ├── db.py / models.py        # SQLAlchemy async engine、DeviceRegistration
 │   ├── security.py              # shared-secret dependency
 │   ├── _ssl_compat.py           # OpenSSL 3 寬容模式（NTUST TLS chain 是壞的）
-│   ├── routes/                  # devices / schedule / bulletins / live_activities / custom_push / device_lists / debug
-│   ├── push/                    # apns_client / fcm_client / payload / router
+│   ├── auth/                    # v3 身分層：crypto（憑證加密）/ tokens / service / rate_limit / moodle / models
+│   ├── sync/                    # v3 使用者同步：upload / changelog / serializers / retention / models
+│   ├── syncjobs/                # 伺服器代抓：executor / credentials（密碼鐵律）/ moodle_client / assignments / provisioning
+│   ├── routes/                  # v2：devices / schedule / bulletins / …；v3：auth / user_devices / sync / academics / settings_docs / bulletins_v3 / sync_jobs
+│   ├── push/                    # apns_client / fcm_client / router / pipeline（兩階段投遞）/ reminders / course_reminders / job_payloads
 │   ├── scheduler/               # APScheduler runtime、dispatch、retention
-│   ├── bulletins/               # scraper / dedup / matcher / dispatcher / taxonomy
+│   ├── bulletins/               # scraper / dedup / matcher / dispatcher（匿名）/ user_dispatch（登入使用者）/ taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt
 │   ├── secrets/                 # APNs .p8（gitignored）
 │   ├── migrations/              # Alembic

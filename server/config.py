@@ -38,6 +38,44 @@ class Settings(BaseSettings):
     # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
     api_shared_secret: str = ""
 
+    # --- v3 user accounts / auth ---
+    api_v3_base_path: str = "/v3"
+    # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
+    # (login returns 503) — mirrors the api_shared_secret dev convention.
+    auth_jwt_secret: str = ""
+    # Separate HMAC-SHA-256 key for refresh-token hashing (key separation:
+    # a leaked JWT secret must not let an attacker forge refresh hashes).
+    auth_refresh_hmac_key: str = ""
+    auth_access_token_ttl_seconds: int = 900  # 15 min
+    auth_refresh_token_ttl_days: int = 90
+    # After a refresh rotation, the superseded token stays redeemable for
+    # this long so a client whose rotation response was lost in transit can
+    # retry without tripping reuse detection (which would log the whole
+    # device out). Reuse outside this window IS treated as theft.
+    auth_refresh_reuse_grace_seconds: int = 60
+    # Login rate limit: N attempts per window, applied independently to the
+    # student_id and the client IP. Protects both against credential
+    # stuffing and against our single server IP getting blocked by Moodle.
+    auth_login_max_attempts: int = 5
+    auth_login_window_seconds: int = 900
+    # Behind nginx-proxy-manager the socket peer is always the proxy, which
+    # would collapse every user into one per-IP rate-limit bucket. Enable
+    # this ONLY when a trusted proxy strips/sets X-Forwarded-For; when off,
+    # the header is ignored (it is client-spoofable without a proxy).
+    auth_trust_forwarded_for: bool = False
+
+    # --- Credential envelope encryption ---
+    # key_id -> base64-encoded 32-byte AES-256 key. Multiple entries allow
+    # key rotation: new rows encrypt with `credential_active_key_id`, old
+    # rows decrypt with whichever key_id they were written under.
+    # Env format: TIGERDUCK_CREDENTIAL_KEYS='{"v1":"<base64 32 bytes>"}'
+    credential_keys: dict[str, str] = Field(default_factory=dict)
+    credential_active_key_id: str = ""
+
+    # --- Moodle token verification (login-time check only) ---
+    moodle_base_url: str = "https://moodle.ntust.edu.tw"
+    moodle_verify_timeout_seconds: float = 10.0
+
     # --- Database ---
     # e.g. postgresql+asyncpg://tigerduck:password@localhost:5432/tigerduck
     database_url: str = Field(
@@ -82,6 +120,80 @@ class Settings(BaseSettings):
     live_activity_token_retention_days: int = 30
     live_activity_token_retention_interval_hours: int = 24
 
+    # --- Sync change log retention ---
+    # Entries older than this are purged; clients further behind than the
+    # purge watermark get HTTP 410 and full-sync.
+    sync_changelog_retention_days: int = 30
+    sync_changelog_retention_interval_hours: int = 24
+
+    # --- Server-side sync jobs (Phase 3) ---
+    sync_job_tick_seconds: int = 30
+    # Max jobs claimed per tick by ONE worker.
+    sync_job_batch_size: int = 5
+    # Cap on `status='running'` rows ACROSS all workers — counted before
+    # claiming so multiple instances can't collectively hammer the school
+    # APIs from our single egress IP (security review suggestion).
+    sync_job_global_concurrency: int = 5
+    sync_job_stale_lock_minutes: int = 10
+    # Retriable-failure backoff: base * 2^(attempts-1), capped.
+    sync_job_backoff_base_seconds: int = 300
+    sync_job_backoff_cap_seconds: int = 3600
+    # Pull-to-refresh per-user-per-job-type cooldown.
+    sync_job_manual_cooldown_seconds: int = 60
+    # Moodle webservice fetch timeout (sync worker, not login verify).
+    moodle_fetch_timeout_seconds: float = 20.0
+
+    # --- User push pipeline (Phase 4) ---
+    push_pipeline_tick_seconds: int = 30
+    push_pipeline_batch_size: int = 10
+    push_job_stale_lock_minutes: int = 5
+    # Delay before a job with still-pending deliveries gets another round.
+    push_retry_round_delay_seconds: int = 60
+
+    # --- Assignment reminders (Phase 4a) ---
+    assignment_reminder_scan_interval_seconds: int = 300
+    # Server-side default when a user has no `notification` settings
+    # document. Deliberately lighter than the client's six-offset default.
+    assignment_reminder_default_offsets_hours: list[float] = Field(
+        default_factory=lambda: [24.0, 2.0]
+    )
+    # Assignments due further out than this are picked up by a later scan;
+    # offsets larger than the window are unsupported (the reminder would
+    # be born in the past).
+    assignment_reminder_window_hours: int = 168
+
+    # --- Course reminders (Phase 4b) ---
+    course_reminder_scan_interval_seconds: int = 600
+    course_reminder_window_hours: int = 48
+    # Minutes before class start; used when the user has no `notification`
+    # settings document (or no `courses.reminder_offsets_minutes`).
+    course_reminder_default_offsets_minutes: list[float] = Field(
+        default_factory=lambda: [10.0]
+    )
+    course_reminder_timezone: str = "Asia/Taipei"
+    # NTUST period number → local class start time (HH:MM). schedule_json
+    # periods are normalized via str() before lookup; unknown periods are
+    # ignored so a future timetable change degrades to "no reminder", not
+    # a crash.
+    course_period_start_times: dict[str, str] = Field(
+        default_factory=lambda: {
+            "1": "08:10",
+            "2": "09:10",
+            "3": "10:20",
+            "4": "11:20",
+            "5": "12:20",
+            "6": "13:20",
+            "7": "14:20",
+            "8": "15:30",
+            "9": "16:30",
+            "10": "17:30",
+            "A": "18:25",
+            "B": "19:20",
+            "C": "20:15",
+            "D": "21:10",
+        }
+    )
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"
@@ -89,6 +201,9 @@ class Settings(BaseSettings):
     bulletin_scrape_interval_seconds: int = 600   # 10 min
     bulletin_process_interval_seconds: int = 60
     bulletin_dispatch_interval_seconds: int = 60
+    # Phase 4c: user-level (logged-in) bulletin fan-out via push_jobs.
+    bulletin_user_dispatch_interval_seconds: int = 60
+    bulletin_user_dispatch_batch_size: int = 10
     # Rows whose last_seen_at is older than N scrape cycles get is_deleted=true.
     bulletin_stale_cycles: int = 3
     # Max processing retries before giving up on a bulletin.
