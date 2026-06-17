@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import Settings
+from .db import close_pool, open_pool
 from .routes import (
     announcement,
     backup,
@@ -34,7 +35,6 @@ from .routes import (
     devices,
     logs,
     status,
-    test_push,
 )
 
 
@@ -48,7 +48,12 @@ _WEB_DIST = _APP_DIR.parent / "web" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = Settings.from_env()
-    yield
+    # Operator routes read/write postgres directly over tigerduck-db.
+    await open_pool(app)
+    try:
+        yield
+    finally:
+        await close_pool(app)
 
 
 app = FastAPI(title="TigerDuck Backend Portal", lifespan=lifespan)
@@ -75,7 +80,6 @@ app.include_router(announcement.router)
 app.include_router(custom_push.router)
 app.include_router(devices.router)
 app.include_router(device_lists.router)
-app.include_router(test_push.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

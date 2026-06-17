@@ -8,7 +8,6 @@ import {
   Megaphone,
   ScrollText,
   Send,
-  Smartphone,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -31,12 +30,6 @@ const NAV: NavItem[] = [
   { to: "/custom-push", label: "Custom push", icon: Send },
   { to: "/devices", label: "Devices", icon: List },
   { to: "/lists", label: "Lists", icon: Layers },
-  {
-    to: "/test",
-    label: "Apple test push",
-    icon: Smartphone,
-    devOnly: true,
-  },
 ];
 
 export function Layout() {

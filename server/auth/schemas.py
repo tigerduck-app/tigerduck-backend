@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 
 Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android",
-    "apple",
 ]
 
 
