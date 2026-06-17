@@ -9,7 +9,6 @@ anonymous pipeline during the migration (dual-write happens client-side).
 from __future__ import annotations
 
 import hashlib
-import uuid
 from datetime import UTC, datetime
 
 import structlog
@@ -177,15 +176,20 @@ async def list_devices(
 
 @router.delete("/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_device(
-    device_id: uuid.UUID, auth: CurrentAuthDep, session: SessionDep
+    device_id: str, auth: CurrentAuthDep, session: SessionDep
 ) -> None:
     """Soft-delete a device and cut its access: revoke its auth sessions
     and invalidate its push tokens (security review — a removed device must
-    not keep working tokens)."""
+    not keep working tokens).
+
+    `device_id` is the client-owned `client_device_id` (the app's persistent
+    UUID) — the identifier the clients hold — scoped to the authed user, not
+    the server-side row PK.
+    """
     device = (
         await session.execute(
             select(UserDevice).where(
-                UserDevice.id == device_id,
+                UserDevice.client_device_id == device_id,
                 UserDevice.user_id == auth.user_id,
                 UserDevice.deleted_at.is_(None),
             )
@@ -240,17 +244,29 @@ async def delete_device(
 
 @router.patch("/{device_id}/preferences", response_model=DevicePreferencesV3Response)
 async def update_device_preferences(
-    device_id: uuid.UUID,
+    device_id: str,
     payload: DevicePreferencesV3Request,
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    """Update device preferences (e.g., server_push_enabled)."""
-    device = await session.get(UserDevice, device_id)
-    if device is None or device.user_id != auth.user_id or device.deleted_at is not None:
+    """Update device preferences (e.g., server_push_enabled).
+
+    `device_id` is the client-owned `client_device_id` (the app's persistent
+    UUID), scoped to the authed user — not the server-side row PK.
+    """
+    device = (
+        await session.execute(
+            select(UserDevice).where(
+                UserDevice.client_device_id == device_id,
+                UserDevice.user_id == auth.user_id,
+                UserDevice.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if device is None:
         raise HTTPException(status_code=404, detail="device_not_found")
     device.server_push_enabled = payload.server_push_enabled
     return DevicePreferencesV3Response(
-        device_id=str(device.id),
+        device_id=device.client_device_id,
         server_push_enabled=device.server_push_enabled,
     )
