@@ -65,6 +65,8 @@ def build_apns_for_job(
                 },
             },
         }
+        if event == "end":
+            message["aps"]["dismissal-date"] = timestamp
         return ApnsRequest(
             device_token=token_value,
             topic=f"{bundle_id}.push-type.liveactivity",
