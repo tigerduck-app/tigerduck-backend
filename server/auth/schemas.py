@@ -117,3 +117,18 @@ class ScheduleSyncV3Request(BaseModel):
 class ScheduleSyncV3Response(BaseModel):
     pending: int
     replaced: int
+
+
+class LiveActivityRegisterV3Request(BaseModel):
+    activity_id: str = Field(min_length=1, max_length=160)
+    source_id: str = Field(min_length=1, max_length=128)
+    update_token_hex: str = Field(min_length=1, max_length=512)
+    countdown_target: datetime
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    bundle_id: str = Field(default="org.ntust.app.TigerDuck", max_length=128)
+    environment: str | None = Field(default=None, pattern=r"^(development|production)$")
+
+
+class LiveActivityRegisterV3Response(BaseModel):
+    token_id: int
+    end_job_id: int | None = None

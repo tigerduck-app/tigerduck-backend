@@ -47,13 +47,18 @@ def build_apns_for_job(
 
     if channel == "schedule":
         # Live Activity content-state update
+        kind = payload.get("kind", "schedule")
+        if kind == "live_activity_end":
+            event = "end"
+        else:
+            event = "update"
         scenario = payload.get("scenario", "")
         snapshot = {k: v for k, v in payload.items() if k not in ("kind", "scenario", "source_id")}
         normalized_snapshot = _normalize_snapshot_for_apns(snapshot)
         message: dict[str, Any] = {
             "aps": {
                 "timestamp": timestamp,
-                "event": "update",
+                "event": event,
                 "content-state": {
                     "scenario": scenario,
                     **normalized_snapshot,
