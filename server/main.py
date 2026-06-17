@@ -216,19 +216,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     except CredentialCipherError:
         app.state.credential_cipher = None
 
-    _mount_api(app, settings.api_base_path, env=settings.env)
-    for legacy in settings.api_legacy_base_paths:
-        _mount_api(app, legacy, env=settings.env)
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)
-
-    if settings.api_legacy_base_paths:
-        _install_deprecation_middleware(
-            app,
-            current=settings.api_base_path,
-            legacy_paths=tuple(settings.api_legacy_base_paths),
-            sunset=settings.api_legacy_sunset,
-        )
 
     return app
 
