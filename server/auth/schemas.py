@@ -85,3 +85,11 @@ class DeviceItem(BaseModel):
 
 class DeviceListV3Response(BaseModel):
     items: list[DeviceItem]
+
+
+class DevicePreferencesV3Request(BaseModel):
+    server_push_enabled: bool
+
+
+class DevicePreferencesV3Response(BaseModel):
+    server_push_enabled: bool

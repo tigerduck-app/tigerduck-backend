@@ -29,6 +29,8 @@ from server.auth.models import (
 from server.auth.schemas import (
     DeviceItem,
     DeviceListV3Response,
+    DevicePreferencesV3Request,
+    DevicePreferencesV3Response,
     DeviceRegisterV3Request,
     DeviceRegisterV3Response,
     PushTokenIn,
@@ -234,3 +236,18 @@ async def delete_device(
         user_id=str(auth.user_id),
         device_id=str(device.id),
     )
+
+
+@router.patch("/{device_id}/preferences", response_model=DevicePreferencesV3Response)
+async def update_device_preferences(
+    device_id: uuid.UUID,
+    payload: DevicePreferencesV3Request,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    """Update device preferences (e.g., server_push_enabled)."""
+    device = await session.get(UserDevice, device_id)
+    if device is None or device.user_id != auth.user_id or device.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="device_not_found")
+    device.server_push_enabled = payload.server_push_enabled
+    return DevicePreferencesV3Response(server_push_enabled=device.server_push_enabled)
