@@ -25,6 +25,7 @@ from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
+from server.routes import bulletins_feed as bulletins_feed_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
@@ -226,6 +227,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
+    app.include_router(bulletins_feed_routes.router, prefix=prefix)
     app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
     app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
     app.include_router(schedule_v3_routes.router, prefix=prefix)
