@@ -20,6 +20,7 @@ from enum import StrEnum
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -250,6 +251,9 @@ class UserDevice(Base):
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    server_push_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -462,7 +466,7 @@ class PushJob(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom')",
+            "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom', 'schedule')",
             name="chk_push_job_channel",
         ),
         CheckConstraint(
