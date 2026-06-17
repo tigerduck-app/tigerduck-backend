@@ -28,12 +28,12 @@ from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import custom_push as custom_push_routes
-from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import debug as debug_routes
 from server.routes import device_lists as device_lists_routes
 from server.routes import devices as devices_routes
 from server.routes import live_activities as live_activities_routes
 from server.routes import schedule as schedule_routes
+from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import settings_docs as settings_docs_routes
 from server.routes import sync as sync_routes
 from server.routes import sync_jobs as sync_jobs_routes

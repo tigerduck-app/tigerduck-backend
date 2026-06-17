@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from server.push.payload import ApnsRequest, FcmRequest, PushKind
+from server.push.payload import ApnsRequest, FcmRequest, PushKind, _normalize_snapshot_for_apns
 
 _RESERVED = {"title", "body"}
 _DEFAULT_TTL_SECONDS = 24 * 3600
@@ -49,13 +49,14 @@ def build_apns_for_job(
         # Live Activity content-state update
         scenario = payload.get("scenario", "")
         snapshot = {k: v for k, v in payload.items() if k not in ("kind", "scenario", "source_id")}
+        normalized_snapshot = _normalize_snapshot_for_apns(snapshot)
         message: dict[str, Any] = {
             "aps": {
                 "timestamp": timestamp,
                 "event": "update",
                 "content-state": {
                     "scenario": scenario,
-                    **snapshot,
+                    **normalized_snapshot,
                 },
             },
         }

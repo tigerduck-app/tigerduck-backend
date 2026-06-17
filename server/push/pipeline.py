@@ -5,8 +5,9 @@ Claim/execute split mirrors `server/syncjobs/executor.py`: stale
 §2), then a short transaction claims due jobs under an advisory lock +
 FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
-  materialize: one push_deliveries row per active standard token
-               (idempotent via ux_push_delivery_job_token DO NOTHING)
+  materialize: one push_deliveries row per active token
+               (channel-aware: standard tokens for regular pushes, push_to_start
+               tokens for schedule; idempotent via ux_push_delivery_job_token DO NOTHING)
   deliver:     send each due pending delivery once via PushRouter;
                unregistered tokens are invalidated, transient failures
                keep the delivery pending with next_retry_at backoff
@@ -181,7 +182,8 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
 
 
 async def _materialize(session: AsyncSession, job: PushJob) -> None:
-    """Create one delivery row per active standard token. Idempotent —
+    """Create one delivery row per active token (channel-aware: standard tokens
+    for regular pushes, push_to_start tokens for schedule). Idempotent —
     a stale-recovered job re-materializes onto the same unique index."""
     now = datetime.now(UTC)
     target_token_kind = (

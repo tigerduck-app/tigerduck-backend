@@ -1,0 +1,111 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="TigerDuck Architecture" id="arch">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ── Section labels ─────────────────────────────────── -->
+        <mxCell id="lbl-public" value="Public" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="50" y="20" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="lbl-infra" value="Infrastructure" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=1;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="230" y="20" width="170" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ── Host container ─────────────────────────────────── -->
+        <mxCell id="host" value="host (macOS / Linux)" style="swimlane;startSize=30;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;fontStyle=1;fontSize=13;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="460" y="10" width="680" height="700" as="geometry" />
+        </mxCell>
+
+        <!-- ── Docker containers (inside host) ───────────────── -->
+        <mxCell id="backend" value="&lt;b&gt;tigerduck-internal&lt;/b&gt;&lt;br/&gt;FastAPI + APScheduler&lt;br/&gt;:40000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="host">
+          <mxGeometry x="30" y="60" width="220" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="portal" value="&lt;b&gt;tigerduck-portal&lt;/b&gt;&lt;br/&gt;FastAPI + React (Vite)&lt;br/&gt;:40010" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;" vertex="1" parent="host">
+          <mxGeometry x="30" y="230" width="220" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="db" value="&lt;b&gt;tigerduck-db&lt;/b&gt;&lt;br/&gt;Postgres 17&lt;br/&gt;(internal-only network)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="host">
+          <mxGeometry x="100" y="430" width="160" height="90" as="geometry" />
+        </mxCell>
+
+        <!-- ── llama-server (native, not a container) ─────────── -->
+        <mxCell id="llama" value="&lt;b&gt;llama-server&lt;/b&gt;&lt;br/&gt;native process, Metal GPU&lt;br/&gt;:40006" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;dashed=1;dashPattern=8 4;" vertex="1" parent="host">
+          <mxGeometry x="390" y="430" width="220" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="llama-note" value="(not a Docker container)" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=2;fontSize=10;fontColor=#999999;" vertex="1" parent="host">
+          <mxGeometry x="390" y="524" width="220" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ── External services (inside host box, top-right) ─── -->
+        <mxCell id="apns" value="APNs" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="host">
+          <mxGeometry x="370" y="60" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="fcm" value="FCM" style="ellipse;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="host">
+          <mxGeometry x="500" y="60" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ext-note" value="external services" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontStyle=2;fontSize=10;fontColor=#999999;" vertex="1" parent="host">
+          <mxGeometry x="360" y="124" width="260" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ── proxy-net annotation ───────────────────────────── -->
+        <mxCell id="proxy-net" value="proxy-net" style="text;html=1;strokeColor=#aaaaaa;fillColor=#ffffff;align=center;fontSize=11;fontColor=#666666;dashed=1;dashPattern=6 3;rounded=1;" vertex="1" parent="host">
+          <mxGeometry x="30" y="630" width="580" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- ── Public clients ─────────────────────────────────── -->
+        <mxCell id="mobile" value="iOS / Android" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="50" y="80" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="operator" value="Operator browser" style="rounded=1;whiteSpace=wrap;html=1;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="50" y="270" width="140" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ── Infrastructure ─────────────────────────────────── -->
+        <mxCell id="npm" value="nginx-proxy-manager" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="80" width="170" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cf" value="cloudflared&lt;br/&gt;(Zero Trust)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="270" width="170" height="60" as="geometry" />
+        </mxCell>
+
+        <!-- ── Edges ──────────────────────────────────────────── -->
+        <mxCell id="e1" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;" edge="1" source="mobile" target="npm" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="npm" target="backend" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="HTTPS" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;" edge="1" source="operator" target="cf" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="cf" target="portal" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- backend ↔ db -->
+        <mxCell id="e5" value="" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;startArrow=open;startFill=0;endFill=0;" edge="1" source="backend" target="db" parent="host">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- portal ↔ db -->
+        <mxCell id="e6" value="" style="edgeStyle=orthogonalEdgeStyle;endArrow=open;startArrow=open;startFill=0;endFill=0;" edge="1" source="portal" target="db" parent="host">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- backend → llama-server (via host.docker.internal) -->
+        <mxCell id="e7" value="host.docker.internal" style="edgeStyle=orthogonalEdgeStyle;fontSize=11;dashed=1;" edge="1" source="backend" target="llama" parent="host">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- backend → APNs -->
+        <mxCell id="e8" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="backend" target="apns" parent="host">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <!-- backend → FCM -->
+        <mxCell id="e9" value="" style="edgeStyle=orthogonalEdgeStyle;" edge="1" source="backend" target="fcm" parent="host">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
