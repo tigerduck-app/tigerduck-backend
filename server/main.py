@@ -28,6 +28,7 @@ from server.routes import auth as auth_routes
 from server.routes import bulletins as bulletins_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import custom_push as custom_push_routes
+from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import debug as debug_routes
 from server.routes import device_lists as device_lists_routes
 from server.routes import devices as devices_routes
@@ -272,6 +273,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(settings_docs_routes.router, prefix=prefix)
     app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
     app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
+    app.include_router(schedule_v3_routes.router, prefix=prefix)
 
 
 def _install_deprecation_middleware(

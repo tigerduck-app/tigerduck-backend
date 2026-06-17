@@ -184,13 +184,16 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     """Create one delivery row per active standard token. Idempotent —
     a stale-recovered job re-materializes onto the same unique index."""
     now = datetime.now(UTC)
+    target_token_kind = (
+        "push_to_start" if job.channel == "schedule" else "standard"
+    )
     token_query = (
         select(DevicePushToken)
         .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
         .where(
             UserDevice.user_id == job.user_id,
             UserDevice.deleted_at.is_(None),
-            DevicePushToken.token_kind == "standard",
+            DevicePushToken.token_kind == target_token_kind,
             DevicePushToken.status == PushTokenStatus.active.value,
             (DevicePushToken.expires_at.is_(None))
             | (DevicePushToken.expires_at > now),

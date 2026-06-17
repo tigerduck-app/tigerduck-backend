@@ -44,9 +44,34 @@ def build_apns_for_job(
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> ApnsRequest:
     timestamp = int((now or datetime.now(UTC)).timestamp())
+
+    if channel == "schedule":
+        # Live Activity content-state update
+        scenario = payload.get("scenario", "")
+        snapshot = {k: v for k, v in payload.items() if k not in ("kind", "scenario", "source_id")}
+        message: dict[str, Any] = {
+            "aps": {
+                "timestamp": timestamp,
+                "event": "update",
+                "content-state": {
+                    "scenario": scenario,
+                    **snapshot,
+                },
+            },
+        }
+        return ApnsRequest(
+            device_token=token_value,
+            topic=f"{bundle_id}.push-type.liveactivity",
+            expiration=timestamp + ttl_seconds,
+            priority=10,
+            message=message,
+            kind=PushKind.live_activity,
+        )
+
+    # Standard alert (existing logic)
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
-    message: dict[str, Any] = {
+    message = {
         "aps": {
             "alert": {"title": title, "body": body},
             "badge": 1,

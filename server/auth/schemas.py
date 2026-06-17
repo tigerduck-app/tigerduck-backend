@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from datetime import datetime
+from enum import Enum
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -93,3 +95,25 @@ class DevicePreferencesV3Request(BaseModel):
 
 class DevicePreferencesV3Response(BaseModel):
     server_push_enabled: bool
+
+
+class ScheduleScenario(str, Enum):
+    class_preparing = "classPreparing"
+    in_class = "inClass"
+    assignment_urgent = "assignmentUrgent"
+
+
+class ScheduleEventV3(BaseModel):
+    source_id: str = Field(min_length=1, max_length=128, pattern=r"^[^:]+$")
+    scenario: ScheduleScenario
+    fire_at: datetime
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScheduleSyncV3Request(BaseModel):
+    events: list[ScheduleEventV3] = Field(max_length=200)
+
+
+class ScheduleSyncV3Response(BaseModel):
+    pending: int
+    replaced: int
