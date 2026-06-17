@@ -14,6 +14,7 @@ from typing import AsyncIterator  # noqa: E402
 import httpx  # noqa: E402
 import structlog  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 
 from server import __version__
 from server.auth.crypto import CredentialCipher, CredentialCipherError
@@ -178,6 +179,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
+    # Legacy /v1 and /v2 are retired. Answer any request to them with
+    # 410 Gone (not a bare 404) so an out-of-date client gets an
+    # unambiguous "this API version is removed — update the app" signal.
+    @app.middleware("http")
+    async def _legacy_api_gone(request, call_next):
+        path = request.url.path
+        if path in ("/v1", "/v2") or path.startswith("/v1/") or path.startswith("/v2/"):
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "detail": (
+                        "This API version has been retired. Update the app "
+                        "to the latest version."
+                    ),
+                    "current_api": settings.api_v3_base_path,
+                },
+            )
+        return await call_next(request)
+
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
@@ -190,7 +210,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # prefix below so /v1 and /v2 clients have it too.
         return {"version": __version__, "api_base_path": settings.api_base_path}
 
-    @app.get(f"{settings.api_base_path}/ping", tags=["meta"])
+    # Unversioned (was {api_base_path}/ping) so it survives the /v1+/v2
+    # sunset and infra probes don't need to know a version prefix.
+    @app.get("/ping", tags=["meta"])
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
