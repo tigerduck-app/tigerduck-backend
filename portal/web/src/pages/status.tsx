@@ -65,11 +65,11 @@ function StatusContent({ data }: { data: StatusPayload }) {
     apns_config: apns,
   } = data;
 
-  // Backend mounts FastAPI under /v2 (or whatever api_base_path reports).
+  // Backend mounts FastAPI under /v3 (or whatever api_base_path reports).
   // Display the rooted URL so the link lands directly on the API surface
   // teams paste into curl / Postman, not the 404 you get hitting the
   // bare host.
-  const apiBase = version.api_base_path || "/v2";
+  const apiBase = version.api_base_path || "/v3";
   const backendApiUrl = `${env.backend_public_url.replace(/\/+$/, "")}${apiBase}`;
 
   return (

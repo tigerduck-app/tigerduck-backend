@@ -88,15 +88,15 @@ print_stack_status() {
     local portal_url
     case "$env_val" in
         development)
-            backend_url="http://localhost:40000/v2 (published to host)"
+            backend_url="http://localhost:40000/v3 (published to host)"
             portal_url="http://localhost:40010 (published to host)"
             ;;
         production)
-            backend_url="http://tigerduck-internal:40000/v2 (proxy-net only)"
+            backend_url="http://tigerduck-internal:40000/v3 (proxy-net only)"
             portal_url="http://tigerduck-portal:40010 (proxy-net only)"
             ;;
         *)
-            backend_url="http://tigerduck-internal:40000/v2 (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
+            backend_url="http://tigerduck-internal:40000/v3 (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
             portal_url="http://tigerduck-portal:40010 (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
             ;;
     esac
