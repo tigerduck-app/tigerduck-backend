@@ -25,14 +25,7 @@ from server.logging_setup import configure as configure_logging
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
-from server.routes import bulletins as bulletins_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
-from server.routes import custom_push as custom_push_routes
-from server.routes import debug as debug_routes
-from server.routes import device_lists as device_lists_routes
-from server.routes import devices as devices_routes
-from server.routes import live_activities as live_activities_routes
-from server.routes import schedule as schedule_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import settings_docs as settings_docs_routes
@@ -222,34 +215,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
-    # ping / health are registered per-prefix so the deprecation middleware
-    # stamps /v1/* responses just like the routed endpoints. The root /health
-    # also stays mounted in create_app() for infra probes that don't carry a
-    # version prefix (load balancers, kubelet).
-    async def ping() -> dict[str, str]:
-        return {"pong": "tigerduck"}
-
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "env": env}
-
-    async def version() -> dict[str, str]:
-        return {"version": __version__, "api_base_path": prefix}
-
-    app.add_api_route(f"{prefix}/ping", ping, methods=["GET"], tags=["meta"])
-    app.add_api_route(f"{prefix}/health", health, methods=["GET"], tags=["meta"])
-    app.add_api_route(f"{prefix}/version", version, methods=["GET"], tags=["meta"])
-    app.include_router(devices_routes.router, prefix=prefix)
-    app.include_router(live_activities_routes.router, prefix=prefix)
-    app.include_router(schedule_routes.router, prefix=prefix)
-    app.include_router(debug_routes.router, prefix=prefix)
-    app.include_router(bulletins_routes.router, prefix=prefix)
-    app.include_router(bulletins_routes.device_router, prefix=prefix)
-    app.include_router(bulletins_routes.admin_router, prefix=prefix)
-    app.include_router(custom_push_routes.router, prefix=prefix)
-    app.include_router(device_lists_routes.router, prefix=prefix)
-
-
 def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     """Mount the user-account (/v3) routers. Kept separate from _mount_api:
     the v2/v1 surface is device-centric and frozen; v3 is user-centric."""
@@ -267,30 +232,6 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(live_activities_v3_routes.router, prefix=prefix)
 
 
-def _install_deprecation_middleware(
-    app: FastAPI,
-    *,
-    current: str,
-    legacy_paths: tuple[str, ...],
-    sunset: str,
-) -> None:
-    """Stamp RFC 8594 Deprecation + successor-version Link on legacy responses."""
-
-    @app.middleware("http")
-    async def _deprecation_headers(request, call_next):
-        response = await call_next(request)
-        path = request.url.path
-        for legacy in legacy_paths:
-            if path == legacy or path.startswith(f"{legacy}/"):
-                response.headers["Deprecation"] = "true"
-                successor = current + path[len(legacy):]
-                response.headers["Link"] = (
-                    f'<{successor}>; rel="successor-version"'
-                )
-                if sunset:
-                    response.headers["Sunset"] = sunset
-                break
-        return response
 
 
 app = create_app()

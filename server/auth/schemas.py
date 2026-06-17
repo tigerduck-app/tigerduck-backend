@@ -9,7 +9,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Platform = Literal[
-    "ios", "ipados", "macos", "windows", "watchos", "wearos", "android"
+    "ios", "ipados", "macos", "windows", "watchos", "wearos", "android",
+    "apple",
 ]
 
 
@@ -24,7 +25,7 @@ class DeviceInfo(BaseModel):
 class LoginRequest(BaseModel):
     student_id: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=256)
-    moodle_token: str = Field(min_length=1, max_length=256)
+    moodle_token: str | None = Field(default=None, max_length=256)
     moodle_private_token: str | None = Field(default=None, max_length=256)
     device_info: DeviceInfo
 
@@ -94,6 +95,7 @@ class DevicePreferencesV3Request(BaseModel):
 
 
 class DevicePreferencesV3Response(BaseModel):
+    device_id: str
     server_push_enabled: bool
 
 

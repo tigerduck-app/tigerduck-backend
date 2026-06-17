@@ -250,4 +250,7 @@ async def update_device_preferences(
     if device is None or device.user_id != auth.user_id or device.deleted_at is not None:
         raise HTTPException(status_code=404, detail="device_not_found")
     device.server_push_enabled = payload.server_push_enabled
-    return DevicePreferencesV3Response(server_push_enabled=device.server_push_enabled)
+    return DevicePreferencesV3Response(
+        device_id=str(device.id),
+        server_push_enabled=device.server_push_enabled,
+    )

@@ -95,6 +95,49 @@ async def list_subscriptions(auth: CurrentAuthDep, session: SessionDep):
     return {"items": [serializers.subscription_to_dict(s) for s in rows]}
 
 
+class SubscriptionsPutBody(BaseModel):
+    rules: list[SubscriptionCreate]
+
+
+@subscriptions_router.put("")
+async def replace_subscriptions(
+    payload: SubscriptionsPutBody, auth: CurrentAuthDep, session: SessionDep
+):
+    """Snapshot-style replacement: soft-delete all existing, then insert."""
+    existing = (
+        (
+            await session.execute(
+                select(UserBulletinSubscription).where(
+                    UserBulletinSubscription.user_id == auth.user_id,
+                    UserBulletinSubscription.deleted_at.is_(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    now = datetime.now(UTC)
+    for row in existing:
+        row.deleted_at = now
+        row.updated_by_device_id = auth.device_id
+    created = []
+    for rule in payload.rules:
+        s = UserBulletinSubscription(
+            user_id=auth.user_id,
+            name=rule.name,
+            orgs=rule.orgs,
+            tags=rule.tags,
+            mode=rule.mode,
+            enabled=rule.enabled,
+            created_by_device_id=auth.device_id,
+            updated_by_device_id=auth.device_id,
+        )
+        session.add(s)
+        created.append(s)
+    await session.flush()
+    return {"items": [serializers.subscription_to_dict(s) for s in created]}
+
+
 @subscriptions_router.post("")
 async def create_subscription(
     payload: SubscriptionCreate, auth: CurrentAuthDep, session: SessionDep
