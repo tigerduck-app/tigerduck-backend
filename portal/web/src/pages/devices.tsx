@@ -43,12 +43,11 @@ import type {
   DeviceRow,
 } from "@/types/api";
 
-// Sub-tab key → matcher on the device row. Apple `device_class` is
-// either "iphone" or "ipad"; Android registers without an apns env so we
-// gate on `platform` instead of `device_class` to catch the (rare but
-// real) older rows where `device_class` was left blank.
+// Sub-tab key → matcher on the device row. v3 reports platform
+// `ios`/`ipados` (mapped to device_class iphone/ipad server-side);
+// Android registers without an apns env so we gate on `platform`.
 const TABS: Array<{
-  key: "iphone" | "ipad" | "android" | "apple-deprecated";
+  key: "iphone" | "ipad" | "android";
   label: string;
   match: (d: DeviceRow) => boolean;
 }> = [
@@ -58,11 +57,6 @@ const TABS: Array<{
     key: "android",
     label: "Android",
     match: (d) => d.platform === "android",
-  },
-  {
-    key: "apple-deprecated",
-    label: "Apple (Deprecated)",
-    match: (d) => d.platform === "apple" && d.device_class === "",
   },
 ];
 
