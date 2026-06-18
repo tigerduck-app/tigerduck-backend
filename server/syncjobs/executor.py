@@ -59,6 +59,9 @@ from server.syncjobs.moodle_client import (
     MoodleUnreachable,
 )
 
+from server.auth.models import PushJob
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 logger = structlog.get_logger(__name__)
 
 ERROR_CREDENTIAL_INVALID = "credential_invalid"
@@ -76,6 +79,23 @@ _CLAIM_LOCK_KEY = 0x54445F53594E43
 
 def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+async def _enqueue_sync_trigger(session: AsyncSession, user_id) -> None:
+    now = datetime.now(UTC)
+    stmt = (
+        pg_insert(PushJob)
+        .values(
+            user_id=user_id,
+            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp())}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now,
+            payload={"kind": "sync_trigger", "source_device_id": None},
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)
 
 
 @dataclass(frozen=True)
@@ -282,6 +302,9 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             await log_sync(session, user_id=job.user_id, source="executor",
                            message=f"Job succeeded: {job.job_type} — fetched={stats.fetched_count} changed={stats.changed_count}",
                            detail={"fetched": stats.fetched_count, "changed": stats.changed_count})
+
+            if stats.changed_count > 0:
+                await _enqueue_sync_trigger(session, job.user_id)
 
             interval = (
                 policy.default_interval_seconds
