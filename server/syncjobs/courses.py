@@ -71,7 +71,7 @@ async def apply_fetched_courses(
         row = existing.get(moodle_id)
 
         if row is None:
-            course_no = item.short_name or moodle_id
+            course_no = (item.short_name or moodle_id)[:64]
             row = UserCourse(
                 user_id=user_id,
                 semester="",
