@@ -81,7 +81,7 @@ async def login(
     cipher: CredentialCipher | None,
     *,
     student_id: str,
-    moodle_token: str,
+    moodle_token: str | None,
     moodle_private_token: str | None,
     device_info: DeviceInfo,
     client_ip: str,
@@ -101,6 +101,11 @@ async def login(
     limiter.record(sid_key)
     limiter.record(ip_key)
 
+    if not moodle_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="moodle_token_required",
+        )
     result = await verifier.verify(token=moodle_token, student_id=student_id)
     if not result.ok:
         logger.info(

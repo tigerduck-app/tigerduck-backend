@@ -59,6 +59,7 @@ class UserDevicePlatform(StrEnum):
     watchos = "watchos"
     wearos = "wearos"
     android = "android"
+    web = "web"
 
 
 class SessionRevokedReason(StrEnum):
@@ -279,7 +280,7 @@ class UserDevice(Base):
         UniqueConstraint("user_id", "client_device_id"),
         CheckConstraint(
             "platform IN ('ios', 'ipados', 'macos', 'windows', "
-            "'watchos', 'wearos', 'android')",
+            "'watchos', 'wearos', 'android', 'web')",
             name="chk_device_platform",
         ),
     )

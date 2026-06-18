@@ -47,6 +47,34 @@ async def login(
     payload: LoginRequest, request: Request, session: SessionDep
 ) -> LoginResponse:
     state = request.app.state
+    moodle_token = payload.moodle_token
+    moodle_private_token = payload.moodle_private_token
+
+    if not moodle_token and payload.password:
+        from server.syncjobs.moodle_client import SsoTokenClient, SsoAuthFailed, SsoUnavailable
+        sso = SsoTokenClient(
+            base_url=state.settings.moodle_base_url,
+            timeout_seconds=15,
+        )
+        try:
+            obtained = await sso.obtain_token(
+                username=payload.student_id, password=payload.password
+            )
+            moodle_token = obtained.token
+            moodle_private_token = obtained.private_token
+        except SsoAuthFailed:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid_credentials",
+            )
+        except SsoUnavailable as exc:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"moodle_unavailable:{exc}",
+            )
+
     result = await service.login(
         session,
         state.settings,
@@ -54,8 +82,8 @@ async def login(
         state.login_limiter,
         state.credential_cipher,
         student_id=payload.student_id,
-        moodle_token=payload.moodle_token,
-        moodle_private_token=payload.moodle_private_token,
+        moodle_token=moodle_token,
+        moodle_private_token=moodle_private_token,
         device_info=payload.device_info,
         client_ip=_client_ip(request),
     )

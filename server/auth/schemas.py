@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Platform = Literal[
-    "ios", "ipados", "macos", "windows", "watchos", "wearos", "android",
+    "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
 ]
 
 
