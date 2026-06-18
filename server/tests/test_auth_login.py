@@ -17,6 +17,7 @@ from server.auth.models import (
 )
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -104,6 +105,48 @@ async def test_login_success_creates_full_identity(client) -> None:
         ).scalars().all()
         assert len(sessions) == 1
         assert sessions[0].revoked_at is None
+
+
+async def test_android_login_skips_credential_and_sync(client) -> None:
+    """Android self-syncs on-device, so the backend must NOT persist its
+    NTUST credentials or provision a server-side sync job. The Moodle token
+    only authenticates the login here, then is discarded."""
+    allow_moodle(client)
+    body = {
+        **LOGIN_BODY,
+        "device_info": {
+            **LOGIN_BODY["device_info"],
+            "client_device_id": "android-abc",
+            "platform": "android",
+        },
+    }
+    response = await client.post("/v3/auth/login", json=body)
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        user = (
+            await session.execute(
+                select(User).where(User.student_id == "B11015000")
+            )
+        ).scalar_one()
+        account = (
+            await session.execute(
+                select(ExternalAccount).where(ExternalAccount.user_id == user.id)
+            )
+        ).scalar_one()
+        # No NTUST credential persisted for an Android device...
+        assert await session.get(ExternalAccountCredential, account.id) is None
+        # ...and the account is not advertised as server-syncable, so a stray
+        # /sync-jobs/run-now can't provision a job the worker can't run.
+        assert account.credential_status != "active"
+        # No server-side sync job provisioned at login.
+        jobs = (
+            await session.execute(
+                select(SyncJob).where(SyncJob.user_id == user.id)
+            )
+        ).scalars().all()
+        assert jobs == []
 
 
 async def test_second_login_reuses_user_and_device(client) -> None:

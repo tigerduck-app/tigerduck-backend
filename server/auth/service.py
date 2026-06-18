@@ -41,6 +41,14 @@ logger = structlog.get_logger(__name__)
 
 PROVIDER_NTUST_SSO = "ntust_sso"
 
+# Platforms that rely on the backend for background work. iOS / iPadOS (and the
+# Designed-for-iPad-on-Mac runtime, which reports "macos") can't run sustained
+# on-device background sync, so the backend stores their NTUST credentials and
+# provisions a server-side Moodle sync job. Android self-syncs on-device
+# (WorkManager), so its Moodle token only authenticates the login here and is
+# then discarded — never persisted, never used server-side.
+SERVER_SYNC_PLATFORMS = frozenset({"ios", "ipados", "macos"})
+
 
 @dataclass(frozen=True)
 class LoginResult:
@@ -117,19 +125,41 @@ async def login(
         account = await _upsert_external_account(
             session, user=user, student_id=student_id
         )
-        await _store_credentials(
-            session,
-            cipher=cipher,
-            account=account,
-            password=password,
-            moodle_token=moodle_token,
-            moodle_private_token=moodle_private_token,
-            now=now,
-        )
+        # Persist NTUST credentials + provision a server-side sync job only for
+        # platforms that need the backend to sync on their behalf (see
+        # SERVER_SYNC_PLATFORMS). The Moodle token already authenticated this
+        # login above; for Android we deliberately neither store it nor run
+        # server-side Moodle for it — Android self-syncs on-device, so the
+        # token is discarded here and never lands at rest on the server.
+        needs_server_sync = device_info.platform in SERVER_SYNC_PLATFORMS
+        if needs_server_sync:
+            await _store_credentials(
+                session,
+                cipher=cipher,
+                account=account,
+                password=password,
+                moodle_token=moodle_token,
+                moodle_private_token=moodle_private_token,
+                now=now,
+            )
+        else:
+            # Android self-syncs on-device, so we persist nothing. But
+            # credential_status defaults to 'active', which would let
+            # /sync-jobs/run-now provision a job the worker then can't run
+            # (no stored credential). Downgrade it so every credential_status
+            # gate correctly treats this account as non-syncable — unless a
+            # prior Apple login on the SAME user (the external account is
+            # shared across their devices) already stored a real credential,
+            # which we must not clobber.
+            if (
+                await session.get(ExternalAccountCredential, account.id)
+            ) is None:
+                account.credential_status = CredentialStatus.invalid.value
         device = await _upsert_device(session, user=user, info=device_info, now=now)
-        await ensure_sync_jobs(
-            session, user_id=user.id, external_account_id=account.id
-        )
+        if needs_server_sync:
+            await ensure_sync_jobs(
+                session, user_id=user.id, external_account_id=account.id
+            )
 
         refresh_token = generate_refresh_token()
         auth_session = AuthSession(
