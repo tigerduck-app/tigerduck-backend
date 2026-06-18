@@ -190,16 +190,35 @@ class HttpCourseFetcher:
         self._timeout = timeout_seconds
         self._transport = transport
 
-    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]:
+    async def _get_moodle_userid(self, client: httpx.AsyncClient, token: str) -> int:
         params = {
             "wstoken": token,
-            "wsfunction": "core_enrol_get_users_courses",
+            "wsfunction": "core_webservice_get_site_info",
             "moodlewsrestformat": "json",
         }
+        response = await client.get(f"{self._base_url}{_WS_PATH}", params=params)
+        body = response.json()
+        if isinstance(body, dict) and "exception" in body:
+            errorcode = str(body.get("errorcode", ""))
+            if errorcode == "invalidtoken":
+                raise MoodleTokenInvalid(errorcode)
+            raise MoodleUnreachable(errorcode or "moodle_exception")
+        if not isinstance(body, dict) or "userid" not in body:
+            raise MoodleUnreachable("missing_userid_in_site_info")
+        return int(body["userid"])
+
+    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]:
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
+                userid = await self._get_moodle_userid(client, token)
+                params = {
+                    "wstoken": token,
+                    "wsfunction": "core_enrol_get_users_courses",
+                    "userid": str(userid),
+                    "moodlewsrestformat": "json",
+                }
                 response = await client.get(
                     f"{self._base_url}{_WS_PATH}", params=params
                 )
