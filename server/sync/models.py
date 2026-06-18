@@ -134,9 +134,6 @@ class UserCourse(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -162,7 +159,6 @@ class UserCourse(Base):
             "idx_user_courses_semester",
             "user_id",
             "semester",
-            postgresql_where=sa.text("deleted_at IS NULL"),
         ),
     )
 
@@ -193,18 +189,6 @@ class UserCourseOverride(Base):
         DateTime(timezone=True), nullable=True
     )
     color_hex_device_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("user_devices.id", ondelete="SET NULL"),
-        nullable=True,
-    )
-
-    is_hidden: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa.text("false")
-    )
-    is_hidden_updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    is_hidden_device_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,

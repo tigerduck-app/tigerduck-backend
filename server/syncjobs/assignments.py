@@ -86,7 +86,6 @@ async def apply_fetched_assignments(
                 select(UserCourse).where(
                     UserCourse.user_id == user_id,
                     UserCourse.moodle_id.is_not(None),
-                    UserCourse.deleted_at.is_(None),
                 )
             )
         )

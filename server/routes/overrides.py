@@ -1,6 +1,6 @@
-"""Override endpoints: assignment local_status + course is_hidden.
+"""Override endpoints: assignment local_status + course color/name/delete.
 
-Clients call these when the user swipes to mark done / ignored / hidden.
+Clients call these when the user swipes to mark done / ignored / delete.
 The change is written to the per-user override table and appended to the
 changelog so other devices pick it up via delta-sync.
 """
@@ -70,15 +70,17 @@ class CourseOverrideRequest(BaseModel):
 
 class CourseOverrideResponse(BaseModel):
     id: int
-    is_hidden: bool
     color_hex: str | None
     custom_names: dict[str, str]
     updated_at: str
 
 
+class DeletedResponse(BaseModel):
+    deleted: bool = True
+
+
 @router.patch(
     "/assignments/{moodle_assignment_id}/override",
-    response_model=AssignmentOverrideResponse,
 )
 async def patch_assignment_override(
     moodle_assignment_id: int,
@@ -90,6 +92,40 @@ async def patch_assignment_override(
         session, auth.user_id, moodle_assignment_id
     )
     now = datetime.now(UTC)
+
+    if payload.local_status == "none":
+        # Hard-delete the override row instead of keeping status="none".
+        existing = (
+            await session.execute(
+                select(UserAssignmentOverride).where(
+                    UserAssignmentOverride.user_id == auth.user_id,
+                    UserAssignmentOverride.user_assignment_id == assignment.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            await session.delete(existing)
+
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.assignment_override.value,
+            entity_id=str(assignment.id),
+            operation="delete",
+            payload={"local_status": "none"},
+            device_id=auth.device_id,
+        )
+
+        from server.syncjobs.log_entries import log_sync
+
+        await log_sync(session, user_id=auth.user_id, source="override",
+                       message=f"Assignment override deleted: moodle_id={moodle_assignment_id}",
+                       device_id=auth.device_id,
+                       detail={"moodle_assignment_id": moodle_assignment_id,
+                               "local_status": "none"})
+
+        await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
+        return DeletedResponse()
 
     stmt = (
         pg_insert(UserAssignmentOverride)
@@ -143,7 +179,6 @@ async def patch_assignment_override(
 
 @router.patch(
     "/courses/{moodle_course_id}/override",
-    response_model=CourseOverrideResponse,
 )
 async def patch_course_override(
     moodle_course_id: str,
@@ -151,10 +186,77 @@ async def patch_course_override(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    now = datetime.now(UTC)
+
+    if payload.is_hidden is True:
+        # Hard-delete the UserCourse row (cascades to override + skipped dates).
+        course = await _get_course_by_moodle_id(
+            session, auth.user_id, moodle_course_id
+        )
+        await session.delete(course)
+
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.course.value,
+            entity_id=str(course.id),
+            operation="delete",
+            payload=None,
+            device_id=auth.device_id,
+        )
+
+        from server.syncjobs.log_entries import log_sync
+
+        await log_sync(
+            session,
+            user_id=auth.user_id,
+            source="override",
+            message=f"Course deleted: moodle_id={moodle_course_id}",
+            device_id=auth.device_id,
+            detail={"moodle_course_id": moodle_course_id},
+        )
+
+        await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
+        return DeletedResponse()
+
+    if payload.is_hidden is False:
+        # No-op: the course should already exist via upload.
+        course = (
+            await session.execute(
+                select(UserCourse).where(
+                    UserCourse.moodle_id == moodle_course_id,
+                    UserCourse.user_id == auth.user_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if course is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        existing = (
+            await session.execute(
+                select(UserCourseOverride).where(
+                    UserCourseOverride.user_id == auth.user_id,
+                    UserCourseOverride.user_course_id == course.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            return CourseOverrideResponse(
+                id=course.id,
+                color_hex=None,
+                custom_names={},
+                updated_at=course.updated_at.isoformat(),
+            )
+        return CourseOverrideResponse(
+            id=existing.id,
+            color_hex=existing.color_hex,
+            custom_names=existing.custom_names or {},
+            updated_at=existing.updated_at.isoformat(),
+        )
+
+    # Normal update path: color_hex / custom_name only.
     course = await _get_course_by_moodle_id(
         session, auth.user_id, moodle_course_id
     )
-    now = datetime.now(UTC)
 
     existing = (
         await session.execute(
@@ -172,13 +274,6 @@ async def patch_course_override(
         session.add(existing)
 
     changed_fields: list[str] = []
-
-    if payload.is_hidden is not None:
-        existing.is_hidden = payload.is_hidden
-        existing.is_hidden_updated_at = now
-        existing.is_hidden_device_id = auth.device_id
-        changed_fields.append("is_hidden")
-        course.deleted_at = now if payload.is_hidden else None
 
     if payload.color_hex is not None:
         existing.color_hex = payload.color_hex
@@ -213,8 +308,6 @@ async def patch_course_override(
     from server.syncjobs.log_entries import log_sync
 
     parts = []
-    if payload.is_hidden is not None:
-        parts.append(f"hidden={payload.is_hidden}")
     if payload.color_hex is not None:
         parts.append(f"color={payload.color_hex}")
     if payload.custom_name is not None:
@@ -232,7 +325,6 @@ async def patch_course_override(
 
     return CourseOverrideResponse(
         id=existing.id,
-        is_hidden=existing.is_hidden,
         color_hex=existing.color_hex,
         custom_names=existing.custom_names or {},
         updated_at=now.isoformat(),
@@ -264,7 +356,6 @@ async def _get_course_by_moodle_id(
             select(UserCourse).where(
                 UserCourse.moodle_id == moodle_id,
                 UserCourse.user_id == user_id,
-                UserCourse.deleted_at.is_(None),
             )
         )
     ).scalar_one_or_none()

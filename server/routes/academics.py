@@ -43,8 +43,6 @@ class CourseOverridePut(BaseModel):
     custom_name_updated_at: datetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
     color_hex_updated_at: datetime | None = None
-    is_hidden: bool | None = None
-    is_hidden_updated_at: datetime | None = None
 
 
 class AssignmentOverridePut(BaseModel):
@@ -66,7 +64,6 @@ async def list_courses(
 ):
     course_filter = [
         UserCourse.user_id == auth.user_id,
-        UserCourse.deleted_at.is_(None),
     ]
     if semester:
         course_filter.append(UserCourse.semester == semester)
@@ -119,7 +116,6 @@ async def _get_owned_course(
             select(UserCourse).where(
                 UserCourse.id == course_id,
                 UserCourse.user_id == user_id,
-                UserCourse.deleted_at.is_(None),
             )
         )
     ).scalar_one_or_none()
@@ -156,15 +152,9 @@ async def put_course_override(
     for field_name, value, ts in (
         ("custom_name", payload.custom_name, payload.custom_name_updated_at),
         ("color_hex", payload.color_hex, payload.color_hex_updated_at),
-        ("is_hidden", payload.is_hidden, payload.is_hidden_updated_at),
     ):
         if ts is None:
             continue
-        if field_name == "is_hidden" and value is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="is_hidden cannot be null",
-            )
         if apply_field(
             override,
             field_name,

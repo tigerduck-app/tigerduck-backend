@@ -94,19 +94,17 @@ async def apply_fetched_courses(
         if row.course_name != item.full_name:
             row.course_name = item.full_name
             fields.append("course_name")
-        if row.deleted_at is not None:
-            row.deleted_at = None
-            fields.append("deleted_at")
         row.fetched_at = now
         row.last_seen_at = now
         if fields:
             changed += 1
             await log(str(row.id), "upsert", {"fields": fields})
 
+    # Hard-delete courses absent from the fetch.
     for moodle_id, row in existing.items():
-        if moodle_id in seen or row.deleted_at is not None:
+        if moodle_id in seen:
             continue
-        row.deleted_at = now
+        await session.delete(row)
         changed += 1
         await log(str(row.id), "delete")
 

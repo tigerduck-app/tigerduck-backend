@@ -44,7 +44,6 @@ def course_to_dict(c: UserCourse) -> dict:
         "classroom_map": c.classroom_map,
         "enrollment_status": c.enrollment_status,
         "fetched_at": _iso(c.fetched_at),
-        "deleted_at": _iso(c.deleted_at),
         "updated_at": _iso(c.updated_at),
     }
 
@@ -59,8 +58,6 @@ def course_override_to_dict(
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
         "color_hex": o.color_hex,
         "color_hex_updated_at": _iso(o.color_hex_updated_at),
-        "is_hidden": o.is_hidden,
-        "is_hidden_updated_at": _iso(o.is_hidden_updated_at),
     }
 
 

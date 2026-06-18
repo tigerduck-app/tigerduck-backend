@@ -68,8 +68,6 @@ class UploadCourseOverride(BaseModel):
     custom_name_updated_at: datetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
     color_hex_updated_at: datetime | None = None
-    is_hidden: bool | None = None
-    is_hidden_updated_at: datetime | None = None
 
 
 class UploadSkippedDate(BaseModel):
@@ -262,7 +260,6 @@ async def process_initial_upload(
         for field_name, value, ts in (
             ("custom_name", item.custom_name, item.custom_name_updated_at),
             ("color_hex", item.color_hex, item.color_hex_updated_at),
-            ("is_hidden", item.is_hidden, item.is_hidden_updated_at),
         ):
             if value is None:
                 continue

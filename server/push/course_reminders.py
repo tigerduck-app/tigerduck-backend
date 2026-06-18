@@ -202,7 +202,6 @@ async def scan_course_reminders(
                     UserCourseOverride.user_course_id == UserCourse.id,
                 )
                 .where(
-                    UserCourse.deleted_at.is_(None),
                     UserCourse.enrollment_status == "enrolled",
                     func.jsonb_array_length(UserCourse.schedule_json) > 0,
                 )
@@ -232,7 +231,8 @@ async def scan_course_reminders(
             (course, override)
             for course, override in rows
             if course.semester == latest_semester[course.user_id]
-            and not (override is not None and override.is_hidden)
+            # Hidden courses are now hard-deleted, so any course still
+            # present is eligible — no is_hidden check needed.
         ]
         user_ids = {course.user_id for course, _ in eligible}
 

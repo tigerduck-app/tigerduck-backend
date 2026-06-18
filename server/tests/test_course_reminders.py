@@ -220,7 +220,6 @@ async def test_old_semester_hidden_and_excluded_courses(
     local, schedule = _occurrence_in(26)
     current = _course(user, course_key="NEW1", semester="1141", schedule_json=schedule)
     stale = _course(user, course_key="OLD1", semester="1132", schedule_json=schedule)
-    hidden = _course(user, course_key="HID1", semester="1141", schedule_json=schedule)
     dropped = _course(
         user,
         course_key="DRP1",
@@ -228,20 +227,9 @@ async def test_old_semester_hidden_and_excluded_courses(
         schedule_json=schedule,
         enrollment_status="dropped",
     )
-    deleted = _course(
-        user,
-        course_key="DEL1",
-        semester="1141",
-        schedule_json=schedule,
-        deleted_at=datetime.now(UTC),
-    )
-    db_session.add_all([current, stale, hidden, dropped, deleted])
-    await db_session.flush()
-    db_session.add(
-        UserCourseOverride(
-            user_id=user.id, user_course_id=hidden.id, is_hidden=True
-        )
-    )
+    # Hidden/deleted courses are now hard-deleted, so they don't exist in
+    # the DB at all — only old-semester and dropped-status courses remain.
+    db_session.add_all([current, stale, dropped])
     await db_session.commit()
 
     settings = _scan_settings(test_settings, local)
