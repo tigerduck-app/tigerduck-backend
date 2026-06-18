@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # `moodle.ntust.edu.tw` (no "2") does not resolve → login 401 'unreachable'.
     moodle_base_url: str = "https://moodle2.ntust.edu.tw"
     moodle_verify_timeout_seconds: float = 10.0
+    # Default daily maintenance window (Asia/Taipei). During this window,
+    # Moodle token-invalid / unreachable errors are treated as transient
+    # and the sync job reschedules after the window ends (no notification).
+    moodle_maintenance_start: str = "00:00"
+    moodle_maintenance_end: str = "05:00"
 
     # --- Database ---
     # e.g. postgresql+asyncpg://tigerduck:password@localhost:5432/tigerduck

@@ -21,7 +21,7 @@ DEFAULT_POLICIES: tuple[dict, ...] = (
     {
         "job_type": SyncJobType.ntust_courses.value,
         "default_interval_seconds": 28800,
-        "enabled": False,
+        "enabled": True,
     },
     {
         "job_type": SyncJobType.calendar.value,

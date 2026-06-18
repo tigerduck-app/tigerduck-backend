@@ -23,6 +23,7 @@ from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
 from server.logging_setup import configure as configure_logging
+from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes

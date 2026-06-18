@@ -36,6 +36,7 @@ from server.auth.models import ExternalAccount
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
+from server.syncjobs.availability import is_moodle_available
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
@@ -289,24 +290,20 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 changed=stats.changed_count,
             )
     except CredentialInvalid as exc:
-        await _record_failure(
-            worker,
-            job_id=job_id,
-            run_id=run_id,
-            error=ERROR_CREDENTIAL_INVALID,
-            disable=True,
-            detail=exc.reason,
+        await _handle_moodle_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=ERROR_CREDENTIAL_INVALID, detail=exc.reason,
+            is_token_invalid=True,
         )
     except MoodleRateLimited:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED
         )
     except MoodleUnreachable as exc:
-        await _record_failure(
-            worker,
-            job_id=job_id,
-            run_id=run_id,
+        await _handle_moodle_failure(
+            worker, job_id=job_id, run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{str(exc)[:120]}",
+            is_token_invalid=False,
         )
     except Exception as exc:  # unexpected — never kill the tick loop
         logger.exception("syncjobs.run_crashed", job_id=job_id)
@@ -315,6 +312,62 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             job_id=job_id,
             run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{type(exc).__name__}",
+        )
+
+
+async def _handle_moodle_failure(
+    worker: SyncWorker,
+    *,
+    job_id: int,
+    run_id: int,
+    error: str,
+    detail: str | None = None,
+    is_token_invalid: bool,
+) -> None:
+    """Check availability windows before disabling a sync job.
+
+    If Moodle is in a maintenance/suspend window, reschedule instead of
+    disabling — the failure is likely transient. Only disable + push
+    notification when Moodle should be available but isn't.
+    """
+    async with session_scope(worker.session_factory) as session:
+        available, resume_at = await is_moodle_available(
+            session, worker.settings
+        )
+    if not available and resume_at is not None:
+        logger.info(
+            "syncjobs.moodle_unavailable_window",
+            job_id=job_id,
+            resume_at=resume_at.isoformat(),
+        )
+        async with session_scope(worker.session_factory) as session:
+            job = (
+                await session.execute(
+                    select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if job is not None:
+                run = await session.get(SyncRun, run_id)
+                if run is not None and run.status == SyncRunStatus.running.value:
+                    run.status = SyncRunStatus.failed.value
+                    run.finished_at = datetime.now(UTC)
+                    run.error = f"moodle_maintenance:{error}"
+                job.status = SyncJobStatus.pending.value
+                job.run_after = resume_at
+                job.locked_by = None
+                job.locked_at = None
+                job.last_error = f"moodle_maintenance:{error}"
+        return
+
+    if is_token_invalid:
+        await _record_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=error, disable=True, detail=detail,
+        )
+    else:
+        await _record_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=error,
         )
 
 
