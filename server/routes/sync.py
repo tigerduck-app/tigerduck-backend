@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
@@ -126,17 +124,9 @@ async def _read_full_snapshot(session, user_id):
             UserCourseSkippedDate.user_id == user_id
         )
     )
-    cutoff = datetime.now(UTC) - timedelta(days=180)
-    all_assignments = await rows(
-        select(UserAssignment).where(
-            UserAssignment.user_id == user_id,
-            UserAssignment.deleted_at.is_(None),
-        )
+    assignments = await rows(
+        select(UserAssignment).where(UserAssignment.user_id == user_id)
     )
-    assignments = [
-        a for a in all_assignments
-        if a.due_at is None or a.due_at >= cutoff
-    ]
     assignment_overrides = await rows(
         select(UserAssignmentOverride).where(
             UserAssignmentOverride.user_id == user_id
