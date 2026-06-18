@@ -390,6 +390,7 @@ type SyncRun = {
 
 type SyncOverride = {
   moodle_assignment_id: number;
+  title: string | null;
   local_status: string;
   updated_at: string;
 };
@@ -445,8 +446,8 @@ function SyncTab() {
               className="max-w-xs font-mono"
             />
             <Button type="submit" size="sm" disabled={!studentId.trim() || events.isFetching}>
-              {events.isFetching ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1.5 h-3.5 w-3.5" />}
-              Search
+              {events.isFetching ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+              Start monitoring
             </Button>
           </form>
         </CardContent>
@@ -552,7 +553,8 @@ function SyncTab() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Moodle Assignment ID</TableHead>
+                  <TableHead>Moodle ID</TableHead>
+                  <TableHead>Title</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Updated</TableHead>
                 </TableRow>
@@ -561,6 +563,7 @@ function SyncTab() {
                 {data.overrides.map((o) => (
                   <TableRow key={o.moodle_assignment_id}>
                     <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
+                    <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
                     <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
                     <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
                   </TableRow>

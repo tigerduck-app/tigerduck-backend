@@ -229,9 +229,12 @@ async def sync_events(
         )
 
         overrides = await conn.fetch(
-            "SELECT moodle_assignment_id, local_status, updated_at "
-            "FROM user_assignment_overrides WHERE user_id = $1 "
-            "ORDER BY updated_at DESC LIMIT 50",
+            "SELECT ua.moodle_assignment_id, ua.title, "
+            "o.local_status, o.updated_at "
+            "FROM user_assignment_overrides o "
+            "JOIN user_assignments ua ON ua.id = o.user_assignment_id "
+            "WHERE o.user_id = $1 "
+            "ORDER BY o.updated_at DESC LIMIT 50",
             uid,
         )
 
