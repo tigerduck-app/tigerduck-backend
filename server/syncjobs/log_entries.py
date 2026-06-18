@@ -15,6 +15,7 @@ CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS sync_log_entries (
     id          BIGSERIAL PRIMARY KEY,
     user_id     UUID NOT NULL,
+    device_id   UUID,
     ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
     level       VARCHAR(8) NOT NULL DEFAULT 'INFO',
     source      VARCHAR(32) NOT NULL,
@@ -39,17 +40,19 @@ async def log_sync(
     message: str,
     level: str = "INFO",
     detail: dict | None = None,
+    device_id: Any | None = None,
 ) -> None:
     try:
         from sqlalchemy import text
 
         await session.execute(
             text(
-                "INSERT INTO sync_log_entries (user_id, ts, level, source, message, detail) "
-                "VALUES (:uid, :ts, :lvl, :src, :msg, :det)"
+                "INSERT INTO sync_log_entries (user_id, device_id, ts, level, source, message, detail) "
+                "VALUES (:uid, :did, :ts, :lvl, :src, :msg, :det)"
             ),
             {
                 "uid": user_id,
+                "did": device_id,
                 "ts": datetime.now(UTC),
                 "lvl": level,
                 "src": source,

@@ -251,6 +251,53 @@ async def sync_events(
     }
 
 
+def _current_semester_prefix() -> str:
+    """NTUST semester prefix: e.g. '1132' for 2024 spring semester."""
+    now = datetime.now(UTC)
+    roc_year = now.year - 1911
+    if now.month >= 8:
+        return f"{roc_year}1"
+    elif now.month >= 2:
+        return f"{roc_year - 1}2"
+    else:
+        return f"{roc_year - 1}1"
+
+
+@router.get("/sync-courses")
+async def sync_courses(
+    student_id: str = Query(..., min_length=1),
+    pool=Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id FROM users WHERE student_id = $1", student_id
+        )
+        if not user:
+            return {"courses": []}
+
+        uid = user["id"]
+        prefix = _current_semester_prefix()
+
+        sem_dot = f"{prefix[:3]}.{prefix[3]}"
+        rows = await conn.fetch(
+            "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
+            "c.source, c.deleted_at, "
+            "o.color_hex, o.is_hidden, o.custom_names "
+            "FROM user_courses c "
+            "LEFT JOIN user_course_overrides o "
+            "  ON o.user_id = c.user_id AND o.user_course_id = c.id "
+            "WHERE c.user_id = $1 AND c.course_name LIKE $2 "
+            "  AND c.deleted_at IS NULL "
+            "ORDER BY c.course_name",
+            uid, sem_dot + "%",
+        )
+
+    return {
+        "semester": prefix,
+        "courses": [dict(r) for r in rows],
+    }
+
+
 @router.get("/sync-logs")
 async def sync_logs(
     student_id: str = Query(..., min_length=1),
@@ -265,6 +312,7 @@ async def sync_logs(
                 CREATE TABLE IF NOT EXISTS sync_log_entries (
                     id          BIGSERIAL PRIMARY KEY,
                     user_id     UUID NOT NULL,
+                    device_id   UUID,
                     ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
                     level       VARCHAR(8) NOT NULL DEFAULT 'INFO',
                     source      VARCHAR(32) NOT NULL,
@@ -276,6 +324,9 @@ async def sync_logs(
                 CREATE INDEX IF NOT EXISTS idx_sync_log_entries_user
                     ON sync_log_entries (user_id, ts DESC)
             """)
+            await conn.execute(
+                "ALTER TABLE sync_log_entries ADD COLUMN IF NOT EXISTS device_id UUID"
+            )
             _log_table_ready = True
 
         user = await conn.fetchrow(
@@ -285,10 +336,12 @@ async def sync_logs(
             return {"entries": [], "latest_id": after_id}
 
         rows = await conn.fetch(
-            "SELECT id, ts, level, source, message, detail "
-            "FROM sync_log_entries "
-            "WHERE user_id = $1 AND id > $2 "
-            "ORDER BY id ASC LIMIT $3",
+            "SELECT e.id, e.ts, e.level, e.source, e.message, e.detail, "
+            "d.client_device_id AS device_label, d.platform "
+            "FROM sync_log_entries e "
+            "LEFT JOIN user_devices d ON d.id = e.device_id "
+            "WHERE e.user_id = $1 AND e.id > $2 "
+            "ORDER BY e.id ASC LIMIT $3",
             user["id"], after_id, limit,
         )
 

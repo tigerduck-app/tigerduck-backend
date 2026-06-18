@@ -395,6 +395,22 @@ type SyncOverride = {
   updated_at: string;
 };
 
+type SyncCourse = {
+  id: number;
+  moodle_id: string | null;
+  course_no: string;
+  course_name: string;
+  source: string;
+  color_hex: string | null;
+  is_hidden: boolean | null;
+  custom_names: Record<string, string> | null;
+};
+
+type SyncCoursesResponse = {
+  semester: string;
+  courses: SyncCourse[];
+};
+
 type SyncEventsResponse = {
   student_id: string;
   found: boolean;
@@ -410,6 +426,8 @@ type LogEntry = {
   source: string;
   message: string;
   detail: Record<string, unknown> | null;
+  device_label: string | null;
+  platform: string | null;
 };
 
 type LogsResponse = {
@@ -458,7 +476,16 @@ function SyncTab() {
     }
   };
 
+  const coursesQuery = useQuery<SyncCoursesResponse>({
+    queryKey: ["sync-courses", query],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-courses?student_id=${encodeURIComponent(query)}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 10_000 : false,
+  });
+
   const data = events.data;
+  const coursesData = coursesQuery.data;
 
   return (
     <Section className="space-y-4">
@@ -612,6 +639,57 @@ function SyncTab() {
         </Card>
       )}
 
+      {coursesData && coursesData.courses.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              Courses — Semester {coursesData.semester} ({coursesData.courses.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Color</TableHead>
+                  <TableHead>Course No</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Moodle ID</TableHead>
+                  <TableHead>Hidden</TableHead>
+                  <TableHead>Custom Names</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {coursesData.courses.map((c) => (
+                  <TableRow key={c.id}>
+                    <TableCell>
+                      {c.color_hex ? (
+                        <div className="flex items-center gap-1.5">
+                          <div className="h-4 w-4 rounded" style={{ backgroundColor: c.color_hex }} />
+                          <span className="font-mono text-xs">{c.color_hex}</span>
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">default</span>
+                      )}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{c.course_no}</TableCell>
+                    <TableCell className="text-xs max-w-[200px] truncate">{c.course_name}</TableCell>
+                    <TableCell className="font-mono text-xs">{c.moodle_id ?? "—"}</TableCell>
+                    <TableCell>
+                      {c.is_hidden ? <Badge variant="destructive">hidden</Badge> : "—"}
+                    </TableCell>
+                    <TableCell className="text-xs max-w-[200px] truncate">
+                      {c.custom_names && Object.keys(c.custom_names).length > 0
+                        ? Object.entries(c.custom_names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
+                        : "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
       {query && (
         <Card>
           <CardHeader>
@@ -640,6 +718,11 @@ function SyncTab() {
                     <span className="text-muted-foreground shrink-0">{ts}</span>
                     <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
                     <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
+                    {e.device_label && (
+                      <span className="shrink-0 text-purple-400 truncate max-w-[80px]" title={e.device_label}>
+                        [{e.platform ?? "?"}/{e.device_label.slice(0, 8)}]
+                      </span>
+                    )}
                     <span className="text-foreground">{e.message}</span>
                   </div>
                 );

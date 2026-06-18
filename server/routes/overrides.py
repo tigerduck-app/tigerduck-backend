@@ -110,9 +110,9 @@ async def patch_assignment_override(
 
     await log_sync(session, user_id=auth.user_id, source="override",
                    message=f"Assignment override: moodle_id={moodle_assignment_id} → {payload.local_status}",
+                   device_id=auth.device_id,
                    detail={"moodle_assignment_id": moodle_assignment_id,
-                           "local_status": payload.local_status,
-                           "device_id": str(auth.device_id) if auth.device_id else None})
+                           "local_status": payload.local_status})
 
     return AssignmentOverrideResponse(
         id=override_id,
