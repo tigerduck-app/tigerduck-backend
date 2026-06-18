@@ -59,16 +59,18 @@ class CourseOverrideResponse(BaseModel):
 
 
 @router.patch(
-    "/assignments/{assignment_id}/override",
+    "/assignments/{moodle_assignment_id}/override",
     response_model=AssignmentOverrideResponse,
 )
 async def patch_assignment_override(
-    assignment_id: int,
+    moodle_assignment_id: int,
     payload: AssignmentOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    assignment = await _get_assignment(session, auth.user_id, assignment_id)
+    assignment = await _get_assignment_by_moodle_id(
+        session, auth.user_id, moodle_assignment_id
+    )
     now = datetime.now(UTC)
 
     stmt = (
@@ -112,16 +114,18 @@ async def patch_assignment_override(
 
 
 @router.patch(
-    "/courses/{course_id}/override",
+    "/courses/{moodle_course_id}/override",
     response_model=CourseOverrideResponse,
 )
 async def patch_course_override(
-    course_id: int,
+    moodle_course_id: str,
     payload: CourseOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    course = await _get_course(session, auth.user_id, course_id)
+    course = await _get_course_by_moodle_id(
+        session, auth.user_id, moodle_course_id
+    )
     now = datetime.now(UTC)
 
     existing = (
@@ -186,13 +190,13 @@ async def patch_course_override(
     )
 
 
-async def _get_assignment(
-    session: AsyncSession, user_id, assignment_id: int
+async def _get_assignment_by_moodle_id(
+    session: AsyncSession, user_id, moodle_assignment_id: int
 ) -> UserAssignment:
     row = (
         await session.execute(
             select(UserAssignment).where(
-                UserAssignment.id == assignment_id,
+                UserAssignment.moodle_assignment_id == moodle_assignment_id,
                 UserAssignment.user_id == user_id,
                 UserAssignment.deleted_at.is_(None),
             )
@@ -203,13 +207,13 @@ async def _get_assignment(
     return row
 
 
-async def _get_course(
-    session: AsyncSession, user_id, course_id: int
+async def _get_course_by_moodle_id(
+    session: AsyncSession, user_id, moodle_id: str
 ) -> UserCourse:
     row = (
         await session.execute(
             select(UserCourse).where(
-                UserCourse.id == course_id,
+                UserCourse.moodle_id == moodle_id,
                 UserCourse.user_id == user_id,
                 UserCourse.deleted_at.is_(None),
             )
