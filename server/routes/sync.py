@@ -149,12 +149,16 @@ async def _read_full_snapshot(session, user_id):
     )
 
     _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
+    _course_pk_to_moodle = {c.id: c.moodle_id for c in courses}
 
     return {
         "current_revision": state.current_revision if state else 0,
         "courses": [serializers.course_to_dict(c) for c in courses],
         "course_overrides": [
-            serializers.course_override_to_dict(o) for o in course_overrides
+            serializers.course_override_to_dict(
+                o, moodle_id=_course_pk_to_moodle.get(o.user_course_id)
+            )
+            for o in course_overrides
         ],
         "course_skipped_dates": [
             serializers.skipped_date_to_dict(s) for s in skipped
