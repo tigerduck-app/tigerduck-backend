@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Search, Smartphone } from "lucide-react";
+import { Plus, Search, Smartphone, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -244,7 +244,10 @@ function Row({
         {d.has_device_token ? (
           <Badge variant="default">apns</Badge>
         ) : null}
-        {!d.has_pts_token && !d.has_device_token ? (
+        {d.has_fcm_token ? (
+          <Badge variant="default">fcm</Badge>
+        ) : null}
+        {!d.has_pts_token && !d.has_device_token && !d.has_fcm_token ? (
           <Badge variant="muted">none</Badge>
         ) : null}
       </TableCell>
@@ -267,6 +270,7 @@ function SelectionBar({
   const qc = useQueryClient();
   const [listId, setListId] = useState<string>("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [confirmDeregister, setConfirmDeregister] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
 
@@ -316,6 +320,24 @@ function SelectionBar({
     onError: (e) => toast.error(asMessage(e)),
   });
 
+  const deregisterMut = useMutation({
+    mutationFn: () =>
+      api<{ deleted: number }>("/api/devices/deregister", {
+        method: "POST",
+        json: { device_ids: Array.from(selected) },
+      }),
+    onSuccess: (r) => {
+      toast.success(`Deregistered ${r.deleted} device(s)`);
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      setConfirmDeregister(false);
+      onClear();
+    },
+    onError: (e) => {
+      toast.error(asMessage(e));
+      setConfirmDeregister(false);
+    },
+  });
+
   return (
     <Card className="border-primary/40 bg-primary/5">
       <CardContent className="flex flex-wrap items-center gap-3 py-3">
@@ -354,11 +376,49 @@ function SelectionBar({
           >
             Add
           </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setConfirmDeregister(true)}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            Deregister
+          </Button>
           <Button variant="ghost" size="sm" onClick={onClear}>
             Clear
           </Button>
         </div>
       </CardContent>
+
+      <Dialog open={confirmDeregister} onOpenChange={setConfirmDeregister}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Deregister {selected.size} device(s)?</DialogTitle>
+            <DialogDescription>
+              This will soft-delete the selected devices and invalidate all their
+              push tokens. The devices will need to re-register on next app
+              launch. This action cannot be easily undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmDeregister(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={deregisterMut.isPending}
+              onClick={() => deregisterMut.mutate()}
+            >
+              {deregisterMut.isPending ? "Deregistering…" : "Confirm deregister"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>

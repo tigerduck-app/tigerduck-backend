@@ -62,7 +62,14 @@ WITH dev AS (
             SELECT 1 FROM device_push_tokens t
             WHERE t.device_id = ud.id
               AND t.token_kind = 'standard' AND t.status = 'active'
-        )                                      AS has_device_token
+              AND t.provider = 'apns'
+        )                                      AS has_device_token,
+        EXISTS(
+            SELECT 1 FROM device_push_tokens t
+            WHERE t.device_id = ud.id
+              AND t.token_kind = 'standard' AND t.status = 'active'
+              AND t.provider = 'fcm'
+        )                                      AS has_fcm_token
     FROM user_devices ud
     JOIN users u ON u.id = ud.user_id
     WHERE ud.deleted_at IS NULL
@@ -103,6 +110,7 @@ def _row_to_device(r) -> dict:
         "server_push_enabled": r["server_push_enabled"],
         "has_pts_token": r["has_pts_token"],
         "has_device_token": r["has_device_token"],
+        "has_fcm_token": r["has_fcm_token"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
     }
@@ -127,3 +135,29 @@ async def list_devices(
             "total": int(total or 0),
         }
     )
+
+
+@router.post("/deregister")
+async def deregister_devices(
+    pool=Depends(get_pool),
+    body: dict = {},
+) -> JSONResponse:
+    device_ids = body.get("device_ids", [])
+    if not device_ids or not isinstance(device_ids, list):
+        return JSONResponse(content={"deleted": 0})
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE user_devices
+            SET deleted_at = now()
+            WHERE id::text = ANY($1::text[])
+              AND deleted_at IS NULL
+        """, device_ids)
+        count = int(result.split()[-1]) if result else 0
+        if count > 0:
+            await conn.execute("""
+                UPDATE device_push_tokens
+                SET status = 'invalidated'
+                WHERE device_id::text = ANY($1::text[])
+                  AND status = 'active'
+            """, device_ids)
+    return JSONResponse(content={"deleted": count})

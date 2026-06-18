@@ -123,6 +123,7 @@ export type DeviceRow = {
   server_push_enabled: boolean;
   has_pts_token: boolean;
   has_device_token: boolean;
+  has_fcm_token: boolean;
   created_at: string;
   updated_at: string;
 };
