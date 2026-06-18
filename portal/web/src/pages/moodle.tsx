@@ -400,14 +400,20 @@ type SyncCourse = {
   moodle_id: string | null;
   course_no: string;
   course_name: string;
+  client_course_no: string;
   source: string;
   color_hex: string | null;
   is_hidden: boolean | null;
   custom_names: Record<string, string> | null;
+  default_palette_index: number;
+  default_color_light: string;
+  default_color_dark: string;
 };
 
 type SyncCoursesResponse = {
   semester: string;
+  palette_light: string[];
+  palette_dark: string[];
   courses: SyncCourse[];
 };
 
@@ -651,29 +657,37 @@ function SyncTab() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Color</TableHead>
-                  <TableHead>Course No</TableHead>
+                  <TableHead>Course Code</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Moodle ID</TableHead>
                   <TableHead>Hidden</TableHead>
                   <TableHead>Custom Names</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {coursesData.courses.map((c) => (
+                {coursesData.courses.map((c) => {
+                  const isCustom = !!c.color_hex;
+                  return (
                   <TableRow key={c.id}>
                     <TableCell>
-                      {c.color_hex ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="h-4 w-4 rounded" style={{ backgroundColor: c.color_hex }} />
-                          <span className="font-mono text-xs">{c.color_hex}</span>
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">default</span>
-                      )}
+                      <div className="flex items-center gap-1">
+                        {isCustom ? (
+                          <>
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                            <span className="font-mono text-xs">{c.color_hex}</span>
+                          </>
+                        ) : (
+                          <>
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="iOS / Android light" />
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Android dark" />
+                            <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                          </>
+                        )}
+                      </div>
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{c.course_no}</TableCell>
-                    <TableCell className="text-xs max-w-[200px] truncate">{c.course_name}</TableCell>
-                    <TableCell className="font-mono text-xs">{c.moodle_id ?? "—"}</TableCell>
+                    <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                    <TableCell className="text-xs max-w-[200px] truncate" title={c.course_name}>
+                      {c.course_name.replace(/^\d+\.\d【[^】]+】\s*\S+\s*/, "")}
+                    </TableCell>
                     <TableCell>
                       {c.is_hidden ? <Badge variant="destructive">hidden</Badge> : "—"}
                     </TableCell>
@@ -683,7 +697,8 @@ function SyncTab() {
                         : "—"}
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
           </CardContent>

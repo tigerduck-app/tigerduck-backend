@@ -251,6 +251,27 @@ async def sync_events(
     }
 
 
+COURSE_PALETTE_LIGHT = [
+    "#FF6B6B", "#4ECDC4", "#45B7D1", "#F39C12", "#DDA0DD",
+    "#2ECC71", "#E74C3C", "#3498DB", "#F7DC6F", "#9B59B6",
+    "#1ABC9C", "#E67E22", "#85C1E9", "#D35400", "#27AE60",
+    "#C0392B", "#8E44AD", "#16A085", "#F1C40F", "#2980B9",
+]
+COURSE_PALETTE_DARK = [
+    "#994747", "#3A7A73", "#366D7D", "#916111", "#846284",
+    "#267A4C", "#8A3329", "#265F83", "#948448", "#5E3E6E",
+    "#13715E", "#8A5118", "#54748C", "#7E3700", "#1E693D",
+    "#73281D", "#562D68", "#126150", "#91750F", "#1E4F6F",
+]
+
+
+def _course_hash_index(course_no: str) -> int:
+    h = 0
+    for c in course_no:
+        h = (h * 31 + ord(c)) & 0x7FFFFFFF
+    return h % len(COURSE_PALETTE_LIGHT)
+
+
 def _current_semester_prefix() -> str:
     """NTUST semester prefix: e.g. '1132' for 2024 spring semester."""
     now = datetime.now(UTC)
@@ -279,6 +300,7 @@ async def sync_courses(
         prefix = _current_semester_prefix()
 
         sem_dot = f"{prefix[:3]}.{prefix[3]}"
+
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
             "c.source, c.deleted_at, "
@@ -292,9 +314,28 @@ async def sync_courses(
             uid, sem_dot + "%",
         )
 
+    courses = []
+    for r in rows:
+        d = dict(r)
+        name = d.get("course_name") or ""
+        bracket_end = name.find("】")
+        if bracket_end >= 0:
+            rest = name[bracket_end + 1:].strip()
+            code = rest.split(" ", 1)[0] if rest else ""
+        else:
+            code = d.get("course_no") or ""
+        d["client_course_no"] = code
+        idx = _course_hash_index(code)
+        d["default_palette_index"] = idx
+        d["default_color_light"] = COURSE_PALETTE_LIGHT[idx]
+        d["default_color_dark"] = COURSE_PALETTE_DARK[idx]
+        courses.append(d)
+
     return {
         "semester": prefix,
-        "courses": [dict(r) for r in rows],
+        "palette_light": COURSE_PALETTE_LIGHT,
+        "palette_dark": COURSE_PALETTE_DARK,
+        "courses": courses,
     }
 
 
