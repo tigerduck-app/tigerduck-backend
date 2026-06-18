@@ -209,6 +209,24 @@ async def patch_course_override(
         device_id=auth.device_id,
     )
 
+    from server.syncjobs.log_entries import log_sync
+
+    parts = []
+    if payload.is_hidden is not None:
+        parts.append(f"hidden={payload.is_hidden}")
+    if payload.color_hex is not None:
+        parts.append(f"color={payload.color_hex}")
+    if payload.custom_name is not None:
+        parts.append(f"name={payload.custom_name!r}")
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="override",
+        message=f"Course override: moodle_id={moodle_course_id} → {', '.join(parts)}",
+        device_id=auth.device_id,
+        detail={"moodle_course_id": moodle_course_id, "fields": changed_fields},
+    )
+
     await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     return CourseOverrideResponse(

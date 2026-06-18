@@ -90,7 +90,7 @@ async def initial_upload(
 
 
 @router.get("/full")
-async def full_sync(auth: CurrentAuthDep, request: Request):
+async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request):
     """Authoritative snapshot of all user-scoped data + current_revision.
 
     Runs under REPEATABLE READ so every section and the revision watermark
@@ -102,12 +102,23 @@ async def full_sync(auth: CurrentAuthDep, request: Request):
     would leak surprising state into the dependency's commit/rollback
     handling and the pooled connection.
     """
+    from server.syncjobs.log_entries import log_sync
+
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message="Full sync fetched",
+        device_id=auth.device_id,
+    )
+    await session.commit()
+
     factory = request.app.state.session_factory
-    async with factory() as session:
-        await session.connection(
+    async with factory() as snap_session:
+        await snap_session.connection(
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return await _read_full_snapshot(session, auth.user_id)
+        return await _read_full_snapshot(snap_session, auth.user_id)
 
 
 async def _read_full_snapshot(session, user_id):
