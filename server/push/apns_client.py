@@ -59,11 +59,12 @@ class AioApnsSender:
         )
 
     async def send(self, request: ApnsRequest) -> SendResult:
-        push_type = (
-            PushType.LIVEACTIVITY
-            if request.kind is PushKind.live_activity
-            else PushType.ALERT
-        )
+        if request.kind is PushKind.live_activity:
+            push_type = PushType.LIVEACTIVITY
+        elif request.kind is PushKind.background:
+            push_type = PushType.BACKGROUND
+        else:
+            push_type = PushType.ALERT
         notification = NotificationRequest(
             device_token=request.device_token,
             message=request.message,

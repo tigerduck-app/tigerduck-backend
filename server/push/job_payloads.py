@@ -87,7 +87,7 @@ def build_apns_for_job(
             expiration=timestamp + 300,
             priority=5,
             message=message,
-            kind=PushKind.alert,
+            kind=PushKind.background,
         )
 
     # Standard alert (existing logic)

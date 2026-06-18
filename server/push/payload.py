@@ -85,6 +85,7 @@ class PushKind(StrEnum):
 
     live_activity = "live_activity"
     alert = "alert"
+    background = "background"
 
 
 @dataclass(frozen=True)
