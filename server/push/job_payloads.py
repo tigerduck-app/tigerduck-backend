@@ -76,6 +76,20 @@ def build_apns_for_job(
             kind=PushKind.live_activity,
         )
 
+    if payload.get("kind") == "sync_trigger":
+        message = {
+            "aps": {"content-available": 1},
+            "kind": "sync_trigger",
+        }
+        return ApnsRequest(
+            device_token=token_value,
+            topic=bundle_id,
+            expiration=timestamp + 300,
+            priority=5,
+            message=message,
+            kind=PushKind.alert,
+        )
+
     # Standard alert (existing logic)
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
@@ -106,6 +120,15 @@ def build_fcm_for_job(
     token_value: str,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> FcmRequest:
+    if payload.get("kind") == "sync_trigger":
+        return FcmRequest(
+            token=token_value,
+            title="",
+            body="",
+            data={"kind": "sync_trigger"},
+            ttl_seconds=300,
+        )
+
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
     data = {

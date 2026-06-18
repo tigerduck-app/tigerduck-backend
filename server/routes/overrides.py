@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import CurrentAuthDep
+from server.auth.models import PushJob
 from server.db import SessionDep
 from server.sync.changelog import append_change
 from server.sync.models import (
@@ -31,6 +32,23 @@ from server.sync.models import (
 
 router = APIRouter(tags=["sync-overrides"])
 logger = structlog.get_logger(__name__)
+
+
+async def _enqueue_sync_trigger(session: AsyncSession, user_id, device_id) -> None:
+    now = datetime.now(UTC)
+    stmt = (
+        pg_insert(PushJob)
+        .values(
+            user_id=user_id,
+            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp())}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now,
+            payload={"kind": "sync_trigger", "source_device_id": str(device_id) if device_id else None},
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)
 
 
 class AssignmentOverrideRequest(BaseModel):
@@ -114,6 +132,8 @@ async def patch_assignment_override(
                    detail={"moodle_assignment_id": moodle_assignment_id,
                            "local_status": payload.local_status})
 
+    await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
+
     return AssignmentOverrideResponse(
         id=override_id,
         local_status=payload.local_status,
@@ -188,6 +208,8 @@ async def patch_course_override(
         payload={"fields": changed_fields},
         device_id=auth.device_id,
     )
+
+    await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     return CourseOverrideResponse(
         id=existing.id,
