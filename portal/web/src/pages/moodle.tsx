@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -403,9 +403,26 @@ type SyncEventsResponse = {
   overrides?: SyncOverride[];
 };
 
+type LogEntry = {
+  id: number;
+  ts: string;
+  level: string;
+  source: string;
+  message: string;
+  detail: Record<string, unknown> | null;
+};
+
+type LogsResponse = {
+  entries: LogEntry[];
+  latest_id: number;
+};
+
 function SyncTab() {
   const [studentId, setStudentId] = useState("");
   const [query, setQuery] = useState("");
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [latestId, setLatestId] = useState(0);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
   const events = useQuery<SyncEventsResponse>({
     queryKey: ["sync-events", query],
@@ -415,9 +432,30 @@ function SyncTab() {
     refetchInterval: query ? 5_000 : false,
   });
 
+  const logsQuery = useQuery<LogsResponse>({
+    queryKey: ["sync-logs", query, latestId],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-logs?student_id=${encodeURIComponent(query)}&after_id=${latestId}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 2_000 : false,
+  });
+
+  useEffect(() => {
+    const d = logsQuery.data;
+    if (d && d.entries.length > 0) {
+      setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
+      setLatestId(d.latest_id);
+      setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+    }
+  }, [logsQuery.data]);
+
   const handleSearch = () => {
     const trimmed = studentId.trim();
-    if (trimmed) setQuery(trimmed);
+    if (trimmed) {
+      setQuery(trimmed);
+      setLogEntries([]);
+      setLatestId(0);
+    }
   };
 
   const data = events.data;
@@ -570,6 +608,44 @@ function SyncTab() {
                 ))}
               </TableBody>
             </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {query && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <RefreshCw className={`h-4 w-4 ${query ? "animate-spin" : ""}`} />
+              Live Sync Log
+            </CardTitle>
+            <CardDescription>
+              Auto-refreshes every 2s. Shows executor events, override PATCHes, and auth events.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="rounded-md border bg-muted/30 font-mono text-xs h-80 overflow-y-auto p-3 space-y-0.5">
+              {logEntries.length === 0 && (
+                <div className="text-muted-foreground text-center py-8">
+                  Waiting for sync events...
+                </div>
+              )}
+              {logEntries.map((e) => {
+                const ts = new Date(e.ts).toLocaleTimeString();
+                const levelColor =
+                  e.level === "ERROR" ? "text-red-500" :
+                  e.level === "WARN" ? "text-yellow-500" : "text-muted-foreground";
+                return (
+                  <div key={e.id} className="flex gap-2 leading-5">
+                    <span className="text-muted-foreground shrink-0">{ts}</span>
+                    <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
+                    <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
+                    <span className="text-foreground">{e.message}</span>
+                  </div>
+                );
+              })}
+              <div ref={logEndRef} />
+            </div>
           </CardContent>
         </Card>
       )}

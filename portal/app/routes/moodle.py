@@ -1,7 +1,8 @@
-"""Moodle sync management tab — status, suspend, retry-all, job list."""
+"""Moodle sync management tab — status, suspend, retry-all, job list, sync logs."""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
@@ -9,6 +10,9 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..db import get_pool
+
+logger = logging.getLogger(__name__)
+_log_table_ready = False
 
 router = APIRouter(prefix="/api/moodle")
 
@@ -245,3 +249,49 @@ async def sync_events(
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],
     }
+
+
+@router.get("/sync-logs")
+async def sync_logs(
+    student_id: str = Query(..., min_length=1),
+    after_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+    pool=Depends(get_pool),
+):
+    global _log_table_ready
+    async with pool.acquire() as conn:
+        if not _log_table_ready:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS sync_log_entries (
+                    id          BIGSERIAL PRIMARY KEY,
+                    user_id     UUID NOT NULL,
+                    ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    level       VARCHAR(8) NOT NULL DEFAULT 'INFO',
+                    source      VARCHAR(32) NOT NULL,
+                    message     TEXT NOT NULL,
+                    detail      JSONB
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_log_entries_user
+                    ON sync_log_entries (user_id, ts DESC)
+            """)
+            _log_table_ready = True
+
+        user = await conn.fetchrow(
+            "SELECT id FROM users WHERE student_id = $1", student_id
+        )
+        if not user:
+            return {"entries": [], "latest_id": after_id}
+
+        rows = await conn.fetch(
+            "SELECT id, ts, level, source, message, detail "
+            "FROM sync_log_entries "
+            "WHERE user_id = $1 AND id > $2 "
+            "ORDER BY id ASC LIMIT $3",
+            user["id"], after_id, limit,
+        )
+
+    entries = [dict(r) for r in rows]
+    latest_id = entries[-1]["id"] if entries else after_id
+    return {"entries": entries, "latest_id": latest_id}

@@ -245,12 +245,20 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             if not isinstance(token, str) or not token:
                 raise CredentialInvalid("moodle_token_missing")
 
+            from .log_entries import log_sync
+
+            await log_sync(session, user_id=job.user_id, source="executor",
+                           message=f"Job started: {job.job_type}",
+                           detail={"job_id": job.id, "run_id": run_id})
+
             now = datetime.now(UTC)
             if job.job_type == SyncJobType.ntust_courses.value:
                 try:
                     courses = await worker.course_fetcher.fetch_courses(token=token)
                 except MoodleTokenInvalid:
                     raise CredentialInvalid("moodle_token_invalid")
+                await log_sync(session, user_id=job.user_id, source="executor",
+                               message=f"Fetched {len(courses)} courses from Moodle")
                 stats = await apply_fetched_courses(
                     session, user_id=job.user_id, fetched=courses, now=now
                 )
@@ -259,6 +267,8 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     fetched = await worker.fetcher.fetch_assignments(token=token)
                 except MoodleTokenInvalid:
                     raise CredentialInvalid("moodle_token_invalid")
+                await log_sync(session, user_id=job.user_id, source="executor",
+                               message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
                     session, user_id=job.user_id, fetched=fetched, now=now
                 )
@@ -268,6 +278,10 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 run.finished_at = now
                 run.fetched_count = stats.fetched_count
                 run.changed_count = stats.changed_count
+
+            await log_sync(session, user_id=job.user_id, source="executor",
+                           message=f"Job succeeded: {job.job_type} — fetched={stats.fetched_count} changed={stats.changed_count}",
+                           detail={"fetched": stats.fetched_count, "changed": stats.changed_count})
 
             interval = (
                 policy.default_interval_seconds
