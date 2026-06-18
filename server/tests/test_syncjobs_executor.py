@@ -24,9 +24,6 @@ from server.syncjobs.moodle_client import (
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
-    ObtainedToken,
-    SsoAuthFailed,
-    SsoUnavailable,
 )
 from server.syncjobs.policies import ensure_default_policies
 
@@ -52,28 +49,14 @@ class StubFetcher:
         return self.results
 
 
-class StubObtainer:
-    def __init__(self, result=None, error=None):
-        self.result = result
-        self.error = error
-        self.calls = 0
-
-    async def obtain_token(self, *, username, password):
-        self.calls += 1
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-
 def _worker(
-    prepared_engine, test_settings, fetcher=None, obtainer=None
+    prepared_engine, test_settings, fetcher=None
 ) -> SyncWorker:
     return SyncWorker(
         session_factory=build_session_factory(prepared_engine),
         settings=test_settings,
         cipher=_cipher(),
         fetcher=fetcher if fetcher is not None else StubFetcher(),
-        token_obtainer=obtainer if obtainer is not None else StubObtainer(),
         worker_id="test-worker",
     )
 
@@ -297,38 +280,17 @@ async def test_successful_run_upserts_and_reschedules(
     assert len(entries) == 2
 
 
-async def test_expired_token_refreshed_once_then_fetch_retried(
+async def test_expired_token_disables_job_and_queues_push(
     db_session, prepared_engine, test_settings
 ):
-    user, account, job = await _setup_user_job(db_session)
-    fetcher = StubFetcher(results=[_fa(1)], errors=[MoodleTokenInvalid("dead")])
-    obtainer = StubObtainer(
-        result=ObtainedToken(token="fresh-tok", private_token=None)
-    )
-    worker = _worker(
-        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
-    )
-    await run_sync_tick(worker)
-
-    assert obtainer.calls == 1
-    assert fetcher.calls == ["tok-1", "fresh-tok"]
-    await db_session.refresh(job)
-    assert job.status == "pending"
-    assert job.last_success_at is not None
-
-
-async def test_sso_auth_failure_disables_all_jobs_no_retry(
-    db_session, prepared_engine, test_settings
-):
+    """Token-only: an expired Moodle token disables the sync job and
+    queues a push notification. No password-based refresh — the user must
+    open the app to send a fresh token via PATCH /auth/credentials."""
     user, account, job = await _setup_user_job(db_session)
     fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
-    obtainer = StubObtainer(error=SsoAuthFailed("invalidlogin"))
-    worker = _worker(
-        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
-    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)
 
-    assert obtainer.calls == 1  # the iron rule: exactly one SSO attempt
     await db_session.refresh(job)
     assert job.status == "disabled"
     assert job.last_error == "credential_invalid"
@@ -340,10 +302,6 @@ async def test_sso_auth_failure_disables_all_jobs_no_retry(
         )
     ).scalar_one()
     assert push.scenario == "reauth_required"
-
-    # Next tick: disabled job is never claimed, SSO never re-attempted.
-    await run_sync_tick(worker)
-    assert obtainer.calls == 1
 
 
 async def test_network_failure_backs_off_then_terminal_after_max_attempts(
@@ -388,18 +346,3 @@ async def test_rate_limited_records_school_rate_limited(
     assert job.last_error == "school_rate_limited"
 
 
-async def test_sso_network_failure_is_retriable_not_disabling(
-    db_session, prepared_engine, test_settings
-):
-    _, account, job = await _setup_user_job(db_session)
-    fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
-    obtainer = StubObtainer(error=SsoUnavailable("timeout"))
-    worker = _worker(
-        prepared_engine, test_settings, fetcher=fetcher, obtainer=obtainer
-    )
-    await run_sync_tick(worker)
-    await db_session.refresh(job)
-    assert job.status == "pending"  # backoff retry, NOT disabled
-    assert job.attempts == 1
-    await db_session.refresh(account)
-    assert account.credential_status == "active"

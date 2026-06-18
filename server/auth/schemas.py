@@ -55,6 +55,15 @@ class RefreshResponse(BaseModel):
     expires_in: int
 
 
+class UpdateCredentialsRequest(BaseModel):
+    moodle_token: str = Field(min_length=1, max_length=512)
+    moodle_private_token: str | None = Field(default=None, max_length=512)
+
+
+class UpdateCredentialsResponse(BaseModel):
+    updated: bool
+
+
 class PushTokenIn(BaseModel):
     provider: Literal["apns", "fcm"]
     token_kind: Literal["standard", "push_to_start", "live_activity_update"]

@@ -40,7 +40,6 @@ from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential_blob,
     mark_credentials_invalid,
-    refresh_moodle_token_durably,
 )
 from server.syncjobs.models import (
     SyncJob,
@@ -54,8 +53,6 @@ from server.syncjobs.moodle_client import (
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
-    SsoUnavailable,
-    TokenObtainer,
 )
 
 logger = structlog.get_logger(__name__)
@@ -83,7 +80,6 @@ class SyncWorker:
     settings: Settings
     cipher: CredentialCipher
     fetcher: AssignmentFetcher
-    token_obtainer: TokenObtainer
     worker_id: str
 
 
@@ -241,27 +237,12 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             )
             token = (blob.get("token_cache") or {}).get("moodle_token")
 
-            fetched = None
-            if isinstance(token, str) and token:
-                try:
-                    fetched = await worker.fetcher.fetch_assignments(token=token)
-                except MoodleTokenInvalid:
-                    logger.info("syncjobs.token_expired", account_id=account.id)
-            if fetched is None:
-                # Runs in its OWN committed transactions: the iron-rule
-                # marker must be durable, and the fresh token must survive
-                # a later fetch failure rolling this work session back.
-                # NOTE: no work-session statements may run between
-                # load_credential_blob above and this call — the pending
-                # last_used_at update must stay unflushed so the durable
-                # sessions can write the credential row without blocking.
-                token = await refresh_moodle_token_durably(
-                    worker.session_factory,
-                    worker.cipher,
-                    worker.token_obtainer,
-                    external_account_id=job.external_account_id,
-                )
+            if not isinstance(token, str) or not token:
+                raise CredentialInvalid("moodle_token_missing")
+            try:
                 fetched = await worker.fetcher.fetch_assignments(token=token)
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
 
             now = datetime.now(UTC)
             stats = await apply_fetched_assignments(
@@ -307,7 +288,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED
         )
-    except (MoodleUnreachable, SsoUnavailable) as exc:
+    except MoodleUnreachable as exc:
         await _record_failure(
             worker,
             job_id=job_id,

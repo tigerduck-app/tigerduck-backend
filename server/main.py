@@ -37,7 +37,7 @@ from server.routes import user_devices as user_devices_routes
 from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
 from server.syncjobs.executor import SyncWorker, default_worker_id
-from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpTokenObtainer
+from server.syncjobs.moodle_client import HttpAssignmentFetcher
 from server.syncjobs.policies import ensure_default_policies
 
 logger = structlog.get_logger(__name__)
@@ -121,10 +121,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings=settings,
             cipher=cipher,
             fetcher=HttpAssignmentFetcher(
-                base_url=settings.moodle_base_url,
-                timeout_seconds=settings.moodle_fetch_timeout_seconds,
-            ),
-            token_obtainer=HttpTokenObtainer(
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
             ),

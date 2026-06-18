@@ -1,11 +1,20 @@
-"""/v3 auth endpoints: login, refresh, logout."""
+"""/v3 auth endpoints: login, refresh, logout, credential refresh."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
 from fastapi import APIRouter, Request, status
+from sqlalchemy import select, update
 
+from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.dependencies import CurrentAuthDep
+from server.auth.models import (
+    CredentialStatus,
+    ExternalAccount,
+    ExternalAccountCredential,
+)
 
 from server.auth import service
 from server.auth.schemas import (
@@ -13,9 +22,12 @@ from server.auth.schemas import (
     LoginResponse,
     RefreshRequest,
     RefreshResponse,
+    UpdateCredentialsRequest,
+    UpdateCredentialsResponse,
     UserOut,
 )
 from server.db import SessionDep
+from server.syncjobs.models import SyncJob, SyncJobStatus
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = structlog.get_logger(__name__)
@@ -42,7 +54,6 @@ async def login(
         state.login_limiter,
         state.credential_cipher,
         student_id=payload.student_id,
-        password=payload.password,
         moodle_token=payload.moodle_token,
         moodle_private_token=payload.moodle_private_token,
         device_info=payload.device_info,
@@ -75,6 +86,81 @@ async def refresh(
         refresh_token=result.refresh_token,
         expires_in=result.expires_in,
     )
+
+
+@router.patch("/credentials", response_model=UpdateCredentialsResponse)
+async def update_credentials(
+    payload: UpdateCredentialsRequest,
+    auth: CurrentAuthDep,
+    request: Request,
+    session: SessionDep,
+) -> UpdateCredentialsResponse:
+    """Accept a fresh Moodle token from the app (called on every foreground).
+    Updates the encrypted credential blob and auto-revives disabled sync jobs
+    so a token-invalid outage heals the moment the user opens the app."""
+    cipher: CredentialCipher | None = request.app.state.credential_cipher
+    if cipher is None:
+        return UpdateCredentialsResponse(updated=False)
+
+    account = (
+        await session.execute(
+            select(ExternalAccount).where(ExternalAccount.user_id == auth.user_id)
+        )
+    ).scalar_one_or_none()
+    if account is None:
+        return UpdateCredentialsResponse(updated=False)
+
+    credential = await session.get(ExternalAccountCredential, account.id)
+    now = datetime.now(UTC)
+    new_blob = {
+        "token_cache": {
+            "moodle_token": payload.moodle_token,
+            "moodle_private_token": payload.moodle_private_token,
+            "obtained_at": now.isoformat(),
+        },
+    }
+    encrypted = cipher.encrypt(
+        new_blob, build_credential_aad(account.id, account.provider)
+    )
+    if credential is None:
+        credential = ExternalAccountCredential(
+            external_account_id=account.id,
+            encryption_key_id=encrypted.key_id,
+            ciphertext=encrypted.ciphertext,
+            nonce=encrypted.nonce,
+            aad=encrypted.aad,
+        )
+        session.add(credential)
+    else:
+        credential.encryption_key_id = encrypted.key_id
+        credential.ciphertext = encrypted.ciphertext
+        credential.nonce = encrypted.nonce
+        credential.aad = encrypted.aad
+        credential.rotated_at = now
+
+    was_invalid = account.credential_status != CredentialStatus.active.value
+    account.credential_status = CredentialStatus.active.value
+    account.last_auth_success_at = now
+    account.last_auth_error = None
+
+    if was_invalid:
+        await session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.user_id == auth.user_id,
+                SyncJob.status == SyncJobStatus.disabled.value,
+            )
+            .values(
+                status=SyncJobStatus.pending.value,
+                run_after=now,
+                attempts=0,
+                locked_by=None,
+                locked_at=None,
+                last_error=None,
+            )
+        )
+
+    return UpdateCredentialsResponse(updated=True)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
