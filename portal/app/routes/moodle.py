@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -18,8 +18,7 @@ class SuspendRequest(BaseModel):
 
 
 @router.get("/status")
-async def moodle_status():
-    pool = await get_pool()
+async def moodle_status(pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         suspended = await conn.fetchrow(
             "SELECT value FROM system_settings WHERE key = 'moodle_suspended_until'"
@@ -54,9 +53,8 @@ async def moodle_status():
 
 
 @router.post("/suspend")
-async def suspend_moodle(req: SuspendRequest):
+async def suspend_moodle(req: SuspendRequest, pool=Depends(get_pool)):
     until = datetime.now(UTC) + timedelta(hours=req.hours)
-    pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO system_settings (key, value, updated_at)
@@ -67,8 +65,7 @@ async def suspend_moodle(req: SuspendRequest):
 
 
 @router.post("/resume")
-async def resume_moodle():
-    pool = await get_pool()
+async def resume_moodle(pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         await conn.execute(
             "DELETE FROM system_settings WHERE key = 'moodle_suspended_until'"
@@ -81,8 +78,7 @@ class RetryAllRequest(BaseModel):
 
 
 @router.post("/retry-all")
-async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest()):
-    pool = await get_pool()
+async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         result = await conn.execute("""
             UPDATE sync_jobs
@@ -123,8 +119,8 @@ async def list_moodle_jobs(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    pool=Depends(get_pool),
 ):
-    pool = await get_pool()
     where = "WHERE sj.job_type IN ('moodle_assignments', 'ntust_courses')"
     params: list = []
     if status:
@@ -159,8 +155,8 @@ async def list_moodle_students(
     credential_filter: str = Query(default="all"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    pool=Depends(get_pool),
 ):
-    pool = await get_pool()
     async with pool.acquire() as conn:
         counts = await conn.fetchrow("""
             SELECT
