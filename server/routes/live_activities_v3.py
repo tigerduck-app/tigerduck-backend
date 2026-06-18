@@ -77,6 +77,10 @@ async def register_live_activity(
         )
         .on_conflict_do_update(
             index_elements=["provider", "token_kind", "token_hash", "scope_key"],
+            # ux_push_token_active is a PARTIAL unique index (WHERE
+            # status='active'); the predicate must be repeated here or
+            # Postgres can't match the ON CONFLICT target.
+            index_where=DevicePushToken.status == PushTokenStatus.active.value,
             set_={
                 "device_id": auth.device_id,
                 "token_value": payload.update_token_hex,
@@ -112,6 +116,16 @@ async def register_live_activity(
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "dedupe_key"],
+                # ux_push_jobs_dedupe_active is partial (active statuses);
+                # repeat its predicate so ON CONFLICT matches the index.
+                index_where=PushJob.status.in_(
+                    [
+                        PushJobStatus.pending.value,
+                        PushJobStatus.processing.value,
+                        PushJobStatus.sent.value,
+                        PushJobStatus.partial_failed.value,
+                    ]
+                ),
                 set_={
                     "fire_at": payload.countdown_target,
                     "payload": {
