@@ -188,8 +188,6 @@ function DevicesTable({
           <TableHead className="w-10"></TableHead>
           <TableHead>Device ID</TableHead>
           <TableHead>User</TableHead>
-          <TableHead>Bundle</TableHead>
-          <TableHead>APNs env</TableHead>
           <TableHead>Push</TableHead>
           <TableHead>Tokens</TableHead>
           <TableHead>Updated</TableHead>
@@ -232,12 +230,6 @@ function Row({
         </span>
       </TableCell>
       <TableCell className="font-mono text-xs">{d.user_id || "—"}</TableCell>
-      <TableCell className="font-mono text-xs text-muted-foreground">
-        {d.bundle_id || "—"}
-      </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {d.apns_env || "—"}
-      </TableCell>
       <TableCell>
         {d.server_push_enabled ? (
           <Badge variant="success">on</Badge>
