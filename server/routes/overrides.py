@@ -178,6 +178,7 @@ async def patch_course_override(
         existing.is_hidden_updated_at = now
         existing.is_hidden_device_id = auth.device_id
         changed_fields.append("is_hidden")
+        course.deleted_at = now if payload.is_hidden else None
 
     if payload.color_hex is not None:
         existing.color_hex = payload.color_hex
