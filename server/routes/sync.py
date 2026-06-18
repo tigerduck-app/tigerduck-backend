@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
@@ -119,6 +123,68 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
         return await _read_full_snapshot(snap_session, auth.user_id)
+
+
+class CourseUploadItem(BaseModel):
+    semester: str
+    course_no: str
+    course_name: str
+    course_name_en: str | None = None
+    moodle_id: str | None = None
+    credits: float | None = None
+    classroom: str | None = None
+    instructors: list[str] = []
+
+
+class CourseUploadRequest(BaseModel):
+    courses: list[CourseUploadItem]
+
+
+@router.post("/courses/upload")
+async def upload_courses(
+    payload: CourseUploadRequest,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    now = datetime.now(UTC)
+    upserted = 0
+    for c in payload.courses:
+        course_key = f"client:{c.semester}:{c.course_no}"
+        moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"
+        stmt = (
+            pg_insert(UserCourse)
+            .values(
+                user_id=auth.user_id,
+                semester=c.semester,
+                course_key=course_key,
+                source="ntust_portal",
+                course_no=c.course_no,
+                course_name=c.course_name,
+                course_name_en=c.course_name_en,
+                moodle_id=moodle_id,
+                credits=c.credits,
+                classroom=c.classroom,
+                instructors=c.instructors,
+                fetched_at=now,
+                last_seen_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "semester", "course_key"],
+                set_={
+                    "course_name": c.course_name,
+                    "course_name_en": c.course_name_en,
+                    "moodle_id": moodle_id,
+                    "credits": c.credits,
+                    "classroom": c.classroom,
+                    "instructors": c.instructors,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                },
+            )
+        )
+        await session.execute(stmt)
+        upserted += 1
+    return {"upserted": upserted}
 
 
 async def _read_full_snapshot(session, user_id):
