@@ -4,9 +4,11 @@ import { toast } from "sonner";
 import {
   AlertCircle,
   CheckCircle2,
+  Loader2,
   Pause,
   Play,
   RefreshCw,
+  Search,
   Users,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
 import { PageHeader, Section } from "@/components/ui/section";
 import {
   Table,
@@ -77,12 +80,16 @@ export function MoodlePage() {
         <TabsList>
           <TabsTrigger value="actions">Actions</TabsTrigger>
           <TabsTrigger value="lists">Lists</TabsTrigger>
+          <TabsTrigger value="sync">Sync</TabsTrigger>
         </TabsList>
         <TabsContent value="actions">
           <ActionsTab />
         </TabsContent>
         <TabsContent value="lists">
           <ListsTab />
+        </TabsContent>
+        <TabsContent value="sync">
+          <SyncTab />
         </TabsContent>
       </Tabs>
     </>
@@ -355,6 +362,234 @@ function ListsTab() {
         </CardContent>
       </Card>
     </Section>
+  );
+}
+
+type SyncJob = {
+  id: number;
+  job_type: string;
+  job_status: string;
+  attempts: number;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+  run_after: string | null;
+};
+
+type SyncRun = {
+  id: number;
+  job_type: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  fetched_count: number | null;
+  changed_count: number | null;
+  error: string | null;
+  meta: Record<string, unknown> | null;
+};
+
+type SyncOverride = {
+  moodle_assignment_id: number;
+  local_status: string;
+  updated_at: string;
+};
+
+type SyncEventsResponse = {
+  student_id: string;
+  found: boolean;
+  jobs?: SyncJob[];
+  runs?: SyncRun[];
+  overrides?: SyncOverride[];
+};
+
+function SyncTab() {
+  const [studentId, setStudentId] = useState("");
+  const [query, setQuery] = useState("");
+
+  const events = useQuery<SyncEventsResponse>({
+    queryKey: ["sync-events", query],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-events?student_id=${encodeURIComponent(query)}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 5_000 : false,
+  });
+
+  const handleSearch = () => {
+    const trimmed = studentId.trim();
+    if (trimmed) setQuery(trimmed);
+  };
+
+  const data = events.data;
+
+  return (
+    <Section className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Search className="h-5 w-5" />
+            Sync Events
+          </CardTitle>
+          <CardDescription>
+            Enter a student ID to view sync job history, run logs, and override state.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
+          >
+            <Input
+              placeholder="Student ID (e.g. B11234567)"
+              value={studentId}
+              onChange={(e) => setStudentId(e.target.value)}
+              className="max-w-xs font-mono"
+            />
+            <Button type="submit" size="sm" disabled={!studentId.trim() || events.isFetching}>
+              {events.isFetching ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Search className="mr-1.5 h-3.5 w-3.5" />}
+              Search
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      {data && !data.found && (
+        <Card>
+          <CardContent className="py-6 text-center text-muted-foreground">
+            Student "{data.student_id}" not found
+          </CardContent>
+        </Card>
+      )}
+
+      {data?.found && data.jobs && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Sync Jobs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Job Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Attempts</TableHead>
+                  <TableHead>Last Success</TableHead>
+                  <TableHead>Last Failure</TableHead>
+                  <TableHead>Error</TableHead>
+                  <TableHead>Next Run</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.jobs.map((j) => (
+                  <TableRow key={j.id}>
+                    <TableCell className="font-mono text-xs">{j.job_type}</TableCell>
+                    <TableCell><RunStatusBadge status={j.job_status} /></TableCell>
+                    <TableCell>{j.attempts}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.last_success_at)}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.last_failure_at)}</TableCell>
+                    <TableCell className="max-w-[200px] truncate text-xs text-destructive">{j.last_error ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.run_after)}</TableCell>
+                  </TableRow>
+                ))}
+                {data.jobs.length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync jobs</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {data?.found && data.runs && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Run History ({data.runs.length})</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Started</TableHead>
+                  <TableHead>Job Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Duration</TableHead>
+                  <TableHead>Fetched</TableHead>
+                  <TableHead>Changed</TableHead>
+                  <TableHead>Error</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.runs.map((r) => {
+                  const dur = r.finished_at && r.started_at
+                    ? `${((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1)}s`
+                    : "—";
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="text-xs">{fmt(r.started_at)}</TableCell>
+                      <TableCell className="font-mono text-xs">{r.job_type}</TableCell>
+                      <TableCell><RunStatusBadge status={r.status} /></TableCell>
+                      <TableCell className="text-xs">{dur}</TableCell>
+                      <TableCell>{r.fetched_count ?? "—"}</TableCell>
+                      <TableCell>{r.changed_count ?? "—"}</TableCell>
+                      <TableCell className="max-w-[250px] truncate text-xs text-destructive">{r.error ?? "—"}</TableCell>
+                    </TableRow>
+                  );
+                })}
+                {data.runs.length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync runs yet</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {data?.found && data.overrides && data.overrides.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Assignment Overrides ({data.overrides.length})</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Moodle Assignment ID</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Updated</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.overrides.map((o) => (
+                  <TableRow key={o.moodle_assignment_id}>
+                    <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
+                    <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
+                    <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+    </Section>
+  );
+}
+
+function RunStatusBadge({ status }: { status: string }) {
+  const colors: Record<string, string> = {
+    succeeded: "bg-green-500/10 text-green-600",
+    running: "bg-blue-500/10 text-blue-600",
+    pending: "bg-yellow-500/10 text-yellow-600",
+    failed: "bg-red-500/10 text-red-600",
+    disabled: "bg-gray-500/10 text-gray-600",
+    cancelled: "bg-gray-500/10 text-gray-600",
+    ignored: "bg-gray-500/10 text-gray-600",
+    locally_completed: "bg-green-500/10 text-green-600",
+    none: "bg-gray-500/10 text-gray-600",
+  };
+  return (
+    <Badge variant="default" className={colors[status] ?? "bg-gray-500/10 text-gray-600"}>
+      {status}
+    </Badge>
   );
 }
 

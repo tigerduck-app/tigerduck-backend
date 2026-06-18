@@ -192,3 +192,53 @@ async def list_moodle_students(
         "counts": dict(counts) if counts else {"valid": 0, "expired": 0},
         "students": [dict(r) for r in rows],
     }
+
+
+@router.get("/sync-events")
+async def sync_events(
+    student_id: str = Query(..., min_length=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    pool=Depends(get_pool),
+):
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow(
+            "SELECT id FROM users WHERE student_id = $1", student_id
+        )
+        if not user:
+            return {"student_id": student_id, "found": False, "events": []}
+
+        uid = user["id"]
+
+        jobs = await conn.fetch(
+            "SELECT id, job_type, status AS job_status, attempts, "
+            "last_success_at, last_failure_at, last_error, run_after "
+            "FROM sync_jobs WHERE user_id = $1 "
+            "ORDER BY job_type",
+            uid,
+        )
+
+        runs = await conn.fetch(
+            "SELECT sr.id, sj.job_type, sr.started_at, sr.finished_at, "
+            "sr.status, sr.fetched_count, sr.changed_count, sr.error, "
+            "sr.metadata AS meta "
+            "FROM sync_runs sr "
+            "JOIN sync_jobs sj ON sj.id = sr.sync_job_id "
+            "WHERE sr.user_id = $1 "
+            "ORDER BY sr.started_at DESC LIMIT $2",
+            uid, limit,
+        )
+
+        overrides = await conn.fetch(
+            "SELECT moodle_assignment_id, local_status, updated_at "
+            "FROM user_assignment_overrides WHERE user_id = $1 "
+            "ORDER BY updated_at DESC LIMIT 50",
+            uid,
+        )
+
+    return {
+        "student_id": student_id,
+        "found": True,
+        "jobs": [dict(j) for j in jobs],
+        "runs": [dict(r) for r in runs],
+        "overrides": [dict(o) for o in overrides],
+    }
