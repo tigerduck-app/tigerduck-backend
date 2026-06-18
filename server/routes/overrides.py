@@ -44,12 +44,17 @@ class AssignmentOverrideResponse(BaseModel):
 
 
 class CourseOverrideRequest(BaseModel):
-    is_hidden: bool
+    is_hidden: bool | None = None
+    color_hex: str | None = None
+    custom_name: str | None = None
+    locale: str | None = None
 
 
 class CourseOverrideResponse(BaseModel):
     id: int
     is_hidden: bool
+    color_hex: str | None
+    custom_names: dict[str, str]
     updated_at: str
 
 
@@ -119,28 +124,48 @@ async def patch_course_override(
     course = await _get_course(session, auth.user_id, course_id)
     now = datetime.now(UTC)
 
-    stmt = (
-        pg_insert(UserCourseOverride)
-        .values(
-            user_id=auth.user_id,
-            user_course_id=course.id,
-            is_hidden=payload.is_hidden,
-            is_hidden_updated_at=now,
-            is_hidden_device_id=auth.device_id,
+    existing = (
+        await session.execute(
+            select(UserCourseOverride).where(
+                UserCourseOverride.user_id == auth.user_id,
+                UserCourseOverride.user_course_id == course.id,
+            )
         )
-        .on_conflict_do_update(
-            index_elements=["user_id", "user_course_id"],
-            set_={
-                "is_hidden": payload.is_hidden,
-                "is_hidden_updated_at": now,
-                "is_hidden_device_id": auth.device_id,
-                "updated_at": now,
-            },
+    ).scalar_one_or_none()
+
+    if existing is None:
+        existing = UserCourseOverride(
+            user_id=auth.user_id, user_course_id=course.id
         )
-        .returning(UserCourseOverride.id)
-    )
-    result = await session.execute(stmt)
-    override_id = result.scalar_one()
+        session.add(existing)
+
+    changed_fields: list[str] = []
+
+    if payload.is_hidden is not None:
+        existing.is_hidden = payload.is_hidden
+        existing.is_hidden_updated_at = now
+        existing.is_hidden_device_id = auth.device_id
+        changed_fields.append("is_hidden")
+
+    if payload.color_hex is not None:
+        existing.color_hex = payload.color_hex
+        existing.color_hex_updated_at = now
+        existing.color_hex_device_id = auth.device_id
+        changed_fields.append("color_hex")
+
+    if payload.locale and payload.custom_name is not None:
+        names = dict(existing.custom_names or {})
+        if payload.custom_name == "":
+            names.pop(payload.locale, None)
+        else:
+            names[payload.locale] = payload.custom_name
+        existing.custom_names = names
+        existing.custom_name_updated_at = now
+        existing.custom_name_device_id = auth.device_id
+        changed_fields.append("custom_name")
+
+    existing.updated_at = now
+    await session.flush()
 
     await append_change(
         session,
@@ -148,13 +173,15 @@ async def patch_course_override(
         entity_type=ChangeEntityType.course_override.value,
         entity_id=str(course.id),
         operation="upsert",
-        payload={"is_hidden": payload.is_hidden},
+        payload={"fields": changed_fields},
         device_id=auth.device_id,
     )
 
     return CourseOverrideResponse(
-        id=override_id,
-        is_hidden=payload.is_hidden,
+        id=existing.id,
+        is_hidden=existing.is_hidden,
+        color_hex=existing.color_hex,
+        custom_names=existing.custom_names or {},
         updated_at=now.isoformat(),
     )
 

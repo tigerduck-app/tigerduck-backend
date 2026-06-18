@@ -178,7 +178,7 @@ class UserCourseOverride(Base):
         BigInteger, ForeignKey("user_courses.id", ondelete="CASCADE")
     )
 
-    custom_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    custom_names: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     custom_name_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
