@@ -2,6 +2,7 @@ import * as React from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import {
   Activity,
+  GraduationCap,
   HardDrive,
   Layers,
   List,
@@ -30,6 +31,7 @@ const NAV: NavItem[] = [
   { to: "/custom-push", label: "Custom push", icon: Send },
   { to: "/devices", label: "Devices", icon: List },
   { to: "/lists", label: "Lists", icon: Layers },
+  { to: "/moodle", label: "Moodle", icon: GraduationCap },
 ];
 
 export function Layout() {

@@ -34,6 +34,7 @@ from .routes import (
     device_lists,
     devices,
     logs,
+    moodle,
     status,
 )
 
@@ -80,6 +81,7 @@ app.include_router(announcement.router)
 app.include_router(custom_push.router)
 app.include_router(devices.router)
 app.include_router(device_lists.router)
+app.include_router(moodle.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
