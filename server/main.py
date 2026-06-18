@@ -31,6 +31,7 @@ from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import settings_docs as settings_docs_routes
+from server.routes import overrides as overrides_routes
 from server.routes import sync as sync_routes
 from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
@@ -243,6 +244,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(auth_routes.router, prefix=prefix)
     app.include_router(user_devices_routes.router, prefix=prefix)
     app.include_router(sync_routes.router, prefix=prefix)
+    app.include_router(overrides_routes.router, prefix=f"{prefix}/sync")
     app.include_router(sync_jobs_routes.router, prefix=prefix)
     app.include_router(sync_jobs_routes.admin_router, prefix=prefix)
     app.include_router(academics_routes.courses_router, prefix=prefix)
