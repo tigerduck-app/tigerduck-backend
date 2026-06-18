@@ -75,7 +75,7 @@ async def apply_fetched_courses(
                 user_id=user_id,
                 semester="",
                 course_key=f"moodle:{moodle_id}",
-                source="moodle",
+                source="ntust_portal",
                 course_name=item.full_name,
                 moodle_id=moodle_id,
                 fetched_at=now,
