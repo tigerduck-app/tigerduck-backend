@@ -692,9 +692,12 @@ function SyncTab() {
                       {c.is_hidden ? <Badge variant="destructive">hidden</Badge> : "—"}
                     </TableCell>
                     <TableCell className="text-xs max-w-[200px] truncate">
-                      {c.custom_names && Object.keys(c.custom_names).length > 0
-                        ? Object.entries(c.custom_names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
-                        : "—"}
+                      {(() => {
+                        const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
+                        return names && typeof names === "object" && Object.keys(names).length > 0
+                          ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
+                          : "—";
+                      })()}
                     </TableCell>
                   </TableRow>
                   );
@@ -734,8 +737,8 @@ function SyncTab() {
                     <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
                     <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
                     {e.device_label && (
-                      <span className="shrink-0 text-purple-400 truncate max-w-[80px]" title={e.device_label}>
-                        [{e.platform ?? "?"}/{e.device_label.slice(0, 8)}]
+                      <span className="shrink-0 text-purple-400">
+                        [{e.platform ?? "?"}/{e.device_label}]
                       </span>
                     )}
                     <span className="text-foreground">{e.message}</span>
