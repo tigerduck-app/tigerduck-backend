@@ -52,7 +52,7 @@ def course_to_dict(c: UserCourse) -> dict:
 def course_override_to_dict(o: UserCourseOverride) -> dict:
     return {
         "user_course_id": o.user_course_id,
-        "custom_name": o.custom_name,
+        "custom_names": o.custom_names or {},
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
         "color_hex": o.color_hex,
         "color_hex_updated_at": _iso(o.color_hex_updated_at),
