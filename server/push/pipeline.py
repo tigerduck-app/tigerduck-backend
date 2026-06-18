@@ -350,6 +350,8 @@ async def _send_one(
         delivery.sent_at = now
         delivery.provider_message_id = result.notification_id
         token.last_success_at = now
+        if job.scenario == "sync_trigger":
+            await _log_sync_trigger_delivery(session, job, token, delivery.provider)
         return
 
     token.last_failure_at = now
@@ -375,3 +377,32 @@ async def _send_one(
         delivery.next_retry_at = now + timedelta(
             seconds=worker.settings.push_retry_round_delay_seconds
         )
+
+
+async def _log_sync_trigger_delivery(
+    session: AsyncSession, job: PushJob, token: DevicePushToken, provider: str
+) -> None:
+    try:
+        from server.syncjobs.log_entries import log_sync
+
+        device = await session.get(UserDevice, token.device_id)
+        target_label = (
+            f"{device.platform}/{device.device_name or device.client_device_id}"
+            if device else f"token:{token.id}"
+        )
+        source_device_id = (job.payload or {}).get("source_device_id")
+        await log_sync(
+            session,
+            user_id=job.user_id,
+            source="push",
+            message=f"sync_trigger sent via {provider} → {target_label}",
+            device_id=source_device_id,
+            detail={
+                "target_device_id": str(token.device_id),
+                "target_platform": device.platform if device else provider,
+                "target_name": device.device_name if device else None,
+                "provider": provider,
+            },
+        )
+    except Exception:
+        logger.debug("sync_trigger log write failed", exc_info=True)
