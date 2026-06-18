@@ -64,7 +64,10 @@ class Settings(BaseSettings):
     credential_active_key_id: str = ""
 
     # --- Moodle token verification (login-time check only) ---
-    moodle_base_url: str = "https://moodle.ntust.edu.tw"
+    # Must be the SAME instance the apps harvest the wstoken from
+    # (moodle2.ntust.edu.tw) — a wstoken only validates on its issuing host.
+    # `moodle.ntust.edu.tw` (no "2") does not resolve → login 401 'unreachable'.
+    moodle_base_url: str = "https://moodle2.ntust.edu.tw"
     moodle_verify_timeout_seconds: float = 10.0
 
     # --- Database ---
