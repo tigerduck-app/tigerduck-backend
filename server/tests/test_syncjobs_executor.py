@@ -49,14 +49,26 @@ class StubFetcher:
         return self.results
 
 
+class StubCourseFetcher:
+    def __init__(self, results=None, errors=()):
+        self.results = results if results is not None else []
+        self.errors = list(errors)
+
+    async def fetch_courses(self, *, token):
+        if self.errors:
+            raise self.errors.pop(0)
+        return self.results
+
+
 def _worker(
-    prepared_engine, test_settings, fetcher=None
+    prepared_engine, test_settings, fetcher=None, course_fetcher=None
 ) -> SyncWorker:
     return SyncWorker(
         session_factory=build_session_factory(prepared_engine),
         settings=test_settings,
         cipher=_cipher(),
         fetcher=fetcher if fetcher is not None else StubFetcher(),
+        course_fetcher=course_fetcher if course_fetcher is not None else StubCourseFetcher(),
         worker_id="test-worker",
     )
 

@@ -36,6 +36,7 @@ from server.auth.models import ExternalAccount
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
+from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential_blob,
@@ -44,12 +45,14 @@ from server.syncjobs.credentials import (
 from server.syncjobs.models import (
     SyncJob,
     SyncJobStatus,
+    SyncJobType,
     SyncPolicy,
     SyncRun,
     SyncRunStatus,
 )
 from server.syncjobs.moodle_client import (
     AssignmentFetcher,
+    CourseFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -80,6 +83,7 @@ class SyncWorker:
     settings: Settings
     cipher: CredentialCipher
     fetcher: AssignmentFetcher
+    course_fetcher: CourseFetcher
     worker_id: str
 
 
@@ -239,15 +243,24 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
 
             if not isinstance(token, str) or not token:
                 raise CredentialInvalid("moodle_token_missing")
-            try:
-                fetched = await worker.fetcher.fetch_assignments(token=token)
-            except MoodleTokenInvalid:
-                raise CredentialInvalid("moodle_token_invalid")
 
             now = datetime.now(UTC)
-            stats = await apply_fetched_assignments(
-                session, user_id=job.user_id, fetched=fetched, now=now
-            )
+            if job.job_type == SyncJobType.ntust_courses.value:
+                try:
+                    courses = await worker.course_fetcher.fetch_courses(token=token)
+                except MoodleTokenInvalid:
+                    raise CredentialInvalid("moodle_token_invalid")
+                stats = await apply_fetched_courses(
+                    session, user_id=job.user_id, fetched=courses, now=now
+                )
+            else:
+                try:
+                    fetched = await worker.fetcher.fetch_assignments(token=token)
+                except MoodleTokenInvalid:
+                    raise CredentialInvalid("moodle_token_invalid")
+                stats = await apply_fetched_assignments(
+                    session, user_id=job.user_id, fetched=fetched, now=now
+                )
 
             if run is not None:
                 run.status = SyncRunStatus.succeeded.value

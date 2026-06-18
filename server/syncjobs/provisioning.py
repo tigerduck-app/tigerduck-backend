@@ -22,7 +22,10 @@ from server.syncjobs.models import SyncJob, SyncJobStatus, SyncJobType, SyncPoli
 # Phase 3 implements the Moodle assignment fetcher only. ntust_courses /
 # calendar / grades policies exist but have no per-user jobs until their
 # fetchers land.
-HANDLED_JOB_TYPES: tuple[str, ...] = (SyncJobType.moodle_assignments.value,)
+HANDLED_JOB_TYPES: tuple[str, ...] = (
+    SyncJobType.moodle_assignments.value,
+    SyncJobType.ntust_courses.value,
+)
 
 
 async def ensure_sync_jobs(
