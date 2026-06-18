@@ -94,9 +94,12 @@ def assignment_to_dict(a: UserAssignment) -> dict:
     }
 
 
-def assignment_override_to_dict(o: UserAssignmentOverride) -> dict:
+def assignment_override_to_dict(
+    o: UserAssignmentOverride, *, moodle_assignment_id: int | None = None
+) -> dict:
     return {
         "user_assignment_id": o.user_assignment_id,
+        "moodle_assignment_id": moodle_assignment_id,
         "local_status": o.local_status,
         "local_status_updated_at": _iso(o.local_status_updated_at),
         "note": o.note,

@@ -148,6 +148,8 @@ async def _read_full_snapshot(session, user_id):
         select(UserBulletinState).where(UserBulletinState.user_id == user_id)
     )
 
+    _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
+
     return {
         "current_revision": state.current_revision if state else 0,
         "courses": [serializers.course_to_dict(c) for c in courses],
@@ -159,7 +161,10 @@ async def _read_full_snapshot(session, user_id):
         ],
         "assignments": [serializers.assignment_to_dict(a) for a in assignments],
         "assignment_overrides": [
-            serializers.assignment_override_to_dict(o)
+            serializers.assignment_override_to_dict(
+                o,
+                moodle_assignment_id=_pk_to_moodle.get(o.user_assignment_id),
+            )
             for o in assignment_overrides
         ],
         "settings_documents": [
