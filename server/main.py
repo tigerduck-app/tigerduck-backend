@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "server.startup",
         env=settings.env,
-        api_base_path=settings.api_base_path,
+        api_base_path=settings.api_v3_base_path,
         apns_env=settings.apns_env,
         apns_topic=settings.apns_topic_live_activity,
     )
@@ -204,11 +204,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/version", tags=["meta"])
     async def version() -> dict[str, str]:
-        # Unversioned on purpose — operator tooling (portal status,
-        # start.sh) shouldn't have to know the api_base_path to ask
-        # what's running. The same body is re-served under each api
-        # prefix below so /v1 and /v2 clients have it too.
-        return {"version": __version__, "api_base_path": settings.api_base_path}
+        # Unversioned on purpose — operator tooling (portal status, start.sh)
+        # shouldn't have to know the prefix to ask what's running. Reports the
+        # live v3 base path (v1/v2 are retired → 410).
+        return {"version": __version__, "api_base_path": settings.api_v3_base_path}
 
     # Unversioned (was {api_base_path}/ping) so it survives the /v1+/v2
     # sunset and infra probes don't need to know a version prefix.
