@@ -71,11 +71,13 @@ async def apply_fetched_courses(
         row = existing.get(moodle_id)
 
         if row is None:
+            course_no = item.short_name or moodle_id
             row = UserCourse(
                 user_id=user_id,
                 semester="",
                 course_key=f"moodle:{moodle_id}",
                 source="ntust_portal",
+                course_no=course_no,
                 course_name=item.full_name,
                 moodle_id=moodle_id,
                 fetched_at=now,
