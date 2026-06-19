@@ -231,8 +231,8 @@ async def scan_course_reminders(
             (course, override)
             for course, override in rows
             if course.semester == latest_semester[course.user_id]
-            # Hidden courses are now hard-deleted, so any course still
-            # present is eligible — no is_hidden check needed.
+            # Removed courses are hard-deleted, so any course still
+            # present is eligible.
         ]
         user_ids = {course.user_id for course, _ in eligible}
 

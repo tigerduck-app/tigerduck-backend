@@ -296,7 +296,7 @@ async def sync_events(
         )
 
         devices = await conn.fetch(
-            "SELECT id, client_device_id, platform, device_name, "
+            "SELECT id, client_device_id, platform, "
             "app_version, os_version, last_seen_at, last_login_at, created_at "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
@@ -413,7 +413,7 @@ async def sync_courses(
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
             "c.source, "
-            "o.color_hex, o.is_hidden, o.custom_names "
+            "o.color_hex, o.custom_names "
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "
             "  ON o.user_id = c.user_id AND o.user_course_id = c.id "

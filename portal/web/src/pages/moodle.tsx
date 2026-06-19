@@ -605,7 +605,6 @@ type SyncCourse = {
   client_course_no: string;
   source: string;
   color_hex: string | null;
-  is_hidden: boolean | null;
   custom_names: Record<string, string> | null;
   default_palette_index: number;
   default_color_light: string;
@@ -911,7 +910,6 @@ function SyncTab() {
                   <TableHead>Color</TableHead>
                   <TableHead>Course Code</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Hidden</TableHead>
                   <TableHead>Custom Names</TableHead>
                 </TableRow>
               </TableHeader>
@@ -939,9 +937,6 @@ function SyncTab() {
                     <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
                     <TableCell className="text-xs max-w-[200px] truncate" title={c.course_name}>
                       {c.course_name}
-                    </TableCell>
-                    <TableCell>
-                      {c.is_hidden ? <Badge variant="destructive">hidden</Badge> : "—"}
                     </TableCell>
                     <TableCell className="text-xs max-w-[200px] truncate">
                       {(() => {

@@ -227,8 +227,8 @@ async def test_old_semester_hidden_and_excluded_courses(
         schedule_json=schedule,
         enrollment_status="dropped",
     )
-    # Hidden/deleted courses are now hard-deleted, so they don't exist in
-    # the DB at all — only old-semester and dropped-status courses remain.
+    # Removed courses are hard-deleted, so they don't exist in the DB at
+    # all — only old-semester and dropped-status courses remain.
     db_session.add_all([current, stale, dropped])
     await db_session.commit()
 
