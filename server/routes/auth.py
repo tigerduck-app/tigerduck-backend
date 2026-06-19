@@ -52,13 +52,15 @@ async def login(
 
     if not moodle_token and payload.password:
         ip_key = f"login:ip:{_client_ip(request)}"
-        if not state.login_limiter.allow(ip_key):
+        sid_key = f"login:sid:{payload.student_id.lower()}"
+        if not state.login_limiter.allow(ip_key) or not state.login_limiter.allow(sid_key):
             from fastapi import HTTPException
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="too_many_login_attempts",
             )
         state.login_limiter.record(ip_key)
+        state.login_limiter.record(sid_key)
         from server.syncjobs.moodle_client import SsoTokenClient, SsoAuthFailed, SsoUnavailable
         sso = SsoTokenClient(
             base_url=state.settings.moodle_base_url,
