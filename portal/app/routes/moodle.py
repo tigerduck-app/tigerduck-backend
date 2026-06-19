@@ -325,12 +325,21 @@ async def sync_events(
             uid,
         )
 
+        devices = await conn.fetch(
+            "SELECT id, client_device_id, platform, device_name, "
+            "app_version, os_version, last_seen_at, last_login_at, created_at "
+            "FROM user_devices WHERE user_id = $1 "
+            "ORDER BY last_seen_at DESC NULLS LAST",
+            uid,
+        )
+
     return {
         "student_id": student_id,
         "found": True,
         "jobs": [dict(j) for j in jobs],
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],
+        "devices": [dict(d) for d in devices],
     }
 
 
