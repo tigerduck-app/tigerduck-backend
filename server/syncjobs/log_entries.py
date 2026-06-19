@@ -45,20 +45,21 @@ async def log_sync(
     try:
         from sqlalchemy import text
 
-        await session.execute(
-            text(
-                "INSERT INTO sync_log_entries (user_id, device_id, ts, level, source, message, detail) "
-                "VALUES (:uid, :did, :ts, :lvl, :src, :msg, :det)"
-            ),
-            {
-                "uid": user_id,
-                "did": device_id,
-                "ts": datetime.now(UTC),
-                "lvl": level,
-                "src": source,
-                "msg": message,
-                "det": json.dumps(detail) if detail else None,
-            },
-        )
+        async with session.begin_nested():
+            await session.execute(
+                text(
+                    "INSERT INTO sync_log_entries (user_id, device_id, ts, level, source, message, detail) "
+                    "VALUES (:uid, :did, :ts, :lvl, :src, :msg, :det)"
+                ),
+                {
+                    "uid": user_id,
+                    "did": device_id,
+                    "ts": datetime.now(UTC),
+                    "lvl": level,
+                    "src": source,
+                    "msg": message,
+                    "det": json.dumps(detail) if detail else None,
+                },
+            )
     except Exception:
         logger.debug("sync log write failed (table may not exist yet)", exc_info=True)

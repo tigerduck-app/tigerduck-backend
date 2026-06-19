@@ -124,6 +124,8 @@ export type DeviceRow = {
   has_pts_token: boolean;
   has_device_token: boolean;
   has_fcm_token: boolean;
+  app_version: string | null;
+  os_version: string | null;
   created_at: string;
   updated_at: string;
 };
