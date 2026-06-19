@@ -252,8 +252,131 @@ function ActionsTab() {
         </CardContent>
       </Card>
 
+      <SyncStats />
       <JobsTable />
     </Section>
+  );
+}
+
+type SyncStatsData = {
+  summary: {
+    succeeded_24h: number;
+    failed_24h: number;
+    running_now: number;
+    total_24h: number;
+    avg_duration_s: number;
+    total_fetched: number;
+  };
+  recent_runs: {
+    id: number;
+    student_id: string;
+    job_type: string;
+    status: string;
+    started_at: string | null;
+    finished_at: string | null;
+    fetched_count: number | null;
+    changed_count: number | null;
+  }[];
+};
+
+function SyncStats() {
+  const stats = useQuery<SyncStatsData>({
+    queryKey: ["moodle-stats"],
+    queryFn: () => fetch("/api/moodle/stats").then((r) => r.json()),
+    refetchInterval: 10_000,
+  });
+
+  const s = stats.data?.summary;
+  const runs = stats.data?.recent_runs ?? [];
+
+  return (
+    <>
+      {s && (
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle className="text-base">Last 24h sync results</CardTitle>
+            <CardDescription>
+              Tick every 30s, batch size 5, per-user interval 8h
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-4 sm:grid-cols-6">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-green-600">{s.succeeded_24h}</div>
+                <div className="text-xs text-muted-foreground">Succeeded</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-red-500">{s.failed_24h}</div>
+                <div className="text-xs text-muted-foreground">Failed</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-blue-500">{s.running_now}</div>
+                <div className="text-xs text-muted-foreground">Running</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.total_24h}</div>
+                <div className="text-xs text-muted-foreground">Total runs</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.avg_duration_s}s</div>
+                <div className="text-xs text-muted-foreground">Avg duration</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.total_fetched}</div>
+                <div className="text-xs text-muted-foreground">Items fetched</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="text-base">Recent runs (last 50)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Student</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Started</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead className="text-right">Fetched</TableHead>
+                <TableHead className="text-right">Changed</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {runs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    No runs in the last 24h
+                  </TableCell>
+                </TableRow>
+              ) : (
+                runs.map((r) => {
+                  const dur = r.started_at && r.finished_at
+                    ? ((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1) + "s"
+                    : "—";
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-mono text-xs">{r.student_id}</TableCell>
+                      <TableCell className="text-xs">{r.job_type.replace("_", " ")}</TableCell>
+                      <TableCell>{statusBadge(r.status)}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{fmt(r.started_at)}</TableCell>
+                      <TableCell className="text-xs font-mono">{dur}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{r.fetched_count ?? "—"}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{r.changed_count ?? "—"}</TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+    </>
   );
 }
 
