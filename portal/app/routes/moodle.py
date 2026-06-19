@@ -75,7 +75,7 @@ async def moodle_stats(pool=Depends(get_pool)):
         """)
         recent = await conn.fetch("""
             SELECT
-                sr.id, sr.job_type, sr.status, sr.started_at, sr.finished_at,
+                sr.id, sj.job_type, sr.status, sr.started_at, sr.finished_at,
                 sr.fetched_count, sr.changed_count,
                 u.student_id
             FROM sync_runs sr
