@@ -9,6 +9,7 @@ import {
   Megaphone,
   ScrollText,
   Send,
+  UserMinus,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -32,6 +33,7 @@ const NAV: NavItem[] = [
   { to: "/devices", label: "Devices", icon: List },
   { to: "/lists", label: "Lists", icon: Layers },
   { to: "/moodle", label: "Moodle", icon: GraduationCap },
+  { to: "/deregister", label: "Deregister", icon: UserMinus },
 ];
 
 export function Layout() {

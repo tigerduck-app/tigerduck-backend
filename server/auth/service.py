@@ -485,6 +485,30 @@ async def _store_credentials(
 async def _upsert_device(
     session: AsyncSession, *, user: User, info: DeviceInfo, now: datetime
 ) -> UserDevice:
+    # Clean up stale device rows: if the same physical device
+    # (client_device_id) was previously registered under a different user,
+    # delete those rows. The CASCADE wipes tokens, sessions, and push
+    # deliveries tied to that old device entry.
+    old_devices = (
+        await session.execute(
+            select(UserDevice).where(
+                UserDevice.client_device_id == info.client_device_id,
+                UserDevice.user_id != user.id,
+            )
+        )
+    ).scalars().all()
+    for old in old_devices:
+        logger.info(
+            "auth.device.cross_user_cleanup",
+            client_device_id=info.client_device_id,
+            old_user_id=str(old.user_id),
+            old_device_id=str(old.id),
+            new_user_id=str(user.id),
+        )
+        await session.delete(old)
+    if old_devices:
+        await session.flush()
+
     device = (
         await session.execute(
             select(UserDevice).where(
