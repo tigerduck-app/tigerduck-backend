@@ -334,6 +334,55 @@ def _course_hash_index(course_no: str) -> int:
     return h % len(COURSE_PALETTE_LIGHT)
 
 
+_en_name_cache: dict[str, dict[str, str]] = {}
+_en_name_cache_ts: dict[str, float] = {}
+_EN_CACHE_TTL = 3600
+
+
+async def _english_course_names(semester: str) -> dict[str, str]:
+    """Fetch English course names from NTUST QueryCourse API, cached 1h.
+
+    Returns {course_no: english_name}.
+    """
+    import ssl
+    import time
+    import urllib.request
+    import json as _json
+
+    now = time.monotonic()
+    if semester in _en_name_cache and now - _en_name_cache_ts.get(semester, 0) < _EN_CACHE_TTL:
+        return _en_name_cache[semester]
+
+    try:
+        payload = _json.dumps({
+            "Semester": semester,
+            "CourseNo": "", "CourseName": "", "CourseTeacher": "",
+            "Dimension": "", "CourseNotes": "", "CampusNotes": "",
+            "ForeignLanguage": 0, "OnlyIntensive": 0, "OnlyGeneral": 0,
+            "OnleyNTUST": 0, "OnlyMaster": 0, "OnlyUnderGraduate": 0,
+            "OnlyNode": 0, "Language": "en",
+        }).encode()
+        req = urllib.request.Request(
+            "https://querycourse.ntust.edu.tw/QueryCourse/api/courses",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+            courses = _json.loads(resp.read())
+        result = {c["CourseNo"]: c["CourseName"] for c in courses if c.get("CourseNo")}
+        _en_name_cache[semester] = result
+        _en_name_cache_ts[semester] = now
+        logger.info("fetched %d English course names for %s", len(result), semester)
+        return result
+    except Exception as e:
+        logger.warning("failed to fetch English course names for %s: %s", semester, e)
+        return _en_name_cache.get(semester, {})
+
+
 def _current_semester_prefix() -> str:
     """NTUST semester prefix: e.g. '1132' for 2024 spring semester."""
     now = datetime.now(UTC)
@@ -373,18 +422,23 @@ async def sync_courses(
             uid, prefix,
         )
 
+    en_names = await _english_course_names(prefix)
+
     courses = []
     for r in rows:
         d = dict(r)
-        name = d.get("course_name") or ""
-        bracket_end = name.find("】")
-        if bracket_end >= 0:
-            rest = name[bracket_end + 1:].strip()
-            code = rest.split(" ", 1)[0] if rest else ""
+        course_no = d.get("course_no") or ""
+        en_name = en_names.get(course_no)
+        if en_name:
+            d["course_name"] = en_name
         else:
-            code = d.get("course_no") or ""
-        d["client_course_no"] = code
-        idx = _course_hash_index(code)
+            name = d.get("course_name") or ""
+            bracket_end = name.find("】")
+            if bracket_end >= 0:
+                rest = name[bracket_end + 1:].strip()
+                d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
+        d["client_course_no"] = course_no
+        idx = _course_hash_index(course_no)
         d["default_palette_index"] = idx
         d["default_color_light"] = COURSE_PALETTE_LIGHT[idx]
         d["default_color_dark"] = COURSE_PALETTE_DARK[idx]

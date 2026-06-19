@@ -938,7 +938,7 @@ function SyncTab() {
                     </TableCell>
                     <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
                     <TableCell className="text-xs max-w-[200px] truncate" title={c.course_name}>
-                      {c.course_name.replace(/^\d+\.\d【[^】]+】\s*\S+\s*/, "")}
+                      {c.course_name}
                     </TableCell>
                     <TableCell>
                       {c.is_hidden ? <Badge variant="destructive">hidden</Badge> : "—"}
