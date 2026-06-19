@@ -361,18 +361,16 @@ async def sync_courses(
         uid = user["id"]
         prefix = _current_semester_prefix()
 
-        sem_dot = f"{prefix[:3]}.{prefix[3]}"
-
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
             "c.source, "
-            "o.color_hex, o.custom_names "
+            "o.color_hex, o.is_hidden, o.custom_names "
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "
             "  ON o.user_id = c.user_id AND o.user_course_id = c.id "
-            "WHERE c.user_id = $1 AND c.course_name LIKE $2 "
+            "WHERE c.user_id = $1 AND c.semester = $2 "
             "ORDER BY c.course_name",
-            uid, sem_dot + "%",
+            uid, prefix,
         )
 
     courses = []
