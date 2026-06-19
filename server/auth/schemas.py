@@ -23,7 +23,7 @@ class DeviceInfo(BaseModel):
 
 class LoginRequest(BaseModel):
     student_id: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=1, max_length=256)
+    password: str = Field(default="", max_length=256)
     moodle_token: str | None = Field(default=None, max_length=256)
     moodle_private_token: str | None = Field(default=None, max_length=256)
     device_info: DeviceInfo
