@@ -780,7 +780,7 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
                     <TableCell>
                       <Badge variant="outline">{d.platform}</Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground max-w-[200px] truncate" title={d.client_device_id}>
+                    <TableCell className="font-mono text-xs text-muted-foreground break-all">
                       {d.client_device_id}
                     </TableCell>
                     <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>

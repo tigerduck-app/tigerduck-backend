@@ -292,10 +292,8 @@ function Row({
           onCheckedChange={() => onToggle(d.device_id)}
         />
       </TableCell>
-      <TableCell className="font-mono text-xs">
-        <span className="block max-w-[16ch] truncate" title={d.device_id}>
-          {d.device_id}
-        </span>
+      <TableCell className="font-mono text-xs break-all">
+        {d.device_id}
       </TableCell>
       <TableCell className="font-mono text-xs">{d.user_id || "—"}</TableCell>
       <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
