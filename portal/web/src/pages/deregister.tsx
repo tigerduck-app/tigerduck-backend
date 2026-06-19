@@ -28,7 +28,6 @@ type DeregisterReport = {
     device_id: string;
     client_device_id: string;
     platform: string;
-    device_name: string | null;
     app_version: string | null;
     last_seen_at: string | null;
   }[];
@@ -153,7 +152,7 @@ export function DeregisterPage() {
                           {d.platform}
                         </span>
                         <span className="truncate">
-                          {d.device_name ?? d.client_device_id}
+                          {d.client_device_id}
                         </span>
                         <span className="ml-auto text-muted-foreground shrink-0">
                           {d.last_seen_at ? new Date(d.last_seen_at).toLocaleDateString() : "never"}
