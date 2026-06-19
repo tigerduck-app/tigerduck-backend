@@ -21,6 +21,7 @@ pull-to-refresh or re-login revives them.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 from dataclasses import dataclass
@@ -108,12 +109,45 @@ class SyncWorker:
     worker_id: str
 
 
+def _in_maintenance_window(window: str) -> bool:
+    """Return True if current UTC time falls within the maintenance window.
+
+    *window* format: ``"HH:MM-HH:MM"`` (start-end, UTC).  Wrapping past
+    midnight is supported (e.g. ``"23:00-02:00"``).  Empty string or
+    unparseable values → ``False`` (no window).
+    """
+    if not window or "-" not in window:
+        return False
+    try:
+        start_str, end_str = window.split("-", 1)
+        sh, sm = (int(x) for x in start_str.strip().split(":"))
+        eh, em = (int(x) for x in end_str.strip().split(":"))
+    except (ValueError, TypeError):
+        return False
+    now = datetime.now(UTC)
+    now_minutes = now.hour * 60 + now.minute
+    start_minutes = sh * 60 + sm
+    end_minutes = eh * 60 + em
+    if start_minutes <= end_minutes:
+        return start_minutes <= now_minutes < end_minutes
+    # Window wraps past midnight (e.g. 23:00-02:00).
+    return now_minutes >= start_minutes or now_minutes < end_minutes
+
+
 async def run_sync_tick(worker: SyncWorker) -> int:
     """One scheduler tick: recover stale locks, claim due jobs, execute
     them sequentially. Returns the number of jobs executed."""
+    if _in_maintenance_window(worker.settings.sync_maintenance_window):
+        logger.info(
+            "syncjobs.maintenance_window",
+            window=worker.settings.sync_maintenance_window,
+        )
+        return 0
     await _recover_stale_jobs(worker)
     claimed = await _claim_due_jobs(worker)
-    for job_id, run_id in claimed:
+    for idx, (job_id, run_id) in enumerate(claimed):
+        if idx > 0:
+            await asyncio.sleep(worker.settings.sync_job_min_interval_seconds)
         await _execute_job(worker, job_id=job_id, run_id=run_id)
     return len(claimed)
 

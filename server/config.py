@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     sync_job_tick_seconds: int = 30
     # Max jobs claimed per tick by ONE worker.
     sync_job_batch_size: int = 5
+    # Minimum seconds between individual job executions within a tick.
+    # Effectively rate-limits server-side sync to 1 job per interval.
+    sync_job_min_interval_seconds: int = 60
+    # Maintenance window — no server-side sync during this period.
+    # Format: "HH:MM-HH:MM" in UTC, e.g. "02:00-04:00". Empty = no window.
+    sync_maintenance_window: str = ""
     # Cap on `status='running'` rows ACROSS all workers — counted before
     # claiming so multiple instances can't collectively hammer the school
     # APIs from our single egress IP (security review suggestion).

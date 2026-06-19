@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
@@ -27,11 +27,31 @@ from server.sync.models import (
     UserSettingsDocument,
     UserSyncState,
 )
+from server.syncjobs.models import SyncJob, SyncJobStatus
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 logger = structlog.get_logger(__name__)
 
 MAX_SYNC_LIMIT = 500
+_CLIENT_SYNC_PUSHBACK_SECONDS = 7200  # 2 hours
+
+
+async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS) -> None:
+    """Push all pending sync jobs for *user_id* to ``now + seconds``.
+
+    Called after a client sync or upload so the server's own sync cycle
+    defers — the client just delivered fresh data, no need for the server
+    to re-fetch from Moodle immediately.
+    """
+    run_after = datetime.now(UTC) + timedelta(seconds=seconds)
+    await session.execute(
+        update(SyncJob)
+        .where(
+            SyncJob.user_id == user_id,
+            SyncJob.status == SyncJobStatus.pending.value,
+        )
+        .values(run_after=run_after, attempts=0)
+    )
 
 
 @router.get("")
@@ -115,6 +135,7 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         message="Full sync fetched",
         device_id=auth.device_id,
     )
+    await _push_back_sync_jobs(session, auth.user_id)
     await session.commit()
 
     factory = request.app.state.session_factory
@@ -184,6 +205,75 @@ async def upload_courses(
         )
         await session.execute(stmt)
         upserted += 1
+    await _push_back_sync_jobs(session, auth.user_id)
+    return {"upserted": upserted}
+
+
+class AssignmentUploadItem(BaseModel):
+    moodle_assignment_id: int
+    course_no: str
+    course_name: str
+    title: str
+    due_at: str | None = None
+    moodle_url: str | None = None
+    is_submitted: bool = False
+    grade: str | None = None
+
+
+class AssignmentUploadRequest(BaseModel):
+    assignments: list[AssignmentUploadItem]
+
+
+@router.post("/assignments/upload")
+async def upload_assignments(
+    payload: AssignmentUploadRequest,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    """Client-pushed assignment data.  Upserts into ``user_assignments``
+    using the actual unique constraint ``(user_id, moodle_course_id,
+    moodle_assignment_id)`` — ``moodle_course_id`` is set to ``0`` for
+    client-originated rows (the real Moodle course ID is not available on
+    the client side).
+    """
+    now = datetime.now(UTC)
+    upserted = 0
+    for a in payload.assignments:
+        due_at = datetime.fromisoformat(a.due_at) if a.due_at else None
+        stmt = (
+            pg_insert(UserAssignment)
+            .values(
+                user_id=auth.user_id,
+                moodle_course_id=0,
+                moodle_assignment_id=a.moodle_assignment_id,
+                course_no=a.course_no,
+                course_name=a.course_name,
+                title=a.title,
+                due_at=due_at,
+                moodle_url=a.moodle_url,
+                provider_is_submitted=a.is_submitted,
+                provider_grade=a.grade,
+                fetched_at=now,
+                last_seen_at=now,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "moodle_course_id", "moodle_assignment_id"],
+                set_={
+                    "course_no": a.course_no,
+                    "course_name": a.course_name,
+                    "title": a.title,
+                    "due_at": due_at,
+                    "moodle_url": a.moodle_url,
+                    "provider_is_submitted": a.is_submitted,
+                    "provider_grade": a.grade,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                },
+            )
+        )
+        await session.execute(stmt)
+        upserted += 1
+    await _push_back_sync_jobs(session, auth.user_id)
     return {"upserted": upserted}
 
 
