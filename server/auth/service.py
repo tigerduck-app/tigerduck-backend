@@ -525,8 +525,10 @@ async def _upsert_device(
         )
         session.add(device)
     device.platform = info.platform
-    device.app_version = info.app_version
-    device.os_version = info.os_version
+    if info.app_version is not None:
+        device.app_version = info.app_version
+    if info.os_version is not None:
+        device.os_version = info.os_version
     device.deleted_at = None
     device.last_seen_at = now
     device.last_login_at = now

@@ -63,8 +63,10 @@ async def register_device(
         )
         session.add(device)
     device.platform = payload.platform
-    device.app_version = payload.app_version
-    device.os_version = payload.os_version
+    if payload.app_version is not None:
+        device.app_version = payload.app_version
+    if payload.os_version is not None:
+        device.os_version = payload.os_version
     device.deleted_at = None
     device.last_seen_at = now
     await session.flush()
