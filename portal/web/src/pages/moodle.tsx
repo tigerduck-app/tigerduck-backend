@@ -655,6 +655,168 @@ type LogsResponse = {
   latest_id: number;
 };
 
+const CHART_COLORS = [
+  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
+  "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
+];
+const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
+const ANDROID_PLATFORMS = new Set(["android", "wearos"]);
+
+function MiniPieChart({ data }: { data: { label: string; value: number; color: string }[] }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+  const size = 140;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 4;
+
+  if (data.length === 1) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={cx} cy={cy} r={r} fill={data[0].color} />
+      </svg>
+    );
+  }
+
+  let cumAngle = -90;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {data.map((d, i) => {
+        const angle = (d.value / total) * 360;
+        const startRad = (cumAngle * Math.PI) / 180;
+        const endRad = ((cumAngle + angle) * Math.PI) / 180;
+        cumAngle += angle;
+        const largeArc = angle > 180 ? 1 : 0;
+        const x1 = cx + r * Math.cos(startRad);
+        const y1 = cy + r * Math.sin(startRad);
+        const x2 = cx + r * Math.cos(endRad);
+        const y2 = cy + r * Math.sin(endRad);
+        return (
+          <path
+            key={i}
+            d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`}
+            fill={d.color}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+function StatSection({ title, counts, total }: { title: string; counts: [string, number][]; total: number }) {
+  const chartData = counts.map(([label, value], i) => ({
+    label,
+    value,
+    color: CHART_COLORS[i % CHART_COLORS.length],
+  }));
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium">{title}</h4>
+      <div className="flex items-start gap-6">
+        <MiniPieChart data={chartData} />
+        <div className="space-y-1 text-xs min-w-0">
+          {chartData.map((d) => (
+            <div key={d.label} className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: d.color }} />
+              <span className="truncate">{d.label}</span>
+              <span className="text-muted-foreground ml-auto tabular-nums">
+                {d.value} ({total > 0 ? ((d.value / total) * 100).toFixed(0) : 0}%)
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DevicesCard({ devices }: { devices: SyncDevice[] }) {
+  const [platformFilter, setPlatformFilter] = useState<"all" | "apple" | "android">("all");
+
+  const filtered = devices.filter((d) => {
+    if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
+    if (platformFilter === "android") return ANDROID_PLATFORMS.has(d.platform);
+    return true;
+  });
+
+  const countBy = (key: "os_version" | "app_version") => {
+    const map: Record<string, number> = {};
+    for (const d of filtered) {
+      const v = (key === "os_version" ? `${d.platform} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      map[v] = (map[v] ?? 0) + 1;
+    }
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Devices ({devices.length})</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <Tabs defaultValue="list">
+          <TabsList>
+            <TabsTrigger value="list">List</TabsTrigger>
+            <TabsTrigger value="stats">Statistics</TabsTrigger>
+          </TabsList>
+          <TabsContent value="list">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Platform</TableHead>
+                  <TableHead>Device ID</TableHead>
+                  <TableHead>App Version</TableHead>
+                  <TableHead>OS</TableHead>
+                  <TableHead>Last Seen</TableHead>
+                  <TableHead>Registered</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {devices.map((d) => (
+                  <TableRow key={d.id}>
+                    <TableCell>
+                      <Badge variant="outline">{d.platform}</Badge>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground max-w-[200px] truncate" title={d.client_device_id}>
+                      {d.client_device_id}
+                    </TableCell>
+                    <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{d.os_version ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{fmt(d.last_seen_at)}</TableCell>
+                    <TableCell className="text-xs">{fmt(d.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TabsContent>
+          <TabsContent value="stats">
+            <div className="mb-4">
+              <Select value={platformFilter} onValueChange={(v) => setPlatformFilter(v as "all" | "apple" | "android")}>
+                <SelectTrigger className="w-40">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Platforms</SelectItem>
+                  <SelectItem value="apple">Apple</SelectItem>
+                  <SelectItem value="android">Android</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {filtered.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No devices for this platform filter.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <StatSection title="OS Version" counts={countBy("os_version")} total={filtered.length} />
+                <StatSection title="App Version" counts={countBy("app_version")} total={filtered.length} />
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SyncTab() {
   const [studentId, setStudentId] = useState("");
   const [query, setQuery] = useState("");
@@ -787,41 +949,7 @@ function SyncTab() {
       )}
 
       {data?.found && data.devices && data.devices.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Devices ({data.devices.length})</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Platform</TableHead>
-                  <TableHead>Device ID</TableHead>
-                  <TableHead>App Version</TableHead>
-                  <TableHead>OS</TableHead>
-                  <TableHead>Last Seen</TableHead>
-                  <TableHead>Registered</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.devices.map((d) => (
-                  <TableRow key={d.id}>
-                    <TableCell>
-                      <Badge variant="outline">{d.platform}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground max-w-[200px] truncate" title={d.client_device_id}>
-                      {d.client_device_id}
-                    </TableCell>
-                    <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
-                    <TableCell className="text-xs">{d.os_version ?? "—"}</TableCell>
-                    <TableCell className="text-xs">{fmt(d.last_seen_at)}</TableCell>
-                    <TableCell className="text-xs">{fmt(d.created_at)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+        <DevicesCard devices={data.devices} />
       )}
 
       {data?.found && data.runs && (
