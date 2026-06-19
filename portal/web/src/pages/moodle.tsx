@@ -731,12 +731,15 @@ function StatSection({ title, counts, total }: { title: string; counts: [string,
 }
 
 function DevicesCard({ devices }: { devices: SyncDevice[] }) {
-  const [platformFilter, setPlatformFilter] = useState<"all" | "apple" | "android">("all");
+  const [platformFilter, setPlatformFilter] = useState("all");
+
+  const platforms = [...new Set(devices.map((d) => d.platform))].sort();
 
   const filtered = devices.filter((d) => {
+    if (platformFilter === "all") return true;
     if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
     if (platformFilter === "android") return ANDROID_PLATFORMS.has(d.platform);
-    return true;
+    return d.platform === platformFilter;
   });
 
   const countBy = (key: "os_version" | "app_version") => {
@@ -781,7 +784,7 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
                       {d.client_device_id}
                     </TableCell>
                     <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
-                    <TableCell className="text-xs">{d.os_version ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{d.os_version ? `${d.platform} ${d.os_version}` : "—"}</TableCell>
                     <TableCell className="text-xs">{fmt(d.last_seen_at)}</TableCell>
                     <TableCell className="text-xs">{fmt(d.created_at)}</TableCell>
                   </TableRow>
@@ -791,14 +794,17 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
           </TabsContent>
           <TabsContent value="stats">
             <div className="mb-4">
-              <Select value={platformFilter} onValueChange={(v) => setPlatformFilter(v as "all" | "apple" | "android")}>
-                <SelectTrigger className="w-40">
+              <Select value={platformFilter} onValueChange={setPlatformFilter}>
+                <SelectTrigger className="w-44">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Platforms</SelectItem>
-                  <SelectItem value="apple">Apple</SelectItem>
-                  <SelectItem value="android">Android</SelectItem>
+                  <SelectItem value="apple">All Apple</SelectItem>
+                  <SelectItem value="android">All Android</SelectItem>
+                  {platforms.map((p) => (
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
