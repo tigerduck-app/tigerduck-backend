@@ -56,6 +56,37 @@ async def moodle_status(pool=Depends(get_pool)):
     }
 
 
+@router.get("/jobs")
+async def moodle_jobs(pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                sj.id, sj.job_type, sj.status, sj.priority,
+                sj.run_after, sj.last_success_at, sj.last_error, sj.attempts,
+                u.student_id
+            FROM sync_jobs sj
+            JOIN users u ON u.id = sj.user_id
+            WHERE sj.job_type IN ('moodle_assignments', 'ntust_courses')
+            ORDER BY sj.status, u.student_id, sj.job_type
+        """)
+    return {
+        "jobs": [
+            {
+                "id": r["id"],
+                "student_id": r["student_id"],
+                "job_type": r["job_type"],
+                "status": r["status"],
+                "priority": r["priority"],
+                "run_after": r["run_after"].isoformat() if r["run_after"] else None,
+                "last_success_at": r["last_success_at"].isoformat() if r["last_success_at"] else None,
+                "last_error": r["last_error"],
+                "attempts": r["attempts"],
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post("/suspend")
 async def suspend_moodle(req: SuspendRequest, pool=Depends(get_pool)):
     until = datetime.now(UTC) + timedelta(hours=req.hours)
