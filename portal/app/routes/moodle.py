@@ -334,24 +334,26 @@ def _course_hash_index(course_no: str) -> int:
     return h % len(COURSE_PALETTE_LIGHT)
 
 
-_en_name_cache: dict[str, dict[str, str]] = {}
-_en_name_cache_ts: dict[str, float] = {}
-_EN_CACHE_TTL = 3600
+_course_name_cache: dict[str, dict[str, str]] = {}
+_course_name_cache_ts: dict[str, float] = {}
+_COURSE_NAME_CACHE_TTL = 3600
 
 
-async def _english_course_names(semester: str) -> dict[str, str]:
-    """Fetch English course names from NTUST QueryCourse API, cached 1h.
+async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
+    """Fetch course names from NTUST QueryCourse API, cached 1h.
 
-    Returns {course_no: english_name}.
+    *lang*: ``"en"`` or ``"zh"``.
+    Returns ``{course_no: course_name}``.
     """
     import ssl
     import time
     import urllib.request
     import json as _json
 
+    cache_key = f"{semester}:{lang}"
     now = time.monotonic()
-    if semester in _en_name_cache and now - _en_name_cache_ts.get(semester, 0) < _EN_CACHE_TTL:
-        return _en_name_cache[semester]
+    if cache_key in _course_name_cache and now - _course_name_cache_ts.get(cache_key, 0) < _COURSE_NAME_CACHE_TTL:
+        return _course_name_cache[cache_key]
 
     try:
         payload = _json.dumps({
@@ -360,7 +362,7 @@ async def _english_course_names(semester: str) -> dict[str, str]:
             "Dimension": "", "CourseNotes": "", "CampusNotes": "",
             "ForeignLanguage": 0, "OnlyIntensive": 0, "OnlyGeneral": 0,
             "OnleyNTUST": 0, "OnlyMaster": 0, "OnlyUnderGraduate": 0,
-            "OnlyNode": 0, "Language": "en",
+            "OnlyNode": 0, "Language": lang,
         }).encode()
         req = urllib.request.Request(
             "https://querycourse.ntust.edu.tw/QueryCourse/api/courses",
@@ -374,13 +376,13 @@ async def _english_course_names(semester: str) -> dict[str, str]:
         with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             courses = _json.loads(resp.read())
         result = {c["CourseNo"]: c["CourseName"] for c in courses if c.get("CourseNo")}
-        _en_name_cache[semester] = result
-        _en_name_cache_ts[semester] = now
-        logger.info("fetched %d English course names for %s", len(result), semester)
+        _course_name_cache[cache_key] = result
+        _course_name_cache_ts[cache_key] = now
+        logger.info("fetched %d %s course names for %s", len(result), lang, semester)
         return result
     except Exception as e:
-        logger.warning("failed to fetch English course names for %s: %s", semester, e)
-        return _en_name_cache.get(semester, {})
+        logger.warning("failed to fetch %s course names for %s: %s", lang, semester, e)
+        return _course_name_cache.get(cache_key, {})
 
 
 def _current_semester_prefix() -> str:
@@ -422,19 +424,22 @@ async def sync_courses(
             uid, prefix,
         )
 
-    en_names = await _english_course_names(prefix)
+    zh_names = await _course_names_by_lang(prefix, "zh")
+    en_names = await _course_names_by_lang(prefix, "en")
 
     courses = []
     for r in rows:
         d = dict(r)
         course_no = d.get("course_no") or ""
-        # Clean up bracket prefix from Chinese name (e.g. "【必修】微積分" → "微積分")
-        name = d.get("course_name") or ""
-        bracket_end = name.find("】")
-        if bracket_end >= 0:
-            rest = name[bracket_end + 1:].strip()
-            d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
-        # English name: prefer NTUST API, fall back to DB field
+        zh_name = zh_names.get(course_no)
+        if zh_name:
+            d["course_name"] = zh_name
+        else:
+            name = d.get("course_name") or ""
+            bracket_end = name.find("】")
+            if bracket_end >= 0:
+                rest = name[bracket_end + 1:].strip()
+                d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
         en_name = en_names.get(course_no)
         if en_name:
             d["course_name_en"] = en_name
