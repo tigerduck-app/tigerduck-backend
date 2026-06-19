@@ -623,7 +623,6 @@ type SyncDevice = {
   id: string;
   client_device_id: string;
   platform: string;
-  device_name: string | null;
   app_version: string | null;
   os_version: string | null;
   last_seen_at: string | null;
@@ -796,7 +795,6 @@ function SyncTab() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Platform</TableHead>
-                  <TableHead>Device Name</TableHead>
                   <TableHead>Device ID</TableHead>
                   <TableHead>App Version</TableHead>
                   <TableHead>OS</TableHead>
@@ -810,7 +808,6 @@ function SyncTab() {
                     <TableCell>
                       <Badge variant="outline">{d.platform}</Badge>
                     </TableCell>
-                    <TableCell className="text-sm">{d.device_name ?? "—"}</TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground max-w-[200px] truncate" title={d.client_device_id}>
                       {d.client_device_id}
                     </TableCell>

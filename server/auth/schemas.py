@@ -16,7 +16,6 @@ Platform = Literal[
 class DeviceInfo(BaseModel):
     client_device_id: str = Field(min_length=1, max_length=128)
     platform: Platform
-    device_name: str | None = Field(default=None, max_length=128)
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
 
@@ -87,7 +86,6 @@ class DeviceItem(BaseModel):
     id: str
     client_device_id: str
     platform: str
-    device_name: str | None
     app_version: str | None
     os_version: str | None
     last_seen_at: str | None

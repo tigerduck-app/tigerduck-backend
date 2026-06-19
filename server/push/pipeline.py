@@ -387,7 +387,7 @@ async def _log_sync_trigger_delivery(
 
         device = await session.get(UserDevice, token.device_id)
         target_label = (
-            f"{device.platform}/{device.device_name or device.client_device_id}"
+            f"{device.platform}/{device.client_device_id}"
             if device else f"token:{token.id}"
         )
         source_device_id = (job.payload or {}).get("source_device_id")
@@ -400,7 +400,7 @@ async def _log_sync_trigger_delivery(
             detail={
                 "target_device_id": str(token.device_id),
                 "target_platform": device.platform if device else provider,
-                "target_name": device.device_name if device else None,
+                "target_name": None,
                 "provider": provider,
             },
         )

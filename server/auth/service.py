@@ -525,7 +525,6 @@ async def _upsert_device(
         )
         session.add(device)
     device.platform = info.platform
-    device.device_name = info.device_name
     device.app_version = info.app_version
     device.os_version = info.os_version
     device.deleted_at = None

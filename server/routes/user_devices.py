@@ -63,7 +63,6 @@ async def register_device(
         )
         session.add(device)
     device.platform = payload.platform
-    device.device_name = payload.device_name
     device.app_version = payload.app_version
     device.os_version = payload.os_version
     device.deleted_at = None
@@ -163,7 +162,6 @@ async def list_devices(
                 id=str(d.id),
                 client_device_id=d.client_device_id,
                 platform=d.platform,
-                device_name=d.device_name,
                 app_version=d.app_version,
                 os_version=d.os_version,
                 last_seen_at=d.last_seen_at.isoformat() if d.last_seen_at else None,
