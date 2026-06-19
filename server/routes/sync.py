@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
@@ -169,8 +169,12 @@ async def upload_courses(
 ):
     now = datetime.now(UTC)
     upserted = 0
+    uploaded_keys: set[str] = set()
+    semesters: set[str] = set()
     for c in payload.courses:
         course_key = f"client:{c.semester}:{c.course_no}"
+        uploaded_keys.add(course_key)
+        semesters.add(c.semester)
         moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"
         stmt = (
             pg_insert(UserCourse)
@@ -205,8 +209,25 @@ async def upload_courses(
         )
         await session.execute(stmt)
         upserted += 1
+
+    # Remove courses the client no longer has for the uploaded semesters.
+    if semesters:
+        del_stmt = (
+            delete(UserCourse)
+            .where(
+                UserCourse.user_id == auth.user_id,
+                UserCourse.semester.in_(semesters),
+                UserCourse.source == "ntust_portal",
+                UserCourse.course_key.notin_(uploaded_keys),
+            )
+        )
+        result = await session.execute(del_stmt)
+        deleted = result.rowcount
+    else:
+        deleted = 0
+
     await _push_back_sync_jobs(session, auth.user_id)
-    return {"upserted": upserted}
+    return {"upserted": upserted, "deleted": deleted}
 
 
 class AssignmentUploadItem(BaseModel):
