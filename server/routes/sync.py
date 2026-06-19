@@ -307,18 +307,25 @@ async def _read_full_snapshot(session, user_id):
 
     state = await session.get(UserSyncState, user_id)
     courses = await rows(
-        select(UserCourse).where(UserCourse.user_id == user_id)
+        select(UserCourse).where(
+            UserCourse.user_id == user_id,
+            UserCourse.deleted_at.is_(None),
+        )
     )
     course_overrides = await rows(
         select(UserCourseOverride).where(UserCourseOverride.user_id == user_id)
     )
     skipped = await rows(
         select(UserCourseSkippedDate).where(
-            UserCourseSkippedDate.user_id == user_id
+            UserCourseSkippedDate.user_id == user_id,
+            UserCourseSkippedDate.deleted_at.is_(None),
         )
     )
     assignments = await rows(
-        select(UserAssignment).where(UserAssignment.user_id == user_id)
+        select(UserAssignment).where(
+            UserAssignment.user_id == user_id,
+            UserAssignment.deleted_at.is_(None),
+        )
     )
     assignment_overrides = await rows(
         select(UserAssignmentOverride).where(

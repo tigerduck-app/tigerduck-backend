@@ -14,7 +14,8 @@ import structlog
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
 from server.bulletins.models import Bulletin
@@ -172,10 +173,40 @@ async def patch_subscription(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    subscription = await _get_owned_subscription(
-        session, auth.user_id, subscription_id
+    # Atomic compare-and-swap on revision (mirrors settings_docs.py):
+    # UPDATE ... WHERE revision = base_revision so a concurrent writer
+    # that bumps the revision between our SELECT and UPDATE causes
+    # rowcount=0 instead of silently overwriting.
+    values: dict = {
+        "revision": UserBulletinSubscription.revision + 1,
+        "updated_by_device_id": auth.device_id,
+    }
+    if payload.name is not None:
+        values["name"] = payload.name
+    if payload.orgs is not None:
+        values["orgs"] = payload.orgs
+    if payload.tags is not None:
+        values["tags"] = payload.tags
+    if payload.mode is not None:
+        values["mode"] = payload.mode
+    if payload.enabled is not None:
+        values["enabled"] = payload.enabled
+
+    result = await session.execute(
+        update(UserBulletinSubscription)
+        .where(
+            UserBulletinSubscription.id == subscription_id,
+            UserBulletinSubscription.user_id == auth.user_id,
+            UserBulletinSubscription.deleted_at.is_(None),
+            UserBulletinSubscription.revision == payload.base_revision,
+        )
+        .values(**values)
     )
-    if subscription.revision != payload.base_revision:
+    if result.rowcount == 0:
+        subscription = await _get_owned_subscription(
+            session, auth.user_id, subscription_id
+        )
+        # Row exists but revision didn't match — conflict.
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
             content={
@@ -183,19 +214,11 @@ async def patch_subscription(
                 "server": serializers.subscription_to_dict(subscription),
             },
         )
-    if payload.name is not None:
-        subscription.name = payload.name
-    if payload.orgs is not None:
-        subscription.orgs = payload.orgs
-    if payload.tags is not None:
-        subscription.tags = payload.tags
-    if payload.mode is not None:
-        subscription.mode = payload.mode
-    if payload.enabled is not None:
-        subscription.enabled = payload.enabled
-    subscription.revision += 1
-    subscription.updated_by_device_id = auth.device_id
 
+    # Re-read updated row for the response and changelog.
+    subscription = await _get_owned_subscription(
+        session, auth.user_id, subscription_id
+    )
     await append_change(
         session,
         user_id=auth.user_id,
@@ -287,6 +310,14 @@ async def put_state(
     if bulletin is None:
         raise HTTPException(status_code=404, detail="bulletin not found")
 
+    # INSERT ... ON CONFLICT DO NOTHING to atomically ensure the row
+    # exists without racing a concurrent PUT for the same (user, bulletin).
+    await session.execute(
+        pg_insert(UserBulletinState)
+        .values(user_id=auth.user_id, bulletin_id=bulletin_id)
+        .on_conflict_do_nothing(index_elements=["user_id", "bulletin_id"])
+    )
+    await session.flush()
     state = (
         await session.execute(
             select(UserBulletinState).where(
@@ -294,11 +325,7 @@ async def put_state(
                 UserBulletinState.bulletin_id == bulletin_id,
             )
         )
-    ).scalar_one_or_none()
-    if state is None:
-        state = UserBulletinState(user_id=auth.user_id, bulletin_id=bulletin_id)
-        session.add(state)
-        await session.flush()
+    ).scalar_one()
 
     now = datetime.now(UTC)
     changed_fields = []

@@ -18,6 +18,14 @@ async def require_shared_secret(
 ) -> None:
     expected: str = request.app.state.settings.api_shared_secret
     if not expected:
+        # In production the secret MUST be configured (validated at startup
+        # via Settings.validate_production_secrets). If somehow reached at
+        # runtime with an empty secret, reject rather than silently allowing.
+        if request.app.state.settings.env == "production":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="shared secret not configured",
+            )
         return  # auth disabled (dev/test default)
     if x_push_token is None or not secrets.compare_digest(x_push_token, expected):
         raise HTTPException(

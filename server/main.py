@@ -228,6 +228,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_attempts=settings.auth_login_max_attempts,
         window_seconds=settings.auth_login_window_seconds,
     )
+    from server.routes.auth import _REFRESH_MAX_ATTEMPTS, _REFRESH_WINDOW_SECONDS
+    app.state.refresh_limiter = SlidingWindowLimiter(
+        max_attempts=_REFRESH_MAX_ATTEMPTS,
+        window_seconds=_REFRESH_WINDOW_SECONDS,
+    )
     try:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:

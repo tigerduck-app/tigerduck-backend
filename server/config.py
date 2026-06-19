@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -246,6 +246,14 @@ class Settings(BaseSettings):
     # bulletin classification job still tries the LLM on its own ticks
     # and self-heals once llama-server is back up.
     skip_llm_probe: bool = False
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.env == "production" and not self.api_shared_secret:
+            raise ValueError(
+                "TIGERDUCK_API_SHARED_SECRET must be set in production"
+            )
+        return self
 
     @property
     def apns_topic_live_activity(self) -> str:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select, update
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
@@ -31,6 +31,11 @@ from server.syncjobs.models import SyncJob, SyncJobStatus
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = structlog.get_logger(__name__)
+
+# Per-IP rate limit for /auth/refresh — separate from login_limiter so
+# the two windows don't interfere with each other.
+_REFRESH_MAX_ATTEMPTS = 10
+_REFRESH_WINDOW_SECONDS = 60
 
 
 def _client_ip(request: Request) -> str:
@@ -117,6 +122,14 @@ async def login(
 async def refresh(
     payload: RefreshRequest, request: Request, session: SessionDep
 ) -> RefreshResponse:
+    ip = _client_ip(request)
+    limiter = request.app.state.refresh_limiter
+    if not limiter.allow(ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many refresh attempts, try again later",
+        )
+    limiter.record(ip)
     result = await service.refresh(
         session,
         request.app.state.settings,
