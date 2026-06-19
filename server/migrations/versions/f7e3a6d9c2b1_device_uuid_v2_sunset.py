@@ -36,6 +36,12 @@ def upgrade() -> None:
         "push_jobs",
         "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom', 'schedule')",
     )
+    op.drop_constraint("chk_device_platform", "user_devices", type_="check")
+    op.create_check_constraint(
+        "chk_device_platform",
+        "user_devices",
+        "platform IN ('ios', 'ipados', 'macos', 'windows', 'watchos', 'wearos', 'android', 'web')",
+    )
     # ### end Alembic commands ###
 
 
@@ -47,6 +53,12 @@ def downgrade() -> None:
         "chk_push_job_channel",
         "push_jobs",
         "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom')",
+    )
+    op.drop_constraint("chk_device_platform", "user_devices", type_="check")
+    op.create_check_constraint(
+        "chk_device_platform",
+        "user_devices",
+        "platform IN ('ios', 'ipados', 'macos', 'windows', 'watchos', 'wearos', 'android')",
     )
     op.drop_column("user_devices", "server_push_enabled")
     # ### end Alembic commands ###

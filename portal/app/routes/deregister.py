@@ -107,17 +107,18 @@ async def deregister_student(
         counts["external_accounts"] = ext_accounts
         counts["external_account_credentials"] = ext_creds
 
-        await conn.execute(
-            """DELETE FROM external_account_credentials
-               WHERE external_account_id IN (
-                   SELECT id FROM external_accounts WHERE user_id = $1
-               )""",
-            user_id,
-        )
-        await conn.execute(
-            "DELETE FROM external_accounts WHERE user_id = $1", user_id
-        )
-        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+        async with conn.transaction():
+            await conn.execute(
+                """DELETE FROM external_account_credentials
+                   WHERE external_account_id IN (
+                       SELECT id FROM external_accounts WHERE user_id = $1
+                   )""",
+                user_id,
+            )
+            await conn.execute(
+                "DELETE FROM external_accounts WHERE user_id = $1", user_id
+            )
+            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
     report = {
         "deleted": True,

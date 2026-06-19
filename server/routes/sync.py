@@ -239,7 +239,10 @@ async def upload_assignments(
     now = datetime.now(UTC)
     upserted = 0
     for a in payload.assignments:
-        due_at = datetime.fromisoformat(a.due_at) if a.due_at else None
+        try:
+            due_at = datetime.fromisoformat(a.due_at) if a.due_at else None
+        except ValueError:
+            due_at = None
         stmt = (
             pg_insert(UserAssignment)
             .values(

@@ -49,6 +49,7 @@ async def login(
     state = request.app.state
     moodle_token = payload.moodle_token
     moodle_private_token = payload.moodle_private_token
+    did_sso_rate_limit = False
 
     if not moodle_token and payload.password:
         ip_key = f"login:ip:{_client_ip(request)}"
@@ -61,6 +62,7 @@ async def login(
             )
         state.login_limiter.record(ip_key)
         state.login_limiter.record(sid_key)
+        did_sso_rate_limit = True
         from server.syncjobs.moodle_client import SsoTokenClient, SsoAuthFailed, SsoUnavailable
         sso = SsoTokenClient(
             base_url=state.settings.moodle_base_url,
@@ -96,6 +98,7 @@ async def login(
         moodle_private_token=moodle_private_token,
         device_info=payload.device_info,
         client_ip=_client_ip(request),
+        skip_rate_limit=did_sso_rate_limit,
     )
     return LoginResponse(
         access_token=result.access_token,

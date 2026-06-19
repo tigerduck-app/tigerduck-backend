@@ -85,21 +85,21 @@ async def login(
     moodle_private_token: str | None,
     device_info: DeviceInfo,
     client_ip: str,
+    skip_rate_limit: bool = False,
 ) -> LoginResult:
     ensure_auth_configured(settings, cipher)
     assert cipher is not None  # narrowed by ensure_auth_configured
 
-    sid_key = f"login:sid:{student_id.lower()}"
-    ip_key = f"login:ip:{client_ip}"
-    if not limiter.allow(sid_key) or not limiter.allow(ip_key):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="too_many_login_attempts",
-        )
-    # Record BEFORE the Moodle call: every verification attempt counts, so
-    # the endpoint can't be hammered as a token-validation oracle.
-    limiter.record(sid_key)
-    limiter.record(ip_key)
+    if not skip_rate_limit:
+        sid_key = f"login:sid:{student_id.lower()}"
+        ip_key = f"login:ip:{client_ip}"
+        if not limiter.allow(sid_key) or not limiter.allow(ip_key):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too_many_login_attempts",
+            )
+        limiter.record(sid_key)
+        limiter.record(ip_key)
 
     if not moodle_token:
         raise HTTPException(

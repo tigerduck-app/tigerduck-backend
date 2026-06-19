@@ -88,7 +88,7 @@ async def _enqueue_sync_trigger(session: AsyncSession, user_id) -> None:
         pg_insert(PushJob)
         .values(
             user_id=user_id,
-            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp())}",
+            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}",
             channel="system",
             scenario="sync_trigger",
             fire_at=now,
