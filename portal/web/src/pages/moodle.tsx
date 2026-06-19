@@ -602,6 +602,7 @@ type SyncCourse = {
   moodle_id: string | null;
   course_no: string;
   course_name: string;
+  course_name_en: string | null;
   client_course_no: string;
   source: string;
   color_hex: string | null;
@@ -659,6 +660,7 @@ function SyncTab() {
   const [query, setQuery] = useState("");
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [latestId, setLatestId] = useState(0);
+  const [courseNameLang, setCourseNameLang] = useState<"en" | "zh">("en");
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const events = useQuery<SyncEventsResponse>({
@@ -899,9 +901,20 @@ function SyncTab() {
       {coursesData && coursesData.courses.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">
-              Courses — Semester {coursesData.semester} ({coursesData.courses.length})
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base">
+                Courses — Semester {coursesData.semester} ({coursesData.courses.length})
+              </CardTitle>
+              <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+                <SelectTrigger className="w-32">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="en">English</SelectItem>
+                  <SelectItem value="zh">Chinese</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </CardHeader>
           <CardContent>
             <Table>
@@ -935,8 +948,8 @@ function SyncTab() {
                       </div>
                     </TableCell>
                     <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
-                    <TableCell className="text-xs max-w-[200px] truncate" title={c.course_name}>
-                      {c.course_name}
+                    <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
+                      {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
                     </TableCell>
                     <TableCell className="text-xs max-w-[200px] truncate">
                       {(() => {

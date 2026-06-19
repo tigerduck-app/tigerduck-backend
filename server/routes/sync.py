@@ -14,9 +14,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
-from server.sync.changelog import RevisionExpired, read_changes
+from server.auth.models import PushJob
+from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync.models import (
+    ChangeEntityType,
     UserAssignment,
     UserAssignmentOverride,
     UserBulletinState,
@@ -211,6 +213,7 @@ async def upload_courses(
         upserted += 1
 
     # Remove courses the client no longer has for the uploaded semesters.
+    deleted = 0
     if semesters:
         del_stmt = (
             delete(UserCourse)
@@ -220,11 +223,41 @@ async def upload_courses(
                 UserCourse.source == "ntust_portal",
                 UserCourse.course_key.notin_(uploaded_keys),
             )
+            .returning(UserCourse.id, UserCourse.course_key)
         )
         result = await session.execute(del_stmt)
-        deleted = result.rowcount
-    else:
-        deleted = 0
+        deleted_rows = result.all()
+        deleted = len(deleted_rows)
+
+        if deleted_rows:
+            state = await lock_sync_state(session, auth.user_id)
+            for row in deleted_rows:
+                await append_change(
+                    session,
+                    user_id=auth.user_id,
+                    entity_type=ChangeEntityType.course.value,
+                    entity_id=str(row.id),
+                    operation="delete",
+                    payload={"course_key": row.course_key},
+                    device_id=auth.device_id,
+                    locked_state=state,
+                )
+            now = datetime.now(UTC)
+            await session.execute(
+                pg_insert(PushJob)
+                .values(
+                    user_id=auth.user_id,
+                    dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+                    channel="system",
+                    scenario="sync_trigger",
+                    fire_at=now,
+                    payload={
+                        "kind": "sync_trigger",
+                        "source_device_id": str(auth.device_id) if auth.device_id else None,
+                    },
+                )
+                .on_conflict_do_nothing()
+            )
 
     await _push_back_sync_jobs(session, auth.user_id)
     return {"upserted": upserted, "deleted": deleted}

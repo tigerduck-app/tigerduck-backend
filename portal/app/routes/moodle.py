@@ -412,7 +412,7 @@ async def sync_courses(
 
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
-            "c.source, "
+            "c.course_name_en, c.source, "
             "o.color_hex, o.custom_names "
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "
@@ -428,15 +428,16 @@ async def sync_courses(
     for r in rows:
         d = dict(r)
         course_no = d.get("course_no") or ""
+        # Clean up bracket prefix from Chinese name (e.g. "【必修】微積分" → "微積分")
+        name = d.get("course_name") or ""
+        bracket_end = name.find("】")
+        if bracket_end >= 0:
+            rest = name[bracket_end + 1:].strip()
+            d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
+        # English name: prefer NTUST API, fall back to DB field
         en_name = en_names.get(course_no)
         if en_name:
-            d["course_name"] = en_name
-        else:
-            name = d.get("course_name") or ""
-            bracket_end = name.find("】")
-            if bracket_end >= 0:
-                rest = name[bracket_end + 1:].strip()
-                d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
+            d["course_name_en"] = en_name
         d["client_course_no"] = course_no
         idx = _course_hash_index(course_no)
         d["default_palette_index"] = idx
