@@ -45,6 +45,7 @@ def course_to_dict(c: UserCourse) -> dict:
         "enrollment_status": c.enrollment_status,
         "fetched_at": _iso(c.fetched_at),
         "updated_at": _iso(c.updated_at),
+        "version": c.version,
     }
 
 

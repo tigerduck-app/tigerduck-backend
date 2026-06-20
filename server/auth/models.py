@@ -135,6 +135,9 @@ class User(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    courses_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     external_accounts: Mapped[list["ExternalAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

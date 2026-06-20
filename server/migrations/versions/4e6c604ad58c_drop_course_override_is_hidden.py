@@ -29,22 +29,22 @@ def upgrade() -> None:
     op.drop_column("user_course_overrides", "is_hidden_updated_at")
     op.drop_column("user_course_overrides", "is_hidden")
 
-    op.create_table(
-        "sync_log_entries",
-        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("user_id", UUID(as_uuid=True), nullable=False),
-        sa.Column("device_id", UUID(as_uuid=True), nullable=True),
-        sa.Column("ts", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
-        sa.Column("level", sa.String(8), nullable=False, server_default=sa.text("'INFO'")),
-        sa.Column("source", sa.String(32), nullable=False),
-        sa.Column("message", sa.Text(), nullable=False),
-        sa.Column("detail", JSONB(), nullable=True),
-    )
-    op.create_index(
-        "idx_sync_log_entries_user",
-        "sync_log_entries",
-        ["user_id", sa.text("ts DESC")],
-    )
+    op.execute(sa.text("""
+        CREATE TABLE IF NOT EXISTS sync_log_entries (
+            id          BIGSERIAL PRIMARY KEY,
+            user_id     UUID NOT NULL,
+            device_id   UUID,
+            ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            level       VARCHAR(8) NOT NULL DEFAULT 'INFO',
+            source      VARCHAR(32) NOT NULL,
+            message     TEXT NOT NULL,
+            detail      JSONB
+        )
+    """))
+    op.execute(sa.text("""
+        CREATE INDEX IF NOT EXISTS idx_sync_log_entries_user
+            ON sync_log_entries (user_id, ts DESC)
+    """))
 
 
 def downgrade() -> None:

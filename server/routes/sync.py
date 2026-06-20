@@ -7,14 +7,14 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
-from server.auth.models import PushJob
+from server.auth.models import PushJob, User
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync.models import (
@@ -27,6 +27,7 @@ from server.sync.models import (
     UserCourse,
     UserCourseOverride,
     UserCourseSkippedDate,
+    UserCourseTombstone,
     UserSettingsDocument,
     UserSyncState,
 )
@@ -162,8 +163,16 @@ class CourseUploadItem(BaseModel):
     classroom_map: dict = {}
 
 
+class CourseOverrideUploadItem(BaseModel):
+    course_key: str
+    color_hex: str | None = Field(default=None, max_length=16)
+
+
 class CourseUploadRequest(BaseModel):
     courses: list[CourseUploadItem]
+    course_overrides: list[CourseOverrideUploadItem] = Field(
+        default_factory=list, max_length=500
+    )
 
 
 @router.post("/courses/upload")
@@ -204,6 +213,7 @@ async def upload_courses(
                 classroom_map=c.classroom_map,
                 fetched_at=now,
                 last_seen_at=now,
+                updated_by_device_id=auth.device_id,
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "semester", "course_key"],
@@ -218,11 +228,21 @@ async def upload_courses(
                     "classroom_map": c.classroom_map,
                     "last_seen_at": now,
                     "updated_at": now,
+                    "version": UserCourse.__table__.c.version + 1,
+                    "updated_by_device_id": auth.device_id,
                 },
             )
         )
         await session.execute(stmt)
         upserted += 1
+
+    if uploaded_keys:
+        await session.execute(
+            delete(UserCourseTombstone).where(
+                UserCourseTombstone.user_id == auth.user_id,
+                UserCourseTombstone.course_key.in_(uploaded_keys),
+            )
+        )
 
     new_keys = uploaded_keys - existing_keys
     logger.info(
@@ -270,8 +290,42 @@ async def upload_courses(
             .on_conflict_do_nothing()
         )
 
+    overrides_applied = 0
+    for item in payload.course_overrides:
+        if not item.color_hex:
+            continue
+        course = (
+            await session.execute(
+                select(UserCourse).where(
+                    UserCourse.user_id == auth.user_id,
+                    UserCourse.course_key == item.course_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if course is None:
+            continue
+        override = (
+            await session.execute(
+                select(UserCourseOverride).where(
+                    UserCourseOverride.user_id == auth.user_id,
+                    UserCourseOverride.user_course_id == course.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if override is None:
+            override = UserCourseOverride(
+                user_id=auth.user_id, user_course_id=course.id
+            )
+            session.add(override)
+            await session.flush()
+        if override.color_hex != item.color_hex:
+            override.color_hex = item.color_hex
+            override.color_hex_updated_at = now
+            override.color_hex_device_id = auth.device_id
+            overrides_applied += 1
+
     await _push_back_sync_jobs(session, auth.user_id)
-    return {"upserted": upserted}
+    return {"upserted": upserted, "overrides_applied": overrides_applied}
 
 
 @router.delete("/courses")
@@ -280,13 +334,36 @@ async def delete_all_courses(
     session: SessionDep,
 ):
     """Wipe all courses for the user. Used by 'reset course timetable'."""
+    now = datetime.now(UTC)
+
     rows = (await session.execute(
         delete(UserCourse)
         .where(UserCourse.user_id == auth.user_id)
-        .returning(UserCourse.id, UserCourse.course_key)
+        .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
     )).all()
     if not rows:
         return {"deleted": 0}
+
+    for row in rows:
+        await session.execute(
+            pg_insert(UserCourseTombstone)
+            .values(
+                user_id=auth.user_id,
+                course_key=row.course_key,
+                semester=row.semester,
+                course_no=row.course_no,
+                deleted_at=now,
+                deleted_by_device_id=auth.device_id,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "course_key"],
+                set_={"deleted_at": now, "deleted_by_device_id": auth.device_id},
+            )
+        )
+
+    await session.execute(
+        update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
+    )
 
     state = await lock_sync_state(session, auth.user_id)
     for row in rows:
@@ -300,8 +377,6 @@ async def delete_all_courses(
             device_id=auth.device_id,
             locked_state=state,
         )
-
-    now = datetime.now(UTC)
     await session.execute(
         pg_insert(PushJob)
         .values(
@@ -332,31 +407,47 @@ async def delete_course(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    now = datetime.now(UTC)
     del_stmt = (
         delete(UserCourse)
         .where(
             UserCourse.user_id == auth.user_id,
             UserCourse.course_key == course_key,
         )
-        .returning(UserCourse.id)
+        .returning(UserCourse.id, UserCourse.semester, UserCourse.course_no)
     )
     result = await session.execute(del_stmt)
-    deleted_row = result.scalar_one_or_none()
+    deleted_row = result.one_or_none()
     if deleted_row is None:
         return {"deleted": 0}
+
+    await session.execute(
+        pg_insert(UserCourseTombstone)
+        .values(
+            user_id=auth.user_id,
+            course_key=course_key,
+            semester=deleted_row.semester,
+            course_no=deleted_row.course_no,
+            deleted_at=now,
+            deleted_by_device_id=auth.device_id,
+        )
+        .on_conflict_do_update(
+            index_elements=["user_id", "course_key"],
+            set_={"deleted_at": now, "deleted_by_device_id": auth.device_id},
+        )
+    )
 
     state = await lock_sync_state(session, auth.user_id)
     await append_change(
         session,
         user_id=auth.user_id,
         entity_type=ChangeEntityType.course.value,
-        entity_id=str(deleted_row),
+        entity_id=str(deleted_row.id),
         operation="delete",
         payload={"course_key": course_key},
         device_id=auth.device_id,
         locked_state=state,
     )
-    now = datetime.now(UTC)
     await session.execute(
         pg_insert(PushJob)
         .values(
@@ -451,8 +542,15 @@ async def _read_full_snapshot(session, user_id):
         return (await session.execute(stmt)).scalars().all()
 
     state = await session.get(UserSyncState, user_id)
+    user = await session.get(User, user_id)
     courses = await rows(
         select(UserCourse).where(UserCourse.user_id == user_id)
+    )
+    tombstones = await rows(
+        select(UserCourseTombstone).where(
+            UserCourseTombstone.user_id == user_id,
+            UserCourseTombstone.deleted_at > func.now() - text("interval '30 days'"),
+        )
     )
     course_overrides = await rows(
         select(UserCourseOverride).where(UserCourseOverride.user_id == user_id)
@@ -501,8 +599,19 @@ async def _read_full_snapshot(session, user_id):
         course_semesters=sorted(set(c.semester for c in courses)),
     )
 
+    _iso = serializers._iso
     return {
         "current_revision": state.current_revision if state else 0,
+        "courses_reset_at": _iso(user.courses_reset_at) if user else None,
+        "course_tombstones": [
+            {
+                "course_key": t.course_key,
+                "course_no": t.course_no,
+                "semester": t.semester,
+                "deleted_at": _iso(t.deleted_at),
+            }
+            for t in tombstones
+        ],
         "courses": [serializers.course_to_dict(c) for c in courses],
         "course_overrides": [
             serializers.course_override_to_dict(
