@@ -274,6 +274,58 @@ async def upload_courses(
     return {"upserted": upserted}
 
 
+@router.delete("/courses")
+async def delete_all_courses(
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    """Wipe all courses for the user. Used by 'reset course timetable'."""
+    rows = (await session.execute(
+        delete(UserCourse)
+        .where(UserCourse.user_id == auth.user_id)
+        .returning(UserCourse.id, UserCourse.course_key)
+    )).all()
+    if not rows:
+        return {"deleted": 0}
+
+    state = await lock_sync_state(session, auth.user_id)
+    for row in rows:
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.course.value,
+            entity_id=str(row.id),
+            operation="delete",
+            payload={"course_key": row.course_key},
+            device_id=auth.device_id,
+            locked_state=state,
+        )
+
+    now = datetime.now(UTC)
+    await session.execute(
+        pg_insert(PushJob)
+        .values(
+            user_id=auth.user_id,
+            dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now,
+            payload={
+                "kind": "sync_trigger",
+                "source_device_id": str(auth.device_id) if auth.device_id else None,
+            },
+        )
+        .on_conflict_do_nothing()
+    )
+
+    logger.info(
+        "sync.delete_all_courses",
+        user_id=str(auth.user_id),
+        deleted=len(rows),
+    )
+    return {"deleted": len(rows)}
+
+
 @router.delete("/courses/{course_key:path}")
 async def delete_course(
     course_key: str,
