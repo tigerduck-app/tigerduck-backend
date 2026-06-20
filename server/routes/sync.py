@@ -155,6 +155,15 @@ async def poll_revision(auth: CurrentAuthDep, session: SessionDep):
     """
     if auth.device_id:
         record_poll(str(auth.user_id), str(auth.device_id))
+        await session.execute(
+            update(UserDevice)
+            .where(
+                UserDevice.user_id == auth.user_id,
+                UserDevice.client_device_id == str(auth.device_id),
+            )
+            .values(last_seen_at=datetime.now(UTC))
+        )
+        await session.commit()
     state = await session.get(UserSyncState, auth.user_id)
     return {"revision": state.current_revision if state else 0}
 
