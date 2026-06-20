@@ -123,7 +123,7 @@ export function Layout() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileNav items={items} />
-        <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6">
+        <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6" style={{ overflowAnchor: "none" }}>
           <div className="mx-auto w-full space-y-6">
             <Outlet />
           </div>
