@@ -737,6 +737,17 @@ const PLATFORM_LABELS: Record<string, string> = {
   android: "Android", wearos: "Wear OS", web: "Web",
 };
 function platformLabel(p: string) { return PLATFORM_LABELS[p] ?? p; }
+const PLATFORM_ORDER: Record<string, number> = {
+  android: 0, wearos: 1, ios: 2, ipados: 3, macos: 4, watchos: 5, web: 6,
+};
+function sortedDevices(devices: SyncDevice[]): SyncDevice[] {
+  return [...devices].sort((a, b) => {
+    const pa = PLATFORM_ORDER[a.platform] ?? 99;
+    const pb = PLATFORM_ORDER[b.platform] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return a.client_device_id.localeCompare(b.client_device_id);
+  });
+}
 
 function deviceLabel(deviceId: string | null | undefined, devices: SyncDevice[]): string {
   if (!deviceId) return "—";
@@ -1130,7 +1141,7 @@ function TopologyOverview({
 
           {/* Device nodes */}
           <div className="space-y-2">
-            {devices.map((device) => {
+            {sortedDevices(devices).map((device) => {
               const ps = pollStatus?.[device.id];
               const seenAgo = device.last_seen_at
                 ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
@@ -1886,15 +1897,17 @@ function SyncTab() {
         const timer = setTimeout(() => setNewLogIds(new Set()), 2000);
         setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
         setLatestId(d.latest_id);
-        if (wasAtBottom) {
-          setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        if (wasAtBottom && logContainerRef.current) {
+          setTimeout(() => {
+            const c = logContainerRef.current;
+            if (c) c.scrollTop = c.scrollHeight;
+          }, 50);
         }
         return () => clearTimeout(timer);
       }
       isInitialLoad.current = false;
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
       setLatestId(d.latest_id);
-      setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "auto" }), 50);
     }
   }, [logsQuery.data]);
 

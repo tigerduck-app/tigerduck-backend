@@ -75,8 +75,8 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
     now = datetime.now(UTC)
     device_row = (await session.execute(
         select(UserDevice.id).where(
+            UserDevice.id == device_id,
             UserDevice.user_id == user_id,
-            UserDevice.client_device_id == str(device_id),
             UserDevice.deleted_at.is_(None),
         )
     )).scalar_one_or_none()
@@ -154,16 +154,11 @@ async def poll_revision(auth: CurrentAuthDep, session: SessionDep):
     pipeline skips this device (it will pick up changes via polling).
     """
     if auth.device_id:
-        record_poll(str(auth.user_id), str(auth.device_id))
-        await session.execute(
-            update(UserDevice)
-            .where(
-                UserDevice.user_id == auth.user_id,
-                UserDevice.client_device_id == str(auth.device_id),
-            )
-            .values(last_seen_at=datetime.now(UTC))
-        )
-        await session.commit()
+        device = await session.get(UserDevice, auth.device_id)
+        if device:
+            record_poll(str(auth.user_id), device.client_device_id)
+            device.last_seen_at = datetime.now(UTC)
+            await session.commit()
     state = await session.get(UserSyncState, auth.user_id)
     return {"revision": state.current_revision if state else 0}
 
@@ -259,14 +254,9 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
 
     if auth.device_id:
         await _cancel_pending_deliveries_for_device(session, auth.user_id, auth.device_id)
-        await session.execute(
-            update(UserDevice)
-            .where(
-                UserDevice.user_id == auth.user_id,
-                UserDevice.client_device_id == str(auth.device_id),
-            )
-            .values(last_seen_at=datetime.now(UTC))
-        )
+        device = await session.get(UserDevice, auth.device_id)
+        if device:
+            device.last_seen_at = datetime.now(UTC)
 
     await session.commit()
 
@@ -500,14 +490,10 @@ async def upload_courses(
     )
     await _push_back_sync_jobs(session, auth.user_id)
     if auth.device_id:
-        await session.execute(
-            update(UserDevice)
-            .where(
-                UserDevice.user_id == auth.user_id,
-                UserDevice.client_device_id == str(auth.device_id),
-            )
-            .values(last_seen_at=datetime.now(UTC))
-        )
+        device = await session.get(UserDevice, auth.device_id)
+        if device:
+            device.last_seen_at = datetime.now(UTC)
+    await session.commit()
     return {"upserted": upserted, "skipped_tombstoned": skipped, "overrides_applied": overrides_applied}
 
 
