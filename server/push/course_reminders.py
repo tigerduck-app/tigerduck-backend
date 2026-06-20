@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -203,7 +203,8 @@ async def scan_course_reminders(
                 )
                 .where(
                     UserCourse.enrollment_status == "enrolled",
-                    func.jsonb_array_length(UserCourse.schedule_json) > 0,
+                    UserCourse.schedule_json != text("'{}'::jsonb"),
+                    UserCourse.schedule_json != text("'[]'::jsonb"),
                 )
             )
         ).all()

@@ -563,14 +563,17 @@ async def sync_logs(
 
 @router.post("/push-tick")
 async def force_push_tick(request: Request) -> JSONResponse:
-    """Manually trigger the push pipeline tick to process pending jobs."""
-    worker = getattr(request.app.state, "push_worker", None)
-    if worker is None:
-        return JSONResponse({"ok": False, "error": "push_worker not available"}, 503)
-    from server.push.pipeline import run_push_tick
+    """Proxy to the main API server's /push-tick endpoint."""
+    import httpx
+
+    import os
+    settings = request.app.state.settings
+    env_mode = os.environ.get("TIGERDUCK_ENV", "development")
+    backend_url = "http://tigerduck-internal:40000" if env_mode != "development" else "http://localhost:40000"
     try:
-        await run_push_tick(worker)
-        return JSONResponse({"ok": True})
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{backend_url}/push-tick")
+            return JSONResponse(resp.json(), status_code=resp.status_code)
     except Exception as e:
-        logger.exception("force push tick failed")
+        logger.exception("force push tick proxy failed")
         return JSONResponse({"ok": False, "error": str(e)}, 500)

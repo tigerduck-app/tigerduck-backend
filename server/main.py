@@ -218,6 +218,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
+    @app.post("/push-tick", tags=["meta"])
+    async def force_push_tick() -> dict:
+        worker = getattr(app.state, "push_worker", None)
+        if worker is None:
+            return {"ok": False, "error": "push_worker not available"}
+        from server.push.pipeline import run_push_tick
+        await run_push_tick(worker)
+        return {"ok": True}
+
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
     # them before issuing requests. The cipher is None when credential keys
     # are unconfigured — /v3 auth then answers 503 auth_not_configured.
