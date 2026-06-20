@@ -1190,7 +1190,7 @@ function TopologyOverview({
                     )}
                     {pending > 0 && (
                       <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-orange-500">
-                        {pending} pending
+                        {pending} scheduled
                       </Badge>
                     )}
                     <span className="text-xs text-muted-foreground ml-auto">
@@ -1497,6 +1497,7 @@ function NodeDetailPanel({
         <Tabs defaultValue="data">
           <TabsList>
             <TabsTrigger value="data">Data</TabsTrigger>
+            <TabsTrigger value="synced-list">Synced List</TabsTrigger>
             <TabsTrigger value="push">
               Push{deviceDeliveries.length > 0 ? ` (${deviceDeliveries.length})` : ""}
             </TabsTrigger>
@@ -1513,9 +1514,8 @@ function NodeDetailPanel({
             ) : (
               <Tabs defaultValue="courses">
                 <TabsList className="mb-2">
-                  <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
-                  <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
-                  <TabsTrigger value="overrides">Overrides ({allOverrides.length})</TabsTrigger>
+                  <TabsTrigger value="courses" className={allCourses.length === 0 ? "text-orange-400" : ""}>Courses ({allCourses.length})</TabsTrigger>
+                  <TabsTrigger value="assignments" className={allAssignments.length === 0 ? "text-orange-400" : ""}>Assignments ({allAssignments.length})</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="courses">
@@ -1620,36 +1620,34 @@ function NodeDetailPanel({
                   )}
                 </TabsContent>
 
-                <TabsContent value="overrides">
-                  {allOverrides.length === 0 ? (
-                    <p className="text-sm text-muted-foreground py-4">No overrides</p>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead className="text-xs">Moodle ID</TableHead>
-                            <TableHead className="text-xs">Title</TableHead>
-                            <TableHead className="text-xs">Status</TableHead>
-                            <TableHead className="text-xs">Updated</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {allOverrides.map((o) => (
-                            <TableRow key={o.moodle_assignment_id}>
-                              <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
-                              <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
-                              <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
-                              <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  )}
-                </TabsContent>
               </Tabs>
             )}
+          </TabsContent>
+          <TabsContent value="synced-list">
+            <div className="space-y-2 py-2">
+              {(() => {
+                const colorCount = allCourses.filter((c) => c.color_hex).length;
+                const customNameCount = allCourses.filter((c) => {
+                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
+                  return names && typeof names === "object" && Object.keys(names).length > 0;
+                }).length;
+                const categories = [
+                  { label: "Courses", count: allCourses.length, detail: `${allCourses.length} courses in backend` },
+                  { label: "Course colours", count: colorCount, detail: `${colorCount} of ${allCourses.length} have synced colours` },
+                  { label: "Custom course names", count: customNameCount, detail: `${customNameCount} of ${allCourses.length} have custom names` },
+                  { label: "Assignments", count: allAssignments.length, detail: `${allAssignments.length} assignments in backend` },
+                ];
+                return categories.map((cat) => (
+                  <div key={cat.label} className={`flex items-center gap-3 rounded-md border p-3 ${cat.count === 0 ? "border-orange-400/40 bg-orange-500/5" : "border-border"}`}>
+                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${cat.count > 0 ? "bg-green-500" : "bg-orange-400"}`} />
+                    <div className="min-w-0">
+                      <div className={`text-sm font-medium ${cat.count === 0 ? "text-orange-400" : ""}`}>{cat.label}</div>
+                      <div className="text-xs text-muted-foreground">{cat.detail}</div>
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
           </TabsContent>
           <TabsContent value="push">
             <div className="mb-4 flex flex-wrap gap-2">
