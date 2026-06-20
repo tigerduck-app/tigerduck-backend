@@ -54,10 +54,19 @@ export function Layout() {
             className="h-7 w-7 rounded shrink-0"
           />
           {!sidebarCollapsed && (
-            <div className="leading-tight">
-              <div className="text-sm font-semibold">TigerDuck</div>
-              <div className="text-xs text-muted-foreground">Backend Portal</div>
-            </div>
+            <>
+              <div className="leading-tight">
+                <div className="text-sm font-semibold">TigerDuck</div>
+                <div className="text-xs text-muted-foreground">Backend Portal</div>
+              </div>
+              <button
+                onClick={() => setSidebarCollapsed(true)}
+                className="ml-auto rounded-md p-1 hover:bg-accent text-muted-foreground"
+                title="Collapse sidebar"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </>
           )}
         </div>
         <nav className={`flex flex-col gap-0.5 py-3 ${sidebarCollapsed ? "px-1" : "px-2"}`}>
@@ -98,16 +107,17 @@ export function Layout() {
               </div>
             </div>
           )}
-          <div className="flex items-center gap-2">
-            {!sidebarCollapsed && <ThemeToggle />}
+          {sidebarCollapsed ? (
             <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="rounded-md p-1.5 hover:bg-accent text-muted-foreground ml-auto"
-              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              onClick={() => setSidebarCollapsed(false)}
+              className="rounded-md p-1.5 hover:bg-accent text-muted-foreground mx-auto"
+              title="Expand sidebar"
             >
-              {sidebarCollapsed ? <Menu className="h-4 w-4" /> : <X className="h-4 w-4" />}
+              <Menu className="h-4 w-4" />
             </button>
-          </div>
+          ) : (
+            <ThemeToggle />
+          )}
         </div>
       </aside>
 
