@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Loader2,
   Monitor,
+  Tablet,
   Pause,
   Play,
   RefreshCw,
@@ -1014,7 +1015,9 @@ function relativeTime(iso: string | null): string {
 }
 
 function platformIcon(platform: string) {
-  if (["ios", "ipados", "android", "watchos", "wearos"].includes(platform))
+  if (["android", "wearos"].includes(platform))
+    return <Tablet className="h-5 w-5" />;
+  if (["ios", "ipados", "watchos"].includes(platform))
     return <Smartphone className="h-5 w-5" />;
   return <Monitor className="h-5 w-5" />;
 }
@@ -1093,15 +1096,29 @@ function TopologyOverview({
             </button>
           </div>
 
-          {/* Connector lines */}
+          {/* SVG connector curves */}
           {devices.length > 0 && (
-            <div className="flex flex-col items-center justify-center self-stretch shrink-0 mx-1" style={{ minWidth: 48 }}>
-              {devices.map((_, i) => (
-                <div key={i} className="flex items-center flex-1" style={{ minHeight: 24 }}>
-                  <div className="w-12 border-t-2 border-dashed border-muted-foreground/30" />
-                </div>
-              ))}
-            </div>
+            <svg className="shrink-0 self-stretch mx-1" width="56" style={{ minWidth: 56 }}>
+              {devices.map((_, i) => {
+                const count = devices.length;
+                const gap = 12;
+                const cardH = 108;
+                const totalH = count * cardH + (count - 1) * gap;
+                const midY = totalH / 2;
+                const deviceY = i * (cardH + gap) + cardH / 2;
+                return (
+                  <path
+                    key={i}
+                    d={`M 0 ${midY} C 28 ${midY}, 28 ${deviceY}, 56 ${deviceY}`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeDasharray="4 3"
+                    className="text-muted-foreground/30"
+                  />
+                );
+              })}
+            </svg>
           )}
 
           {/* Device nodes */}
