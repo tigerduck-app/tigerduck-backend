@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
 import {
   AlertCircle,
@@ -70,13 +71,14 @@ function fmt(iso: string | null): string {
 }
 
 export function MoodlePage() {
+  const [activeTab, setActiveTab] = useHashTab("actions");
   return (
     <>
       <PageHeader
         title="Moodle Sync"
         description="Manage server-side Moodle sync jobs"
       />
-      <Tabs defaultValue="actions" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="actions">Actions</TabsTrigger>
           <TabsTrigger value="lists">Lists</TabsTrigger>
@@ -659,8 +661,11 @@ const CHART_COLORS = [
   "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
   "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
 ];
-const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
-const ANDROID_PLATFORMS = new Set(["android", "wearos"]);
+const PLATFORM_LABELS: Record<string, string> = {
+  ios: "iOS", ipados: "iPadOS", macos: "macOS", watchos: "watchOS",
+  android: "Android", wearos: "Wear OS", web: "Web",
+};
+function platformLabel(p: string) { return PLATFORM_LABELS[p] ?? p; }
 
 function MiniPieChart({ data }: { data: { label: string; value: number; color: string }[] }) {
   const total = data.reduce((s, d) => s + d.value, 0);
@@ -733,19 +738,18 @@ function StatSection({ title, counts, total }: { title: string; counts: [string,
 function DevicesCard({ devices }: { devices: SyncDevice[] }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
-  const platforms = [...new Set(devices.map((d) => d.platform))].sort();
+  const platforms = ["ios", "ipados", "macos", "android"];
 
   const filtered = devices.filter((d) => {
     if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
-    if (platformFilter === "android") return ANDROID_PLATFORMS.has(d.platform);
+    if (platformFilter === "apple") return ["ios", "ipados", "macos", "watchos"].includes(d.platform);
     return d.platform === platformFilter;
   });
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};
     for (const d of filtered) {
-      const v = (key === "os_version" ? `${d.platform} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
       map[v] = (map[v] ?? 0) + 1;
     }
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
@@ -784,7 +788,7 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
                       {d.client_device_id}
                     </TableCell>
                     <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
-                    <TableCell className="text-xs">{d.os_version ? `${d.platform} ${d.os_version}` : "—"}</TableCell>
+                    <TableCell className="text-xs">{d.os_version ? `${platformLabel(d.platform)} ${d.os_version}` : "—"}</TableCell>
                     <TableCell className="text-xs">{fmt(d.last_seen_at)}</TableCell>
                     <TableCell className="text-xs">{fmt(d.created_at)}</TableCell>
                   </TableRow>
@@ -801,9 +805,8 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
                 <SelectContent>
                   <SelectItem value="all">All Platforms</SelectItem>
                   <SelectItem value="apple">All Apple</SelectItem>
-                  <SelectItem value="android">All Android</SelectItem>
                   {platforms.map((p) => (
-                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                    <SelectItem key={p} value={p}>{platformLabel(p)}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

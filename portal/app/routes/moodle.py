@@ -339,22 +339,14 @@ _course_name_cache_ts: dict[str, float] = {}
 _COURSE_NAME_CACHE_TTL = 3600
 
 
-async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
-    """Fetch course names from NTUST QueryCourse API, cached 1h.
-
-    *lang*: ``"en"`` or ``"zh"``.
-    Returns ``{course_no: course_name}``.
-    """
+def _fetch_course_names_sync(semester: str, lang: str) -> dict[str, str]:
+    """Blocking fetch — meant to run in a thread."""
     import ssl
     import time
     import urllib.request
     import json as _json
 
     cache_key = f"{semester}:{lang}"
-    now = time.monotonic()
-    if cache_key in _course_name_cache and now - _course_name_cache_ts.get(cache_key, 0) < _COURSE_NAME_CACHE_TTL:
-        return _course_name_cache[cache_key]
-
     try:
         payload = _json.dumps({
             "Semester": semester,
@@ -377,12 +369,25 @@ async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
             courses = _json.loads(resp.read())
         result = {c["CourseNo"]: c["CourseName"] for c in courses if c.get("CourseNo")}
         _course_name_cache[cache_key] = result
-        _course_name_cache_ts[cache_key] = now
+        _course_name_cache_ts[cache_key] = time.monotonic()
         logger.info("fetched %d %s course names for %s", len(result), lang, semester)
-        return result
     except Exception as e:
         logger.warning("failed to fetch %s course names for %s: %s", lang, semester, e)
-        return _course_name_cache.get(cache_key, {})
+
+
+async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
+    """Return cached course names. If cache is cold, kick off a background
+    fetch and return whatever we have (possibly empty). Next request gets
+    the result."""
+    import asyncio
+    import time
+
+    cache_key = f"{semester}:{lang}"
+    now = time.monotonic()
+    fresh = cache_key in _course_name_cache and now - _course_name_cache_ts.get(cache_key, 0) < _COURSE_NAME_CACHE_TTL
+    if not fresh:
+        asyncio.get_event_loop().run_in_executor(None, _fetch_course_names_sync, semester, lang)
+    return _course_name_cache.get(cache_key, {})
 
 
 def _current_semester_prefix() -> str:

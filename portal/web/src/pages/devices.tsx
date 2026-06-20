@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
 import { Plus, Search, Smartphone, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
@@ -125,6 +126,7 @@ function StatBlock({ title, counts, total }: { title: string; counts: [string, n
 export function DevicesPage() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useHashTab("iphone");
 
   const q = useQuery<DevicesPayload>({
     // Include the trimmed search in the key so React Query treats it as
@@ -193,7 +195,7 @@ export function DevicesPage() {
         </Card>
       )}
       {q.data && (
-        <Tabs defaultValue="iphone" className="space-y-4">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
           <TabsList>
             {TABS.map((t) => {
               const count = q.data.items.filter(t.match).length;
@@ -536,24 +538,35 @@ function SelectionBar({
   );
 }
 
-const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
-const ANDROID_PLATFORMS = new Set(["android", "wearos"]);
+const PLATFORM_LABELS: Record<string, string> = {
+  ios: "iOS",
+  ipados: "iPadOS",
+  macos: "macOS",
+  watchos: "watchOS",
+  android: "Android",
+  wearos: "Wear OS",
+  web: "Web",
+};
+
+function platformLabel(p: string) {
+  return PLATFORM_LABELS[p] ?? p;
+}
 
 function DeviceStats({ items }: { items: DeviceRow[] }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
-  const platforms = [...new Set(items.map((d) => d.platform))].sort();
+  const platforms = ["ios", "ipados", "macos", "android"];
+  const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
   const filtered = items.filter((d) => {
     if (platformFilter === "all") return true;
     if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
-    if (platformFilter === "android") return ANDROID_PLATFORMS.has(d.platform);
     return d.platform === platformFilter;
   });
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};
     for (const d of filtered) {
-      const v = (key === "os_version" ? `${d.platform} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
       map[v] = (map[v] ?? 0) + 1;
     }
     return Object.entries(map).sort((a, b) => b[1] - a[1]);
@@ -569,9 +582,8 @@ function DeviceStats({ items }: { items: DeviceRow[] }) {
           <SelectContent>
             <SelectItem value="all">All Platforms</SelectItem>
             <SelectItem value="apple">All Apple</SelectItem>
-            <SelectItem value="android">All Android</SelectItem>
             {platforms.map((p) => (
-              <SelectItem key={p} value={p}>{p}</SelectItem>
+              <SelectItem key={p} value={p}>{platformLabel(p)}</SelectItem>
             ))}
           </SelectContent>
         </Select>
