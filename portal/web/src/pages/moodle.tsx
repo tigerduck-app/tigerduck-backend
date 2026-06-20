@@ -1083,7 +1083,7 @@ function SyncTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {coursesData.courses.map((c) => {
+                {[...coursesData.courses].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
                   const paletteLight = coursesData.palette_light ?? [];
                   const paletteDark = coursesData.palette_dark ?? [];
                   const overrideIdx = c.color_hex ? paletteLight.findIndex(

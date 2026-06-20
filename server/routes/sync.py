@@ -219,6 +219,14 @@ async def upload_courses(
         upserted += 1
 
     new_keys = uploaded_keys - existing_keys
+    logger.info(
+        "sync.upload_courses",
+        user_id=str(auth.user_id),
+        device_id=str(auth.device_id) if auth.device_id else None,
+        upserted=upserted,
+        new_keys=sorted(new_keys) if new_keys else [],
+        uploaded_keys=sorted(uploaded_keys),
+    )
     if new_keys:
         state = await lock_sync_state(session, auth.user_id)
         new_rows = (await session.execute(
@@ -426,6 +434,14 @@ async def _read_full_snapshot(session, user_id):
 
     _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
     _course_pk_to_moodle = {c.id: c.moodle_id for c in courses}
+
+    logger.info(
+        "sync.full_snapshot",
+        user_id=str(user_id),
+        course_count=len(courses),
+        course_nos=sorted(c.course_no or "" for c in courses),
+        course_semesters=sorted(set(c.semester for c in courses)),
+    )
 
     return {
         "current_revision": state.current_revision if state else 0,
