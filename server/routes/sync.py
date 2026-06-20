@@ -31,6 +31,7 @@ from server.sync.models import (
     UserSettingsDocument,
     UserSyncState,
 )
+from server.syncjobs.log_entries import log_sync
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -111,6 +112,14 @@ async def initial_upload(
         device_id=auth.device_id,
         payload=payload,
     )
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message=f"Initial upload: {result.counts}",
+        device_id=auth.device_id,
+        detail=result.counts,
+    )
     return {
         "counts": result.counts,
         "current_revision": result.current_revision,
@@ -130,8 +139,6 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
     would leak surprising state into the dependency's commit/rollback
     handling and the pooled connection.
     """
-    from server.syncjobs.log_entries import log_sync
-
     await log_sync(
         session,
         user_id=auth.user_id,
@@ -324,6 +331,20 @@ async def upload_courses(
             override.color_hex_device_id = auth.device_id
             overrides_applied += 1
 
+    course_nos = [c.course_no for c in payload.courses]
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message=f"Courses uploaded: {upserted} upserted, {len(new_keys)} new, {overrides_applied} colors set",
+        device_id=auth.device_id,
+        detail={
+            "upserted": upserted,
+            "new_keys": sorted(new_keys) if new_keys else [],
+            "overrides_applied": overrides_applied,
+            "course_nos": course_nos,
+        },
+    )
     await _push_back_sync_jobs(session, auth.user_id)
     return {"upserted": upserted, "overrides_applied": overrides_applied}
 
@@ -393,6 +414,15 @@ async def delete_all_courses(
         .on_conflict_do_nothing()
     )
 
+    deleted_keys = [r.course_key for r in rows]
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message=f"All courses deleted: {len(rows)} removed",
+        device_id=auth.device_id,
+        detail={"deleted": len(rows), "course_keys": deleted_keys},
+    )
     logger.info(
         "sync.delete_all_courses",
         user_id=str(auth.user_id),
@@ -462,6 +492,18 @@ async def delete_course(
             },
         )
         .on_conflict_do_nothing()
+    )
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message=f"Course deleted: {course_key}",
+        device_id=auth.device_id,
+        detail={
+            "course_key": course_key,
+            "course_no": deleted_row.course_no,
+            "semester": deleted_row.semester,
+        },
     )
     return {"deleted": 1}
 
@@ -533,6 +575,14 @@ async def upload_assignments(
         )
         await session.execute(stmt)
         upserted += 1
+    await log_sync(
+        session,
+        user_id=auth.user_id,
+        source="sync",
+        message=f"Assignments uploaded: {upserted} upserted",
+        device_id=auth.device_id,
+        detail={"upserted": upserted},
+    )
     await _push_back_sync_jobs(session, auth.user_id)
     return {"upserted": upserted}
 
