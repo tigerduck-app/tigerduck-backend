@@ -1365,10 +1365,13 @@ function NodeDetailPanel({
                         <TableHead>Course</TableHead>
                         <TableHead>Due</TableHead>
                         <TableHead>Submitted</TableHead>
+                        <TableHead>Status</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {coursesData.assignments.map((a) => (
+                      {coursesData.assignments.map((a) => {
+                        const override = (data.overrides ?? []).find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
+                        return (
                         <TableRow key={a.id}>
                           <TableCell className="text-xs max-w-[200px] truncate" title={a.title}>{a.title}</TableCell>
                           <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
@@ -1380,9 +1383,10 @@ function NodeDetailPanel({
                               <Minus className="h-4 w-4 text-muted-foreground inline-block" />
                             )}
                           </TableCell>
-                          <TableCell className="text-xs">{a.provider_grade ?? "—"}</TableCell>
+                          <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
@@ -1571,17 +1575,21 @@ function NodeDetailPanel({
                             <TableHead className="text-xs">Title</TableHead>
                             <TableHead className="text-xs">Course</TableHead>
                             <TableHead className="text-xs">Due</TableHead>
-                            <TableHead className="text-xs">Grade</TableHead>
+                            <TableHead className="text-xs">Status</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {allAssignments.map((a) => (
+                          {allAssignments.map((a) => {
+                            const override = allOverrides.find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
+                            return (
                             <TableRow key={a.id}>
                               <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
                               <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
                               <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                              <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
                             </TableRow>
-                          ))}
+                            );
+                          })}
                         </TableBody>
                       </Table>
                     </div>
