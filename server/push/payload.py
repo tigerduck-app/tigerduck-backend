@@ -100,6 +100,7 @@ class ApnsRequest:
     # Default stays on live_activity so the PTS code path keeps working
     # without changes. Alert callers set `kind=PushKind.alert` explicitly.
     kind: PushKind = field(default=PushKind.live_activity)
+    collapse_id: str | None = field(default=None)
 
 
 def _alert_for(scenario: str, snapshot: dict[str, Any]) -> dict[str, str]:
@@ -271,6 +272,7 @@ class FcmRequest:
     body: str
     data: dict[str, str]
     ttl_seconds: int = 7 * 24 * 3600
+    collapse_key: str | None = None
 
 
 def build_fcm_alert_request(

@@ -25,6 +25,21 @@ _ANDROID_CHANNELS = {
     "custom": "bulletins_sound",
 }
 
+# FCM allows at most 4 active collapse keys per device at once.
+_COLLAPSE_KEYS = {
+    "sync_trigger": "sync",
+    "schedule": "schedule",
+    "course": "reminder",
+    "assignment": "reminder",
+}
+
+
+def _collapse_key(channel: str, payload: dict[str, Any]) -> str | None:
+    kind = payload.get("kind", "")
+    if kind == "sync_trigger":
+        return _COLLAPSE_KEYS["sync_trigger"]
+    return _COLLAPSE_KEYS.get(channel)
+
 
 def _extras(payload: dict[str, Any]) -> dict[str, str]:
     return {
@@ -44,6 +59,7 @@ def build_apns_for_job(
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> ApnsRequest:
     timestamp = int((now or datetime.now(UTC)).timestamp())
+    collapse = _collapse_key(channel, payload)
 
     if channel == "schedule":
         # Live Activity content-state update
@@ -74,6 +90,7 @@ def build_apns_for_job(
             priority=10,
             message=message,
             kind=PushKind.live_activity,
+            collapse_id=collapse,
         )
 
     if payload.get("kind") == "sync_trigger":
@@ -88,6 +105,7 @@ def build_apns_for_job(
             priority=5,
             message=message,
             kind=PushKind.background,
+            collapse_id=collapse,
         )
 
     # Standard alert (existing logic)
@@ -110,6 +128,7 @@ def build_apns_for_job(
         priority=10,
         message=message,
         kind=PushKind.alert,
+        collapse_id=collapse,
     )
 
 
@@ -120,6 +139,8 @@ def build_fcm_for_job(
     token_value: str,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> FcmRequest:
+    collapse = _collapse_key(channel, payload)
+
     if payload.get("kind") == "sync_trigger":
         return FcmRequest(
             token=token_value,
@@ -127,6 +148,7 @@ def build_fcm_for_job(
             body="",
             data={"kind": "sync_trigger"},
             ttl_seconds=300,
+            collapse_key=collapse,
         )
 
     title = str(payload.get("title") or "")
@@ -143,4 +165,5 @@ def build_fcm_for_job(
         body=body,
         data=data,
         ttl_seconds=ttl_seconds,
+        collapse_key=collapse,
     )

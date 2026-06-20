@@ -72,6 +72,7 @@ class AioApnsSender:
             time_to_live=max(0, request.expiration - _now_seconds()),
             push_type=push_type,
             apns_topic=request.topic,
+            collapse_key=request.collapse_id,
         )
         result = await self._client.send_notification(notification)
         return SendResult(
