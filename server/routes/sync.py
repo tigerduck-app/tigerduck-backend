@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
-from server.auth.models import PushJob, User
+from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync.models import (
@@ -56,6 +56,52 @@ async def _trigger_push_tick(request: Request) -> None:
     async with _push_tick_lock:
         from server.push.pipeline import run_push_tick
         await run_push_tick(worker)
+
+
+async def _cancel_sync_trigger_for_device(session, user_id, device_id) -> None:
+    """Cancel pending sync_trigger deliveries for *device_id*.
+
+    When the device just did a full sync it already has fresh data — no
+    need for a sync_trigger push to tell it to sync again.
+    """
+    device_row = (await session.execute(
+        select(UserDevice.id).where(
+            UserDevice.user_id == user_id,
+            UserDevice.client_device_id == str(device_id),
+            UserDevice.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+    if device_row is None:
+        return
+    sync_trigger_ids = (await session.execute(
+        select(PushJob.id).where(
+            PushJob.user_id == user_id,
+            PushJob.scenario == "sync_trigger",
+            PushJob.status.in_([PushJobStatus.pending.value, PushJobStatus.processing.value]),
+        )
+    )).scalars().all()
+    if not sync_trigger_ids:
+        return
+    result = await session.execute(
+        update(PushDelivery)
+        .where(
+            PushDelivery.push_job_id.in_(sync_trigger_ids),
+            PushDelivery.device_id == device_row,
+            PushDelivery.status == PushDeliveryStatus.pending.value,
+        )
+        .values(
+            status=PushDeliveryStatus.skipped.value,
+            failure_code="device_already_synced",
+        )
+    )
+    skipped = result.rowcount or 0
+    if skipped:
+        logger.info(
+            "sync.cancelled_sync_trigger_deliveries",
+            user_id=str(user_id),
+            device_id=str(device_id),
+            skipped=skipped,
+        )
 
 
 async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS) -> None:
@@ -164,6 +210,10 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         device_id=auth.device_id,
     )
     await _push_back_sync_jobs(session, auth.user_id)
+
+    if auth.device_id:
+        await _cancel_sync_trigger_for_device(session, auth.user_id, auth.device_id)
+
     await session.commit()
 
     factory = request.app.state.session_factory

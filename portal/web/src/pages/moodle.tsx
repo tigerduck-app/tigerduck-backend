@@ -918,7 +918,7 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                         <Badge variant={pj.status === "pending" ? "default" : "secondary"}>{pj.status}</Badge>
                         <span className="font-mono text-xs">{pj.scenario}</span>
                         <span className="text-xs text-muted-foreground ml-auto">
-                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; created {fmt(pj.created_at)}
+                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; fires {fmt(pj.fire_at)} &middot; created {fmt(pj.created_at)}
                         </span>
                       </div>
                       {sourceDevice && (
@@ -965,7 +965,11 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                         </Table></div>
                       )}
                       {deliveries.length === 0 && (
-                        <p className="text-xs text-muted-foreground">Not yet materialized (waiting for pipeline tick)</p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(pj.fire_at) > new Date()
+                            ? `Scheduled — fires at ${fmt(pj.fire_at)}`
+                            : "Not yet materialized (waiting for pipeline tick)"}
+                        </p>
                       )}
                     </div>
                   );
