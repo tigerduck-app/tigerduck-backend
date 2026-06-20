@@ -328,9 +328,31 @@ async def sync_events(
                 pj_ids,
             )
 
+        topology = await conn.fetchrow(
+            "SELECT "
+            "  (SELECT current_revision FROM user_sync_state WHERE user_id = $1) AS revision, "
+            "  (SELECT count(*) FROM user_courses WHERE user_id = $1) AS course_count, "
+            "  (SELECT count(*) FROM user_course_tombstones WHERE user_id = $1) AS tombstone_count, "
+            "  (SELECT courses_reset_at FROM users WHERE id = $1) AS courses_reset_at",
+            uid,
+        )
+
+    from server.sync.poll_tracker import is_foreground
+    poll_status = {}
+    for d in devices:
+        cid = d["client_device_id"]
+        poll_status[str(d["id"])] = "foreground" if is_foreground(str(uid), cid) else "background"
+
     return {
         "student_id": student_id,
         "found": True,
+        "topology": {
+            "revision": topology["revision"] or 0 if topology else 0,
+            "course_count": topology["course_count"] or 0 if topology else 0,
+            "tombstone_count": topology["tombstone_count"] or 0 if topology else 0,
+            "courses_reset_at": str(topology["courses_reset_at"]) if topology and topology["courses_reset_at"] else None,
+        },
+        "poll_status": poll_status,
         "jobs": [dict(j) for j in jobs],
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],

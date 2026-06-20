@@ -6,11 +6,16 @@ import {
   AlertCircle,
   CheckCircle2,
   Loader2,
+  Monitor,
   Pause,
   Play,
   RefreshCw,
   Search,
+  Server,
+  Smartphone,
   Users,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -669,6 +674,13 @@ type SyncEventsResponse = {
   devices?: SyncDevice[];
   push_jobs?: PushJobRow[];
   push_deliveries?: PushDeliveryRow[];
+  topology?: {
+    revision: number;
+    course_count: number;
+    tombstone_count: number;
+    courses_reset_at: string | null;
+  };
+  poll_status?: Record<string, "foreground" | "background">;
 };
 
 type LogEntry = {
@@ -982,6 +994,580 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
     </Card>
   );
 }
+void DevicesCard; // Kept for reuse; topology UI now handles device display
+
+type TopologyNode =
+  | { kind: "backend" }
+  | { kind: "device"; device: SyncDevice };
+
+function relativeTime(iso: string | null): string {
+  if (!iso) return "never";
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return "just now";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function platformIcon(platform: string) {
+  if (["ios", "ipados", "android", "watchos", "wearos"].includes(platform))
+    return <Smartphone className="h-5 w-5" />;
+  return <Monitor className="h-5 w-5" />;
+}
+
+function TopologyOverview({
+  topology,
+  pollStatus,
+  devices,
+  pushJobs,
+  selectedNode,
+  onSelectNode,
+}: {
+  topology: SyncEventsResponse["topology"];
+  pollStatus: SyncEventsResponse["poll_status"];
+  devices: SyncDevice[];
+  pushJobs?: PushJobRow[];
+  selectedNode: TopologyNode | null;
+  onSelectNode: (node: TopologyNode) => void;
+}) {
+  const isBackendSelected =
+    selectedNode !== null && selectedNode.kind === "backend";
+
+  const pendingByDevice = (deviceId: string) =>
+    (pushJobs ?? []).filter(
+      (pj) =>
+        pj.status === "pending" &&
+        pj.source_device_id !== deviceId
+    ).length;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Wifi className="h-4 w-4" />
+          Sync Topology
+        </CardTitle>
+        <CardDescription>
+          Click a node to see details below.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap items-start gap-0">
+          {/* Backend node */}
+          <div className="flex flex-col items-center shrink-0">
+            <button
+              type="button"
+              onClick={() => onSelectNode({ kind: "backend" })}
+              className={`rounded-lg border-2 p-4 text-left transition-colors w-44 ${
+                isBackendSelected
+                  ? "border-blue-500 bg-blue-500/5"
+                  : "border-border hover:border-blue-300 bg-card"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <Server className="h-5 w-5 text-blue-500" />
+                <span className="font-semibold text-sm">Backend</span>
+              </div>
+              {topology ? (
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  <div>Rev: <span className="font-mono text-foreground">{topology.revision}</span></div>
+                  <div>{topology.course_count} courses</div>
+                  {topology.tombstone_count > 0 && (
+                    <div className="text-orange-500">
+                      {topology.tombstone_count} tombstones
+                    </div>
+                  )}
+                  {topology.courses_reset_at && (
+                    <div className="text-[11px] truncate" title={fmt(topology.courses_reset_at)}>
+                      Reset: {relativeTime(topology.courses_reset_at)}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">No topology data</div>
+              )}
+            </button>
+          </div>
+
+          {/* Connector lines */}
+          {devices.length > 0 && (
+            <div className="flex flex-col items-center justify-center self-stretch shrink-0 mx-1" style={{ minWidth: 48 }}>
+              {devices.map((_, i) => (
+                <div key={i} className="flex items-center flex-1" style={{ minHeight: 24 }}>
+                  <div className="w-12 border-t-2 border-dashed border-muted-foreground/30" />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Device nodes */}
+          <div className="flex flex-col gap-3 shrink-0">
+            {devices.map((device) => {
+              const ps = pollStatus?.[device.id];
+              const isForeground = ps === "foreground";
+              const isMacOs = device.platform === "macos";
+              const pending = pendingByDevice(device.id);
+              const isSelected =
+                selectedNode !== null &&
+                selectedNode.kind === "device" &&
+                selectedNode.device.id === device.id;
+
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  onClick={() => onSelectNode({ kind: "device", device })}
+                  className={`rounded-lg border-2 p-3 text-left transition-colors w-52 ${
+                    isSelected
+                      ? "border-blue-500 bg-blue-500/5"
+                      : "border-border hover:border-blue-300 bg-card"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 mb-1.5">
+                    {platformIcon(device.platform)}
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm truncate">
+                        {platformLabel(device.platform)}
+                      </div>
+                      <div className="font-mono text-[10px] text-muted-foreground truncate">
+                        {device.client_device_id.slice(0, 12)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1 mb-1.5">
+                    {ps ? (
+                      <Badge
+                        variant="default"
+                        className={
+                          isForeground
+                            ? "bg-green-500/10 text-green-600 text-[10px] px-1.5 py-0"
+                            : "bg-gray-500/10 text-gray-500 text-[10px] px-1.5 py-0"
+                        }
+                      >
+                        {isForeground ? "Foreground" : "Background"}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                        <WifiOff className="h-2.5 w-2.5 mr-0.5" />
+                        Offline
+                      </Badge>
+                    )}
+                    {isMacOs && (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground">
+                        No push
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="space-y-0.5 text-xs text-muted-foreground">
+                    {pending > 0 && (
+                      <div className="text-orange-500">{pending} pending</div>
+                    )}
+                    <div>Seen {relativeTime(device.last_seen_at)}</div>
+                  </div>
+                </button>
+              );
+            })}
+            {devices.length === 0 && (
+              <div className="text-sm text-muted-foreground py-4">
+                No devices registered
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NodeDetailPanel({
+  selectedNode,
+  data,
+  coursesData,
+  courseNameLang,
+  setCourseNameLang,
+  studentId,
+}: {
+  selectedNode: TopologyNode;
+  data: SyncEventsResponse;
+  coursesData?: SyncCoursesResponse;
+  courseNameLang: "en" | "zh";
+  setCourseNameLang: (v: "en" | "zh") => void;
+  studentId: string;
+}) {
+  if (selectedNode.kind === "backend") {
+    return (
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Server className="h-4 w-4 text-blue-500" />
+              Backend Details
+            </CardTitle>
+            <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="en">English</SelectItem>
+                <SelectItem value="zh">Chinese</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Tabs defaultValue="courses">
+            <TabsList>
+              <TabsTrigger value="courses">
+                Courses{coursesData ? ` (${coursesData.courses.length})` : ""}
+              </TabsTrigger>
+              <TabsTrigger value="overrides">
+                Overrides{data.overrides ? ` (${data.overrides.length})` : ""}
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="courses">
+              {!coursesData ? (
+                <div className="flex items-center justify-center py-6 text-muted-foreground">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+                </div>
+              ) : coursesData.courses.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground">No courses</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Color</TableHead>
+                        <TableHead>Course Code</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead>Custom Names</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {[...coursesData.courses]
+                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
+                        .map((c) => {
+                          const paletteLight = coursesData.palette_light ?? [];
+                          const paletteDark = coursesData.palette_dark ?? [];
+                          const overrideIdx = c.color_hex
+                            ? paletteLight.findIndex(
+                                (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
+                              )
+                            : -1;
+                          const isPresetOverride = overrideIdx >= 0;
+                          const isCustom = !!c.color_hex && !isPresetOverride;
+                          return (
+                            <TableRow key={c.id}>
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  {isPresetOverride ? (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
+                                      <span className="font-mono text-xs">#{overrideIdx}</span>
+                                    </>
+                                  ) : isCustom ? (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                      <span className="font-mono text-xs">{c.color_hex}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
+                                      <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                              <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
+                                {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                              </TableCell>
+                              <TableCell className="text-xs max-w-[200px] truncate">
+                                {(() => {
+                                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
+                                  return names && typeof names === "object" && Object.keys(names).length > 0
+                                    ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
+                                    : "—";
+                                })()}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="overrides">
+              {data.overrides && data.overrides.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Moodle ID</TableHead>
+                        <TableHead>Title</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Updated</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.overrides.map((o) => (
+                        <TableRow key={o.moodle_assignment_id}>
+                          <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
+                          <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
+                          <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
+                          <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="py-6 text-center text-muted-foreground">No overrides</div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Device selected
+  const device = selectedNode.device;
+  const deviceDeliveries = (data.push_deliveries ?? []).filter(
+    (d) => d.device_id === device.id
+  );
+  const devicePushJobs = (data.push_jobs ?? []).filter(
+    (pj) => pj.source_device_id === device.id
+  );
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          {platformIcon(device.platform)}
+          {platformLabel(device.platform)}
+          <span className="font-mono text-xs text-muted-foreground">
+            {device.client_device_id.slice(0, 12)}
+          </span>
+        </CardTitle>
+        <CardDescription>
+          {device.app_version && `v${device.app_version}`}
+          {device.os_version && ` on ${platformLabel(device.platform)} ${device.os_version}`}
+          {device.last_seen_at && ` · Last seen ${relativeTime(device.last_seen_at)}`}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Tabs defaultValue="push">
+          <TabsList>
+            <TabsTrigger value="push">
+              Push{deviceDeliveries.length > 0 ? ` (${deviceDeliveries.length})` : ""}
+            </TabsTrigger>
+            <TabsTrigger value="source-push">
+              Source Jobs{devicePushJobs.length > 0 ? ` (${devicePushJobs.length})` : ""}
+            </TabsTrigger>
+            <TabsTrigger value="info">Info</TabsTrigger>
+          </TabsList>
+          <TabsContent value="push">
+            <div className="mb-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const res = await fetch("/api/moodle/push-tick", { method: "POST" });
+                    const resp = await res.json();
+                    if (!resp.ok) alert("Push tick failed: " + (resp.error ?? "unknown"));
+                  } catch {
+                    alert("Push tick request failed");
+                  }
+                }}
+              >
+                Force Execute Pipeline
+              </Button>
+              {(data.push_jobs ?? []).length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    if (!confirm(`Cancel all ${(data.push_jobs ?? []).length} pending push jobs?`)) return;
+                    try {
+                      const res = await fetch(`/api/moodle/push-clear?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                      const resp = await res.json();
+                      if (!resp.ok) alert("Clear failed: " + (resp.error ?? "unknown"));
+                    } catch {
+                      alert("Clear request failed");
+                    }
+                  }}
+                >
+                  Clear Queue
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="default"
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/moodle/push-sync-trigger?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                    const resp = await res.json();
+                    if (resp.deduplicated) alert("Deduplicated — a sync_trigger already exists in this window");
+                    else if (!resp.ok) alert("Failed: " + (resp.error ?? "unknown"));
+                  } catch {
+                    alert("Request failed");
+                  }
+                }}
+              >
+                Force Sync Push
+              </Button>
+            </div>
+            {deviceDeliveries.length === 0 ? (
+              <div className="py-4 text-sm text-muted-foreground">No push deliveries for this device.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-xs">Job ID</TableHead>
+                      <TableHead className="text-xs">Provider</TableHead>
+                      <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs">Attempts</TableHead>
+                      <TableHead className="text-xs">Sent</TableHead>
+                      <TableHead className="text-xs">Error</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {deviceDeliveries.map((dl) => (
+                      <TableRow key={dl.id}>
+                        <TableCell className="font-mono text-xs">#{dl.push_job_id}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"}
+                            className="text-[10px]"
+                          >
+                            {dl.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                        <TableCell className="text-xs">{fmt(dl.sent_at)}</TableCell>
+                        <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="source-push">
+            {devicePushJobs.length === 0 ? (
+              <div className="py-4 text-sm text-muted-foreground">No push jobs sourced from this device.</div>
+            ) : (
+              <div className="space-y-4">
+                {devicePushJobs.map((pj) => {
+                  const deliveries = (data.push_deliveries ?? []).filter((d) => d.push_job_id === pj.id);
+                  return (
+                    <div key={pj.id} className="border rounded-md p-3 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={pj.status === "pending" ? "default" : "secondary"}>{pj.status}</Badge>
+                        <span className="font-mono text-xs">{pj.scenario}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; fires {fmt(pj.fire_at)}
+                        </span>
+                      </div>
+                      {pj.last_error && <p className="text-xs text-destructive">{pj.last_error}</p>}
+                      {deliveries.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="text-xs">Target</TableHead>
+                                <TableHead className="text-xs">Provider</TableHead>
+                                <TableHead className="text-xs">Status</TableHead>
+                                <TableHead className="text-xs">Attempts</TableHead>
+                                <TableHead className="text-xs">Error</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {deliveries.map((dl) => {
+                                const target = (data.devices ?? []).find((d) => d.id === dl.device_id);
+                                return (
+                                  <TableRow key={dl.id}>
+                                    <TableCell className="text-xs">
+                                      {target ? (
+                                        <><Badge variant="outline" className="text-[10px] px-1 py-0">{target.platform}</Badge> {target.client_device_id.slice(0, 8)}...</>
+                                      ) : (
+                                        <span className="text-muted-foreground">{dl.device_id?.slice(0, 8) ?? "—"}...</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                                    <TableCell>
+                                      <Badge variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"} className="text-[10px]">{dl.status}</Badge>
+                                    </TableCell>
+                                    <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                                    <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="info">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableBody>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs w-36">Device ID</TableCell>
+                    <TableCell className="font-mono text-xs break-all">{device.client_device_id}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Internal ID</TableCell>
+                    <TableCell className="font-mono text-xs">{device.id}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Platform</TableCell>
+                    <TableCell className="text-xs">{platformLabel(device.platform)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">App Version</TableCell>
+                    <TableCell className="text-xs">{device.app_version ?? "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">OS Version</TableCell>
+                    <TableCell className="text-xs">{device.os_version ? `${platformLabel(device.platform)} ${device.os_version}` : "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Last Seen</TableCell>
+                    <TableCell className="text-xs">{fmt(device.last_seen_at)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Last Login</TableCell>
+                    <TableCell className="text-xs">{fmt(device.last_login_at)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Registered</TableCell>
+                    <TableCell className="text-xs">{fmt(device.created_at)}</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
 
 function SyncTab() {
   const [studentId, setStudentId] = useState("");
@@ -989,6 +1575,7 @@ function SyncTab() {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [latestId, setLatestId] = useState(0);
   const [courseNameLang, setCourseNameLang] = useState<"en" | "zh">("en");
+  const [selectedNode, setSelectedNode] = useState<TopologyNode | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const events = useQuery<SyncEventsResponse>({
@@ -1022,6 +1609,7 @@ function SyncTab() {
       setQuery(trimmed);
       setLogEntries([]);
       setLatestId(0);
+      setSelectedNode(null);
     }
   };
 
@@ -1038,6 +1626,7 @@ function SyncTab() {
 
   return (
     <Section className="space-y-4">
+      {/* 1. Search card */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -1075,6 +1664,31 @@ function SyncTab() {
         </Card>
       )}
 
+      {/* 2. Topology overview */}
+      {data?.found && (
+        <TopologyOverview
+          topology={data.topology}
+          pollStatus={data.poll_status}
+          devices={data.devices ?? []}
+          pushJobs={data.push_jobs}
+          selectedNode={selectedNode}
+          onSelectNode={setSelectedNode}
+        />
+      )}
+
+      {/* 3. Detail panel */}
+      {data?.found && selectedNode && (
+        <NodeDetailPanel
+          selectedNode={selectedNode}
+          data={data}
+          coursesData={coursesData}
+          courseNameLang={courseNameLang}
+          setCourseNameLang={setCourseNameLang}
+          studentId={query}
+        />
+      )}
+
+      {/* 4. Sync Jobs card */}
       {query && data?.found !== false && (
         <Card>
           <CardHeader>
@@ -1083,7 +1697,7 @@ function SyncTab() {
           <CardContent>
             {!data ? (
               <div className="flex items-center justify-center py-6 text-muted-foreground">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
             ) : (
             <div className="overflow-x-auto"><Table>
@@ -1120,10 +1734,7 @@ function SyncTab() {
         </Card>
       )}
 
-      {data?.found && data.devices && data.devices.length > 0 && (
-        <DevicesCard devices={data.devices} pushJobs={data.push_jobs} pushDeliveries={data.push_deliveries} studentId={query} />
-      )}
-
+      {/* 5. Run History card */}
       {query && data?.found !== false && (
         <Card>
           <CardHeader>
@@ -1132,7 +1743,7 @@ function SyncTab() {
           <CardContent>
             {!data ? (
               <div className="flex items-center justify-center py-6 text-muted-foreground">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
             ) : (
             <div className="overflow-x-auto"><Table>
@@ -1174,126 +1785,7 @@ function SyncTab() {
         </Card>
       )}
 
-      {data?.found && data.overrides && data.overrides.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Assignment Overrides ({data.overrides.length})</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto"><Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Moodle ID</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Updated</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.overrides.map((o) => (
-                  <TableRow key={o.moodle_assignment_id}>
-                    <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
-                    <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
-                    <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
-                    <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table></div>
-          </CardContent>
-        </Card>
-      )}
-
-      {query && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base">
-                Courses{coursesData ? ` — Semester ${coursesData.semester} (${coursesData.courses.length})` : ""}
-              </CardTitle>
-              <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
-                <SelectTrigger className="w-32">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="en">English</SelectItem>
-                  <SelectItem value="zh">Chinese</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {!coursesData ? (
-              <div className="flex items-center justify-center py-6 text-muted-foreground">
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
-              </div>
-            ) : coursesData.courses.length === 0 ? (
-              <div className="py-6 text-center text-muted-foreground">No courses</div>
-            ) : (
-            <div className="overflow-x-auto"><Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Color</TableHead>
-                  <TableHead>Course Code</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Custom Names</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...coursesData.courses].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
-                  const paletteLight = coursesData.palette_light ?? [];
-                  const paletteDark = coursesData.palette_dark ?? [];
-                  const overrideIdx = c.color_hex ? paletteLight.findIndex(
-                    (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
-                  ) : -1;
-                  const isPresetOverride = overrideIdx >= 0;
-                  const isCustom = !!c.color_hex && !isPresetOverride;
-                  return (
-                  <TableRow key={c.id}>
-                    <TableCell>
-                      <div className="flex items-center gap-1">
-                        {isPresetOverride ? (
-                          <>
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
-                            <span className="font-mono text-xs">#{overrideIdx}</span>
-                          </>
-                        ) : isCustom ? (
-                          <>
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
-                            <span className="font-mono text-xs">{c.color_hex}</span>
-                          </>
-                        ) : (
-                          <>
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
-                            <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
-                          </>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
-                    <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
-                      {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
-                    </TableCell>
-                    <TableCell className="text-xs max-w-[200px] truncate">
-                      {(() => {
-                        const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
-                        return names && typeof names === "object" && Object.keys(names).length > 0
-                          ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
-                          : "—";
-                      })()}
-                    </TableCell>
-                  </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table></div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
+      {/* 6. Live Sync Log card */}
       {query && (
         <Card>
           <CardHeader>
