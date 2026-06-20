@@ -42,7 +42,12 @@ export function Layout() {
   const env = useEnv();
   const isDev = env.data?.env === "development";
   const items = NAV.filter((n) => !n.devOnly || isDev);
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
+    try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed)); } catch {}
+  }, [sidebarCollapsed]);
 
   return (
     <div className="flex min-h-screen bg-background">
