@@ -1235,15 +1235,6 @@ function NodeDetailPanel({
               <Server className="h-4 w-4 text-blue-500" />
               Backend Details
             </CardTitle>
-            <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
-              <SelectTrigger className="w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="en">English</SelectItem>
-                <SelectItem value="zh">Chinese</SelectItem>
-              </SelectContent>
-            </Select>
           </div>
         </CardHeader>
         <CardContent>
@@ -1272,6 +1263,18 @@ function NodeDetailPanel({
               ) : coursesData.courses.length === 0 ? (
                 <div className="py-6 text-center text-muted-foreground">No courses</div>
               ) : (
+                <div className="space-y-2">
+                <div className="flex justify-end">
+                  <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+                    <SelectTrigger className="w-28 h-7 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="en">English</SelectItem>
+                      <SelectItem value="zh">Chinese</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div className="overflow-x-auto">
                   <Table>
                     <TableHeader>
@@ -1346,6 +1349,7 @@ function NodeDetailPanel({
                         })}
                     </TableBody>
                   </Table>
+                </div>
                 </div>
               )}
             </TabsContent>
@@ -1470,33 +1474,8 @@ function NodeDetailPanel({
   );
 
   const allCourses = coursesData?.courses ?? [];
-  const syncedCourses = allCourses.filter((c) => c.updated_by_device_id === device.id);
-  const otherCourses = allCourses.filter((c) => c.updated_by_device_id !== device.id);
   const allAssignments = coursesData?.assignments ?? [];
   const allOverrides = data.overrides ?? [];
-
-  const renderDeviceCourseRow = (c: SyncCourse) => {
-    const paletteLight = coursesData?.palette_light ?? [];
-    const overrideIdx = c.color_hex
-      ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase())
-      : -1;
-    const isPresetOverride = overrideIdx >= 0;
-    const isCustom = !!c.color_hex && !isPresetOverride;
-    const colorSwatch = isPresetOverride
-      ? paletteLight[overrideIdx]
-      : isCustom
-        ? c.color_hex!
-        : c.default_color_light;
-    return (
-      <div key={c.id} className="flex items-center gap-2 py-1">
-        <div className="h-3 w-3 rounded-sm border flex-shrink-0" style={{ backgroundColor: colorSwatch }} />
-        <span className="font-mono text-xs">{c.client_course_no}</span>
-        <span className="text-xs text-muted-foreground truncate">
-          {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
-        </span>
-      </div>
-    );
-  };
 
   return (
     <Card>
@@ -1540,28 +1519,73 @@ function NodeDetailPanel({
                 </TabsList>
 
                 <TabsContent value="courses">
-                  <div className="space-y-3">
-                    <div>
-                      <h4 className="text-xs font-medium text-green-600 mb-1">Synced by this device ({syncedCourses.length})</h4>
-                      {syncedCourses.length === 0 ? (
-                        <p className="text-xs text-muted-foreground py-1">None</p>
-                      ) : (
-                        <div className="space-y-0.5">
-                          {syncedCourses.sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map(renderDeviceCourseRow)}
-                        </div>
-                      )}
+                  {allCourses.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">No courses</p>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex justify-end">
+                        <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+                          <SelectTrigger className="w-28 h-7 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="en">English</SelectItem>
+                            <SelectItem value="zh">Chinese</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Color</TableHead>
+                              <TableHead className="text-xs">Code</TableHead>
+                              <TableHead className="text-xs">Name</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {[...allCourses].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
+                              const paletteLight = coursesData?.palette_light ?? [];
+                              const paletteDark = coursesData?.palette_dark ?? [];
+                              const overrideIdx = c.color_hex ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()) : -1;
+                              const isPresetOverride = overrideIdx >= 0;
+                              const isCustom = !!c.color_hex && !isPresetOverride;
+                              return (
+                                <TableRow key={c.id}>
+                                  <TableCell>
+                                    <div className="flex items-center gap-1">
+                                      {isPresetOverride ? (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Light" />
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Dark" />
+                                          <span className="font-mono text-xs">#{overrideIdx}</span>
+                                        </>
+                                      ) : isCustom ? (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                          <span className="font-mono text-xs">{c.color_hex}</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Light" />
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Dark" />
+                                          <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                                  <TableCell className="text-xs max-w-[200px] truncate">
+                                    {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="text-xs font-medium text-muted-foreground mb-1">From other devices ({otherCourses.length})</h4>
-                      {otherCourses.length === 0 ? (
-                        <p className="text-xs text-muted-foreground py-1">None</p>
-                      ) : (
-                        <div className="space-y-0.5 border-l-2 border-dashed border-border pl-2 opacity-70">
-                          {otherCourses.sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map(renderDeviceCourseRow)}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  )}
                 </TabsContent>
 
                 <TabsContent value="assignments">
@@ -1831,6 +1855,7 @@ function SyncTab() {
   const [courseNameLang, setCourseNameLang] = useState<"en" | "zh">("en");
   const [selectedNode, setSelectedNode] = useState<TopologyNode | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logContainerRef = useRef<HTMLDivElement>(null);
 
   const events = useQuery<SyncEventsResponse>({
     queryKey: ["sync-events", query],
@@ -1853,18 +1878,26 @@ function SyncTab() {
   useEffect(() => {
     const d = logsQuery.data;
     if (d && d.entries.length > 0) {
+      const container = logContainerRef.current;
+      const wasAtBottom = container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight < 40
+        : false;
+
       if (!isInitialLoad.current) {
         const ids = new Set(d.entries.map((e) => e.id));
         setNewLogIds(ids);
         const timer = setTimeout(() => setNewLogIds(new Set()), 2000);
-        // eslint-disable-next-line consistent-return
         setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
         setLatestId(d.latest_id);
+        if (wasAtBottom) {
+          setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+        }
         return () => clearTimeout(timer);
       }
       isInitialLoad.current = false;
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
       setLatestId(d.latest_id);
+      setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "auto" }), 50);
     }
   }, [logsQuery.data]);
 
@@ -2065,7 +2098,7 @@ function SyncTab() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="rounded-md border bg-muted/30 font-mono text-xs h-80 overflow-y-auto p-3 space-y-0.5">
+            <div ref={logContainerRef} className="rounded-md border bg-muted/30 font-mono text-xs h-80 overflow-y-auto p-3 space-y-0.5">
               {logEntries.length === 0 && (
                 <div className="text-muted-foreground text-center py-8">
                   Waiting for sync events...
@@ -2077,7 +2110,7 @@ function SyncTab() {
                   e.level === "ERROR" ? "text-red-500" :
                   e.level === "WARN" ? "text-yellow-500" : "text-muted-foreground";
                 return (
-                  <div key={e.id} className={`flex gap-2 leading-5 transition-colors duration-1000 ${newLogIds.has(e.id) ? "bg-blue-500/15 rounded px-1 -mx-1" : ""}`}>
+                  <div key={e.id} className={`flex gap-2 leading-5 transition-colors duration-1000 ${newLogIds.has(e.id) ? "bg-yellow-500/20 rounded px-1 -mx-1" : ""}`}>
                     <span className="text-muted-foreground shrink-0">{ts}</span>
                     <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
                     <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
