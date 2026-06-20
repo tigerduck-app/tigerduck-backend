@@ -75,4 +75,4 @@ EXPOSE 40010
 
 # Lifespan-driven config load runs on startup (see app.main:lifespan).
 # No `entrypoint.sh` because there's nothing complex to set up.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "40010"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "40010", "--proxy-headers", "--forwarded-allow-ips", "*"]

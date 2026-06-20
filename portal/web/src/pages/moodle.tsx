@@ -1135,7 +1135,6 @@ function TopologyOverview({
               const seenAgo = device.last_seen_at
                 ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
                 : Infinity;
-              const isForeground = ps ? ps === "foreground" : seenAgo < 120;
               const isOnline = ps ? ps !== undefined : seenAgo < 600;
               const isMacOs = device.platform === "macos";
               const pending = pendingByDevice(device.id);
@@ -1168,17 +1167,13 @@ function TopologyOverview({
                     {isOnline ? (
                       <Badge
                         variant="default"
-                        className={
-                          isForeground
-                            ? "bg-green-500/10 text-green-600 text-[10px] px-1.5 py-0"
-                            : "bg-gray-500/10 text-gray-500 text-[10px] px-1.5 py-0"
-                        }
+                        className="bg-green-500/10 text-green-600 text-[10px] px-1.5 py-0"
                       >
                         <Wifi className="h-2.5 w-2.5 mr-0.5" />
-                        {isForeground ? "Active" : "Online"}
+                        Online
                       </Badge>
                     ) : (
-                      <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                      <Badge variant="default" className="bg-gray-500/10 text-gray-500 text-[10px] px-1.5 py-0">
                         <WifiOff className="h-2.5 w-2.5 mr-0.5" />
                         Offline
                       </Badge>
@@ -1846,8 +1841,12 @@ function NodeDetailPanel({
 }
 
 function SyncTab() {
-  const [studentId, setStudentId] = useState("");
-  const [query, setQuery] = useState("");
+  const [studentId, setStudentId] = useState(() => {
+    try { return localStorage.getItem("sync-student-id") ?? ""; } catch { return ""; }
+  });
+  const [query, setQuery] = useState(() => {
+    try { return localStorage.getItem("sync-query") ?? ""; } catch { return ""; }
+  });
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [latestId, setLatestId] = useState(0);
   const [courseNameLang, setCourseNameLang] = useState<"en" | "zh">("en");
@@ -1903,6 +1902,7 @@ function SyncTab() {
     const trimmed = studentId.trim();
     if (trimmed) {
       setQuery(trimmed);
+      try { localStorage.setItem("sync-student-id", trimmed); localStorage.setItem("sync-query", trimmed); } catch {}
       setLogEntries([]);
       setLatestId(0);
       setSelectedNode(null);
