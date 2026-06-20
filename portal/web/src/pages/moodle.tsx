@@ -1509,8 +1509,8 @@ function NodeDetailPanel({
             ) : (
               <Tabs defaultValue="courses">
                 <TabsList className="mb-2">
-                  <TabsTrigger value="courses" className={allCourses.length === 0 ? "text-orange-400" : ""}>Courses ({allCourses.length})</TabsTrigger>
-                  <TabsTrigger value="assignments" className={allAssignments.length === 0 ? "text-orange-400" : ""}>Assignments ({allAssignments.length})</TabsTrigger>
+                  <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
+                  <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
                 </TabsList>
 
                 <TabsContent value="courses">
@@ -1633,10 +1633,10 @@ function NodeDetailPanel({
                   { label: "Assignments", count: allAssignments.length, detail: `${allAssignments.length} assignments in backend` },
                 ];
                 return categories.map((cat) => (
-                  <div key={cat.label} className={`flex items-center gap-3 rounded-md border p-3 ${cat.count === 0 ? "border-orange-400/40 bg-orange-500/5" : "border-border"}`}>
-                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${cat.count > 0 ? "bg-green-500" : "bg-orange-400"}`} />
+                  <div key={cat.label} className="flex items-center gap-3 rounded-md border border-border p-3">
+                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${cat.count > 0 ? "bg-green-500" : "bg-muted-foreground/30"}`} />
                     <div className="min-w-0">
-                      <div className={`text-sm font-medium ${cat.count === 0 ? "text-orange-400" : ""}`}>{cat.label}</div>
+                      <div className="text-sm font-medium">{cat.label}</div>
                       <div className="text-xs text-muted-foreground">{cat.detail}</div>
                     </div>
                   </div>
