@@ -154,6 +154,8 @@ class Settings(BaseSettings):
     push_job_stale_lock_minutes: int = 5
     # Delay before a job with still-pending deliveries gets another round.
     push_retry_round_delay_seconds: int = 60
+    push_job_retention_days: int = 7
+    push_job_retention_interval_hours: int = 24
 
     # --- Assignment reminders (Phase 4a) ---
     assignment_reminder_scan_interval_seconds: int = 300
