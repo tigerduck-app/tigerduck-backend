@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
@@ -172,35 +172,6 @@ async def upload_courses(
 ):
     now = datetime.now(UTC)
 
-    # Courses deleted by OTHER devices — don't let this upload resurrect them.
-    # Only suppress if the latest changelog entry for that course_key is a
-    # delete (a later upsert means someone re-added it intentionally).
-    suppressed_keys: set[str] = set()
-    if auth.device_id:
-        del_logs = (await session.execute(
-            select(
-                UserChangeLog.payload,
-                UserChangeLog.operation,
-                UserChangeLog.revision,
-                UserChangeLog.device_id,
-            )
-            .where(
-                UserChangeLog.user_id == auth.user_id,
-                UserChangeLog.entity_type == ChangeEntityType.course.value,
-            )
-            .order_by(UserChangeLog.revision.desc())
-        )).all()
-        seen: set[str] = set()
-        for row in del_logs:
-            ck = (row.payload or {}).get("course_key")
-            if not ck or ck in seen:
-                continue
-            seen.add(ck)
-            # Only suppress if the delete was by a DIFFERENT device.
-            # Same-device deletes are not suppressed so re-enrollment works.
-            if row.operation == "delete" and row.device_id != auth.device_id:
-                suppressed_keys.add(ck)
-
     existing_keys = set(
         (await session.execute(
             select(UserCourse.course_key).where(UserCourse.user_id == auth.user_id)
@@ -209,14 +180,9 @@ async def upload_courses(
 
     upserted = 0
     uploaded_keys: set[str] = set()
-    semesters: set[str] = set()
     for c in payload.courses:
         course_key = f"client:{c.semester}:{c.course_no}"
-        if course_key in suppressed_keys:
-            semesters.add(c.semester)
-            continue
         uploaded_keys.add(course_key)
-        semesters.add(c.semester)
         moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"
         stmt = (
             pg_insert(UserCourse)
@@ -234,7 +200,6 @@ async def upload_courses(
                 instructors=c.instructors,
                 fetched_at=now,
                 last_seen_at=now,
-                source_device_id=auth.device_id,
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "semester", "course_key"],
@@ -247,9 +212,6 @@ async def upload_courses(
                     "instructors": c.instructors,
                     "last_seen_at": now,
                     "updated_at": now,
-                    "source_device_id": func.coalesce(
-                        UserCourse.source_device_id, auth.device_id
-                    ),
                 },
             )
         )
@@ -277,47 +239,6 @@ async def upload_courses(
                 device_id=auth.device_id,
                 locked_state=state,
             )
-
-    # Remove courses the client no longer has for the uploaded semesters.
-    deleted = 0
-    if semesters:
-        conditions = [
-            UserCourse.user_id == auth.user_id,
-            UserCourse.semester.in_(semesters),
-            UserCourse.source == "ntust_portal",
-            UserCourse.course_key.notin_(uploaded_keys),
-        ]
-        if auth.device_id:
-            conditions.append(
-                or_(
-                    UserCourse.source_device_id == auth.device_id,
-                    UserCourse.source_device_id.is_(None),
-                )
-            )
-        del_stmt = (
-            delete(UserCourse)
-            .where(*conditions)
-            .returning(UserCourse.id, UserCourse.course_key)
-        )
-        result = await session.execute(del_stmt)
-        deleted_rows = result.all()
-        deleted = len(deleted_rows)
-
-        if deleted_rows:
-            state = await lock_sync_state(session, auth.user_id)
-            for row in deleted_rows:
-                await append_change(
-                    session,
-                    user_id=auth.user_id,
-                    entity_type=ChangeEntityType.course.value,
-                    entity_id=str(row.id),
-                    operation="delete",
-                    payload={"course_key": row.course_key},
-                    device_id=auth.device_id,
-                    locked_state=state,
-                )
-
-    if new_keys or deleted:
         now = datetime.now(UTC)
         await session.execute(
             pg_insert(PushJob)
@@ -336,7 +257,56 @@ async def upload_courses(
         )
 
     await _push_back_sync_jobs(session, auth.user_id)
-    return {"upserted": upserted, "deleted": deleted}
+    return {"upserted": upserted}
+
+
+@router.delete("/courses/{course_key:path}")
+async def delete_course(
+    course_key: str,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    del_stmt = (
+        delete(UserCourse)
+        .where(
+            UserCourse.user_id == auth.user_id,
+            UserCourse.course_key == course_key,
+        )
+        .returning(UserCourse.id)
+    )
+    result = await session.execute(del_stmt)
+    deleted_row = result.scalar_one_or_none()
+    if deleted_row is None:
+        return {"deleted": 0}
+
+    state = await lock_sync_state(session, auth.user_id)
+    await append_change(
+        session,
+        user_id=auth.user_id,
+        entity_type=ChangeEntityType.course.value,
+        entity_id=str(deleted_row),
+        operation="delete",
+        payload={"course_key": course_key},
+        device_id=auth.device_id,
+        locked_state=state,
+    )
+    now = datetime.now(UTC)
+    await session.execute(
+        pg_insert(PushJob)
+        .values(
+            user_id=auth.user_id,
+            dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now,
+            payload={
+                "kind": "sync_trigger",
+                "source_device_id": str(auth.device_id) if auth.device_id else None,
+            },
+        )
+        .on_conflict_do_nothing()
+    )
+    return {"deleted": 1}
 
 
 class AssignmentUploadItem(BaseModel):

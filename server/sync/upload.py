@@ -228,7 +228,6 @@ async def process_initial_upload(
             schedule_json=item.schedule_json,
             classroom_map=item.classroom_map,
             enrollment_status=item.enrollment_status,
-            source_device_id=device_id,
         )
         session.add(course)
         await session.flush()

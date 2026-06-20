@@ -29,19 +29,6 @@ def upgrade() -> None:
     op.drop_column("user_course_overrides", "is_hidden_updated_at")
     op.drop_column("user_course_overrides", "is_hidden")
 
-    op.add_column(
-        "user_courses",
-        sa.Column("source_device_id", UUID(as_uuid=True), nullable=True),
-    )
-    op.create_foreign_key(
-        "user_courses_source_device_id_fkey",
-        "user_courses",
-        "user_devices",
-        ["source_device_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-
     op.create_table(
         "sync_log_entries",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -63,9 +50,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("idx_sync_log_entries_user", table_name="sync_log_entries")
     op.drop_table("sync_log_entries")
-
-    op.drop_constraint("user_courses_source_device_id_fkey", "user_courses", type_="foreignkey")
-    op.drop_column("user_courses", "source_device_id")
 
     op.add_column(
         "user_course_overrides",

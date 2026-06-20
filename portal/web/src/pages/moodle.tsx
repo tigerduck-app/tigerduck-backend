@@ -1084,20 +1084,32 @@ function SyncTab() {
               </TableHeader>
               <TableBody>
                 {coursesData.courses.map((c) => {
-                  const isCustom = !!c.color_hex;
+                  const paletteLight = coursesData.palette_light ?? [];
+                  const paletteDark = coursesData.palette_dark ?? [];
+                  const overrideIdx = c.color_hex ? paletteLight.findIndex(
+                    (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
+                  ) : -1;
+                  const isPresetOverride = overrideIdx >= 0;
+                  const isCustom = !!c.color_hex && !isPresetOverride;
                   return (
                   <TableRow key={c.id}>
                     <TableCell>
                       <div className="flex items-center gap-1">
-                        {isCustom ? (
+                        {isPresetOverride ? (
+                          <>
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
+                            <span className="font-mono text-xs">#{overrideIdx}</span>
+                          </>
+                        ) : isCustom ? (
                           <>
                             <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
                             <span className="font-mono text-xs">{c.color_hex}</span>
                           </>
                         ) : (
                           <>
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="iOS / Android light" />
-                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Android dark" />
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
+                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
                             <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
                           </>
                         )}
