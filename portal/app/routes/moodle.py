@@ -336,23 +336,23 @@ def _course_hash_index(course_no: str) -> int:
     return h % len(COURSE_PALETTE_LIGHT)
 
 
-_course_name_cache: dict[str, dict[str, str]] = {}
-_course_name_cache_ts: dict[str, float] = {}
-_COURSE_NAME_CACHE_TTL = 3600
+_cn_cache: dict[str, str] = {}
+_cn_cache_ts: dict[str, float] = {}
+_CN_CACHE_TTL = 3600
 
 
-def _fetch_course_names_sync(semester: str, lang: str) -> dict[str, str]:
-    """Blocking fetch — meant to run in a thread."""
+def _fetch_single_course_name_sync(
+    semester: str, lang: str, course_no: str,
+) -> str | None:
+    """Blocking fetch of one course name — meant to run in a thread."""
     import ssl
-    import time
     import urllib.request
     import json as _json
 
-    cache_key = f"{semester}:{lang}"
     try:
         payload = _json.dumps({
             "Semester": semester,
-            "CourseNo": "", "CourseName": "", "CourseTeacher": "",
+            "CourseNo": course_no, "CourseName": "", "CourseTeacher": "",
             "Dimension": "", "CourseNotes": "", "CampusNotes": "",
             "ForeignLanguage": 0, "OnlyIntensive": 0, "OnlyGeneral": 0,
             "OnleyNTUST": 0, "OnlyMaster": 0, "OnlyUnderGraduate": 0,
@@ -367,33 +367,45 @@ def _fetch_course_names_sync(semester: str, lang: str) -> dict[str, str]:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             courses = _json.loads(resp.read())
-        result = {c["CourseNo"]: c["CourseName"] for c in courses if c.get("CourseNo")}
-        _course_name_cache[cache_key] = result
-        _course_name_cache_ts[cache_key] = time.monotonic()
-        logger.info("fetched %d %s course names for %s", len(result), lang, semester)
+        for c in courses:
+            if c.get("CourseNo") == course_no:
+                return c.get("CourseName")
     except Exception as e:
-        logger.warning("failed to fetch %s course names for %s: %s", lang, semester, e)
+        logger.warning("course-name lookup failed %s/%s/%s: %s", semester, lang, course_no, e)
+    return None
 
 
-async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
-    """Return cached course names.  Awaits the fetch on cold cache so the
-    first request gets real data; uses stale-while-revalidate after that."""
-    cache_key = f"{semester}:{lang}"
+async def _course_names_for_nos(
+    semester: str, lang: str, course_nos: list[str],
+) -> dict[str, str]:
+    """Fetch course names for specific course numbers, with per-entry cache."""
     now = time.monotonic()
-    ts = _course_name_cache_ts.get(cache_key, 0)
-    cached = _course_name_cache.get(cache_key)
+    result: dict[str, str] = {}
+    to_fetch: list[str] = []
 
-    if cached is not None and (now - ts) < _COURSE_NAME_CACHE_TTL:
-        return cached
+    for no in course_nos:
+        key = f"{semester}:{lang}:{no}"
+        if key in _cn_cache and (now - _cn_cache_ts.get(key, 0)) < _CN_CACHE_TTL:
+            result[no] = _cn_cache[key]
+        else:
+            to_fetch.append(no)
 
-    if cached is not None:
-        asyncio.get_event_loop().run_in_executor(None, _fetch_course_names_sync, semester, lang)
-        return cached
+    if to_fetch:
+        loop = asyncio.get_event_loop()
+        names = await asyncio.gather(*(
+            loop.run_in_executor(None, _fetch_single_course_name_sync, semester, lang, no)
+            for no in to_fetch
+        ))
+        for no, name in zip(to_fetch, names):
+            key = f"{semester}:{lang}:{no}"
+            if name:
+                _cn_cache[key] = name
+                _cn_cache_ts[key] = now
+                result[no] = name
 
-    await asyncio.get_event_loop().run_in_executor(None, _fetch_course_names_sync, semester, lang)
-    return _course_name_cache.get(cache_key, {})
+    return result
 
 
 def _current_semester_prefix() -> str:
@@ -435,9 +447,10 @@ async def sync_courses(
             uid, prefix,
         )
 
+    course_nos = list({r["course_no"] for r in rows if r["course_no"]})
     zh_names, en_names = await asyncio.gather(
-        _course_names_by_lang(prefix, "zh"),
-        _course_names_by_lang(prefix, "en"),
+        _course_names_for_nos(prefix, "zh", course_nos),
+        _course_names_for_nos(prefix, "en", course_nos),
     )
 
     courses = []

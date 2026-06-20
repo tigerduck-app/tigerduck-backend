@@ -918,12 +918,17 @@ function SyncTab() {
         </Card>
       )}
 
-      {data?.found && data.jobs && (
+      {query && data?.found !== false && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Sync Jobs</CardTitle>
           </CardHeader>
           <CardContent>
+            {!data ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -937,7 +942,7 @@ function SyncTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.jobs.map((j) => (
+                {(data.jobs ?? []).map((j) => (
                   <TableRow key={j.id}>
                     <TableCell className="font-mono text-xs">{j.job_type}</TableCell>
                     <TableCell><RunStatusBadge status={j.job_status} /></TableCell>
@@ -948,11 +953,12 @@ function SyncTab() {
                     <TableCell className="text-xs">{fmt(j.run_after)}</TableCell>
                   </TableRow>
                 ))}
-                {data.jobs.length === 0 && (
+                {(data.jobs ?? []).length === 0 && (
                   <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync jobs</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
+            )}
           </CardContent>
         </Card>
       )}
@@ -961,12 +967,17 @@ function SyncTab() {
         <DevicesCard devices={data.devices} />
       )}
 
-      {data?.found && data.runs && (
+      {query && data?.found !== false && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Run History ({data.runs.length})</CardTitle>
+            <CardTitle className="text-base">Run History{data?.runs ? ` (${data.runs.length})` : ""}</CardTitle>
           </CardHeader>
           <CardContent>
+            {!data ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -980,7 +991,7 @@ function SyncTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.runs.map((r) => {
+                {(data.runs ?? []).map((r) => {
                   const dur = r.finished_at && r.started_at
                     ? `${((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1)}s`
                     : "—";
@@ -996,11 +1007,12 @@ function SyncTab() {
                     </TableRow>
                   );
                 })}
-                {data.runs.length === 0 && (
+                {(data.runs ?? []).length === 0 && (
                   <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync runs yet</TableCell></TableRow>
                 )}
               </TableBody>
             </Table>
+            )}
           </CardContent>
         </Card>
       )}
@@ -1035,12 +1047,12 @@ function SyncTab() {
         </Card>
       )}
 
-      {coursesData && coursesData.courses.length > 0 && (
+      {query && (
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle className="text-base">
-                Courses — Semester {coursesData.semester} ({coursesData.courses.length})
+                Courses{coursesData ? ` — Semester ${coursesData.semester} (${coursesData.courses.length})` : ""}
               </CardTitle>
               <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
                 <SelectTrigger className="w-32">
@@ -1054,6 +1066,13 @@ function SyncTab() {
             </div>
           </CardHeader>
           <CardContent>
+            {!coursesData ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
+              </div>
+            ) : coursesData.courses.length === 0 ? (
+              <div className="py-6 text-center text-muted-foreground">No courses</div>
+            ) : (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -1101,6 +1120,7 @@ function SyncTab() {
                 })}
               </TableBody>
             </Table>
+            )}
           </CardContent>
         </Card>
       )}
