@@ -765,7 +765,7 @@ function StatSection({ title, counts, total }: { title: string; counts: [string,
   );
 }
 
-function DevicesCard({ devices, pushJobs, pushDeliveries }: { devices: SyncDevice[]; pushJobs?: PushJobRow[]; pushDeliveries?: PushDeliveryRow[] }) {
+function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices: SyncDevice[]; pushJobs?: PushJobRow[]; pushDeliveries?: PushDeliveryRow[]; studentId: string }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
   const platforms = ["ios", "ipados", "macos", "android"];
@@ -852,25 +852,59 @@ function DevicesCard({ devices, pushJobs, pushDeliveries }: { devices: SyncDevic
             )}
           </TabsContent>
           <TabsContent value="push">
-            {pushJobs && pushJobs.length > 0 && (
-              <div className="mb-4">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={async () => {
-                    try {
-                      const res = await fetch("/api/moodle/push-tick", { method: "POST" });
-                      const data = await res.json();
-                      if (!data.ok) alert("Push tick failed: " + (data.error ?? "unknown"));
-                    } catch (e) {
-                      alert("Push tick request failed");
-                    }
-                  }}
-                >
-                  Force Execute Pipeline
-                </Button>
-              </div>
-            )}
+            <div className="mb-4 flex flex-wrap gap-2">
+              {pushJobs && pushJobs.length > 0 && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/moodle/push-tick", { method: "POST" });
+                        const data = await res.json();
+                        if (!data.ok) alert("Push tick failed: " + (data.error ?? "unknown"));
+                      } catch (e) {
+                        alert("Push tick request failed");
+                      }
+                    }}
+                  >
+                    Force Execute Pipeline
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      if (!confirm(`Cancel all ${pushJobs.length} pending push jobs?`)) return;
+                      try {
+                        const res = await fetch(`/api/moodle/push-clear?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                        const data = await res.json();
+                        if (!data.ok) alert("Clear failed: " + (data.error ?? "unknown"));
+                      } catch (e) {
+                        alert("Clear request failed");
+                      }
+                    }}
+                  >
+                    Clear Queue
+                  </Button>
+                </>
+              )}
+              <Button
+                size="sm"
+                variant="default"
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/moodle/push-sync-trigger?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                    const data = await res.json();
+                    if (data.deduplicated) alert("Deduplicated — a sync_trigger already exists in this window");
+                    else if (!data.ok) alert("Failed: " + (data.error ?? "unknown"));
+                  } catch (e) {
+                    alert("Request failed");
+                  }
+                }}
+              >
+                Force Sync Push
+              </Button>
+            </div>
             {!pushJobs || pushJobs.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4">No pending push jobs.</p>
             ) : (
@@ -1083,7 +1117,7 @@ function SyncTab() {
       )}
 
       {data?.found && data.devices && data.devices.length > 0 && (
-        <DevicesCard devices={data.devices} pushJobs={data.push_jobs} pushDeliveries={data.push_deliveries} />
+        <DevicesCard devices={data.devices} pushJobs={data.push_jobs} pushDeliveries={data.push_deliveries} studentId={query} />
       )}
 
       {query && data?.found !== false && (
