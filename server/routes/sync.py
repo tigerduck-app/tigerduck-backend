@@ -23,6 +23,7 @@ from server.sync.models import (
     UserAssignmentOverride,
     UserBulletinState,
     UserBulletinSubscription,
+    UserChangeLog,
     UserCourse,
     UserCourseOverride,
     UserCourseSkippedDate,
@@ -170,11 +171,37 @@ async def upload_courses(
     session: SessionDep,
 ):
     now = datetime.now(UTC)
+
+    # Courses deleted by OTHER devices — don't let this upload resurrect them.
+    # Only suppress if the latest changelog entry for that course_key is a
+    # delete (a later upsert means someone re-added it intentionally).
+    suppressed_keys: set[str] = set()
+    if auth.device_id:
+        del_logs = (await session.execute(
+            select(UserChangeLog.payload, UserChangeLog.operation, UserChangeLog.revision)
+            .where(
+                UserChangeLog.user_id == auth.user_id,
+                UserChangeLog.entity_type == ChangeEntityType.course.value,
+            )
+            .order_by(UserChangeLog.revision.desc())
+        )).all()
+        seen: set[str] = set()
+        for row in del_logs:
+            ck = (row.payload or {}).get("course_key")
+            if not ck or ck in seen:
+                continue
+            seen.add(ck)
+            if row.operation == "delete":
+                suppressed_keys.add(ck)
+
     upserted = 0
     uploaded_keys: set[str] = set()
     semesters: set[str] = set()
     for c in payload.courses:
         course_key = f"client:{c.semester}:{c.course_no}"
+        if course_key in suppressed_keys:
+            semesters.add(c.semester)
+            continue
         uploaded_keys.add(course_key)
         semesters.add(c.semester)
         moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"

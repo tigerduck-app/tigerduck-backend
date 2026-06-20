@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
@@ -376,17 +378,21 @@ def _fetch_course_names_sync(semester: str, lang: str) -> dict[str, str]:
 
 
 async def _course_names_by_lang(semester: str, lang: str) -> dict[str, str]:
-    """Return cached course names. If cache is cold, kick off a background
-    fetch and return whatever we have (possibly empty). Next request gets
-    the result."""
-    import asyncio
-    import time
-
+    """Return cached course names.  Awaits the fetch on cold cache so the
+    first request gets real data; uses stale-while-revalidate after that."""
     cache_key = f"{semester}:{lang}"
     now = time.monotonic()
-    fresh = cache_key in _course_name_cache and now - _course_name_cache_ts.get(cache_key, 0) < _COURSE_NAME_CACHE_TTL
-    if not fresh:
+    ts = _course_name_cache_ts.get(cache_key, 0)
+    cached = _course_name_cache.get(cache_key)
+
+    if cached is not None and (now - ts) < _COURSE_NAME_CACHE_TTL:
+        return cached
+
+    if cached is not None:
         asyncio.get_event_loop().run_in_executor(None, _fetch_course_names_sync, semester, lang)
+        return cached
+
+    await asyncio.get_event_loop().run_in_executor(None, _fetch_course_names_sync, semester, lang)
     return _course_name_cache.get(cache_key, {})
 
 
@@ -429,8 +435,10 @@ async def sync_courses(
             uid, prefix,
         )
 
-    zh_names = await _course_names_by_lang(prefix, "zh")
-    en_names = await _course_names_by_lang(prefix, "en")
+    zh_names, en_names = await asyncio.gather(
+        _course_names_by_lang(prefix, "zh"),
+        _course_names_by_lang(prefix, "en"),
+    )
 
     courses = []
     for r in rows:
