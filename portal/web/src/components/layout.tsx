@@ -42,56 +42,72 @@ export function Layout() {
   const env = useEnv();
   const isDev = env.data?.env === "development";
   const items = NAV.filter((n) => !n.devOnly || isDev);
+  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false);
 
   return (
     <div className="flex min-h-screen bg-background">
-      <aside className="sticky top-0 hidden h-screen w-60 shrink-0 flex-col border-r border-border bg-card/30 lg:flex">
-        <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
+      <aside className={`sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-card/30 lg:flex transition-all duration-200 ${sidebarCollapsed ? "w-14" : "w-60"}`}>
+        <div className={`flex items-center gap-2.5 pb-3 pt-5 ${sidebarCollapsed ? "justify-center px-2" : "px-5"}`}>
           <img
             src="/static/tigerduck-logo.png"
             alt=""
-            className="h-7 w-7 rounded"
+            className="h-7 w-7 rounded shrink-0"
           />
-          <div className="leading-tight">
-            <div className="text-sm font-semibold">TigerDuck</div>
-            <div className="text-xs text-muted-foreground">Backend Portal</div>
-          </div>
+          {!sidebarCollapsed && (
+            <div className="leading-tight">
+              <div className="text-sm font-semibold">TigerDuck</div>
+              <div className="text-xs text-muted-foreground">Backend Portal</div>
+            </div>
+          )}
         </div>
-        <nav className="flex flex-col gap-0.5 px-2 py-3">
+        <nav className={`flex flex-col gap-0.5 py-3 ${sidebarCollapsed ? "px-1" : "px-2"}`}>
           {items.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.to === "/"}
+              title={sidebarCollapsed ? item.label : undefined}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  "flex items-center rounded-md text-sm font-medium transition-colors",
+                  sidebarCollapsed ? "justify-center px-2 py-2" : "gap-2.5 px-3 py-2",
                   "text-muted-foreground hover:bg-accent hover:text-foreground",
                   isActive && "bg-accent text-foreground",
                 )
               }
             >
-              <item.icon className="h-4 w-4" />
-              {item.label}
+              <item.icon className="h-4 w-4 shrink-0" />
+              {!sidebarCollapsed && item.label}
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto space-y-3 border-t border-border px-3 py-4">
-          <div className="space-y-1.5 px-2 text-xs text-foreground/80">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">Mode</span>
-              <EnvBadge env={env.data?.env} />
+        <div className="mt-auto border-t border-border px-3 py-4">
+          {!sidebarCollapsed && (
+            <div className="space-y-1.5 px-2 text-xs text-foreground/80 mb-3">
+              <div className="flex items-center gap-2">
+                <span className="font-medium">Mode</span>
+                <EnvBadge env={env.data?.env} />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-medium">APNs</span>
+                <ApnsBadge apns={env.data?.apns_config} />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-medium">FCM</span>
+                <FcmBadge fcm={env.data?.fcm_config} />
+              </div>
             </div>
-            <div className="flex items-center gap-2">
-              <span className="font-medium">APNs</span>
-              <ApnsBadge apns={env.data?.apns_config} />
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="font-medium">FCM</span>
-              <FcmBadge fcm={env.data?.fcm_config} />
-            </div>
+          )}
+          <div className="flex items-center gap-2">
+            {!sidebarCollapsed && <ThemeToggle />}
+            <button
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              className="rounded-md p-1.5 hover:bg-accent text-muted-foreground ml-auto"
+              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            >
+              {sidebarCollapsed ? <Menu className="h-4 w-4" /> : <X className="h-4 w-4" />}
+            </button>
           </div>
-          <ThemeToggle />
         </div>
       </aside>
 

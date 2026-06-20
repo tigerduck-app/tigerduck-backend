@@ -1093,14 +1093,12 @@ function TopologyOverview({
           Click a node to see details below.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <div className="flex flex-wrap items-start gap-0">
+      <CardContent className="space-y-3">
           {/* Backend node */}
-          <div className="flex flex-col items-center shrink-0">
             <button
               type="button"
               onClick={() => onSelectNode({ kind: "backend" })}
-              className={`rounded-lg border-2 p-4 text-left transition-colors w-44 ${
+              className={`w-full rounded-lg border-2 p-4 text-left transition-colors ${
                 isBackendSelected
                   ? "border-blue-500 bg-blue-500/5"
                   : "border-border hover:border-blue-300 bg-card"
@@ -1111,7 +1109,7 @@ function TopologyOverview({
                 <span className="font-semibold text-sm">Backend</span>
               </div>
               {topology ? (
-                <div className="space-y-1 text-xs text-muted-foreground">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                   <div>Rev: <span className="font-mono text-foreground">{topology.revision}</span></div>
                   <div>{topology.course_count} courses</div>
                   {topology.tombstone_count > 0 && (
@@ -1120,7 +1118,7 @@ function TopologyOverview({
                     </div>
                   )}
                   {topology.courses_reset_at && (
-                    <div className="text-[11px] truncate" title={fmt(topology.courses_reset_at)}>
+                    <div className="truncate" title={fmt(topology.courses_reset_at)}>
                       Reset: {relativeTime(topology.courses_reset_at)}
                     </div>
                   )}
@@ -1129,35 +1127,9 @@ function TopologyOverview({
                 <div className="text-xs text-muted-foreground">No topology data</div>
               )}
             </button>
-          </div>
-
-          {/* SVG connector curves */}
-          {devices.length > 0 && (
-            <svg className="shrink-0 self-stretch mx-1" width="56" style={{ minWidth: 56 }}>
-              {devices.map((_, i) => {
-                const count = devices.length;
-                const gap = 12;
-                const cardH = 108;
-                const totalH = count * cardH + (count - 1) * gap;
-                const midY = totalH / 2;
-                const deviceY = i * (cardH + gap) + cardH / 2;
-                return (
-                  <path
-                    key={i}
-                    d={`M 0 ${midY} C 28 ${midY}, 28 ${deviceY}, 56 ${deviceY}`}
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeDasharray="4 3"
-                    className="text-muted-foreground/30"
-                  />
-                );
-              })}
-            </svg>
-          )}
 
           {/* Device nodes */}
-          <div className="flex flex-col gap-3 shrink-0">
+          <div className="space-y-2">
             {devices.map((device) => {
               const ps = pollStatus?.[device.id];
               const seenAgo = device.last_seen_at
@@ -1177,24 +1149,22 @@ function TopologyOverview({
                   key={device.id}
                   type="button"
                   onClick={() => onSelectNode({ kind: "device", device })}
-                  className={`rounded-lg border-2 p-3 text-left transition-colors w-52 ${
+                  className={`w-full rounded-lg border-2 p-3 text-left transition-colors ${
                     isSelected
                       ? "border-blue-500 bg-blue-500/5"
                       : "border-border hover:border-blue-300 bg-card"
                   }`}
                 >
-                  <div className="flex items-center gap-2 mb-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
                     {platformIcon(device.platform)}
                     <div className="min-w-0">
                       <div className="font-semibold text-sm truncate">
                         {platformLabel(device.platform)}
                       </div>
-                      <div className="font-mono text-[10px] text-muted-foreground truncate">
-                        {device.client_device_id.slice(0, 12)}
-                      </div>
                     </div>
-                  </div>
-                  <div className="flex flex-wrap gap-1 mb-1.5">
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {device.client_device_id.slice(0, 12)}
+                    </span>
                     {isOnline ? (
                       <Badge
                         variant="default"
@@ -1218,12 +1188,14 @@ function TopologyOverview({
                         No push
                       </Badge>
                     )}
-                  </div>
-                  <div className="space-y-0.5 text-xs text-muted-foreground">
                     {pending > 0 && (
-                      <div className="text-orange-500">{pending} pending</div>
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-orange-500">
+                        {pending} pending
+                      </Badge>
                     )}
-                    <div>Seen {relativeTime(device.last_seen_at)}</div>
+                    <span className="text-xs text-muted-foreground ml-auto">
+                      {relativeTime(device.last_seen_at)}
+                    </span>
                   </div>
                 </button>
               );
@@ -1234,7 +1206,6 @@ function TopologyOverview({
               </div>
             )}
           </div>
-        </div>
       </CardContent>
     </Card>
   );
@@ -1874,11 +1845,15 @@ function SyncTab() {
       {data && !data.found && (
         <Card>
           <CardContent className="py-6 text-center text-muted-foreground">
-            Student "{data.student_id}" not found
+            Student &quot;{data.student_id}&quot; not found
           </CardContent>
         </Card>
       )}
 
+      {query && data?.found !== false && (
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      {/* ===== LEFT COLUMN: Topology + Details ===== */}
+      <div className="space-y-4">
       {/* 2. Topology overview */}
       {data?.found && (
         <TopologyOverview
@@ -1902,9 +1877,11 @@ function SyncTab() {
           studentId={query}
         />
       )}
+      </div>
 
+      {/* ===== RIGHT COLUMN: Jobs + History + Log ===== */}
+      <div className="space-y-4">
       {/* 4. Sync Jobs card */}
-      {query && data?.found !== false && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Sync Jobs</CardTitle>
@@ -1947,10 +1924,8 @@ function SyncTab() {
             )}
           </CardContent>
         </Card>
-      )}
 
       {/* 5. Run History card */}
-      {query && data?.found !== false && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Run History{data?.runs ? ` (${data.runs.length})` : ""}</CardTitle>
@@ -1998,10 +1973,8 @@ function SyncTab() {
             )}
           </CardContent>
         </Card>
-      )}
 
       {/* 6. Live Sync Log card */}
-      {query && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
@@ -2042,6 +2015,8 @@ function SyncTab() {
             </div>
           </CardContent>
         </Card>
+      </div>
+      </div>
       )}
     </Section>
   );
