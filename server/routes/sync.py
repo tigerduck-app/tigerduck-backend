@@ -8,7 +8,7 @@ import structlog
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
@@ -247,6 +247,9 @@ async def upload_courses(
                     "instructors": c.instructors,
                     "last_seen_at": now,
                     "updated_at": now,
+                    "source_device_id": func.coalesce(
+                        UserCourse.source_device_id, auth.device_id
+                    ),
                 },
             )
         )
