@@ -4,8 +4,10 @@ import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
   Loader2,
+  Minus,
   Monitor,
   Tablet,
   Pause,
@@ -618,6 +620,30 @@ type SyncCourse = {
   default_palette_index: number;
   default_color_light: string;
   default_color_dark: string;
+  updated_by_device_id?: string | null;
+  updated_at?: string | null;
+  color_hex_device_id?: string | null;
+  semester?: string;
+};
+
+type SyncTombstone = {
+  course_key: string;
+  course_no: string;
+  semester: string;
+  deleted_at: string;
+  deleted_by_device_id: string | null;
+};
+
+type SyncAssignment = {
+  id: number;
+  moodle_assignment_id: number;
+  course_no: string;
+  course_name: string;
+  title: string;
+  due_at: string | null;
+  moodle_url: string | null;
+  provider_is_submitted: boolean;
+  provider_grade: string | null;
 };
 
 type SyncCoursesResponse = {
@@ -625,6 +651,8 @@ type SyncCoursesResponse = {
   palette_light: string[];
   palette_dark: string[];
   courses: SyncCourse[];
+  tombstones?: SyncTombstone[];
+  assignments?: SyncAssignment[];
 };
 
 type SyncDevice = {
@@ -709,6 +737,13 @@ const PLATFORM_LABELS: Record<string, string> = {
   android: "Android", wearos: "Wear OS", web: "Web",
 };
 function platformLabel(p: string) { return PLATFORM_LABELS[p] ?? p; }
+
+function deviceLabel(deviceId: string | null | undefined, devices: SyncDevice[]): string {
+  if (!deviceId) return "—";
+  const d = devices.find(d => d.id === deviceId);
+  if (!d) return deviceId.slice(0, 8);
+  return `${platformLabel(d.platform)} ${d.client_device_id.slice(0, 8)}`;
+}
 
 function MiniPieChart({ data }: { data: { label: string; value: number; color: string }[] }) {
   const total = data.reduce((s, d) => s + d.value, 0);
@@ -1246,6 +1281,14 @@ function NodeDetailPanel({
               <TabsTrigger value="courses">
                 Courses{coursesData ? ` (${coursesData.courses.length})` : ""}
               </TabsTrigger>
+              <TabsTrigger value="assignments">
+                Assignments{coursesData?.assignments ? ` (${coursesData.assignments.length})` : ""}
+              </TabsTrigger>
+              {coursesData?.tombstones && coursesData.tombstones.length > 0 && (
+                <TabsTrigger value="tombstones">
+                  Tombstones ({coursesData.tombstones.length})
+                </TabsTrigger>
+              )}
               <TabsTrigger value="overrides">
                 Overrides{data.overrides ? ` (${data.overrides.length})` : ""}
               </TabsTrigger>
@@ -1266,6 +1309,7 @@ function NodeDetailPanel({
                         <TableHead>Course Code</TableHead>
                         <TableHead>Name</TableHead>
                         <TableHead>Custom Names</TableHead>
+                        <TableHead>Device</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1317,6 +1361,15 @@ function NodeDetailPanel({
                                     : "—";
                                 })()}
                               </TableCell>
+                              <TableCell>
+                                {c.updated_by_device_id ? (
+                                  <Badge variant="secondary" className="text-[10px] font-normal">
+                                    {deviceLabel(c.updated_by_device_id, data.devices ?? [])}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
                             </TableRow>
                           );
                         })}
@@ -1325,6 +1378,80 @@ function NodeDetailPanel({
                 </div>
               )}
             </TabsContent>
+            <TabsContent value="assignments">
+              {!coursesData ? (
+                <div className="flex items-center justify-center py-6 text-muted-foreground">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+                </div>
+              ) : !coursesData.assignments || coursesData.assignments.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground">No assignments</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Title</TableHead>
+                        <TableHead>Course</TableHead>
+                        <TableHead>Due</TableHead>
+                        <TableHead>Submitted</TableHead>
+                        <TableHead>Grade</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {coursesData.assignments.map((a) => (
+                        <TableRow key={a.id}>
+                          <TableCell className="text-xs max-w-[200px] truncate" title={a.title}>{a.title}</TableCell>
+                          <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
+                          <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                          <TableCell className="text-center">
+                            {a.provider_is_submitted ? (
+                              <Check className="h-4 w-4 text-green-500 inline-block" />
+                            ) : (
+                              <Minus className="h-4 w-4 text-muted-foreground inline-block" />
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs">{a.provider_grade ?? "—"}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </TabsContent>
+            {coursesData?.tombstones && coursesData.tombstones.length > 0 && (
+              <TabsContent value="tombstones">
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Course</TableHead>
+                        <TableHead>Semester</TableHead>
+                        <TableHead>Deleted</TableHead>
+                        <TableHead>By Device</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {coursesData.tombstones.map((t) => (
+                        <TableRow key={t.course_key}>
+                          <TableCell className="font-mono text-xs">{t.course_no}</TableCell>
+                          <TableCell className="text-xs">{t.semester}</TableCell>
+                          <TableCell className="text-xs">{fmt(t.deleted_at)}</TableCell>
+                          <TableCell>
+                            {t.deleted_by_device_id ? (
+                              <Badge variant="secondary" className="text-[10px] font-normal">
+                                {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </TabsContent>
+            )}
             <TabsContent value="overrides">
               {data.overrides && data.overrides.length > 0 ? (
                 <div className="overflow-x-auto">
@@ -1368,6 +1495,33 @@ function NodeDetailPanel({
     (pj) => pj.source_device_id === device.id
   );
 
+  const allCourses = coursesData?.courses ?? [];
+  const syncedByDevice = allCourses.filter((c) => c.updated_by_device_id === device.id);
+  const fromOtherDevices = allCourses.filter((c) => c.updated_by_device_id !== device.id);
+
+  const renderDeviceCourseRow = (c: SyncCourse) => {
+    const paletteLight = coursesData?.palette_light ?? [];
+    const overrideIdx = c.color_hex
+      ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase())
+      : -1;
+    const isPresetOverride = overrideIdx >= 0;
+    const isCustom = !!c.color_hex && !isPresetOverride;
+    const colorSwatch = isPresetOverride
+      ? paletteLight[overrideIdx]
+      : isCustom
+        ? c.color_hex!
+        : c.default_color_light;
+    return (
+      <div key={c.id} className="flex items-center gap-2 py-1">
+        <div className="h-3 w-3 rounded-sm border flex-shrink-0" style={{ backgroundColor: colorSwatch }} />
+        <span className="font-mono text-xs">{c.client_course_no}</span>
+        <span className="text-xs text-muted-foreground truncate">
+          {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+        </span>
+      </div>
+    );
+  };
+
   return (
     <Card>
       <CardHeader>
@@ -1385,8 +1539,9 @@ function NodeDetailPanel({
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <Tabs defaultValue="push">
+        <Tabs defaultValue="data">
           <TabsList>
+            <TabsTrigger value="data">Data</TabsTrigger>
             <TabsTrigger value="push">
               Push{deviceDeliveries.length > 0 ? ` (${deviceDeliveries.length})` : ""}
             </TabsTrigger>
@@ -1395,6 +1550,40 @@ function NodeDetailPanel({
             </TabsTrigger>
             <TabsTrigger value="info">Info</TabsTrigger>
           </TabsList>
+          <TabsContent value="data">
+            {!coursesData ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-xs font-medium mb-2">Synced by this device</h4>
+                  {syncedByDevice.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">No courses synced by this device</p>
+                  ) : (
+                    <div className="space-y-0.5">
+                      {syncedByDevice
+                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
+                        .map(renderDeviceCourseRow)}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <h4 className="text-xs font-medium mb-2">From other devices</h4>
+                  {fromOtherDevices.length === 0 ? (
+                    <p className="text-xs text-muted-foreground py-2">No courses from other devices</p>
+                  ) : (
+                    <div className="space-y-0.5" style={{ borderLeft: "2px dashed var(--border)", paddingLeft: "8px", opacity: 0.7 }}>
+                      {fromOtherDevices
+                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
+                        .map(renderDeviceCourseRow)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </TabsContent>
           <TabsContent value="push">
             <div className="mb-4 flex flex-wrap gap-2">
               <Button

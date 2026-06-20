@@ -487,14 +487,34 @@ async def sync_courses(
 
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
-            "c.course_name_en, c.source, "
-            "o.color_hex, o.custom_names "
+            "c.course_name_en, c.source, c.semester, "
+            "c.updated_by_device_id, c.updated_at, "
+            "o.color_hex, o.custom_names, "
+            "o.color_hex_device_id "
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "
             "  ON o.user_id = c.user_id AND o.user_course_id = c.id "
             "WHERE c.user_id = $1 AND c.semester = $2 "
             "ORDER BY c.course_name",
             uid, prefix,
+        )
+
+        tombstones = await conn.fetch(
+            "SELECT course_key, course_no, semester, deleted_at, "
+            "deleted_by_device_id "
+            "FROM user_course_tombstones WHERE user_id = $1 "
+            "ORDER BY deleted_at DESC",
+            uid,
+        )
+
+        assignments = await conn.fetch(
+            "SELECT a.id, a.moodle_assignment_id, a.course_no, "
+            "a.course_name, a.title, a.due_at, a.moodle_url, "
+            "a.provider_is_submitted, a.provider_grade "
+            "FROM user_assignments a "
+            "WHERE a.user_id = $1 AND a.deleted_at IS NULL "
+            "ORDER BY a.due_at DESC NULLS LAST LIMIT 50",
+            uid,
         )
 
     course_nos = list({r["course_no"] for r in rows if r["course_no"]})
@@ -531,6 +551,8 @@ async def sync_courses(
         "palette_light": COURSE_PALETTE_LIGHT,
         "palette_dark": COURSE_PALETTE_DARK,
         "courses": courses,
+        "tombstones": [dict(t) for t in tombstones],
+        "assignments": [dict(a) for a in assignments],
     }
 
 
