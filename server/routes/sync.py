@@ -318,7 +318,7 @@ async def upload_courses(
             )
             session.add(override)
             await session.flush()
-        if override.color_hex != item.color_hex:
+        if override.color_hex is None:
             override.color_hex = item.color_hex
             override.color_hex_updated_at = now
             override.color_hex_device_id = auth.device_id
