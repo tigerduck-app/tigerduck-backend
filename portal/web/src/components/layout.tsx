@@ -61,7 +61,7 @@ export function Layout() {
               </div>
               <button
                 onClick={() => setSidebarCollapsed(true)}
-                className="ml-auto rounded-md p-1 hover:bg-accent text-muted-foreground"
+                className="ml-auto rounded-md p-2.5 -m-1.5 hover:bg-accent text-muted-foreground"
                 title="Collapse sidebar"
               >
                 <X className="h-4 w-4" />
