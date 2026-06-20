@@ -565,14 +565,10 @@ async def sync_logs(
 async def force_push_tick(request: Request) -> JSONResponse:
     """Proxy to the main API server's /push-tick endpoint."""
     import httpx
-
-    import os
-    settings = request.app.state.settings
-    env_mode = os.environ.get("TIGERDUCK_ENV", "development")
-    backend_url = "http://tigerduck-internal:40000" if env_mode != "development" else "http://localhost:40000"
+    from ..status import BACKEND_INTERNAL_URL
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{backend_url}/push-tick")
+            resp = await client.post(f"{BACKEND_INTERNAL_URL}/push-tick")
             return JSONResponse(resp.json(), status_code=resp.status_code)
     except Exception as e:
         logger.exception("force push tick proxy failed")

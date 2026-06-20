@@ -6,10 +6,12 @@ import {
   HardDrive,
   Layers,
   List,
+  Menu,
   Megaphone,
   ScrollText,
   Send,
   UserMinus,
+  X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -150,32 +152,50 @@ function ApnsBadge({ apns }: { apns: ApnsConfig | undefined }) {
 }
 
 function MobileNav({ items }: { items: NavItem[] }) {
+  const [open, setOpen] = React.useState(false);
+
   return (
-    <header className="flex items-center gap-3 border-b border-border bg-card/30 px-4 py-3 lg:hidden">
-      <img
-        src="/static/tigerduck-logo.png"
-        alt=""
-        className="h-7 w-7 rounded"
-      />
-      <div className="flex-1 leading-tight">
-        <div className="text-sm font-semibold">TigerDuck Backend Portal</div>
-      </div>
-      <select
-        className="rounded-md border border-input bg-background px-2 py-1 text-sm"
-        onChange={(e) => {
-          window.location.href = e.target.value;
-        }}
-        value={window.location.pathname}
-      >
-        {items.map((it) => (
-          <option key={it.to} value={it.to}>
-            {it.label}
-          </option>
-        ))}
-      </select>
-      <div className="w-32">
+    <>
+      <header className="flex items-center gap-3 border-b border-border bg-card/30 px-4 py-3 lg:hidden">
+        <button
+          onClick={() => setOpen(!open)}
+          className="rounded-md p-1.5 hover:bg-accent"
+          aria-label="Toggle menu"
+        >
+          {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+        </button>
+        <img
+          src="/static/tigerduck-logo.png"
+          alt=""
+          className="h-7 w-7 rounded"
+        />
+        <div className="flex-1 leading-tight">
+          <div className="text-sm font-semibold">TigerDuck Backend Portal</div>
+        </div>
         <ThemeToggle />
-      </div>
-    </header>
+      </header>
+      {open && (
+        <nav className="border-b border-border bg-card/30 px-2 py-2 lg:hidden">
+          {items.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.to === "/"}
+              onClick={() => setOpen(false)}
+              className={({ isActive }) =>
+                cn(
+                  "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  isActive && "bg-accent text-foreground",
+                )
+              }
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+      )}
+    </>
   );
 }
