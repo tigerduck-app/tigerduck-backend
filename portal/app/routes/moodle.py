@@ -337,11 +337,14 @@ async def sync_events(
             uid,
         )
 
-    from server.sync.poll_tracker import is_foreground
     poll_status = {}
-    for d in devices:
-        cid = d["client_device_id"]
-        poll_status[str(d["id"])] = "foreground" if is_foreground(str(uid), cid) else "background"
+    try:
+        from server.sync.poll_tracker import is_foreground
+        for d in devices:
+            cid = d["client_device_id"]
+            poll_status[str(d["id"])] = "foreground" if is_foreground(str(uid), cid) else "background"
+    except ImportError:
+        pass
 
     return {
         "student_id": student_id,
