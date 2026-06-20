@@ -151,6 +151,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.router = router
+    app.state.push_worker = push_worker
     # Keep the legacy `sender` attribute pointing at the APNs sender so any
     # tooling that read `app.state.sender` for Live-Activity / iOS paths
     # keeps working without a downstream change.

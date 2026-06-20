@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import asyncio
+
 import structlog
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, text, update
@@ -39,6 +41,21 @@ logger = structlog.get_logger(__name__)
 
 MAX_SYNC_LIMIT = 500
 _CLIENT_SYNC_PUSHBACK_SECONDS = 7200  # 2 hours
+
+_push_tick_lock = asyncio.Lock()
+
+
+async def _trigger_push_tick(request: Request) -> None:
+    """Run the push pipeline tick immediately so sync_trigger pushes
+    are delivered within seconds instead of waiting up to 30s."""
+    worker = getattr(request.app.state, "push_worker", None)
+    if worker is None:
+        return
+    if _push_tick_lock.locked():
+        return
+    async with _push_tick_lock:
+        from server.push.pipeline import run_push_tick
+        await run_push_tick(worker)
 
 
 async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS) -> None:
@@ -191,6 +208,8 @@ async def upload_courses(
     payload: CourseUploadRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ):
     now = datetime.now(UTC)
 
@@ -324,6 +343,7 @@ async def upload_courses(
                 device_id=auth.device_id,
                 detail={"push_job_id": push_row, "new_keys": sorted(new_keys)},
             )
+            background_tasks.add_task(_trigger_push_tick, request)
 
     overrides_applied = 0
     for item in payload.course_overrides:
@@ -382,6 +402,8 @@ async def upload_courses(
 async def delete_all_courses(
     auth: CurrentAuthDep,
     session: SessionDep,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ):
     """Wipe all courses for the user. Used by 'reset course timetable'."""
     now = datetime.now(UTC)
@@ -445,6 +467,8 @@ async def delete_all_courses(
         .returning(PushJob.id)
     )
     push_row = push_result.scalar_one_or_none()
+    if push_row:
+        background_tasks.add_task(_trigger_push_tick, request)
 
     deleted_keys = [r.course_key for r in rows]
     push_status = f"push job #{push_row} queued" if push_row else f"push deduplicated ({dedupe})"
@@ -469,6 +493,8 @@ async def delete_course(
     course_key: str,
     auth: CurrentAuthDep,
     session: SessionDep,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ):
     now = datetime.now(UTC)
     del_stmt = (
@@ -529,6 +555,8 @@ async def delete_course(
         .returning(PushJob.id)
     )
     push_row = push_result.scalar_one_or_none()
+    if push_row:
+        background_tasks.add_task(_trigger_push_tick, request)
     push_status = f"push job #{push_row} queued" if push_row else f"push deduplicated ({dedupe})"
     await log_sync(
         session,
