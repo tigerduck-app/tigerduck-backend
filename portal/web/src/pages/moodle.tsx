@@ -1467,8 +1467,10 @@ function NodeDetailPanel({
   );
 
   const allCourses = coursesData?.courses ?? [];
-  const syncedByDevice = allCourses.filter((c) => c.updated_by_device_id === device.id);
-  const fromOtherDevices = allCourses.filter((c) => c.updated_by_device_id !== device.id);
+  const syncedCourses = allCourses.filter((c) => c.updated_by_device_id === device.id);
+  const otherCourses = allCourses.filter((c) => c.updated_by_device_id !== device.id);
+  const allAssignments = coursesData?.assignments ?? [];
+  const allOverrides = data.overrides ?? [];
 
   const renderDeviceCourseRow = (c: SyncCourse) => {
     const paletteLight = coursesData?.palette_light ?? [];
@@ -1527,32 +1529,96 @@ function NodeDetailPanel({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
             ) : (
-              <div className="space-y-4">
-                <div>
-                  <h4 className="text-xs font-medium mb-2">Synced by this device</h4>
-                  {syncedByDevice.length === 0 ? (
-                    <p className="text-xs text-muted-foreground py-2">No courses synced by this device</p>
+              <Tabs defaultValue="courses">
+                <TabsList className="mb-2">
+                  <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
+                  <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
+                  <TabsTrigger value="overrides">Overrides ({allOverrides.length})</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="courses">
+                  <div className="space-y-3">
+                    <div>
+                      <h4 className="text-xs font-medium text-green-600 mb-1">Synced by this device ({syncedCourses.length})</h4>
+                      {syncedCourses.length === 0 ? (
+                        <p className="text-xs text-muted-foreground py-1">None</p>
+                      ) : (
+                        <div className="space-y-0.5">
+                          {syncedCourses.sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map(renderDeviceCourseRow)}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-medium text-muted-foreground mb-1">From other devices ({otherCourses.length})</h4>
+                      {otherCourses.length === 0 ? (
+                        <p className="text-xs text-muted-foreground py-1">None</p>
+                      ) : (
+                        <div className="space-y-0.5 border-l-2 border-dashed border-border pl-2 opacity-70">
+                          {otherCourses.sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map(renderDeviceCourseRow)}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="assignments">
+                  {allAssignments.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">No assignments</p>
                   ) : (
-                    <div className="space-y-0.5">
-                      {syncedByDevice
-                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
-                        .map(renderDeviceCourseRow)}
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="text-xs">Title</TableHead>
+                            <TableHead className="text-xs">Course</TableHead>
+                            <TableHead className="text-xs">Due</TableHead>
+                            <TableHead className="text-xs">Grade</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {allAssignments.map((a) => (
+                            <TableRow key={a.id}>
+                              <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
+                              <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
+                              <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                              <TableCell className="text-xs">{a.provider_grade ?? "—"}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
                     </div>
                   )}
-                </div>
-                <div>
-                  <h4 className="text-xs font-medium mb-2">From other devices</h4>
-                  {fromOtherDevices.length === 0 ? (
-                    <p className="text-xs text-muted-foreground py-2">No courses from other devices</p>
+                </TabsContent>
+
+                <TabsContent value="overrides">
+                  {allOverrides.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">No overrides</p>
                   ) : (
-                    <div className="space-y-0.5" style={{ borderLeft: "2px dashed var(--border)", paddingLeft: "8px", opacity: 0.7 }}>
-                      {fromOtherDevices
-                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
-                        .map(renderDeviceCourseRow)}
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="text-xs">Moodle ID</TableHead>
+                            <TableHead className="text-xs">Title</TableHead>
+                            <TableHead className="text-xs">Status</TableHead>
+                            <TableHead className="text-xs">Updated</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {allOverrides.map((o) => (
+                            <TableRow key={o.moodle_assignment_id}>
+                              <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
+                              <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
+                              <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
+                              <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
                     </div>
                   )}
-                </div>
-              </div>
+                </TabsContent>
+              </Tabs>
             )}
           </TabsContent>
           <TabsContent value="push">
@@ -1777,15 +1843,22 @@ function SyncTab() {
   });
 
   const [newLogIds, setNewLogIds] = useState<Set<number>>(new Set());
+  const isInitialLoad = useRef(true);
   useEffect(() => {
     const d = logsQuery.data;
     if (d && d.entries.length > 0) {
-      const ids = new Set(d.entries.map((e) => e.id));
-      setNewLogIds(ids);
+      if (!isInitialLoad.current) {
+        const ids = new Set(d.entries.map((e) => e.id));
+        setNewLogIds(ids);
+        const timer = setTimeout(() => setNewLogIds(new Set()), 2000);
+        // eslint-disable-next-line consistent-return
+        setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
+        setLatestId(d.latest_id);
+        return () => clearTimeout(timer);
+      }
+      isInitialLoad.current = false;
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
       setLatestId(d.latest_id);
-      const timer = setTimeout(() => setNewLogIds(new Set()), 3000);
-      return () => clearTimeout(timer);
     }
   }, [logsQuery.data]);
 
