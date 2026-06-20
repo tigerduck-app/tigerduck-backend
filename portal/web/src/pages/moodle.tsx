@@ -1108,7 +1108,11 @@ function TopologyOverview({
           <div className="flex flex-col gap-3 shrink-0">
             {devices.map((device) => {
               const ps = pollStatus?.[device.id];
-              const isForeground = ps === "foreground";
+              const seenAgo = device.last_seen_at
+                ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
+                : Infinity;
+              const isForeground = ps ? ps === "foreground" : seenAgo < 120;
+              const isOnline = ps ? ps !== undefined : seenAgo < 600;
               const isMacOs = device.platform === "macos";
               const pending = pendingByDevice(device.id);
               const isSelected =
@@ -1139,7 +1143,7 @@ function TopologyOverview({
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1 mb-1.5">
-                    {ps ? (
+                    {isOnline ? (
                       <Badge
                         variant="default"
                         className={
@@ -1148,7 +1152,8 @@ function TopologyOverview({
                             : "bg-gray-500/10 text-gray-500 text-[10px] px-1.5 py-0"
                         }
                       >
-                        {isForeground ? "Foreground" : "Background"}
+                        <Wifi className="h-2.5 w-2.5 mr-0.5" />
+                        {isForeground ? "Active" : "Online"}
                       </Badge>
                     ) : (
                       <Badge variant="outline" className="text-[10px] px-1.5 py-0">
@@ -1594,12 +1599,16 @@ function SyncTab() {
     refetchInterval: query ? 2_000 : false,
   });
 
+  const [newLogIds, setNewLogIds] = useState<Set<number>>(new Set());
   useEffect(() => {
     const d = logsQuery.data;
     if (d && d.entries.length > 0) {
+      const ids = new Set(d.entries.map((e) => e.id));
+      setNewLogIds(ids);
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
       setLatestId(d.latest_id);
-      setTimeout(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+      const timer = setTimeout(() => setNewLogIds(new Set()), 3000);
+      return () => clearTimeout(timer);
     }
   }, [logsQuery.data]);
 
@@ -1810,7 +1819,7 @@ function SyncTab() {
                   e.level === "ERROR" ? "text-red-500" :
                   e.level === "WARN" ? "text-yellow-500" : "text-muted-foreground";
                 return (
-                  <div key={e.id} className="flex gap-2 leading-5">
+                  <div key={e.id} className={`flex gap-2 leading-5 transition-colors duration-1000 ${newLogIds.has(e.id) ? "bg-blue-500/15 rounded px-1 -mx-1" : ""}`}>
                     <span className="text-muted-foreground shrink-0">{ts}</span>
                     <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
                     <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
