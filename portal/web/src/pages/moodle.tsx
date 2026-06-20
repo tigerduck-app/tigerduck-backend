@@ -337,7 +337,7 @@ function SyncStats() {
           <CardTitle className="text-base">Recent runs (last 50)</CardTitle>
         </CardHeader>
         <CardContent>
-          <Table>
+          <div className="overflow-x-auto"><Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Student</TableHead>
@@ -375,7 +375,7 @@ function SyncStats() {
                 })
               )}
             </TableBody>
-          </Table>
+          </Table></div>
         </CardContent>
       </Card>
     </>
@@ -420,7 +420,7 @@ function JobsTable() {
         <CardDescription>{list.length} job(s)</CardDescription>
       </CardHeader>
       <CardContent>
-        <Table>
+        <div className="overflow-x-auto"><Table>
           <TableHeader>
             <TableRow>
               <TableHead>Student</TableHead>
@@ -453,7 +453,7 @@ function JobsTable() {
               ))
             )}
           </TableBody>
-        </Table>
+        </Table></div>
       </CardContent>
     </Card>
   );
@@ -517,7 +517,7 @@ function ListsTab() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Table>
+          <div className="overflow-x-auto"><Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Student ID</TableHead>
@@ -562,7 +562,7 @@ function ListsTab() {
                 </TableRow>
               )}
             </TableBody>
-          </Table>
+          </Table></div>
         </CardContent>
       </Card>
     </Section>
@@ -798,7 +798,7 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
             <TabsTrigger value="push">Push Queue{pushJobs && pushJobs.length > 0 ? ` (${pushJobs.length})` : ""}</TabsTrigger>
           </TabsList>
           <TabsContent value="list">
-            <Table>
+            <div className="overflow-x-auto"><Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Platform</TableHead>
@@ -825,7 +825,7 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>
+            </Table></div>
           </TabsContent>
           <TabsContent value="stats">
             <div className="mb-4">
@@ -928,7 +928,7 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                       )}
                       {pj.last_error && <p className="text-xs text-destructive">{pj.last_error}</p>}
                       {deliveries.length > 0 && (
-                        <Table>
+                        <div className="overflow-x-auto"><Table>
                           <TableHeader>
                             <TableRow>
                               <TableHead className="text-xs">Target Device</TableHead>
@@ -962,7 +962,7 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                               );
                             })}
                           </TableBody>
-                        </Table>
+                        </Table></div>
                       )}
                       {deliveries.length === 0 && (
                         <p className="text-xs text-muted-foreground">Not yet materialized (waiting for pipeline tick)</p>
@@ -1082,7 +1082,7 @@ function SyncTab() {
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
               </div>
             ) : (
-            <Table>
+            <div className="overflow-x-auto"><Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Job Type</TableHead>
@@ -1110,7 +1110,7 @@ function SyncTab() {
                   <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync jobs</TableCell></TableRow>
                 )}
               </TableBody>
-            </Table>
+            </Table></div>
             )}
           </CardContent>
         </Card>
@@ -1131,7 +1131,7 @@ function SyncTab() {
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
               </div>
             ) : (
-            <Table>
+            <div className="overflow-x-auto"><Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Started</TableHead>
@@ -1164,7 +1164,7 @@ function SyncTab() {
                   <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync runs yet</TableCell></TableRow>
                 )}
               </TableBody>
-            </Table>
+            </Table></div>
             )}
           </CardContent>
         </Card>
@@ -1176,7 +1176,7 @@ function SyncTab() {
             <CardTitle className="text-base">Assignment Overrides ({data.overrides.length})</CardTitle>
           </CardHeader>
           <CardContent>
-            <Table>
+            <div className="overflow-x-auto"><Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Moodle ID</TableHead>
@@ -1195,7 +1195,7 @@ function SyncTab() {
                   </TableRow>
                 ))}
               </TableBody>
-            </Table>
+            </Table></div>
           </CardContent>
         </Card>
       )}
@@ -1226,7 +1226,7 @@ function SyncTab() {
             ) : coursesData.courses.length === 0 ? (
               <div className="py-6 text-center text-muted-foreground">No courses</div>
             ) : (
-            <Table>
+            <div className="overflow-x-auto"><Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Color</TableHead>
@@ -1284,7 +1284,7 @@ function SyncTab() {
                   );
                 })}
               </TableBody>
-            </Table>
+            </Table></div>
             )}
           </CardContent>
         </Card>
