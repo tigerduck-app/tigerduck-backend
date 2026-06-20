@@ -158,6 +158,8 @@ class CourseUploadItem(BaseModel):
     credits: float | None = None
     classroom: str | None = None
     instructors: list[str] = []
+    schedule_json: dict | list = {}
+    classroom_map: dict = {}
 
 
 class CourseUploadRequest(BaseModel):
@@ -198,6 +200,8 @@ async def upload_courses(
                 credits=c.credits,
                 classroom=c.classroom,
                 instructors=c.instructors,
+                schedule_json=c.schedule_json,
+                classroom_map=c.classroom_map,
                 fetched_at=now,
                 last_seen_at=now,
             )
@@ -210,6 +214,8 @@ async def upload_courses(
                     "credits": c.credits,
                     "classroom": c.classroom,
                     "instructors": c.instructors,
+                    "schedule_json": c.schedule_json,
+                    "classroom_map": c.classroom_map,
                     "last_seen_at": now,
                     "updated_at": now,
                 },
