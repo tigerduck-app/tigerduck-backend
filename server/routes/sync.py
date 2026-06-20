@@ -416,22 +416,13 @@ async def delete_all_courses(
     if not rows:
         return {"deleted": 0}
 
-    for row in rows:
-        await session.execute(
-            pg_insert(UserCourseTombstone)
-            .values(
-                user_id=auth.user_id,
-                course_key=row.course_key,
-                semester=row.semester,
-                course_no=row.course_no,
-                deleted_at=now,
-                deleted_by_device_id=auth.device_id,
-            )
-            .on_conflict_do_update(
-                index_elements=["user_id", "course_key"],
-                set_={"deleted_at": now, "deleted_by_device_id": auth.device_id},
-            )
+    # Full reset: clear ALL tombstones so the immediate re-upload isn't
+    # blocked. courses_reset_at signals other devices that a reset happened.
+    await session.execute(
+        delete(UserCourseTombstone).where(
+            UserCourseTombstone.user_id == auth.user_id,
         )
+    )
 
     await session.execute(
         update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
