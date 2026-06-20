@@ -7,7 +7,7 @@ import logging
 import time
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -559,3 +559,18 @@ async def sync_logs(
     entries = [dict(r) for r in rows]
     latest_id = entries[-1]["id"] if entries else after_id
     return {"entries": entries, "latest_id": latest_id}
+
+
+@router.post("/push-tick")
+async def force_push_tick(request: Request) -> JSONResponse:
+    """Manually trigger the push pipeline tick to process pending jobs."""
+    worker = getattr(request.app.state, "push_worker", None)
+    if worker is None:
+        return JSONResponse({"ok": False, "error": "push_worker not available"}, 503)
+    from server.push.pipeline import run_push_tick
+    try:
+        await run_push_tick(worker)
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.exception("force push tick failed")
+        return JSONResponse({"ok": False, "error": str(e)}, 500)

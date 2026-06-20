@@ -852,6 +852,25 @@ function DevicesCard({ devices, pushJobs, pushDeliveries }: { devices: SyncDevic
             )}
           </TabsContent>
           <TabsContent value="push">
+            {pushJobs && pushJobs.length > 0 && (
+              <div className="mb-4">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      const res = await fetch("/api/moodle/push-tick", { method: "POST" });
+                      const data = await res.json();
+                      if (!data.ok) alert("Push tick failed: " + (data.error ?? "unknown"));
+                    } catch (e) {
+                      alert("Push tick request failed");
+                    }
+                  }}
+                >
+                  Force Execute Pipeline
+                </Button>
+              </div>
+            )}
             {!pushJobs || pushJobs.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4">No pending push jobs.</p>
             ) : (
