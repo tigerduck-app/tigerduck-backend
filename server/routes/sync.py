@@ -299,11 +299,12 @@ async def upload_courses(
                 locked_state=state,
             )
         now = datetime.now(UTC)
-        await session.execute(
+        dedupe = f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}"
+        push_result = await session.execute(
             pg_insert(PushJob)
             .values(
                 user_id=auth.user_id,
-                dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+                dedupe_key=dedupe,
                 channel="system",
                 scenario="sync_trigger",
                 fire_at=now,
@@ -313,7 +314,16 @@ async def upload_courses(
                 },
             )
             .on_conflict_do_nothing()
+            .returning(PushJob.id)
         )
+        push_row = push_result.scalar_one_or_none()
+        if push_row:
+            await log_sync(
+                session, user_id=auth.user_id, source="push",
+                message=f"sync_trigger push job #{push_row} queued ({len(new_keys)} new courses)",
+                device_id=auth.device_id,
+                detail={"push_job_id": push_row, "new_keys": sorted(new_keys)},
+            )
 
     overrides_applied = 0
     for item in payload.course_overrides:
@@ -417,11 +427,12 @@ async def delete_all_courses(
             device_id=auth.device_id,
             locked_state=state,
         )
-    await session.execute(
+    dedupe = f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}"
+    push_result = await session.execute(
         pg_insert(PushJob)
         .values(
             user_id=auth.user_id,
-            dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+            dedupe_key=dedupe,
             channel="system",
             scenario="sync_trigger",
             fire_at=now,
@@ -431,14 +442,17 @@ async def delete_all_courses(
             },
         )
         .on_conflict_do_nothing()
+        .returning(PushJob.id)
     )
+    push_row = push_result.scalar_one_or_none()
 
     deleted_keys = [r.course_key for r in rows]
+    push_status = f"push job #{push_row} queued" if push_row else f"push deduplicated ({dedupe})"
     await log_sync(
         session,
         user_id=auth.user_id,
         source="sync",
-        message=f"All courses deleted: {len(rows)} removed",
+        message=f"All courses deleted: {len(rows)} removed — {push_status}",
         device_id=auth.device_id,
         detail={"deleted": len(rows), "course_keys": deleted_keys},
     )
@@ -497,11 +511,12 @@ async def delete_course(
         device_id=auth.device_id,
         locked_state=state,
     )
-    await session.execute(
+    dedupe = f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}"
+    push_result = await session.execute(
         pg_insert(PushJob)
         .values(
             user_id=auth.user_id,
-            dedupe_key=f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}",
+            dedupe_key=dedupe,
             channel="system",
             scenario="sync_trigger",
             fire_at=now,
@@ -511,17 +526,22 @@ async def delete_course(
             },
         )
         .on_conflict_do_nothing()
+        .returning(PushJob.id)
     )
+    push_row = push_result.scalar_one_or_none()
+    push_status = f"push job #{push_row} queued" if push_row else f"push deduplicated ({dedupe})"
     await log_sync(
         session,
         user_id=auth.user_id,
         source="sync",
-        message=f"Course deleted: {course_key}",
+        message=f"Course deleted: {course_key} — {push_status}",
         device_id=auth.device_id,
         detail={
             "course_key": course_key,
             "course_no": deleted_row.course_no,
             "semester": deleted_row.semester,
+            "push_job_id": push_row,
+            "push_deduplicated": push_row is None,
         },
     )
     return {"deleted": 1}

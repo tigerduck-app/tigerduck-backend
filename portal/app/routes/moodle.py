@@ -305,6 +305,29 @@ async def sync_events(
             uid,
         )
 
+        push_jobs = await conn.fetch(
+            "SELECT pj.id, pj.scenario, pj.status, pj.attempts, pj.max_attempts, "
+            "pj.fire_at, pj.sent_at, pj.last_error, pj.dedupe_key, pj.created_at, "
+            "pj.payload->>'source_device_id' AS source_device_id "
+            "FROM push_jobs pj "
+            "WHERE pj.user_id = $1 AND pj.status IN ('pending', 'processing') "
+            "ORDER BY pj.created_at DESC LIMIT 20",
+            uid,
+        )
+
+        push_deliveries = []
+        if push_jobs:
+            pj_ids = [pj["id"] for pj in push_jobs]
+            push_deliveries = await conn.fetch(
+                "SELECT pd.id, pd.push_job_id, pd.device_id, pd.provider, "
+                "pd.status, pd.attempts, pd.max_attempts, pd.failure_code, "
+                "pd.failure_message, pd.sent_at, pd.created_at "
+                "FROM push_deliveries pd "
+                "WHERE pd.push_job_id = ANY($1::bigint[]) "
+                "ORDER BY pd.created_at",
+                pj_ids,
+            )
+
     return {
         "student_id": student_id,
         "found": True,
@@ -312,6 +335,8 @@ async def sync_events(
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],
         "devices": [dict(d) for d in devices],
+        "push_jobs": [dict(p) for p in push_jobs],
+        "push_deliveries": [dict(d) for d in push_deliveries],
     }
 
 

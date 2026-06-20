@@ -632,6 +632,34 @@ type SyncDevice = {
   created_at: string | null;
 };
 
+type PushJobRow = {
+  id: number;
+  scenario: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  fire_at: string;
+  sent_at: string | null;
+  last_error: string | null;
+  dedupe_key: string;
+  created_at: string;
+  source_device_id: string | null;
+};
+
+type PushDeliveryRow = {
+  id: number;
+  push_job_id: number;
+  device_id: string | null;
+  provider: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  failure_code: string | null;
+  failure_message: string | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
 type SyncEventsResponse = {
   student_id: string;
   found: boolean;
@@ -639,6 +667,8 @@ type SyncEventsResponse = {
   runs?: SyncRun[];
   overrides?: SyncOverride[];
   devices?: SyncDevice[];
+  push_jobs?: PushJobRow[];
+  push_deliveries?: PushDeliveryRow[];
 };
 
 type LogEntry = {
@@ -735,7 +765,7 @@ function StatSection({ title, counts, total }: { title: string; counts: [string,
   );
 }
 
-function DevicesCard({ devices }: { devices: SyncDevice[] }) {
+function DevicesCard({ devices, pushJobs, pushDeliveries }: { devices: SyncDevice[]; pushJobs?: PushJobRow[]; pushDeliveries?: PushDeliveryRow[] }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
   const platforms = ["ios", "ipados", "macos", "android"];
@@ -765,6 +795,7 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
           <TabsList>
             <TabsTrigger value="list">List</TabsTrigger>
             <TabsTrigger value="stats">Statistics</TabsTrigger>
+            <TabsTrigger value="push">Push Queue{pushJobs && pushJobs.length > 0 ? ` (${pushJobs.length})` : ""}</TabsTrigger>
           </TabsList>
           <TabsContent value="list">
             <Table>
@@ -817,6 +848,75 @@ function DevicesCard({ devices }: { devices: SyncDevice[] }) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <StatSection title="OS Version" counts={countBy("os_version")} total={filtered.length} />
                 <StatSection title="App Version" counts={countBy("app_version")} total={filtered.length} />
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="push">
+            {!pushJobs || pushJobs.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4">No pending push jobs.</p>
+            ) : (
+              <div className="space-y-4">
+                {pushJobs.map((pj) => {
+                  const deliveries = (pushDeliveries ?? []).filter((d) => d.push_job_id === pj.id);
+                  const sourceDevice = devices.find((d) => d.id === pj.source_device_id);
+                  return (
+                    <div key={pj.id} className="border rounded-md p-3 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={pj.status === "pending" ? "default" : "secondary"}>{pj.status}</Badge>
+                        <span className="font-mono text-xs">{pj.scenario}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; created {fmt(pj.created_at)}
+                        </span>
+                      </div>
+                      {sourceDevice && (
+                        <p className="text-xs text-muted-foreground">
+                          Source: <Badge variant="outline" className="text-[10px] px-1 py-0">{sourceDevice.platform}</Badge> {sourceDevice.client_device_id.slice(0, 8)}...
+                        </p>
+                      )}
+                      {pj.last_error && <p className="text-xs text-destructive">{pj.last_error}</p>}
+                      {deliveries.length > 0 && (
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Target Device</TableHead>
+                              <TableHead className="text-xs">Provider</TableHead>
+                              <TableHead className="text-xs">Status</TableHead>
+                              <TableHead className="text-xs">Attempts</TableHead>
+                              <TableHead className="text-xs">Error</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {deliveries.map((dl) => {
+                              const targetDevice = devices.find((d) => d.id === dl.device_id);
+                              return (
+                                <TableRow key={dl.id}>
+                                  <TableCell className="text-xs">
+                                    {targetDevice ? (
+                                      <><Badge variant="outline" className="text-[10px] px-1 py-0">{targetDevice.platform}</Badge> {targetDevice.client_device_id.slice(0, 8)}...</>
+                                    ) : (
+                                      <span className="text-muted-foreground">{dl.device_id?.slice(0, 8) ?? "—"}...</span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                                  <TableCell>
+                                    <Badge variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"} className="text-[10px]">
+                                      {dl.status}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                                  <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      )}
+                      {deliveries.length === 0 && (
+                        <p className="text-xs text-muted-foreground">Not yet materialized (waiting for pipeline tick)</p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </TabsContent>
@@ -964,7 +1064,7 @@ function SyncTab() {
       )}
 
       {data?.found && data.devices && data.devices.length > 0 && (
-        <DevicesCard devices={data.devices} />
+        <DevicesCard devices={data.devices} pushJobs={data.push_jobs} pushDeliveries={data.push_deliveries} />
       )}
 
       {query && data?.found !== false && (
