@@ -1135,7 +1135,7 @@ function TopologyOverview({
               const seenAgo = device.last_seen_at
                 ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
                 : Infinity;
-              const isOnline = ps ? ps !== undefined : seenAgo < 600;
+              const isOnline = ps ? ps === "foreground" : seenAgo < 30;
               const isMacOs = device.platform === "macos";
               const pending = pendingByDevice(device.id);
               const isSelected =
