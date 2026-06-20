@@ -1365,7 +1365,6 @@ function NodeDetailPanel({
                         <TableHead>Course</TableHead>
                         <TableHead>Due</TableHead>
                         <TableHead>Submitted</TableHead>
-                        <TableHead>Grade</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1581,7 +1580,6 @@ function NodeDetailPanel({
                               <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
                               <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
                               <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
-                              <TableCell className="text-xs">{a.provider_grade ?? "—"}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
