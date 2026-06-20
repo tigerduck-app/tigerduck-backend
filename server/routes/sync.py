@@ -58,12 +58,20 @@ async def _trigger_push_tick(request: Request) -> None:
         await run_push_tick(worker)
 
 
-async def _cancel_sync_trigger_for_device(session, user_id, device_id) -> None:
-    """Cancel pending sync_trigger deliveries for *device_id*.
+async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> None:
+    """Cancel ALL pending pushes for *device_id*.
 
     When the device just did a full sync it already has fresh data — no
-    need for a sync_trigger push to tell it to sync again.
+    need for sync_trigger, schedule, or reminder pushes.
+
+    Two passes:
+    1. Device-targeted jobs (schedule pushes with job.device_id set):
+       cancel the entire job since it only targets this device.
+    2. User-scoped jobs (sync_trigger etc. with device_id NULL):
+       skip only this device's materialized deliveries so other devices
+       still receive the push.
     """
+    now = datetime.now(UTC)
     device_row = (await session.execute(
         select(UserDevice.id).where(
             UserDevice.user_id == user_id,
@@ -73,34 +81,48 @@ async def _cancel_sync_trigger_for_device(session, user_id, device_id) -> None:
     )).scalar_one_or_none()
     if device_row is None:
         return
-    sync_trigger_ids = (await session.execute(
+
+    cancelled_jobs = await session.execute(
+        update(PushJob)
+        .where(
+            PushJob.user_id == user_id,
+            PushJob.device_id == device_row,
+            PushJob.status == PushJobStatus.pending.value,
+        )
+        .values(status=PushJobStatus.cancelled.value, cancelled_at=now)
+    )
+    job_count = cancelled_jobs.rowcount or 0
+
+    pending_job_ids = (await session.execute(
         select(PushJob.id).where(
             PushJob.user_id == user_id,
-            PushJob.scenario == "sync_trigger",
+            PushJob.device_id.is_(None),
             PushJob.status.in_([PushJobStatus.pending.value, PushJobStatus.processing.value]),
         )
     )).scalars().all()
-    if not sync_trigger_ids:
-        return
-    result = await session.execute(
-        update(PushDelivery)
-        .where(
-            PushDelivery.push_job_id.in_(sync_trigger_ids),
-            PushDelivery.device_id == device_row,
-            PushDelivery.status == PushDeliveryStatus.pending.value,
+    delivery_count = 0
+    if pending_job_ids:
+        result = await session.execute(
+            update(PushDelivery)
+            .where(
+                PushDelivery.push_job_id.in_(pending_job_ids),
+                PushDelivery.device_id == device_row,
+                PushDelivery.status == PushDeliveryStatus.pending.value,
+            )
+            .values(
+                status=PushDeliveryStatus.skipped.value,
+                failure_code="device_already_synced",
+            )
         )
-        .values(
-            status=PushDeliveryStatus.skipped.value,
-            failure_code="device_already_synced",
-        )
-    )
-    skipped = result.rowcount or 0
-    if skipped:
+        delivery_count = result.rowcount or 0
+
+    if job_count or delivery_count:
         logger.info(
-            "sync.cancelled_sync_trigger_deliveries",
+            "sync.cancelled_pushes_for_device",
             user_id=str(user_id),
             device_id=str(device_id),
-            skipped=skipped,
+            jobs_cancelled=job_count,
+            deliveries_skipped=delivery_count,
         )
 
 
@@ -212,7 +234,7 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
     await _push_back_sync_jobs(session, auth.user_id)
 
     if auth.device_id:
-        await _cancel_sync_trigger_for_device(session, auth.user_id, auth.device_id)
+        await _cancel_pending_deliveries_for_device(session, auth.user_id, auth.device_id)
 
     await session.commit()
 
