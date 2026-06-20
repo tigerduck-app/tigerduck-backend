@@ -123,8 +123,8 @@ export function Layout() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         <MobileNav items={items} />
-        <main className="flex-1 px-3 py-4 sm:px-8 sm:py-8">
-          <div className="mx-auto w-full max-w-6xl space-y-8">
+        <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6">
+          <div className="mx-auto w-full space-y-6">
             <Outlet />
           </div>
         </main>
