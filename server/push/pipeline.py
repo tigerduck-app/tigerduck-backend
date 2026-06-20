@@ -184,13 +184,20 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
 async def _materialize(session: AsyncSession, job: PushJob) -> None:
     """Create one delivery row per active token (channel-aware: standard tokens
     for regular pushes, push_to_start tokens for schedule). Idempotent —
-    a stale-recovered job re-materializes onto the same unique index."""
+    a stale-recovered job re-materializes onto the same unique index.
+
+    Skips devices that are currently foregrounded (polling ``/sync/revision``
+    within the last 20 s) and macOS devices (foreground-only, no background
+    push).
+    """
+    from server.sync.poll_tracker import is_foreground
+
     now = datetime.now(UTC)
     target_token_kind = (
         "push_to_start" if job.channel == "schedule" else "standard"
     )
     token_query = (
-        select(DevicePushToken)
+        select(DevicePushToken, UserDevice)
         .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
         .where(
             UserDevice.user_id == job.user_id,
@@ -203,22 +210,33 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
-    tokens = (await session.execute(token_query)).scalars().all()
-    if not tokens:
+    rows = (await session.execute(token_query)).all()
+    if not rows:
         return
-    values = [
-        {
-            "push_job_id": job.id,
-            "user_id": job.user_id,
-            "device_id": token.device_id,
-            "push_token_id": token.id,
-            "provider": token.provider,
-            "token_kind": token.token_kind,
-            "token_hash": token.token_hash,
-            "scope_key": token.scope_key,
-        }
-        for token in tokens
-    ]
+    values = []
+    skipped_fg = 0
+    for token, device in rows:
+        if device.platform == "macos":
+            continue
+        if is_foreground(str(job.user_id), device.client_device_id):
+            skipped_fg += 1
+            continue
+        values.append(
+            {
+                "push_job_id": job.id,
+                "user_id": job.user_id,
+                "device_id": token.device_id,
+                "push_token_id": token.id,
+                "provider": token.provider,
+                "token_kind": token.token_kind,
+                "token_hash": token.token_hash,
+                "scope_key": token.scope_key,
+            }
+        )
+    if skipped_fg:
+        logger.debug("push.skipped_foreground", job_id=job.id, count=skipped_fg)
+    if not values:
+        return
     await session.execute(
         pg_insert(PushDelivery)
         .values(values)
