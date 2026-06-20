@@ -180,6 +180,10 @@ class CourseUploadRequest(BaseModel):
     course_overrides: list[CourseOverrideUploadItem] = Field(
         default_factory=list, max_length=500
     )
+    force_keys: list[str] = Field(
+        default_factory=list, max_length=50,
+        description="Course keys whose tombstones should be cleared (explicit user re-add).",
+    )
 
 
 @router.post("/courses/upload")
@@ -196,10 +200,32 @@ async def upload_courses(
         )).scalars().all()
     )
 
+    # Clear tombstones for explicitly re-added courses (user action).
+    if payload.force_keys:
+        await session.execute(
+            delete(UserCourseTombstone).where(
+                UserCourseTombstone.user_id == auth.user_id,
+                UserCourseTombstone.course_key.in_(payload.force_keys),
+            )
+        )
+
+    # Tombstoned courses must not be resurrected by a bulk portal upload.
+    tombstoned_keys = set(
+        (await session.execute(
+            select(UserCourseTombstone.course_key).where(
+                UserCourseTombstone.user_id == auth.user_id,
+            )
+        )).scalars().all()
+    )
+
     upserted = 0
+    skipped = 0
     uploaded_keys: set[str] = set()
     for c in payload.courses:
         course_key = f"client:{c.semester}:{c.course_no}"
+        if course_key in tombstoned_keys:
+            skipped += 1
+            continue
         uploaded_keys.add(course_key)
         moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"
         stmt = (
@@ -242,14 +268,6 @@ async def upload_courses(
         )
         await session.execute(stmt)
         upserted += 1
-
-    if uploaded_keys:
-        await session.execute(
-            delete(UserCourseTombstone).where(
-                UserCourseTombstone.user_id == auth.user_id,
-                UserCourseTombstone.course_key.in_(uploaded_keys),
-            )
-        )
 
     new_keys = uploaded_keys - existing_keys
     logger.info(
@@ -336,17 +354,18 @@ async def upload_courses(
         session,
         user_id=auth.user_id,
         source="sync",
-        message=f"Courses uploaded: {upserted} upserted, {len(new_keys)} new, {overrides_applied} colors set",
+        message=f"Courses uploaded: {upserted} upserted, {len(new_keys)} new, {skipped} tombstoned, {overrides_applied} colors set",
         device_id=auth.device_id,
         detail={
             "upserted": upserted,
+            "skipped_tombstoned": skipped,
             "new_keys": sorted(new_keys) if new_keys else [],
             "overrides_applied": overrides_applied,
             "course_nos": course_nos,
         },
     )
     await _push_back_sync_jobs(session, auth.user_id)
-    return {"upserted": upserted, "overrides_applied": overrides_applied}
+    return {"upserted": upserted, "skipped_tombstoned": skipped, "overrides_applied": overrides_applied}
 
 
 @router.delete("/courses")
