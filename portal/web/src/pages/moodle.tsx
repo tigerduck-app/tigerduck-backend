@@ -1421,6 +1421,7 @@ function NodeDetailPanel({
               <Tabs defaultValue="courses">
                 <TabsList className="mb-2">
                   <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
+                  <TabsTrigger value="custom-names">Custom Names ({allCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
                   <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
                 </TabsList>
 
@@ -1494,6 +1495,42 @@ function NodeDetailPanel({
                   )}
                 </TabsContent>
 
+                <TabsContent value="custom-names">
+                  {(() => {
+                    const withNames = allCourses
+                      .map((c) => {
+                        const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
+                        return { ...c, parsedNames: (names && typeof names === "object") ? names as Record<string, string> : {} };
+                      })
+                      .filter((c) => Object.keys(c.parsedNames).length > 0)
+                      .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""));
+                    return withNames.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4">All courses using default names</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Course Code</TableHead>
+                              <TableHead className="text-xs">Custom Name (Chinese)</TableHead>
+                              <TableHead className="text-xs">Custom Name (English)</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {withNames.map((c) => (
+                              <TableRow key={c.id}>
+                                <TableCell className="font-mono text-xs">{c.client_course_no ?? c.course_no}</TableCell>
+                                <TableCell className="text-xs">{c.parsedNames["zh"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                                <TableCell className="text-xs">{c.parsedNames["en"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
                 <TabsContent value="assignments">
                   {allAssignments.length === 0 ? (
                     <p className="text-sm text-muted-foreground py-4">No assignments</p>
@@ -1547,15 +1584,15 @@ function NodeDetailPanel({
                 }).length;
                 const categories = [
                   { label: "Courses", count: allCourses.length, enabled: device.sync_courses !== false, detail: `${allCourses.length} courses in backend` },
-                  { label: "Course colours", count: colorCount, enabled: device.sync_course_colors !== false, detail: `${colorCount} of ${allCourses.length} have synced colours` },
-                  { label: "Custom course names", count: customNameCount, enabled: device.sync_course_names !== false, detail: `${customNameCount} of ${allCourses.length} have custom names` },
+                  { label: "Course colours", count: colorCount, enabled: device.sync_course_colors !== false, detail: colorCount > 0 ? `${colorCount} of ${allCourses.length} have synced colours` : `All using auto-assigned colours` },
+                  { label: "Custom course names", count: customNameCount, enabled: device.sync_course_names !== false, detail: customNameCount > 0 ? `${customNameCount} of ${allCourses.length} have custom names` : `All using default names` },
                   { label: "Assignments", count: allAssignments.length, enabled: device.sync_assignments !== false, detail: `${allAssignments.length} assignments in backend` },
                 ];
                 return categories.map((cat) => {
-                  const dotColor = cat.count > 0
-                    ? cat.enabled ? "bg-green-500" : "bg-orange-400"
-                    : "bg-muted-foreground/30";
-                  const statusNote = cat.count > 0 && !cat.enabled ? " · sync to other devices off" : "";
+                  const dotColor = cat.enabled
+                    ? "bg-green-500"
+                    : cat.count > 0 ? "bg-orange-400" : "bg-muted-foreground/30";
+                  const statusNote = !cat.enabled && cat.count > 0 ? " · sync to other devices off" : "";
                   return (
                   <div key={cat.label} className="flex items-center gap-3 rounded-md border border-border p-3">
                     <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${dotColor}`} />
