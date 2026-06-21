@@ -97,12 +97,20 @@ class DeviceListV3Response(BaseModel):
 
 
 class DevicePreferencesV3Request(BaseModel):
-    server_push_enabled: bool
+    server_push_enabled: bool | None = None
+    sync_courses: bool | None = None
+    sync_course_colors: bool | None = None
+    sync_course_names: bool | None = None
+    sync_assignments: bool | None = None
 
 
 class DevicePreferencesV3Response(BaseModel):
     device_id: str
     server_push_enabled: bool
+    sync_courses: bool
+    sync_course_colors: bool
+    sync_course_names: bool
+    sync_assignments: bool
 
 
 class ScheduleScenario(str, Enum):

@@ -664,6 +664,10 @@ type SyncDevice = {
   last_seen_at: string | null;
   last_login_at: string | null;
   created_at: string | null;
+  sync_courses: boolean | null;
+  sync_course_colors: boolean | null;
+  sync_course_names: boolean | null;
+  sync_assignments: boolean | null;
 };
 
 type PushJobRow = {
@@ -1247,16 +1251,11 @@ function NodeDetailPanel({
           <Tabs defaultValue="courses">
             <TabsList>
               <TabsTrigger value="courses">
-                Courses{coursesData ? ` (${coursesData.courses.length})` : ""}
+                Courses{coursesData ? ` (${coursesData.courses.length}${coursesData.tombstones?.length ? ` + ${coursesData.tombstones.length} deleted` : ""})` : ""}
               </TabsTrigger>
               <TabsTrigger value="assignments">
                 Assignments{coursesData?.assignments ? ` (${coursesData.assignments.length})` : ""}
               </TabsTrigger>
-              {coursesData?.tombstones && coursesData.tombstones.length > 0 && (
-                <TabsTrigger value="tombstones">
-                  Tombstones ({coursesData.tombstones.length})
-                </TabsTrigger>
-              )}
               <TabsTrigger value="overrides">
                 Overrides{data.overrides ? ` (${data.overrides.length})` : ""}
               </TabsTrigger>
@@ -1353,6 +1352,25 @@ function NodeDetailPanel({
                             </TableRow>
                           );
                         })}
+                      {coursesData.tombstones?.map((t) => (
+                        <TableRow key={`tomb-${t.course_key}`} className="opacity-50">
+                          <TableCell>
+                            <Badge variant="destructive" className="text-[10px] px-1 py-0">Deleted</Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs line-through">{t.course_no}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground line-through">{t.semester}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{relativeTime(t.deleted_at)}</TableCell>
+                          <TableCell>
+                            {t.deleted_by_device_id ? (
+                              <Badge variant="secondary" className="text-[10px] font-normal">
+                                {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 </div>
@@ -1402,40 +1420,6 @@ function NodeDetailPanel({
                 </div>
               )}
             </TabsContent>
-            {coursesData?.tombstones && coursesData.tombstones.length > 0 && (
-              <TabsContent value="tombstones">
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Course</TableHead>
-                        <TableHead>Semester</TableHead>
-                        <TableHead>Deleted</TableHead>
-                        <TableHead>By Device</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {coursesData.tombstones.map((t) => (
-                        <TableRow key={t.course_key}>
-                          <TableCell className="font-mono text-xs">{t.course_no}</TableCell>
-                          <TableCell className="text-xs">{t.semester}</TableCell>
-                          <TableCell className="text-xs">{fmt(t.deleted_at)}</TableCell>
-                          <TableCell>
-                            {t.deleted_by_device_id ? (
-                              <Badge variant="secondary" className="text-[10px] font-normal">
-                                {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
-                              </Badge>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </TabsContent>
-            )}
             <TabsContent value="overrides">
               {data.overrides && data.overrides.length > 0 ? (
                 <div className="overflow-x-auto">
@@ -1638,20 +1622,26 @@ function NodeDetailPanel({
                   return names && typeof names === "object" && Object.keys(names).length > 0;
                 }).length;
                 const categories = [
-                  { label: "Courses", count: allCourses.length, detail: `${allCourses.length} courses in backend` },
-                  { label: "Course colours", count: colorCount, detail: `${colorCount} of ${allCourses.length} have synced colours` },
-                  { label: "Custom course names", count: customNameCount, detail: `${customNameCount} of ${allCourses.length} have custom names` },
-                  { label: "Assignments", count: allAssignments.length, detail: `${allAssignments.length} assignments in backend` },
+                  { label: "Courses", count: allCourses.length, enabled: device.sync_courses !== false, detail: `${allCourses.length} courses in backend` },
+                  { label: "Course colours", count: colorCount, enabled: device.sync_course_colors !== false, detail: `${colorCount} of ${allCourses.length} have synced colours` },
+                  { label: "Custom course names", count: customNameCount, enabled: device.sync_course_names !== false, detail: `${customNameCount} of ${allCourses.length} have custom names` },
+                  { label: "Assignments", count: allAssignments.length, enabled: device.sync_assignments !== false, detail: `${allAssignments.length} assignments in backend` },
                 ];
-                return categories.map((cat) => (
+                return categories.map((cat) => {
+                  const dotColor = cat.count > 0
+                    ? cat.enabled ? "bg-green-500" : "bg-orange-400"
+                    : "bg-muted-foreground/30";
+                  const statusNote = cat.count > 0 && !cat.enabled ? " · sync to other devices off" : "";
+                  return (
                   <div key={cat.label} className="flex items-center gap-3 rounded-md border border-border p-3">
-                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${cat.count > 0 ? "bg-green-500" : "bg-muted-foreground/30"}`} />
+                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${dotColor}`} />
                     <div className="min-w-0">
                       <div className="text-sm font-medium">{cat.label}</div>
-                      <div className="text-xs text-muted-foreground">{cat.detail}</div>
+                      <div className="text-xs text-muted-foreground">{cat.detail}{statusNote}</div>
                     </div>
                   </div>
-                ));
+                  );
+                });
               })()}
             </div>
           </TabsContent>
@@ -1908,6 +1898,10 @@ function SyncTab() {
       isInitialLoad.current = false;
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
       setLatestId(d.latest_id);
+      setTimeout(() => {
+        const c = logContainerRef.current;
+        if (c) c.scrollTop = c.scrollHeight;
+      }, 50);
     }
   }, [logsQuery.data]);
 
@@ -1918,6 +1912,7 @@ function SyncTab() {
       try { localStorage.setItem("sync-student-id", trimmed); localStorage.setItem("sync-query", trimmed); } catch {}
       setLogEntries([]);
       setLatestId(0);
+      isInitialLoad.current = true;
       setSelectedNode(null);
     }
   };

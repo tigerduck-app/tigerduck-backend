@@ -265,8 +265,21 @@ async def update_device_preferences(
     ).scalar_one_or_none()
     if device is None:
         raise HTTPException(status_code=404, detail="device_not_found")
-    device.server_push_enabled = payload.server_push_enabled
+    if payload.server_push_enabled is not None:
+        device.server_push_enabled = payload.server_push_enabled
+    if payload.sync_courses is not None:
+        device.sync_courses = payload.sync_courses
+    if payload.sync_course_colors is not None:
+        device.sync_course_colors = payload.sync_course_colors
+    if payload.sync_course_names is not None:
+        device.sync_course_names = payload.sync_course_names
+    if payload.sync_assignments is not None:
+        device.sync_assignments = payload.sync_assignments
     return DevicePreferencesV3Response(
         device_id=device.client_device_id,
         server_push_enabled=device.server_push_enabled,
+        sync_courses=device.sync_courses,
+        sync_course_colors=device.sync_course_colors,
+        sync_course_names=device.sync_course_names,
+        sync_assignments=device.sync_assignments,
     )

@@ -299,7 +299,8 @@ async def sync_events(
 
         devices = await conn.fetch(
             "SELECT id, client_device_id, platform, "
-            "app_version, os_version, last_seen_at, last_login_at, created_at "
+            "app_version, os_version, last_seen_at, last_login_at, created_at, "
+            "sync_courses, sync_course_colors, sync_course_names, sync_assignments "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
             uid,

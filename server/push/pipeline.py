@@ -186,11 +186,10 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     for regular pushes, push_to_start tokens for schedule). Idempotent —
     a stale-recovered job re-materializes onto the same unique index.
 
-    Skips devices that are currently foregrounded (polling ``/sync/revision``
-    within the last 20 s) and macOS devices (foreground-only, no background
-    push).
+    Skips macOS devices (foreground-only, no background push). Non-macOS
+    devices always receive the push — collapse keys deduplicate on the
+    device side, and foreground devices simply ignore redundant syncs.
     """
-    from server.sync.poll_tracker import is_foreground
 
     now = datetime.now(UTC)
     target_token_kind = (
@@ -214,12 +213,8 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     if not rows:
         return
     values = []
-    skipped_fg = 0
     for token, device in rows:
         if device.platform == "macos":
-            continue
-        if is_foreground(str(job.user_id), device.client_device_id):
-            skipped_fg += 1
             continue
         values.append(
             {
@@ -233,8 +228,6 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
                 "scope_key": token.scope_key,
             }
         )
-    if skipped_fg:
-        logger.debug("push.skipped_foreground", job_id=job.id, count=skipped_fg)
     if not values:
         return
     await session.execute(
