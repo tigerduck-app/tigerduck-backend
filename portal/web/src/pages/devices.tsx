@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
-import { CloudOff, Plus, Search, Smartphone, Trash2 } from "lucide-react";
+import { Plus, Search, Smartphone, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -305,16 +305,11 @@ function Row({
       <TableCell className="font-mono text-xs">{d.user_id || "—"}</TableCell>
       <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
       <TableCell className="text-xs">{d.os_version ?? "—"}</TableCell>
-      <TableCell className="space-x-1">
+      <TableCell>
         {d.server_push_enabled ? (
           <Badge variant="success">on</Badge>
         ) : (
           <Badge variant="muted">off</Badge>
-        )}
-        {d.cloud_sync_enabled === false && (
-          <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground">
-            <CloudOff className="h-2.5 w-2.5" />device only
-          </Badge>
         )}
       </TableCell>
       <TableCell className="space-x-1">

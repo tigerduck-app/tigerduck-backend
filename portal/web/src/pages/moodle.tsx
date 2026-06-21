@@ -1095,6 +1095,11 @@ function TopologyOverview({
                         Offline
                       </Badge>
                     )}
+                    {device.cloud_sync_enabled === false && (
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground">
+                        <CloudOff className="h-2.5 w-2.5" />device only
+                      </Badge>
+                    )}
                     {isMacOs && (
                       <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground">
                         No push
