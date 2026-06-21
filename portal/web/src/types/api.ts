@@ -126,6 +126,7 @@ export type DeviceRow = {
   has_fcm_token: boolean;
   app_version: string | null;
   os_version: string | null;
+  cloud_sync_enabled: boolean | null;
   created_at: string;
   updated_at: string;
 };

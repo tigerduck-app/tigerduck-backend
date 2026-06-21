@@ -42,6 +42,7 @@ WITH dev AS (
         ud.client_device_id                    AS client_device_id,
         ud.app_version                         AS app_version,
         ud.os_version                          AS os_version,
+        ud.cloud_sync_enabled                  AS cloud_sync_enabled,
         u.student_id                           AS student_id,
         (
             SELECT t.bundle_id FROM device_push_tokens t
@@ -115,6 +116,7 @@ def _row_to_device(r) -> dict:
         "has_fcm_token": r["has_fcm_token"],
         "app_version": r["app_version"] or None,
         "os_version": r["os_version"] or None,
+        "cloud_sync_enabled": r["cloud_sync_enabled"],
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
     }
