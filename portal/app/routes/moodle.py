@@ -173,6 +173,43 @@ async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depend
     return {"retried": count, "notified": notified}
 
 
+@router.post("/retry-all-jobs")
+async def retry_all_jobs(req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)):
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE sync_jobs
+            SET status = 'pending',
+                run_after = now(),
+                attempts = 0,
+                locked_by = NULL,
+                locked_at = NULL,
+                last_error = NULL
+            WHERE job_type IN ('moodle_assignments', 'ntust_courses')
+              AND status IN ('active', 'disabled', 'failed')
+        """)
+        count = int(result.split()[-1]) if result else 0
+
+        notified = 0
+        if req.notify and count > 0:
+            notified_result = await conn.execute("""
+                INSERT INTO push_jobs (user_id, dedupe_key, channel, scenario, fire_at, payload)
+                SELECT DISTINCT sj.user_id,
+                       'system:moodle_expired:' || sj.user_id::text,
+                       'system',
+                       'reauth_required',
+                       now(),
+                       '{"reason": "operator_retry", "provider": "ntust_sso"}'::jsonb
+                FROM sync_jobs sj
+                WHERE sj.job_type IN ('moodle_assignments', 'ntust_courses')
+                  AND sj.status = 'pending'
+                  AND sj.attempts = 0
+                ON CONFLICT DO NOTHING
+            """)
+            notified = int(notified_result.split()[-1]) if notified_result else 0
+
+    return {"retried": count, "notified": notified}
+
+
 @router.get("/jobs")
 async def list_moodle_jobs(
     status: str | None = Query(default=None),
@@ -300,7 +337,8 @@ async def sync_events(
         devices = await conn.fetch(
             "SELECT id, client_device_id, platform, "
             "app_version, os_version, last_seen_at, last_login_at, created_at, "
-            "sync_courses, sync_course_colors, sync_course_names, sync_assignments "
+            "sync_courses, sync_course_colors, sync_course_names, sync_assignments, "
+            "cloud_sync_enabled "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
             uid,

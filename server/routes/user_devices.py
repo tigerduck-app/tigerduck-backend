@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import delete as sa_delete, func, select, update
 
 from server.models import DeviceRegistration
 
@@ -275,6 +275,11 @@ async def update_device_preferences(
         device.sync_course_names = payload.sync_course_names
     if payload.sync_assignments is not None:
         device.sync_assignments = payload.sync_assignments
+    if payload.cloud_sync_enabled is not None:
+        device.cloud_sync_enabled = payload.cloud_sync_enabled
+
+    await _cleanup_orphaned_sync_data(session, auth.user_id, device.id)
+
     return DevicePreferencesV3Response(
         device_id=device.client_device_id,
         server_push_enabled=device.server_push_enabled,
@@ -282,4 +287,63 @@ async def update_device_preferences(
         sync_course_colors=device.sync_course_colors,
         sync_course_names=device.sync_course_names,
         sync_assignments=device.sync_assignments,
+        cloud_sync_enabled=device.cloud_sync_enabled,
     )
+
+
+async def _cleanup_orphaned_sync_data(
+    session: "AsyncSession", user_id, exclude_device_id
+) -> None:
+    """Delete user sync data when no remaining device needs it.
+
+    Called after a device preference update. For each sync category,
+    if no other active device still has that category enabled, the
+    corresponding backend data is removed so the portal shows
+    'Device only' and stale rows don't accumulate.
+    """
+    from server.sync.models import (
+        UserAssignment,
+        UserAssignmentOverride,
+        UserCourse,
+        UserCourseOverride,
+        UserCourseTombstone,
+    )
+
+    other_devices = (
+        await session.execute(
+            select(UserDevice).where(
+                UserDevice.user_id == user_id,
+                UserDevice.id != exclude_device_id,
+                UserDevice.deleted_at.is_(None),
+                UserDevice.cloud_sync_enabled.is_(True),
+            )
+        )
+    ).scalars().all()
+
+    any_courses = any(d.sync_courses for d in other_devices)
+    any_assignments = any(d.sync_assignments for d in other_devices)
+
+    if not any_courses:
+        await session.execute(
+            sa_delete(UserCourseOverride).where(
+                UserCourseOverride.user_id == user_id
+            )
+        )
+        await session.execute(
+            sa_delete(UserCourseTombstone).where(
+                UserCourseTombstone.user_id == user_id
+            )
+        )
+        await session.execute(
+            sa_delete(UserCourse).where(UserCourse.user_id == user_id)
+        )
+
+    if not any_assignments:
+        await session.execute(
+            sa_delete(UserAssignmentOverride).where(
+                UserAssignmentOverride.user_id == user_id
+            )
+        )
+        await session.execute(
+            sa_delete(UserAssignment).where(UserAssignment.user_id == user_id)
+        )

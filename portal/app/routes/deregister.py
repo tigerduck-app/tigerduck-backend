@@ -34,7 +34,7 @@ async def deregister_student(
 
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, student_id, display_name, created_at FROM users WHERE student_id = $1",
+            "SELECT id, student_id, created_at FROM users WHERE student_id = $1",
             student_id,
         )
         if row is None:
@@ -44,7 +44,7 @@ async def deregister_student(
         user_id = row["id"]
 
         devices = await conn.fetch(
-            "SELECT id, client_device_id, platform, app_version, last_seen_at "
+            "SELECT id, client_device_id, platform, app_version, os_version, last_seen_at "
             "FROM user_devices WHERE user_id = $1",
             user_id,
         )
@@ -54,6 +54,7 @@ async def deregister_student(
                 "client_device_id": d["client_device_id"],
                 "platform": d["platform"],
                 "app_version": d["app_version"],
+                "os_version": d["os_version"],
                 "last_seen_at": d["last_seen_at"].isoformat() if d["last_seen_at"] else None,
             }
             for d in devices
@@ -124,7 +125,6 @@ async def deregister_student(
         "timestamp": datetime.now(UTC).isoformat(),
         "student_id": student_id,
         "user_id": str(user_id),
-        "display_name": row["display_name"],
         "account_created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "devices": device_list,
         "deleted_counts": counts,

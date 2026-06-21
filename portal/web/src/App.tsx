@@ -7,7 +7,7 @@ import { AnnouncementPage } from "@/pages/announcement";
 import { CustomPushPage } from "@/pages/custom-push";
 import { DevicesPage } from "@/pages/devices";
 import { ListsPage, ListDetailPage } from "@/pages/lists";
-import { MoodlePage } from "@/pages/moodle";
+import { MoodlePage, DataInspectionPage } from "@/pages/moodle";
 import { DeregisterPage } from "@/pages/deregister";
 
 export function App() {
@@ -23,6 +23,7 @@ export function App() {
         <Route path="lists" element={<ListsPage />} />
         <Route path="lists/:id" element={<ListDetailPage />} />
         <Route path="moodle" element={<MoodlePage />} />
+        <Route path="inspect" element={<DataInspectionPage />} />
         <Route path="deregister" element={<DeregisterPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

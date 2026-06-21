@@ -4,11 +4,11 @@ import {
   Activity,
   GraduationCap,
   HardDrive,
-  Layers,
-  List,
   Menu,
   Megaphone,
+  Monitor,
   ScrollText,
+  Search,
   Send,
   UserMinus,
   X,
@@ -29,12 +29,15 @@ type NavItem = {
 const NAV: NavItem[] = [
   { to: "/", label: "Status", icon: Activity },
   { to: "/logs", label: "Logs", icon: ScrollText },
-  { to: "/backup", label: "Backup", icon: HardDrive },
   { to: "/announcement", label: "Announcement", icon: Megaphone },
   { to: "/custom-push", label: "Custom push", icon: Send },
-  { to: "/devices", label: "Devices", icon: List },
-  { to: "/lists", label: "Lists", icon: Layers },
+  { to: "/devices", label: "Devices", icon: Monitor },
   { to: "/moodle", label: "Moodle", icon: GraduationCap },
+  { to: "/inspect", label: "Data Inspection", icon: Search },
+];
+
+const NAV_BOTTOM: NavItem[] = [
+  { to: "/backup", label: "Backup", icon: HardDrive },
   { to: "/deregister", label: "Deregister", icon: UserMinus },
 ];
 
@@ -42,6 +45,7 @@ export function Layout() {
   const env = useEnv();
   const isDev = env.data?.env === "development";
   const items = NAV.filter((n) => !n.devOnly || isDev);
+  const bottomItems = NAV_BOTTOM.filter((n) => !n.devOnly || isDev);
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
     try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
   });
@@ -95,7 +99,27 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto border-t border-border px-3 py-4">
+        <nav className={`mt-auto flex flex-col gap-0.5 border-t border-border py-3 ${sidebarCollapsed ? "px-1" : "px-2"}`}>
+          {bottomItems.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              title={sidebarCollapsed ? item.label : undefined}
+              className={({ isActive }) =>
+                cn(
+                  "flex items-center rounded-md text-sm font-medium transition-colors",
+                  sidebarCollapsed ? "justify-center px-2 py-2" : "gap-2.5 px-3 py-2",
+                  "text-muted-foreground hover:bg-accent hover:text-foreground",
+                  isActive && "bg-accent text-foreground",
+                )
+              }
+            >
+              <item.icon className="h-4 w-4 shrink-0" />
+              {!sidebarCollapsed && item.label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="border-t border-border px-3 py-4">
           {!sidebarCollapsed && (
             <div className="space-y-1.5 px-2 text-xs text-foreground/80 mb-3">
               <div className="flex items-center gap-2">
@@ -127,7 +151,7 @@ export function Layout() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <MobileNav items={items} />
+        <MobileNav items={[...items, ...bottomItems]} />
         <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6" style={{ overflowAnchor: "none" }}>
           <div className="mx-auto w-full space-y-6">
             <Outlet />

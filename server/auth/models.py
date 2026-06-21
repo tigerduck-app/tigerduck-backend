@@ -270,6 +270,9 @@ class UserDevice(Base):
     sync_assignments: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )
+    cloud_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

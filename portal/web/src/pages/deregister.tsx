@@ -22,13 +22,13 @@ type DeregisterReport = {
   timestamp: string;
   student_id: string;
   user_id: string;
-  display_name: string | null;
   account_created_at: string | null;
   devices: {
     device_id: string;
     client_device_id: string;
     platform: string;
     app_version: string | null;
+    os_version: string | null;
     last_seen_at: string | null;
   }[];
   deleted_counts: Record<string, number | string>;
@@ -131,8 +131,6 @@ export function DeregisterPage() {
                 <span className="font-mono">{lastReport.student_id}</span>
                 <span className="text-muted-foreground">User ID</span>
                 <span className="font-mono text-xs">{lastReport.user_id}</span>
-                <span className="text-muted-foreground">Display name</span>
-                <span>{lastReport.display_name ?? "—"}</span>
                 <span className="text-muted-foreground">Account created</span>
                 <span>{lastReport.account_created_at ? new Date(lastReport.account_created_at).toLocaleString() : "—"}</span>
                 <span className="text-muted-foreground">Deleted at</span>
@@ -148,8 +146,8 @@ export function DeregisterPage() {
                         key={d.device_id}
                         className="flex items-center gap-3 rounded bg-background px-2 py-1 text-xs"
                       >
-                        <span className="font-mono text-muted-foreground w-20 shrink-0 truncate">
-                          {d.platform}
+                        <span className="font-mono text-muted-foreground shrink-0">
+                          {d.platform}{d.os_version ? ` ${d.os_version}` : ""}
                         </span>
                         <span className="truncate">
                           {d.client_device_id}

@@ -43,6 +43,7 @@ import type {
   DevicesPayload,
   DeviceRow,
 } from "@/types/api";
+import { ListsPage } from "@/pages/lists";
 
 // Sub-tab key → matcher on the device row. v3 reports platform
 // `ios`/`ipados` (mapped to device_class iphone/ipad server-side);
@@ -209,6 +210,7 @@ export function DevicesPage() {
               );
             })}
             <TabsTrigger value="stats">Statistics</TabsTrigger>
+            <TabsTrigger value="lists">Lists</TabsTrigger>
           </TabsList>
           {TABS.map((t) => {
             const rows = q.data!.items.filter(t.match);
@@ -224,6 +226,9 @@ export function DevicesPage() {
           })}
           <TabsContent value="stats">
             <DeviceStats items={q.data.items} />
+          </TabsContent>
+          <TabsContent value="lists">
+            <ListsPage embedded />
           </TabsContent>
         </Tabs>
       )}

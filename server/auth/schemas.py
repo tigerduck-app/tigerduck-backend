@@ -102,6 +102,7 @@ class DevicePreferencesV3Request(BaseModel):
     sync_course_colors: bool | None = None
     sync_course_names: bool | None = None
     sync_assignments: bool | None = None
+    cloud_sync_enabled: bool | None = None
 
 
 class DevicePreferencesV3Response(BaseModel):
@@ -111,6 +112,7 @@ class DevicePreferencesV3Response(BaseModel):
     sync_course_colors: bool
     sync_course_names: bool
     sync_assignments: bool
+    cloud_sync_enabled: bool
 
 
 class ScheduleScenario(str, Enum):

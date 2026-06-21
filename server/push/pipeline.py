@@ -209,12 +209,21 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
+
+    is_sync_trigger = job.scenario == "sync_trigger"
+    source_device_id: str | None = None
+    if is_sync_trigger:
+        token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
+        source_device_id = (job.payload or {}).get("source_device_id")
+
     rows = (await session.execute(token_query)).all()
     if not rows:
         return
     values = []
     for token, device in rows:
         if device.platform == "macos":
+            continue
+        if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
             continue
         values.append(
             {

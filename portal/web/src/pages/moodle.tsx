@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
 import {
-  AlertCircle,
   Check,
   CheckCircle2,
+  CloudOff,
   Loader2,
   Minus,
   Monitor,
@@ -16,7 +15,6 @@ import {
   Search,
   Server,
   Smartphone,
-  Users,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -59,19 +57,6 @@ type MoodleStatus = {
   };
 };
 
-type Student = {
-  student_id: string;
-  credential_status: string;
-  last_auth_success_at: string | null;
-  last_auth_failure_at: string | null;
-  last_auth_error: string | null;
-  updated_at: string;
-};
-
-type StudentsResponse = {
-  counts: { valid: number; expired: number };
-  students: Student[];
-};
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -79,29 +64,25 @@ function fmt(iso: string | null): string {
 }
 
 export function MoodlePage() {
-  const [activeTab, setActiveTab] = useHashTab("actions");
   return (
     <>
       <PageHeader
-        title="Moodle Sync"
+        title="Moodle"
         description="Manage server-side Moodle sync jobs"
       />
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="actions">Actions</TabsTrigger>
-          <TabsTrigger value="lists">Lists</TabsTrigger>
-          <TabsTrigger value="sync">Sync</TabsTrigger>
-        </TabsList>
-        <TabsContent value="actions">
-          <ActionsTab />
-        </TabsContent>
-        <TabsContent value="lists">
-          <ListsTab />
-        </TabsContent>
-        <TabsContent value="sync">
-          <SyncTab />
-        </TabsContent>
-      </Tabs>
+      <ActionsTab />
+    </>
+  );
+}
+
+export function DataInspectionPage() {
+  return (
+    <>
+      <PageHeader
+        title="Data Inspection"
+        description="Inspect per-student sync state, device data, and live logs"
+      />
+      <SyncTab />
     </>
   );
 }
@@ -136,6 +117,23 @@ function ActionsTab() {
     onSuccess: () => {
       toast.success("Moodle sync resumed");
       qc.invalidateQueries({ queryKey: ["moodle-status"] });
+    },
+  });
+
+  const retryAllMut = useMutation({
+    mutationFn: () =>
+      fetch("/api/moodle/retry-all-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notify: notifyOnRetry }),
+      }).then((r) => r.json()),
+    onSuccess: (data: { retried: number; notified: number }) => {
+      const msg = data.notified
+        ? `Re-queued ${data.retried} job(s), notified ${data.notified} user(s)`
+        : `Re-queued ${data.retried} job(s)`;
+      toast.success(msg);
+      qc.invalidateQueries({ queryKey: ["moodle-status"] });
+      qc.invalidateQueries({ queryKey: ["moodle-students"] });
     },
   });
 
@@ -235,7 +233,6 @@ function ActionsTab() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3 border-t pt-4">
-            <span className="text-sm font-medium">Retry all failed</span>
             <div className="flex items-center gap-2">
               <Checkbox
                 id="notify-retry"
@@ -249,15 +246,26 @@ function ActionsTab() {
                 Send expire notification to users
               </label>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => retryMut.mutate()}
-              disabled={retryMut.isPending}
-            >
-              <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              Retry all
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => retryAllMut.mutate()}
+                disabled={retryAllMut.isPending}
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Retry all
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => retryMut.mutate()}
+                disabled={retryMut.isPending}
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Retry all failed
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -467,116 +475,6 @@ function JobsTable() {
   );
 }
 
-function ListsTab() {
-  const [credFilter, setCredFilter] = useState<string>("all");
-
-  const students = useQuery<StudentsResponse>({
-    queryKey: ["moodle-students", credFilter],
-    queryFn: () => {
-      const params = new URLSearchParams();
-      if (credFilter !== "all") params.set("credential_filter", credFilter);
-      return fetch(`/api/moodle/students?${params}`).then((r) => r.json());
-    },
-    refetchInterval: 15_000,
-  });
-
-  const c = students.data?.counts;
-
-  return (
-    <Section>
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Users className="h-5 w-5" />
-            Students
-          </CardTitle>
-          <CardDescription>
-            <div className="flex items-center gap-3">
-              {c && (
-                <div className="flex gap-2 text-sm">
-                  <Badge
-                    variant="default"
-                    className="bg-green-500/10 text-green-600"
-                  >
-                    {c.valid} valid
-                  </Badge>
-                  <Badge
-                    variant="default"
-                    className="bg-red-500/10 text-red-600"
-                  >
-                    {c.expired} expired
-                  </Badge>
-                  <Badge variant="outline">
-                    {c.valid + c.expired} total
-                  </Badge>
-                </div>
-              )}
-              <Select value={credFilter} onValueChange={setCredFilter}>
-                <SelectTrigger className="w-32">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="valid">Valid</SelectItem>
-                  <SelectItem value="expired">Expired</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto"><Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Student ID</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Last success</TableHead>
-                <TableHead>Last failure</TableHead>
-                <TableHead>Error</TableHead>
-                <TableHead>Updated</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {students.data?.students.map((s) => (
-                <TableRow key={s.student_id}>
-                  <TableCell className="font-mono text-xs">
-                    {s.student_id}
-                  </TableCell>
-                  <TableCell>
-                    <CredentialBadge status={s.credential_status} />
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {fmt(s.last_auth_success_at)}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {fmt(s.last_auth_failure_at)}
-                  </TableCell>
-                  <TableCell className="max-w-[180px] truncate text-xs text-destructive">
-                    {s.last_auth_error ?? "—"}
-                  </TableCell>
-                  <TableCell className="text-xs">
-                    {fmt(s.updated_at)}
-                  </TableCell>
-                </TableRow>
-              ))}
-              {students.data?.students.length === 0 && (
-                <TableRow>
-                  <TableCell
-                    colSpan={6}
-                    className="text-center text-muted-foreground"
-                  >
-                    No students found
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table></div>
-        </CardContent>
-      </Card>
-    </Section>
-  );
-}
-
 type SyncJob = {
   id: number;
   job_type: string;
@@ -668,6 +566,7 @@ type SyncDevice = {
   sync_course_colors: boolean | null;
   sync_course_names: boolean | null;
   sync_assignments: boolean | null;
+  cloud_sync_enabled: boolean | null;
 };
 
 type PushJobRow = {
@@ -876,7 +775,10 @@ function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices
                 {devices.map((d) => (
                   <TableRow key={d.id}>
                     <TableCell>
-                      <Badge variant="outline">{d.platform}</Badge>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant="outline">{d.platform}</Badge>
+                        {d.cloud_sync_enabled === false && <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground"><CloudOff className="h-2.5 w-2.5" />local</Badge>}
+                      </div>
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground break-all">
                       {d.client_device_id}
@@ -1454,8 +1356,8 @@ function NodeDetailPanel({
     );
   }
 
-  // Device selected
-  const device = selectedNode.device;
+  // Device selected — use fresh data from the latest poll, not the stale snapshot in selectedNode
+  const device = (data.devices ?? []).find((d) => d.id === selectedNode.device.id) ?? selectedNode.device;
   const deviceDeliveries = (data.push_deliveries ?? []).filter(
     (d) => d.device_id === device.id
   );
@@ -1476,6 +1378,7 @@ function NodeDetailPanel({
           <span className="font-mono text-xs text-muted-foreground">
             {device.client_device_id.slice(0, 12)}
           </span>
+          {device.cloud_sync_enabled === false && <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground"><CloudOff className="h-2.5 w-2.5" />local</Badge>}
         </CardTitle>
         <CardDescription>
           {device.app_version && `v${device.app_version}`}
@@ -1497,7 +1400,15 @@ function NodeDetailPanel({
             <TabsTrigger value="info">Info</TabsTrigger>
           </TabsList>
           <TabsContent value="data">
-            {!coursesData ? (
+            {device.cloud_sync_enabled === false ? (
+              <div className="flex items-center gap-3 rounded-md border border-border p-4 my-2">
+                <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">Device only</div>
+                  <div className="text-xs text-muted-foreground">Cloud Sync is off — data on this device is not tracked by the server</div>
+                </div>
+              </div>
+            ) : !coursesData ? (
               <div className="flex items-center justify-center py-6 text-muted-foreground">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
@@ -1615,7 +1526,15 @@ function NodeDetailPanel({
           </TabsContent>
           <TabsContent value="synced-list">
             <div className="space-y-2 py-2">
-              {(() => {
+              {device.cloud_sync_enabled === false ? (
+                <div className="flex items-center gap-3 rounded-md border border-border p-3">
+                  <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Device local only</div>
+                    <div className="text-xs text-muted-foreground">Cloud Sync is off — this device is not participating in cross-device sync</div>
+                  </div>
+                </div>
+              ) : (() => {
                 const colorCount = allCourses.filter((c) => c.color_hex).length;
                 const customNameCount = allCourses.filter((c) => {
                   const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
@@ -1883,8 +1802,14 @@ function SyncTab() {
 
       if (!isInitialLoad.current) {
         const ids = new Set(d.entries.map((e) => e.id));
-        setNewLogIds(ids);
-        const timer = setTimeout(() => setNewLogIds(new Set()), 2000);
+        setNewLogIds((prev) => new Set([...prev, ...ids]));
+        setTimeout(() => {
+          setNewLogIds((prev) => {
+            const next = new Set(prev);
+            ids.forEach((id) => next.delete(id));
+            return next;
+          });
+        }, 2000);
         setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
         setLatestId(d.latest_id);
         if (wasAtBottom && logContainerRef.current) {
@@ -1893,7 +1818,6 @@ function SyncTab() {
             if (c) c.scrollTop = c.scrollHeight;
           }, 50);
         }
-        return () => clearTimeout(timer);
       }
       isInitialLoad.current = false;
       setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
@@ -2159,19 +2083,3 @@ function RunStatusBadge({ status }: { status: string }) {
   );
 }
 
-function CredentialBadge({ status }: { status: string }) {
-  if (status === "active") {
-    return (
-      <Badge variant="default" className="bg-green-500/10 text-green-600">
-        <CheckCircle2 className="mr-1 h-3 w-3" />
-        Valid
-      </Badge>
-    );
-  }
-  return (
-    <Badge variant="destructive">
-      <AlertCircle className="mr-1 h-3 w-3" />
-      {status}
-    </Badge>
-  );
-}
