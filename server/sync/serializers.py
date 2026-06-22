@@ -50,11 +50,15 @@ def course_to_dict(c: UserCourse) -> dict:
 
 
 def course_override_to_dict(
-    o: UserCourseOverride, *, moodle_id: str | None = None
+    o: UserCourseOverride,
+    *,
+    moodle_id: str | None = None,
+    course_no: str | None = None,
 ) -> dict:
     return {
         "user_course_id": o.user_course_id,
         "moodle_id": moodle_id,
+        "course_no": course_no,
         "custom_names": o.custom_names or {},
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
         "color_hex": o.color_hex,
