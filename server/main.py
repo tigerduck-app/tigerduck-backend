@@ -13,7 +13,9 @@ from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
 import structlog  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import Depends, FastAPI  # noqa: E402
+
+from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
 from server import __version__
@@ -218,7 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
-    @app.post("/push-tick", tags=["meta"])
+    @app.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
     async def force_push_tick() -> dict:
         worker = getattr(app.state, "push_worker", None)
         if worker is None:
