@@ -310,7 +310,11 @@ async def _cleanup_orphaned_sync_data(
     Called after a device preference update (post-flush). Checks ALL
     active cloud-enabled devices for the user — the current device's
     updated values are already flushed to the DB at this point.
+
+    After deleting, bumps the sync revision so clients see that data
+    was removed and don't keep stale local copies.
     """
+    from server.sync.changelog import append_change
     from server.sync.models import (
         UserAssignment,
         UserAssignmentOverride,
@@ -331,28 +335,43 @@ async def _cleanup_orphaned_sync_data(
 
     any_courses = any(d.sync_courses for d in active_devices)
     any_assignments = any(d.sync_assignments for d in active_devices)
+    deleted_any = False
 
     if not any_courses:
-        await session.execute(
+        r = await session.execute(
             sa_delete(UserCourseOverride).where(
                 UserCourseOverride.user_id == user_id
             )
         )
-        await session.execute(
+        deleted_any = deleted_any or r.rowcount > 0
+        r = await session.execute(
             sa_delete(UserCourseTombstone).where(
                 UserCourseTombstone.user_id == user_id
             )
         )
-        await session.execute(
+        deleted_any = deleted_any or r.rowcount > 0
+        r = await session.execute(
             sa_delete(UserCourse).where(UserCourse.user_id == user_id)
         )
+        deleted_any = deleted_any or r.rowcount > 0
 
     if not any_assignments:
-        await session.execute(
+        r = await session.execute(
             sa_delete(UserAssignmentOverride).where(
                 UserAssignmentOverride.user_id == user_id
             )
         )
-        await session.execute(
+        deleted_any = deleted_any or r.rowcount > 0
+        r = await session.execute(
             sa_delete(UserAssignment).where(UserAssignment.user_id == user_id)
+        )
+        deleted_any = deleted_any or r.rowcount > 0
+
+    if deleted_any:
+        await append_change(
+            session,
+            user_id=user_id,
+            entity_type="sync_cleanup",
+            entity_id=str(user_id),
+            operation="tombstone",
         )
