@@ -472,6 +472,19 @@ async def upload_courses(
             override.color_hex_updated_at = now
             override.color_hex_device_id = auth.device_id
             overrides_applied += 1
+            logger.debug(
+                "sync.course_color_set",
+                course_key=item.course_key,
+                color_hex=item.color_hex,
+                device_id=str(auth.device_id),
+            )
+        elif override.color_hex != item.color_hex:
+            logger.debug(
+                "sync.course_color_skipped",
+                course_key=item.course_key,
+                server_hex=override.color_hex,
+                client_hex=item.color_hex,
+            )
 
     course_nos = [c.course_no for c in payload.courses]
     await log_sync(

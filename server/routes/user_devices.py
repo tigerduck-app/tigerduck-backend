@@ -68,6 +68,13 @@ async def register_device(
     if payload.os_version is not None:
         device.os_version = payload.os_version
     if payload.cloud_sync_enabled is not None:
+        if device.cloud_sync_enabled != payload.cloud_sync_enabled:
+            logger.info(
+                "device.cloud_sync_reconciled",
+                device_id=str(device.id),
+                old=device.cloud_sync_enabled,
+                new=payload.cloud_sync_enabled,
+            )
         device.cloud_sync_enabled = payload.cloud_sync_enabled
     device.deleted_at = None
     device.last_seen_at = now
