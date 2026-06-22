@@ -67,6 +67,8 @@ async def register_device(
         device.app_version = payload.app_version
     if payload.os_version is not None:
         device.os_version = payload.os_version
+    if payload.cloud_sync_enabled is not None:
+        device.cloud_sync_enabled = payload.cloud_sync_enabled
     device.deleted_at = None
     device.last_seen_at = now
     await session.flush()

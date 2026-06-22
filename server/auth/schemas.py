@@ -75,6 +75,7 @@ class PushTokenIn(BaseModel):
 
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
+    cloud_sync_enabled: bool | None = None
 
 
 class DeviceRegisterV3Response(BaseModel):
