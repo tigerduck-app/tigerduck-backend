@@ -141,7 +141,7 @@ async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_
             SyncJob.user_id == user_id,
             SyncJob.status == SyncJobStatus.pending.value,
         )
-        .values(run_after=run_after, attempts=0)
+        .values(run_after=run_after)
     )
 
 
