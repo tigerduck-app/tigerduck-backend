@@ -16,7 +16,7 @@
 
 ## Overview
 
-TigerDuck Backend is the server side of the [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) iOS app. It runs at `api.tigerduck.app` and is responsible for five things:
+TigerDuck Backend is the server side of the [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) app (iOS / Android). It runs at `api.tigerduck.app` and is responsible for five things:
 
 - 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (theft detection revokes the whole chain), AES-256-GCM credential storage, user device & push-token management
 - 🔄 **User data sync (v3)** — Multi-device sync of courses / assignments / settings / bulletin subscriptions: initial client upload + per-user changelog incremental pulls, with the server periodically fetching authoritative Moodle assignment updates
@@ -55,9 +55,9 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 📲 Push (`server/push/`)
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
 - **Reminder sources** — Assignment reminders (24h / 2h before due, per-user notification settings) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead); submitting / dropping / schedule changes cancel stale reminders
-- **APNs** — JWT auth, Push-to-Start, Live Activity update / end; logged-in devices prefer the v3-registered update token (the v2 table remains the read fallback)
+- **APNs** — JWT auth, Push-to-Start, Live Activity update / end
 - **FCM** — Batched fan-out, automatic cleanup on `UNREGISTERED` / `SENDER_ID_MISMATCH`
-- **Auth** — v3 routes use Bearer JWTs; v2 mutating routes (device registration, subscription writes) require `X-Shared-Secret`; read routes (bulletin list / detail / taxonomy) are public
+- **Auth** — All v3 routes use `Authorization: Bearer <JWT>`; admin endpoints use `X-Shared-Secret`; bulletin reads are public
 
 ### ⏰ Scheduler
 - **Single worker** — APScheduler runs inside the FastAPI lifespan; replica count is locked at 1. Multiple replicas would double-send (see [`docs/scheduler.md`](docs/scheduler.md)).
@@ -188,50 +188,103 @@ TIGERDUCK_LLM_MODEL=gemma-4-E4B-it-GGUF
 
 On macOS, `deploy/launchd/ai.tigerduck.llm.plist` wraps llama-server as a launchd service for long-running deployments.
 
-## API Endpoints (v2)
+## Retired APIs
 
-| Method | Path | Purpose | Auth |
-|---|---|---|---|
-| `GET` | `/v2/health` | liveness | none |
-| `POST` | `/v2/devices` | Device registration (APNs token, `platform=apple` / `android`) | shared secret |
-| `GET` | `/v2/bulletins` | Bulletin list (cursor pagination, newest first) | none |
-| `GET` | `/v2/bulletins/{id}` | Bulletin detail | none |
-| `GET` | `/v2/bulletins/taxonomy` | org / tag label mapping | none |
-| `GET/PUT` | `/v2/devices/{id}/subscriptions` | Subscription rules read/write | shared secret |
-| `PATCH` | `/v2/devices/{id}/preferences` | Device preferences (e.g. `server_push_enabled`) | shared secret |
-| `POST` | `/v2/live-activities/start-tokens` | Live Activity push-to-start token upload | shared secret |
-| `POST` | `/v2/schedule/sync` | Class-table sync (feeds the Live Activity scheduler) | shared secret |
-| `POST` | `/v2/custom-push/preview` | Preview custom-push payload before sending | shared secret |
-| `POST` | `/v2/custom-push` | Dispatch a custom push to a device or device list | shared secret |
-| `GET` | `/v2/custom-push/recent` | Recent custom-push dispatch history | shared secret |
-| `GET/POST` | `/v2/device-lists` | List / create named device cohorts | shared secret |
-| `GET/PATCH/DELETE` | `/v2/device-lists/{id}` | Read / update / delete a device list | shared secret |
-| `GET/POST/DELETE` | `/v2/device-lists/{id}/members` | Manage list membership | shared secret |
+`/v1/*` and `/v2/*` are fully retired — every request returns **410 Gone**. Legacy clients must update the app to use `/v3`.
 
-`/v1/*` is kept as a deprecated alias; iOS clients ≥ 1.6.1 use `/v2`.
+## API Endpoints (v3)
 
-## API Endpoints (v3 — user accounts)
+All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
-v3 is the user-centric surface (v2 is device-centric and frozen). Everything uses `Authorization: Bearer <JWT>` unless noted.
+### Auth
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `POST` | `/v3/auth/login` | NTUST SSO login (Moodle token verification) → access + refresh tokens | none |
 | `POST` | `/v3/auth/refresh` | Refresh token rotation (replay detection revokes the family) | refresh token |
+| `PATCH` | `/v3/auth/credentials` | Update stored encrypted credentials | JWT |
 | `POST` | `/v3/auth/logout` | Revoke the current session | JWT |
-| `POST/GET` | `/v3/devices/register`, `/v3/devices` | User device + push token registration / listing | JWT |
+
+### Devices
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `POST` | `/v3/devices/register` | Register user device + push token | JWT |
+| `GET` | `/v3/devices` | List devices | JWT |
 | `DELETE` | `/v3/devices/{id}` | Delete a device (revokes sessions, invalidates tokens) | JWT |
+| `PATCH` | `/v3/devices/{id}/preferences` | Update sync preferences (sync_courses / colors / names / assignments) | JWT |
+
+### Sync
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
 | `POST` | `/v3/sync/initial-upload` | Initial upload of local data (courses / assignments / settings / subscriptions) | JWT |
 | `GET` | `/v3/sync?since_revision=N` | Changelog incremental sync (expired cursor → 410) | JWT |
 | `GET` | `/v3/sync/full` | Full snapshot | JWT |
-| `GET` | `/v3/courses`, `/v3/assignments` | Course / assignment listings | JWT |
-| `PUT` | `/v3/courses/{id}/override`, `/v3/courses/{id}/skipped-dates/{date}` | Course overrides / skipped dates | JWT |
-| `PUT` | `/v3/assignments/{id}/override` | Local assignment state (done / ignored / archived) | JWT |
-| `GET/PUT` | `/v3/settings/{namespace}` | Settings documents (revision CAS, 409 on conflict) | JWT |
-| `GET/POST/PATCH/DELETE` | `/v3/bulletin-subscriptions[/{id}]` | User bulletin subscription rules (PATCH uses base_revision; DELETE accepts it optionally) | JWT |
-| `GET/PUT` | `/v3/bulletin-states` | Bulletin read / starred / hidden state | JWT |
+| `GET` | `/v3/sync/revision` | Current revision number | JWT |
+| `POST` | `/v3/sync/courses/upload` | Upload courses | JWT |
+| `DELETE` | `/v3/sync/courses` | Delete all courses | JWT |
+| `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
+| `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color/name override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
+
+### Courses / Assignments
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/v3/courses` | Course list | JWT |
+| `PUT` | `/v3/courses/{id}/override` | Course override (authoritative) | JWT |
+| `PUT` | `/v3/courses/{id}/skipped-dates/{date}` | Add skipped date | JWT |
+| `DELETE` | `/v3/courses/{id}/skipped-dates/{date}` | Remove skipped date | JWT |
+| `GET` | `/v3/assignments` | Assignment list | JWT |
+| `PUT` | `/v3/assignments/{id}/override` | Assignment status override (authoritative) | JWT |
+
+### Settings
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/v3/settings` | List all namespaces | JWT |
+| `GET` | `/v3/settings/{namespace}` | Get settings for a namespace | JWT |
+| `PUT` | `/v3/settings/{namespace}` | Update settings (revision CAS, 409 on conflict) | JWT |
+
+### Bulletins
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/v3/bulletins` | Bulletin list (cursor pagination) | JWT |
+| `GET` | `/v3/bulletins/{id}` | Bulletin detail | JWT |
+| `GET` | `/v3/bulletins/taxonomy` | org / tag label mapping | JWT |
+| `GET` | `/v3/bulletin-subscriptions` | List subscription rules | JWT |
+| `PUT` | `/v3/bulletin-subscriptions` | Bulk-put subscription rules | JWT |
+| `POST` | `/v3/bulletin-subscriptions` | Create subscription rule | JWT |
+| `PATCH` | `/v3/bulletin-subscriptions/{id}` | Update subscription rule (base_revision) | JWT |
+| `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | Delete subscription rule(s) | JWT |
+| `GET` | `/v3/bulletin-states` | Bulletin read / starred / hidden state | JWT |
+| `PUT` | `/v3/bulletin-states/{id}` | Set per-bulletin state | JWT |
+
+### Schedule / Live Activity
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler) | JWT |
+| `DELETE` | `/v3/schedule/sync` | Delete schedule data | JWT |
+| `POST` | `/v3/live-activities/register` | Register Live Activity update token | JWT |
+
+### Server-side fetch / Admin
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
 | `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh server fetch trigger (cooldown) | JWT |
-| `GET/PATCH` | `/v3/admin/sync-policies[/{job_type}]` | Sync policy administration | shared secret |
+| `GET` | `/v3/admin/sync-policies` | List sync policies | shared secret |
+| `PATCH` | `/v3/admin/sync-policies/{job_type}` | Update sync policy | shared secret |
+
+### Meta
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/health` | Liveness check | none |
+| `GET` | `/version` | Version and API base path | none |
 
 ## Development
 
@@ -260,7 +313,7 @@ tigerduck-backend/
 │   ├── auth/                    # v3 identity: crypto (credential encryption) / tokens / service / rate_limit / moodle / models
 │   ├── sync/                    # v3 user sync: upload / changelog / serializers / retention / models
 │   ├── syncjobs/                # Server-side fetching: executor / credentials (password iron rule) / moodle_client / assignments / provisioning
-│   ├── routes/                  # v2: devices / schedule / bulletins / …; v3: auth / user_devices / sync / academics / settings_docs / bulletins_v3 / sync_jobs
+│   ├── routes/                  # v3: auth / user_devices / sync / academics / overrides / settings_docs / bulletins_feed / bulletins_v3 / sync_jobs / schedule_v3 / live_activities_v3
 │   ├── push/                    # apns_client / fcm_client / router / pipeline (two-phase delivery) / reminders / course_reminders / job_payloads
 │   ├── scheduler/               # APScheduler runtime, dispatch, retention
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher (anonymous) / user_dispatch (logged-in) / taxonomy
