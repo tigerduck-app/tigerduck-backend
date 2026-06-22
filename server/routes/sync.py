@@ -476,7 +476,7 @@ async def upload_courses(
                 "sync.course_color_set",
                 course_key=item.course_key,
                 color_hex=item.color_hex,
-                device_id=str(auth.device_id),
+                device_id=str(auth.device_id) if auth.device_id else None,
             )
         elif override.color_hex != item.color_hex:
             logger.debug(

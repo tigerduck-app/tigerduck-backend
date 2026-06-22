@@ -16,7 +16,7 @@ Field mapping (v2 device_registrations → v3):
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
 from ..db import get_pool
@@ -146,7 +146,7 @@ async def list_devices(
 @router.post("/deregister")
 async def deregister_devices(
     pool=Depends(get_pool),
-    body: dict = {},
+    body: dict = Body(default={}),
 ) -> JSONResponse:
     device_ids = body.get("device_ids", [])
     if not device_ids or not isinstance(device_ids, list):

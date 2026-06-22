@@ -55,7 +55,8 @@ async def register_device(
             )
         )
     ).scalar_one_or_none()
-    if device is None:
+    is_new = device is None
+    if is_new:
         device = UserDevice(
             user_id=auth.user_id,
             client_device_id=payload.client_device_id,
@@ -68,7 +69,7 @@ async def register_device(
     if payload.os_version is not None:
         device.os_version = payload.os_version
     if payload.cloud_sync_enabled is not None:
-        if device.cloud_sync_enabled != payload.cloud_sync_enabled:
+        if not is_new and device.cloud_sync_enabled != payload.cloud_sync_enabled:
             logger.info(
                 "device.cloud_sync_reconciled",
                 device_id=str(device.id),
@@ -287,7 +288,8 @@ async def update_device_preferences(
     if payload.cloud_sync_enabled is not None:
         device.cloud_sync_enabled = payload.cloud_sync_enabled
 
-    await _cleanup_orphaned_sync_data(session, auth.user_id, device.id)
+    await session.flush()
+    await _cleanup_orphaned_sync_data(session, auth.user_id)
 
     return DevicePreferencesV3Response(
         device_id=device.client_device_id,
@@ -301,14 +303,13 @@ async def update_device_preferences(
 
 
 async def _cleanup_orphaned_sync_data(
-    session: "AsyncSession", user_id, exclude_device_id
+    session: "AsyncSession", user_id
 ) -> None:
-    """Delete user sync data when no remaining device needs it.
+    """Delete user sync data when no active device needs it.
 
-    Called after a device preference update. For each sync category,
-    if no other active device still has that category enabled, the
-    corresponding backend data is removed so the portal shows
-    'Device only' and stale rows don't accumulate.
+    Called after a device preference update (post-flush). Checks ALL
+    active cloud-enabled devices for the user — the current device's
+    updated values are already flushed to the DB at this point.
     """
     from server.sync.models import (
         UserAssignment,
@@ -318,19 +319,18 @@ async def _cleanup_orphaned_sync_data(
         UserCourseTombstone,
     )
 
-    other_devices = (
+    active_devices = (
         await session.execute(
             select(UserDevice).where(
                 UserDevice.user_id == user_id,
-                UserDevice.id != exclude_device_id,
                 UserDevice.deleted_at.is_(None),
                 UserDevice.cloud_sync_enabled.is_(True),
             )
         )
     ).scalars().all()
 
-    any_courses = any(d.sync_courses for d in other_devices)
-    any_assignments = any(d.sync_assignments for d in other_devices)
+    any_courses = any(d.sync_courses for d in active_devices)
+    any_assignments = any(d.sync_assignments for d in active_devices)
 
     if not any_courses:
         await session.execute(
