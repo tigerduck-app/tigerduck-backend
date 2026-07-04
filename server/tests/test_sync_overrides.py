@@ -9,7 +9,12 @@ from sqlalchemy import select
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.sync.models import UserAssignment, UserAssignmentOverride
+from server.sync.models import (
+    UserAssignment,
+    UserAssignmentOverride,
+    UserCourse,
+    UserCourseOverride,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -75,6 +80,67 @@ async def test_override_prefers_server_synced_row_over_upload_placeholder(client
         ).scalar_one()
         assert override.user_assignment_id == synced_id
         assert override.local_status == "locally_completed"
+
+
+async def seed_course(
+    client,
+    user_id: str,
+    *,
+    semester: str,
+    course_key: str,
+    moodle_id: str,
+) -> int:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        course = UserCourse(
+            user_id=uuid.UUID(user_id),
+            semester=semester,
+            course_key=course_key,
+            course_no="CS3001301",
+            course_name="作業系統",
+            moodle_id=moodle_id,
+        )
+        session.add(course)
+        await session.commit()
+        return course.id
+
+
+async def test_course_override_prefers_portal_row_over_moodle_shell(client) -> None:
+    """A Moodle fetch creates a shell row (semester="", course_key
+    "moodle:<id>") and a client portal upload can carry the same moodle_id
+    on its own course_key, so two live rows can share a moodle_id. The
+    override must not 500 and must attach to the portal row the user
+    actually sees."""
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="",
+        course_key="moodle:777",
+        moodle_id="777",
+    )
+    portal_id = await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="777",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/777/override",
+        headers=bearer(login),
+        json={"color_hex": "#FF8800"},
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        override = (
+            await session.execute(select(UserCourseOverride))
+        ).scalar_one()
+        assert override.user_course_id == portal_id
+        assert override.color_hex == "#FF8800"
 
 
 async def test_override_on_upload_placeholder_only(client) -> None:

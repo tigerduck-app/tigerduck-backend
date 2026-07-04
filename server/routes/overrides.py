@@ -300,14 +300,29 @@ async def _get_assignment_by_moodle_id(
 async def _get_course_by_moodle_id(
     session: AsyncSession, user_id, moodle_id: str
 ) -> UserCourse:
+    # moodle_id has no per-user unique constraint: a Moodle fetch creates a
+    # shell row (course_key "moodle:<id>", semester "") while a client
+    # portal upload can carry the same moodle_id on its own course_key, so
+    # two live rows can share a moodle_id. Prefer the portal row — it is
+    # the one the user actually sees (real semester/schedule).
     row = (
-        await session.execute(
-            select(UserCourse).where(
-                UserCourse.moodle_id == moodle_id,
-                UserCourse.user_id == user_id,
+        (
+            await session.execute(
+                select(UserCourse)
+                .where(
+                    UserCourse.moodle_id == moodle_id,
+                    UserCourse.user_id == user_id,
+                )
+                .order_by(
+                    UserCourse.course_key.like("moodle:%").asc(),
+                    UserCourse.id,
+                )
+                .limit(1)
             )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return row
