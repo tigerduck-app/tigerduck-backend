@@ -267,15 +267,31 @@ async def patch_course_override(
 async def _get_assignment_by_moodle_id(
     session: AsyncSession, user_id, moodle_assignment_id: int
 ) -> UserAssignment:
+    # Uniqueness is (user_id, moodle_course_id, moodle_assignment_id), and
+    # client uploads use moodle_course_id=0 (real course ID unknown on the
+    # client), so a server-synced row and an upload placeholder can both be
+    # live for the same assignment until the next fetch soft-deletes the
+    # placeholder. Prefer the server-synced row — overrides attached to it
+    # survive that fetch.
     row = (
-        await session.execute(
-            select(UserAssignment).where(
-                UserAssignment.moodle_assignment_id == moodle_assignment_id,
-                UserAssignment.user_id == user_id,
-                UserAssignment.deleted_at.is_(None),
+        (
+            await session.execute(
+                select(UserAssignment)
+                .where(
+                    UserAssignment.moodle_assignment_id == moodle_assignment_id,
+                    UserAssignment.user_id == user_id,
+                    UserAssignment.deleted_at.is_(None),
+                )
+                .order_by(
+                    (UserAssignment.moodle_course_id == 0).asc(),
+                    UserAssignment.id,
+                )
+                .limit(1)
             )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     return row
