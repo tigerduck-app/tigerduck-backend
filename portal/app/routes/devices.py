@@ -152,18 +152,22 @@ async def deregister_devices(
     if not device_ids or not isinstance(device_ids, list):
         return JSONResponse(content={"deleted": 0})
     async with pool.acquire() as conn:
-        result = await conn.execute("""
-            UPDATE user_devices
-            SET deleted_at = now()
-            WHERE id::text = ANY($1::text[])
-              AND deleted_at IS NULL
-        """, device_ids)
-        count = int(result.split()[-1]) if result else 0
-        if count > 0:
-            await conn.execute("""
-                UPDATE device_push_tokens
-                SET status = 'invalidated'
-                WHERE device_id::text = ANY($1::text[])
-                  AND status = 'active'
+        # Atomic: without the explicit transaction each statement
+        # autocommits, and a crash between them would leave a soft-deleted
+        # device with still-active push tokens.
+        async with conn.transaction():
+            result = await conn.execute("""
+                UPDATE user_devices
+                SET deleted_at = now()
+                WHERE id::text = ANY($1::text[])
+                  AND deleted_at IS NULL
             """, device_ids)
+            count = int(result.split()[-1]) if result else 0
+            if count > 0:
+                await conn.execute("""
+                    UPDATE device_push_tokens
+                    SET status = 'invalidated'
+                    WHERE device_id::text = ANY($1::text[])
+                      AND status = 'active'
+                """, device_ids)
     return JSONResponse(content={"deleted": count})
