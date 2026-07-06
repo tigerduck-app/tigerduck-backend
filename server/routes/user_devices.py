@@ -311,10 +311,13 @@ async def _cleanup_orphaned_sync_data(
     active cloud-enabled devices for the user — the current device's
     updated values are already flushed to the DB at this point.
 
-    After deleting, bumps the sync revision so clients see that data
-    was removed and don't keep stale local copies.
+    Each deleted course/assignment gets a per-entity `delete` changelog
+    entry (same shape as DELETE /sync/courses) so clients that later poll
+    /changes drop their stale local copies. Overrides ride along via the
+    ON DELETE CASCADE on their parent rows and the client-side cascade,
+    and tombstones are server-side bookkeeping with no changelog type.
     """
-    from server.sync.changelog import append_change
+    from server.sync.changelog import append_change, lock_sync_state
     from server.sync.models import (
         UserAssignment,
         UserAssignmentOverride,
@@ -335,43 +338,58 @@ async def _cleanup_orphaned_sync_data(
 
     any_courses = any(d.sync_courses for d in active_devices)
     any_assignments = any(d.sync_assignments for d in active_devices)
-    deleted_any = False
+    # (entity_type, entity_id, payload) for the per-row delete entries
+    deleted_entries: list[tuple[str, str, dict | None]] = []
 
     if not any_courses:
-        r = await session.execute(
+        await session.execute(
             sa_delete(UserCourseOverride).where(
                 UserCourseOverride.user_id == user_id
             )
         )
-        deleted_any = deleted_any or r.rowcount > 0
-        r = await session.execute(
+        await session.execute(
             sa_delete(UserCourseTombstone).where(
                 UserCourseTombstone.user_id == user_id
             )
         )
-        deleted_any = deleted_any or r.rowcount > 0
-        r = await session.execute(
-            sa_delete(UserCourse).where(UserCourse.user_id == user_id)
+        rows = (
+            await session.execute(
+                sa_delete(UserCourse)
+                .where(UserCourse.user_id == user_id)
+                .returning(UserCourse.id, UserCourse.course_key)
+            )
+        ).all()
+        deleted_entries.extend(
+            ("course", str(row.id), {"course_key": row.course_key})
+            for row in rows
         )
-        deleted_any = deleted_any or r.rowcount > 0
 
     if not any_assignments:
-        r = await session.execute(
+        await session.execute(
             sa_delete(UserAssignmentOverride).where(
                 UserAssignmentOverride.user_id == user_id
             )
         )
-        deleted_any = deleted_any or r.rowcount > 0
-        r = await session.execute(
-            sa_delete(UserAssignment).where(UserAssignment.user_id == user_id)
+        rows = (
+            await session.execute(
+                sa_delete(UserAssignment)
+                .where(UserAssignment.user_id == user_id)
+                .returning(UserAssignment.id)
+            )
+        ).all()
+        deleted_entries.extend(
+            ("assignment", str(row.id), None) for row in rows
         )
-        deleted_any = deleted_any or r.rowcount > 0
 
-    if deleted_any:
-        await append_change(
-            session,
-            user_id=user_id,
-            entity_type="sync_cleanup",
-            entity_id=str(user_id),
-            operation="tombstone",
-        )
+    if deleted_entries:
+        state = await lock_sync_state(session, user_id)
+        for entity_type, entity_id, payload in deleted_entries:
+            await append_change(
+                session,
+                user_id=user_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                operation="delete",
+                payload=payload,
+                locked_state=state,
+            )

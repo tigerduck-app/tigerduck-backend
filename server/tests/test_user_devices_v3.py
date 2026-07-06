@@ -308,3 +308,75 @@ async def test_v3_device_delete_clears_marker(client) -> None:
     )
     assert response.status_code == 204
     assert await _linked_user_id(client) is None
+
+
+async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> None:
+    """Disabling the last device's sync categories must delete the orphaned
+    server data AND record per-entity `delete` changelog entries — using only
+    entity types / operations the DB check constraints allow."""
+    from server.sync.models import (
+        UserAssignment,
+        UserChangeLog,
+        UserCourse,
+        UserSyncState,
+    )
+
+    login = await do_login(client)
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = (
+            await session.execute(
+                select(UserDevice).where(
+                    UserDevice.client_device_id == "iphone-abc"
+                )
+            )
+        ).scalar_one()
+        user_id = device.user_id
+        course = UserCourse(
+            user_id=user_id,
+            semester="1132",
+            course_key="1132:CS101",
+            course_no="CS101",
+            course_name="Intro to CS",
+        )
+        assignment = UserAssignment(
+            user_id=user_id,
+            moodle_course_id=1,
+            moodle_assignment_id=2,
+            title="HW1",
+        )
+        session.add_all([course, assignment])
+        await session.commit()
+        course_id, assignment_id = course.id, assignment.id
+
+    response = await client.patch(
+        "/v3/devices/iphone-abc/preferences",
+        headers=bearer(login),
+        json={"sync_courses": False, "sync_assignments": False},
+    )
+    assert response.status_code == 200, response.text
+
+    async with factory() as session:
+        assert (await session.execute(select(UserCourse))).scalars().all() == []
+        assert (
+            await session.execute(select(UserAssignment))
+        ).scalars().all() == []
+
+        entries = (
+            (
+                await session.execute(
+                    select(UserChangeLog).order_by(UserChangeLog.revision)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        deletes = {(e.entity_type, e.entity_id, e.operation) for e in entries}
+        assert ("course", str(course_id), "delete") in deletes
+        assert ("assignment", str(assignment_id), "delete") in deletes
+
+        # Revision watermark advanced over the cleanup entries so clients
+        # polling /changes actually see them.
+        state = (await session.execute(select(UserSyncState))).scalar_one()
+        assert state.current_revision == max(e.revision for e in entries)
