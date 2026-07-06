@@ -37,6 +37,12 @@ logger = structlog.get_logger(__name__)
 _REFRESH_MAX_ATTEMPTS = 10
 _REFRESH_WINDOW_SECONDS = 60
 
+# Per-user rate limit for PATCH /auth/credentials — every call makes a live
+# Moodle verification, so an unthrottled loop would amplify traffic against
+# NTUST Moodle. Legitimate traffic is one call per app foreground.
+_CREDENTIALS_MAX_ATTEMPTS = 10
+_CREDENTIALS_WINDOW_SECONDS = 300
+
 
 def _client_ip(request: Request) -> str:
     if request.app.state.settings.auth_trust_forwarded_for:
@@ -150,8 +156,18 @@ async def update_credentials(
     session: SessionDep,
 ) -> UpdateCredentialsResponse:
     """Accept a fresh Moodle token from the app (called on every foreground).
-    Updates the encrypted credential blob and auto-revives disabled sync jobs
-    so a token-invalid outage heals the moment the user opens the app."""
+    Verifies the token against Moodle, then updates the encrypted credential
+    blob and auto-revives disabled sync jobs so a token-invalid outage heals
+    the moment the user opens the app."""
+    limiter = request.app.state.credentials_limiter
+    limit_key = f"credentials:{auth.user_id}"
+    if not limiter.allow(limit_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too_many_credential_updates",
+        )
+    limiter.record(limit_key)
+
     cipher: CredentialCipher | None = request.app.state.credential_cipher
     if cipher is None:
         return UpdateCredentialsResponse(updated=False)
@@ -162,6 +178,22 @@ async def update_credentials(
         )
     ).scalar_one_or_none()
     if account is None:
+        return UpdateCredentialsResponse(updated=False)
+
+    # Same live check as login: without it, a stale token would keep
+    # flipping the account back to `active` and re-arming disabled sync
+    # jobs with attempts=0, defeating the worker's back-off. The endpoint
+    # retries on the next app foreground, so a failed check is a no-op
+    # rather than an error.
+    verify = await request.app.state.moodle_verifier.verify(
+        token=payload.moodle_token, student_id=account.external_user_id
+    )
+    if not verify.ok:
+        logger.info(
+            "auth.credentials.moodle_rejected",
+            user_id=str(auth.user_id),
+            error=verify.error,
+        )
         return UpdateCredentialsResponse(updated=False)
 
     credential = await session.get(ExternalAccountCredential, account.id)
