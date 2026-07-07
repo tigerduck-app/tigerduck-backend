@@ -60,22 +60,31 @@ async def apply_fetched_courses(
         .scalars()
         .all()
     )
-    existing = {r.moodle_id: r for r in existing_rows if r.moodle_id}
+    # Key by the mirror's own course_key, not the bare moodle_id. A
+    # client-uploaded row ("client:" key) can carry the same moodle_id as a
+    # fetched Moodle course (a documented state — see test_sync_overrides.py),
+    # and keying by moodle_id would let it shadow the server row: the insert
+    # below would be skipped and the client row's name overwritten. Scoping to
+    # "moodle:" keys means the mirror only ever matches rows it created.
+    existing = {
+        r.course_key: r for r in existing_rows if r.course_key.startswith("moodle:")
+    }
 
     changed = 0
     seen: set[str] = set()
 
     for item in fetched:
         moodle_id = str(item.moodle_course_id)
-        seen.add(moodle_id)
-        row = existing.get(moodle_id)
+        course_key = f"moodle:{moodle_id}"
+        seen.add(course_key)
+        row = existing.get(course_key)
 
         if row is None:
             course_no = (item.short_name or moodle_id)[:64]
             row = UserCourse(
                 user_id=user_id,
                 semester="",
-                course_key=f"moodle:{moodle_id}",
+                course_key=course_key,
                 source="ntust_portal",
                 course_no=course_no,
                 course_name=item.full_name,
@@ -85,7 +94,7 @@ async def apply_fetched_courses(
             )
             session.add(row)
             await session.flush()
-            existing[moodle_id] = row
+            existing[course_key] = row
             changed += 1
             await log(str(row.id), "upsert", {"fields": ["course_name", "moodle_id"]})
             continue
@@ -100,9 +109,10 @@ async def apply_fetched_courses(
             changed += 1
             await log(str(row.id), "upsert", {"fields": fields})
 
-    # Hard-delete courses absent from the fetch.
-    for moodle_id, row in existing.items():
-        if moodle_id in seen:
+    # Hard-delete server-fetched courses absent from the fetch. `existing`
+    # holds only "moodle:" rows, so client-uploaded courses are never in scope.
+    for course_key, row in existing.items():
+        if course_key in seen:
             continue
         await session.delete(row)
         changed += 1

@@ -66,7 +66,6 @@ async def login(
         ip_key = f"login:ip:{_client_ip(request)}"
         sid_key = f"login:sid:{payload.student_id.lower()}"
         if not state.login_limiter.allow(ip_key) or not state.login_limiter.allow(sid_key):
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="too_many_login_attempts",
@@ -86,13 +85,11 @@ async def login(
             moodle_token = obtained.token
             moodle_private_token = obtained.private_token
         except SsoAuthFailed:
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid_credentials",
             )
         except SsoUnavailable as exc:
-            from fastapi import HTTPException
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"moodle_unavailable:{exc}",

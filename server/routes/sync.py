@@ -440,33 +440,48 @@ async def upload_courses(
             background_tasks.add_task(_trigger_push_tick, request)
 
     overrides_applied = 0
-    for item in payload.course_overrides:
-        if not item.color_hex:
-            continue
-        course = (
-            await session.execute(
-                select(UserCourse).where(
-                    UserCourse.user_id == auth.user_id,
-                    UserCourse.course_key == item.course_key,
+    override_items = [i for i in payload.course_overrides if i.color_hex]
+    courses_by_key: dict[str, UserCourse] = {}
+    overrides_by_course_id: dict[int, UserCourseOverride] = {}
+    if override_items:
+        courses_by_key = {
+            c.course_key: c
+            for c in (
+                await session.execute(
+                    select(UserCourse).where(
+                        UserCourse.user_id == auth.user_id,
+                        UserCourse.course_key.in_(
+                            {i.course_key for i in override_items}
+                        ),
+                    )
                 )
-            )
-        ).scalar_one_or_none()
+            ).scalars()
+        }
+        overrides_by_course_id = {
+            o.user_course_id: o
+            for o in (
+                await session.execute(
+                    select(UserCourseOverride).where(
+                        UserCourseOverride.user_id == auth.user_id,
+                        UserCourseOverride.user_course_id.in_(
+                            [c.id for c in courses_by_key.values()]
+                        ),
+                    )
+                )
+            ).scalars()
+        }
+    for item in override_items:
+        course = courses_by_key.get(item.course_key)
         if course is None:
             continue
-        override = (
-            await session.execute(
-                select(UserCourseOverride).where(
-                    UserCourseOverride.user_id == auth.user_id,
-                    UserCourseOverride.user_course_id == course.id,
-                )
-            )
-        ).scalar_one_or_none()
+        override = overrides_by_course_id.get(course.id)
         if override is None:
             override = UserCourseOverride(
                 user_id=auth.user_id, user_course_id=course.id
             )
             session.add(override)
             await session.flush()
+            overrides_by_course_id[course.id] = override
         if override.color_hex is None:
             override.color_hex = item.color_hex
             override.color_hex_updated_at = now
