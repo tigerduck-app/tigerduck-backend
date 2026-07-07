@@ -214,6 +214,28 @@ class UserCourseOverride(Base):
         nullable=True,
     )
 
+    # The merge layer (apply_field in academics PUT and initial upload)
+    # still speaks a singular, locale-less `custom_name`. Bridge it onto
+    # the locale-keyed map with the a1b2c3d4e5f6 backfill convention: one
+    # locale-less name feeds both 'zh' and 'en', the only keys the apps
+    # and portal read. Without this bridge, setattr lands on a transient
+    # instance attribute and the name is silently dropped.
+    @property
+    def custom_name(self) -> str | None:
+        names = self.custom_names or {}
+        return names.get("zh") or names.get("en")
+
+    @custom_name.setter
+    def custom_name(self, value: str | None) -> None:
+        names = dict(self.custom_names or {})
+        if value:
+            names["zh"] = value
+            names["en"] = value
+        else:
+            names.pop("zh", None)
+            names.pop("en", None)
+        self.custom_names = names
+
     color_hex: Mapped[str | None] = mapped_column(String(16), nullable=True)
     color_hex_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
