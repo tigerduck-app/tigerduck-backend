@@ -29,17 +29,22 @@ DEVICE_ID = "dev-dispatcher"
 
 
 async def _register_device(client: AsyncClient) -> None:
-    resp = await client.post(
-        "/v2/devices/register",
-        json={
-            "user_id": "user-dispatcher",
-            "device_id": DEVICE_ID,
-            "pts_token_hex": "aa" * 80,
-            "device_token_hex": "bb" * 32,
-            "apns_env": "development",
-        },
-    )
-    assert resp.status_code == 200, resp.text
+    """The v2 register endpoint is retired (410); insert the anonymous
+    device_registrations row the dispatcher fans out to directly."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        s.add(
+            DeviceRegistration(
+                user_id="user-dispatcher",
+                device_id=DEVICE_ID,
+                pts_token_hex="aa" * 80,
+                device_token_hex="bb" * 32,
+                bundle_id="org.ntust.app.TigerDuck",
+                attrs_type="TigerDuckActivityAttributes",
+                apns_env="development",
+            )
+        )
+        await s.commit()
 
 
 async def _seed_push(

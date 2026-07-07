@@ -35,23 +35,23 @@ async def _login(client):
     return response.json()
 
 
-async def test_login_creates_moodle_assignments_job(client):
+async def test_login_creates_job_per_handled_type(client):
     await _login(client)
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         jobs = (await session.execute(select(SyncJob))).scalars().all()
-    assert len(jobs) == 1
-    job = jobs[0]
-    assert job.job_type == "moodle_assignments"
-    assert job.status == "pending"
-    assert job.max_attempts == 3
+    assert {job.job_type for job in jobs} == {"moodle_assignments", "ntust_courses"}
+    for job in jobs:
+        assert job.status == "pending"
+        assert job.max_attempts == 3
 
 
 async def test_relogin_revives_disabled_job(client):
     await _login(client)
     factory = build_session_factory(client.app.state.engine)
+    query = select(SyncJob).where(SyncJob.job_type == "moodle_assignments")
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
+        job = (await session.execute(query)).scalar_one()
         job.status = "disabled"
         job.attempts = 3
         job.last_error = "credential_invalid"
@@ -59,7 +59,7 @@ async def test_relogin_revives_disabled_job(client):
 
     await _login(client)
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
+        job = (await session.execute(query)).scalar_one()
     assert job.status == "pending"
     assert job.attempts == 0
     assert job.last_error is None
@@ -68,12 +68,13 @@ async def test_relogin_revives_disabled_job(client):
 async def test_relogin_does_not_reset_healthy_job(client):
     await _login(client)
     factory = build_session_factory(client.app.state.engine)
+    query = select(SyncJob).where(SyncJob.job_type == "moodle_assignments")
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
+        job = (await session.execute(query)).scalar_one()
         job.attempts = 2  # mid-backoff but not disabled
         await session.commit()
 
     await _login(client)
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
+        job = (await session.execute(query)).scalar_one()
     assert job.attempts == 2  # untouched

@@ -15,7 +15,7 @@ async def test_list_policies_returns_seeded_defaults(client):
     body = {p["job_type"]: p for p in response.json()["policies"]}
     assert body["moodle_assignments"]["enabled"] is True
     assert body["moodle_assignments"]["default_interval_seconds"] == 28800
-    assert body["ntust_courses"]["enabled"] is False
+    assert body["ntust_courses"]["enabled"] is True
     assert body["calendar"]["default_interval_seconds"] == 604800
 
 

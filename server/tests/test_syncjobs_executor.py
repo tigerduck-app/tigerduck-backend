@@ -63,9 +63,19 @@ class StubCourseFetcher:
 def _worker(
     prepared_engine, test_settings, fetcher=None, course_fetcher=None
 ) -> SyncWorker:
+    # Neutralise the Moodle maintenance window (defaults to 00:00–05:00
+    # Taipei): during the window _handle_moodle_failure reschedules instead
+    # of disabling/backing off, which would make the failure-path tests
+    # depend on wall-clock time. start == end means "never in window".
+    settings = test_settings.model_copy(
+        update={
+            "moodle_maintenance_start": "00:00",
+            "moodle_maintenance_end": "00:00",
+        }
+    )
     return SyncWorker(
         session_factory=build_session_factory(prepared_engine),
-        settings=test_settings,
+        settings=settings,
         cipher=_cipher(),
         fetcher=fetcher if fetcher is not None else StubFetcher(),
         course_fetcher=course_fetcher if course_fetcher is not None else StubCourseFetcher(),
