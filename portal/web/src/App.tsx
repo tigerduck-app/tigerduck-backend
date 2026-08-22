@@ -7,7 +7,8 @@ import { AnnouncementPage } from "@/pages/announcement";
 import { CustomPushPage } from "@/pages/custom-push";
 import { DevicesPage } from "@/pages/devices";
 import { ListsPage, ListDetailPage } from "@/pages/lists";
-import { AppleTestPushPage } from "@/pages/apple-test-push";
+import { MoodlePage, DataInspectionPage } from "@/pages/moodle";
+import { DeregisterPage } from "@/pages/deregister";
 
 export function App() {
   return (
@@ -21,7 +22,9 @@ export function App() {
         <Route path="devices" element={<DevicesPage />} />
         <Route path="lists" element={<ListsPage />} />
         <Route path="lists/:id" element={<ListDetailPage />} />
-        <Route path="test" element={<AppleTestPushPage />} />
+        <Route path="moodle" element={<MoodlePage />} />
+        <Route path="inspect" element={<DataInspectionPage />} />
+        <Route path="deregister" element={<DeregisterPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

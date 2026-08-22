@@ -17,7 +17,7 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -202,9 +202,9 @@ async def scan_course_reminders(
                     UserCourseOverride.user_course_id == UserCourse.id,
                 )
                 .where(
-                    UserCourse.deleted_at.is_(None),
                     UserCourse.enrollment_status == "enrolled",
-                    func.jsonb_array_length(UserCourse.schedule_json) > 0,
+                    UserCourse.schedule_json != text("'{}'::jsonb"),
+                    UserCourse.schedule_json != text("'[]'::jsonb"),
                 )
             )
         ).all()
@@ -232,7 +232,8 @@ async def scan_course_reminders(
             (course, override)
             for course, override in rows
             if course.semester == latest_semester[course.user_id]
-            and not (override is not None and override.is_hidden)
+            # Removed courses are hard-deleted, so any course still
+            # present is eligible.
         ]
         user_ids = {course.user_id for course, _ in eligible}
 

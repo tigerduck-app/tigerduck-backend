@@ -24,11 +24,6 @@ class Settings(BaseSettings):
     apns_key_id: str = ""
     fcm_credentials_path: str = ""
     fcm_project_id: str = ""
-    # Forwarded as `X-Push-Token` when the portal proxies to the backend's
-    # /v2/_debug/* surface (test-push page). Same value the iOS app reads
-    # from Secrets.plist. Empty in prod is fine — the test page itself is
-    # dev-only and 404s before any backend call would happen.
-    api_shared_secret: str = ""
 
     # Public URLs surfaced on the status page so an operator can hop
     # straight from "is it up?" to "open the thing." Defaults match
@@ -94,5 +89,4 @@ class Settings(BaseSettings):
                 for ip in env.get("TIGERDUCK_HOST_LAN_IPS", "").split(",")
                 if ip.strip()
             ],
-            api_shared_secret=env.get("TIGERDUCK_API_SHARED_SECRET", ""),
         )

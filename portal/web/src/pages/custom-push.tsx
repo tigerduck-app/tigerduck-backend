@@ -352,9 +352,10 @@ export function CustomPushPage() {
               {form.show_advanced && (
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
                   <div className="grid gap-1.5">
-                    <Label htmlFor="user_id">user_id (optional)</Label>
+                    <Label htmlFor="user_id">Student ID (optional)</Label>
                     <Input
                       id="user_id"
+                      placeholder="e.g. B11315025"
                       value={form.user_id}
                       onChange={(e) =>
                         setForm({ ...form, user_id: e.target.value })
@@ -363,9 +364,10 @@ export function CustomPushPage() {
                     />
                   </div>
                   <div className="grid gap-1.5">
-                    <Label htmlFor="device_id">device_id (optional)</Label>
+                    <Label htmlFor="device_id">Device ID (optional)</Label>
                     <Input
                       id="device_id"
+                      placeholder="e.g. 3f28fcff-d162-..."
                       value={form.device_id}
                       onChange={(e) =>
                         setForm({ ...form, device_id: e.target.value })

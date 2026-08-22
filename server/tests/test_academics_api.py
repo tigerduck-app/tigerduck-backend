@@ -112,7 +112,9 @@ async def test_put_course_override_merges_per_field(client) -> None:
     assert stale.status_code == 200
     merged = stale.json()["override"]
     assert merged["color_hex"] == "#FF8800"  # newer server value kept
-    assert merged["custom_name"] == "OS"  # untouched field applied
+    # Untouched field applied. A locale-less custom_name feeds both 'zh'
+    # and 'en' — the same convention as the a1b2c3d4e5f6 backfill.
+    assert merged["custom_names"] == {"zh": "OS", "en": "OS"}
 
 
 async def test_put_override_unknown_course_404(client) -> None:

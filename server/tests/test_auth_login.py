@@ -17,6 +17,7 @@ from server.auth.models import (
 )
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -84,10 +85,9 @@ async def test_login_success_creates_full_identity(client) -> None:
             aad=cred.aad,
         )
         decrypted = cipher.decrypt(blob)
-        assert decrypted["ntust_password"] == LOGIN_BODY["password"]
-        # Security review 1.4: backend never verified the password, so it
-        # must be stored unverified and never auto-retried against SSO.
-        assert decrypted["password_verified"] is False
+        # Token-only: no password stored.
+        assert "ntust_password" not in decrypted
+        assert "password_verified" not in decrypted
         assert decrypted["token_cache"]["moodle_token"] == "moodle-tok-1"
 
         device = (
@@ -104,6 +104,55 @@ async def test_login_success_creates_full_identity(client) -> None:
         ).scalars().all()
         assert len(sessions) == 1
         assert sessions[0].revoked_at is None
+
+
+async def test_android_login_stores_token_only_credentials(client) -> None:
+    """All platforms store credentials (token-only, no password) and
+    get sync jobs for cross-device sync."""
+    allow_moodle(client)
+    body = {
+        **LOGIN_BODY,
+        "device_info": {
+            **LOGIN_BODY["device_info"],
+            "client_device_id": "android-abc",
+            "platform": "android",
+        },
+    }
+    response = await client.post("/v3/auth/login", json=body)
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        user = (
+            await session.execute(
+                select(User).where(User.student_id == "B11015000")
+            )
+        ).scalar_one()
+        account = (
+            await session.execute(
+                select(ExternalAccount).where(ExternalAccount.user_id == user.id)
+            )
+        ).scalar_one()
+        assert account.credential_status == "active"
+        cred = await session.get(ExternalAccountCredential, account.id)
+        assert cred is not None
+        cipher = CredentialCipher.from_settings(client.app.state.settings)
+        blob = EncryptedBlob(
+            key_id=cred.encryption_key_id,
+            nonce=cred.nonce,
+            ciphertext=cred.ciphertext,
+            aad=cred.aad,
+        )
+        decrypted = cipher.decrypt(blob)
+        assert "ntust_password" not in decrypted
+        assert decrypted["token_cache"]["moodle_token"] == "moodle-tok-1"
+        # Sync jobs provisioned for Android too.
+        jobs = (
+            await session.execute(
+                select(SyncJob).where(SyncJob.user_id == user.id)
+            )
+        ).scalars().all()
+        assert len(jobs) >= 1
 
 
 async def test_second_login_reuses_user_and_device(client) -> None:

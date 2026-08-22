@@ -1,0 +1,127 @@
+"""Mirror fetched Moodle enrolled courses into user_courses + changelog.
+
+A successful fetch is the authoritative snapshot of the student's Moodle
+enrollments: new rows insert, changed fields update, rows absent from the
+fetch soft-delete, previously-deleted rows that reappear resurrect.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from datetime import datetime
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from server.sync.changelog import append_change, lock_sync_state
+from server.sync.models import ChangeEntityType, UserCourse
+from server.syncjobs.moodle_client import FetchedCourse
+
+logger = structlog.get_logger(__name__)
+
+_PROVIDER_FIELDS = ("course_name", "moodle_id")
+
+
+@dataclass(frozen=True)
+class CourseSyncStats:
+    fetched_count: int
+    changed_count: int
+
+
+async def apply_fetched_courses(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    fetched: list[FetchedCourse],
+    now: datetime,
+) -> CourseSyncStats:
+    locked_state = await lock_sync_state(session, user_id)
+
+    async def log(entity_id: str, operation: str, hint: dict | None = None):
+        await append_change(
+            session,
+            user_id=user_id,
+            entity_type=ChangeEntityType.course.value,
+            entity_id=entity_id,
+            operation=operation,
+            payload=hint,
+            device_id=None,
+            locked_state=locked_state,
+        )
+
+    existing_rows = (
+        (
+            await session.execute(
+                select(UserCourse).where(UserCourse.user_id == user_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # Key by the mirror's own course_key, not the bare moodle_id. A
+    # client-uploaded row ("client:" key) can carry the same moodle_id as a
+    # fetched Moodle course (a documented state — see test_sync_overrides.py),
+    # and keying by moodle_id would let it shadow the server row: the insert
+    # below would be skipped and the client row's name overwritten. Scoping to
+    # "moodle:" keys means the mirror only ever matches rows it created.
+    existing = {
+        r.course_key: r for r in existing_rows if r.course_key.startswith("moodle:")
+    }
+
+    changed = 0
+    seen: set[str] = set()
+
+    for item in fetched:
+        moodle_id = str(item.moodle_course_id)
+        course_key = f"moodle:{moodle_id}"
+        seen.add(course_key)
+        row = existing.get(course_key)
+
+        if row is None:
+            course_no = (item.short_name or moodle_id)[:64]
+            row = UserCourse(
+                user_id=user_id,
+                semester="",
+                course_key=course_key,
+                source="ntust_portal",
+                course_no=course_no,
+                course_name=item.full_name,
+                moodle_id=moodle_id,
+                fetched_at=now,
+                last_seen_at=now,
+            )
+            session.add(row)
+            await session.flush()
+            existing[course_key] = row
+            changed += 1
+            await log(str(row.id), "upsert", {"fields": ["course_name", "moodle_id"]})
+            continue
+
+        fields: list[str] = []
+        if row.course_name != item.full_name:
+            row.course_name = item.full_name
+            fields.append("course_name")
+        row.fetched_at = now
+        row.last_seen_at = now
+        if fields:
+            changed += 1
+            await log(str(row.id), "upsert", {"fields": fields})
+
+    # Hard-delete server-fetched courses absent from the fetch. `existing`
+    # holds only "moodle:" rows, so client-uploaded courses are never in scope.
+    for course_key, row in existing.items():
+        if course_key in seen:
+            continue
+        await session.delete(row)
+        changed += 1
+        await log(str(row.id), "delete")
+
+    logger.info(
+        "syncjobs.courses.applied",
+        user_id=str(user_id),
+        fetched=len(fetched),
+        changed=changed,
+    )
+    return CourseSyncStats(fetched_count=len(fetched), changed_count=changed)

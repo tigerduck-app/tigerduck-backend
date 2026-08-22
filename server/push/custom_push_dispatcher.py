@@ -73,6 +73,7 @@ async def _dispatch_pending_custom_pushes_locked(
                 )
                 .order_by(CustomPushDispatch.id)
                 .limit(batch_limit)
+                .with_for_update(skip_locked=True, of=CustomPushDispatch)
             )
         ).all()
 

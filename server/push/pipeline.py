@@ -5,8 +5,9 @@ Claim/execute split mirrors `server/syncjobs/executor.py`: stale
 §2), then a short transaction claims due jobs under an advisory lock +
 FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
-  materialize: one push_deliveries row per active standard token
-               (idempotent via ux_push_delivery_job_token DO NOTHING)
+  materialize: one push_deliveries row per active token
+               (channel-aware: standard tokens for regular pushes, push_to_start
+               tokens for schedule; idempotent via ux_push_delivery_job_token DO NOTHING)
   deliver:     send each due pending delivery once via PushRouter;
                unregistered tokens are invalidated, transient failures
                keep the delivery pending with next_retry_at backoff
@@ -181,16 +182,26 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
 
 
 async def _materialize(session: AsyncSession, job: PushJob) -> None:
-    """Create one delivery row per active standard token. Idempotent —
-    a stale-recovered job re-materializes onto the same unique index."""
+    """Create one delivery row per active token (channel-aware: standard tokens
+    for regular pushes, push_to_start tokens for schedule). Idempotent —
+    a stale-recovered job re-materializes onto the same unique index.
+
+    Skips macOS devices (foreground-only, no background push). Non-macOS
+    devices always receive the push — collapse keys deduplicate on the
+    device side, and foreground devices simply ignore redundant syncs.
+    """
+
     now = datetime.now(UTC)
+    target_token_kind = (
+        "push_to_start" if job.channel == "schedule" else "standard"
+    )
     token_query = (
-        select(DevicePushToken)
+        select(DevicePushToken, UserDevice)
         .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
         .where(
             UserDevice.user_id == job.user_id,
             UserDevice.deleted_at.is_(None),
-            DevicePushToken.token_kind == "standard",
+            DevicePushToken.token_kind == target_token_kind,
             DevicePushToken.status == PushTokenStatus.active.value,
             (DevicePushToken.expires_at.is_(None))
             | (DevicePushToken.expires_at > now),
@@ -198,22 +209,36 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
-    tokens = (await session.execute(token_query)).scalars().all()
-    if not tokens:
+
+    is_sync_trigger = job.scenario == "sync_trigger"
+    source_device_id: str | None = None
+    if is_sync_trigger:
+        token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
+        source_device_id = (job.payload or {}).get("source_device_id")
+
+    rows = (await session.execute(token_query)).all()
+    if not rows:
         return
-    values = [
-        {
-            "push_job_id": job.id,
-            "user_id": job.user_id,
-            "device_id": token.device_id,
-            "push_token_id": token.id,
-            "provider": token.provider,
-            "token_kind": token.token_kind,
-            "token_hash": token.token_hash,
-            "scope_key": token.scope_key,
-        }
-        for token in tokens
-    ]
+    values = []
+    for token, device in rows:
+        if device.platform == "macos":
+            continue
+        if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
+            continue
+        values.append(
+            {
+                "push_job_id": job.id,
+                "user_id": job.user_id,
+                "device_id": token.device_id,
+                "push_token_id": token.id,
+                "provider": token.provider,
+                "token_kind": token.token_kind,
+                "token_hash": token.token_hash,
+                "scope_key": token.scope_key,
+            }
+        )
+    if not values:
+        return
     await session.execute(
         pg_insert(PushDelivery)
         .values(values)
@@ -345,6 +370,8 @@ async def _send_one(
         delivery.sent_at = now
         delivery.provider_message_id = result.notification_id
         token.last_success_at = now
+        if job.scenario == "sync_trigger":
+            await _log_sync_trigger_delivery(session, job, token, delivery.provider)
         return
 
     token.last_failure_at = now
@@ -370,3 +397,32 @@ async def _send_one(
         delivery.next_retry_at = now + timedelta(
             seconds=worker.settings.push_retry_round_delay_seconds
         )
+
+
+async def _log_sync_trigger_delivery(
+    session: AsyncSession, job: PushJob, token: DevicePushToken, provider: str
+) -> None:
+    try:
+        from server.syncjobs.log_entries import log_sync
+
+        device = await session.get(UserDevice, token.device_id)
+        target_label = (
+            f"{device.platform}/{device.client_device_id}"
+            if device else f"token:{token.id}"
+        )
+        source_device_id = (job.payload or {}).get("source_device_id")
+        await log_sync(
+            session,
+            user_id=job.user_id,
+            source="push",
+            message=f"sync_trigger sent via {provider} → {target_label}",
+            device_id=source_device_id,
+            detail={
+                "target_device_id": str(token.device_id),
+                "target_platform": device.platform if device else provider,
+                "target_name": None,
+                "provider": provider,
+            },
+        )
+    except Exception:
+        logger.debug("sync_trigger log write failed", exc_info=True)

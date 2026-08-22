@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from server.push.payload import ApnsRequest, FcmRequest, PushKind
+from server.push.payload import ApnsRequest, FcmRequest, PushKind, _normalize_snapshot_for_apns
 
 _RESERVED = {"title", "body"}
 _DEFAULT_TTL_SECONDS = 24 * 3600
@@ -24,6 +24,21 @@ _ANDROID_CHANNELS = {
     "system": "system",
     "custom": "bulletins_sound",
 }
+
+# FCM allows at most 4 active collapse keys per device at once.
+_COLLAPSE_KEYS = {
+    "sync_trigger": "sync",
+    "schedule": "schedule",
+    "course": "reminder",
+    "assignment": "reminder",
+}
+
+
+def _collapse_key(channel: str, payload: dict[str, Any]) -> str | None:
+    kind = payload.get("kind", "")
+    if kind == "sync_trigger":
+        return _COLLAPSE_KEYS["sync_trigger"]
+    return _COLLAPSE_KEYS.get(channel)
 
 
 def _extras(payload: dict[str, Any]) -> dict[str, str]:
@@ -44,9 +59,59 @@ def build_apns_for_job(
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> ApnsRequest:
     timestamp = int((now or datetime.now(UTC)).timestamp())
+    collapse = _collapse_key(channel, payload)
+
+    if channel == "schedule":
+        # Live Activity content-state update
+        kind = payload.get("kind", "schedule")
+        if kind == "live_activity_end":
+            event = "end"
+        else:
+            event = "update"
+        scenario = payload.get("scenario", "")
+        snapshot = {k: v for k, v in payload.items() if k not in ("kind", "scenario", "source_id")}
+        normalized_snapshot = _normalize_snapshot_for_apns(snapshot)
+        message: dict[str, Any] = {
+            "aps": {
+                "timestamp": timestamp,
+                "event": event,
+                "content-state": {
+                    "scenario": scenario,
+                    **normalized_snapshot,
+                },
+            },
+        }
+        if event == "end":
+            message["aps"]["dismissal-date"] = timestamp
+        return ApnsRequest(
+            device_token=token_value,
+            topic=f"{bundle_id}.push-type.liveactivity",
+            expiration=timestamp + ttl_seconds,
+            priority=10,
+            message=message,
+            kind=PushKind.live_activity,
+            collapse_id=collapse,
+        )
+
+    if payload.get("kind") == "sync_trigger":
+        message = {
+            "aps": {"content-available": 1},
+            "kind": "sync_trigger",
+        }
+        return ApnsRequest(
+            device_token=token_value,
+            topic=bundle_id,
+            expiration=timestamp + 300,
+            priority=5,
+            message=message,
+            kind=PushKind.background,
+            collapse_id=collapse,
+        )
+
+    # Standard alert (existing logic)
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
-    message: dict[str, Any] = {
+    message = {
         "aps": {
             "alert": {"title": title, "body": body},
             "badge": 1,
@@ -63,6 +128,7 @@ def build_apns_for_job(
         priority=10,
         message=message,
         kind=PushKind.alert,
+        collapse_id=collapse,
     )
 
 
@@ -73,6 +139,18 @@ def build_fcm_for_job(
     token_value: str,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
 ) -> FcmRequest:
+    collapse = _collapse_key(channel, payload)
+
+    if payload.get("kind") == "sync_trigger":
+        return FcmRequest(
+            token=token_value,
+            title="",
+            body="",
+            data={"kind": "sync_trigger"},
+            ttl_seconds=300,
+            collapse_key=collapse,
+        )
+
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
     data = {
@@ -87,4 +165,5 @@ def build_fcm_for_job(
         body=body,
         data=data,
         ttl_seconds=ttl_seconds,
+        collapse_key=collapse,
     )

@@ -20,6 +20,7 @@ from enum import StrEnum
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -58,6 +59,7 @@ class UserDevicePlatform(StrEnum):
     watchos = "watchos"
     wearos = "wearos"
     android = "android"
+    web = "web"
 
 
 class SessionRevokedReason(StrEnum):
@@ -131,6 +133,9 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    courses_reset_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -250,6 +255,24 @@ class UserDevice(Base):
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    server_push_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_courses: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_course_colors: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_course_names: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_assignments: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    cloud_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -275,7 +298,7 @@ class UserDevice(Base):
         UniqueConstraint("user_id", "client_device_id"),
         CheckConstraint(
             "platform IN ('ios', 'ipados', 'macos', 'windows', "
-            "'watchos', 'wearos', 'android')",
+            "'watchos', 'wearos', 'android', 'web')",
             name="chk_device_platform",
         ),
     )
@@ -462,7 +485,7 @@ class PushJob(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom')",
+            "channel IN ('assignment', 'course', 'bulletin', 'system', 'custom', 'schedule')",
             name="chk_push_job_channel",
         ),
         CheckConstraint(

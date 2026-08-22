@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -24,15 +24,6 @@ class Settings(BaseSettings):
     # --- App ---
     env: Literal["development", "production"] = "development"
     log_level: str = "INFO"
-    api_base_path: str = "/v2"
-    # Older API prefixes still mounted as aliases for clients that haven't
-    # migrated. Each legacy path serves the same routes as `api_base_path`
-    # but responses carry RFC 8594 deprecation headers (see main.py).
-    api_legacy_base_paths: list[str] = Field(default_factory=lambda: ["/v1"])
-    # Optional RFC 8594 Sunset header value (HTTP-date string) advertised on
-    # legacy responses. Empty string means "no Sunset header" — Deprecation
-    # and successor-version Link still go out.
-    api_legacy_sunset: str = ""
     # Shared-secret that clients must send as X-Push-Token on write endpoints.
     # Empty string disables auth (dev/test convenience). Production must set
     # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
@@ -73,8 +64,16 @@ class Settings(BaseSettings):
     credential_active_key_id: str = ""
 
     # --- Moodle token verification (login-time check only) ---
-    moodle_base_url: str = "https://moodle.ntust.edu.tw"
+    # Must be the SAME instance the apps harvest the wstoken from
+    # (moodle2.ntust.edu.tw) — a wstoken only validates on its issuing host.
+    # `moodle.ntust.edu.tw` (no "2") does not resolve → login 401 'unreachable'.
+    moodle_base_url: str = "https://moodle2.ntust.edu.tw"
     moodle_verify_timeout_seconds: float = 10.0
+    # Default daily maintenance window (Asia/Taipei). During this window,
+    # Moodle token-invalid / unreachable errors are treated as transient
+    # and the sync job reschedules after the window ends (no notification).
+    moodle_maintenance_start: str = "00:00"
+    moodle_maintenance_end: str = "05:00"
 
     # --- Database ---
     # e.g. postgresql+asyncpg://tigerduck:password@localhost:5432/tigerduck
@@ -130,6 +129,12 @@ class Settings(BaseSettings):
     sync_job_tick_seconds: int = 30
     # Max jobs claimed per tick by ONE worker.
     sync_job_batch_size: int = 5
+    # Minimum seconds between individual job executions within a tick.
+    # Effectively rate-limits server-side sync to 1 job per interval.
+    sync_job_min_interval_seconds: int = 60
+    # Maintenance window — no server-side sync during this period.
+    # Format: "HH:MM-HH:MM" in UTC, e.g. "02:00-04:00". Empty = no window.
+    sync_maintenance_window: str = ""
     # Cap on `status='running'` rows ACROSS all workers — counted before
     # claiming so multiple instances can't collectively hammer the school
     # APIs from our single egress IP (security review suggestion).
@@ -149,6 +154,8 @@ class Settings(BaseSettings):
     push_job_stale_lock_minutes: int = 5
     # Delay before a job with still-pending deliveries gets another round.
     push_retry_round_delay_seconds: int = 60
+    push_job_retention_days: int = 7
+    push_job_retention_interval_hours: int = 24
 
     # --- Assignment reminders (Phase 4a) ---
     assignment_reminder_scan_interval_seconds: int = 300
@@ -241,6 +248,14 @@ class Settings(BaseSettings):
     # bulletin classification job still tries the LLM on its own ticks
     # and self-heals once llama-server is back up.
     skip_llm_probe: bool = False
+
+    @model_validator(mode="after")
+    def validate_production_secrets(self) -> "Settings":
+        if self.env == "production" and not self.api_shared_secret:
+            raise ValueError(
+                "TIGERDUCK_API_SHARED_SECRET must be set in production"
+            )
+        return self
 
     @property
     def apns_topic_live_activity(self) -> str:

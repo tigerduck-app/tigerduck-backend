@@ -13,7 +13,10 @@ from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
 import structlog  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import Depends, FastAPI  # noqa: E402
+
+from server.security import require_shared_secret  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
 
 from server import __version__
 from server.auth.crypto import CredentialCipher, CredentialCipherError
@@ -22,25 +25,23 @@ from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
 from server.logging_setup import configure as configure_logging
+from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
-from server.routes import bulletins as bulletins_routes
+from server.routes import bulletins_feed as bulletins_feed_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
-from server.routes import custom_push as custom_push_routes
-from server.routes import debug as debug_routes
-from server.routes import device_lists as device_lists_routes
-from server.routes import devices as devices_routes
-from server.routes import live_activities as live_activities_routes
-from server.routes import schedule as schedule_routes
+from server.routes import live_activities_v3 as live_activities_v3_routes
+from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import settings_docs as settings_docs_routes
+from server.routes import overrides as overrides_routes
 from server.routes import sync as sync_routes
 from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
 from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
 from server.syncjobs.executor import SyncWorker, default_worker_id
-from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpTokenObtainer
+from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetcher
 from server.syncjobs.policies import ensure_default_policies
 
 logger = structlog.get_logger(__name__)
@@ -60,7 +61,7 @@ async def _wait_for_llm(settings: Settings) -> bool:
     Intentionally NON-blocking: on failure we log a warning and let the
     server finish booting. Rationale:
 
-    * Read endpoints (`GET /v2/bulletins/...`) don't need the LLM at all.
+    * Read endpoints (`GET /v3/bulletins/...`) don't need the LLM at all.
     * The scheduler's `bulletin_process` job has its own retry/backoff,
       so transient LLM downtime self-heals without server restart.
     * launchd / Docker supervisor would otherwise pin-pong the API
@@ -101,7 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "server.startup",
         env=settings.env,
-        api_base_path=settings.api_base_path,
+        api_base_path=settings.api_v3_base_path,
         apns_env=settings.apns_env,
         apns_topic=settings.apns_topic_live_activity,
     )
@@ -127,7 +128,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
             ),
-            token_obtainer=HttpTokenObtainer(
+            course_fetcher=HttpCourseFetcher(
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
             ),
@@ -152,6 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.router = router
+    app.state.push_worker = push_worker
     # Keep the legacy `sender` attribute pointing at the APNs sender so any
     # tooling that read `app.state.sender` for Live-Activity / iOS paths
     # keeps working without a downstream change.
@@ -182,21 +184,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
 
+    # Legacy /v1 and /v2 are retired. Answer any request to them with
+    # 410 Gone (not a bare 404) so an out-of-date client gets an
+    # unambiguous "this API version is removed — update the app" signal.
+    @app.middleware("http")
+    async def _legacy_api_gone(request, call_next):
+        path = request.url.path
+        if path in ("/v1", "/v2") or path.startswith("/v1/") or path.startswith("/v2/"):
+            return JSONResponse(
+                status_code=410,
+                content={
+                    "detail": (
+                        "This API version has been retired. Update the app "
+                        "to the latest version."
+                    ),
+                    "current_api": settings.api_v3_base_path,
+                },
+            )
+        return await call_next(request)
+
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
 
     @app.get("/version", tags=["meta"])
     async def version() -> dict[str, str]:
-        # Unversioned on purpose — operator tooling (portal status,
-        # start.sh) shouldn't have to know the api_base_path to ask
-        # what's running. The same body is re-served under each api
-        # prefix below so /v1 and /v2 clients have it too.
-        return {"version": __version__, "api_base_path": settings.api_base_path}
+        # Unversioned on purpose — operator tooling (portal status, start.sh)
+        # shouldn't have to know the prefix to ask what's running. Reports the
+        # live v3 base path (v1/v2 are retired → 410).
+        return {"version": __version__, "api_base_path": settings.api_v3_base_path}
 
-    @app.get(f"{settings.api_base_path}/ping", tags=["meta"])
+    # Unversioned (was {api_base_path}/ping) so it survives the /v1+/v2
+    # sunset and infra probes don't need to know a version prefix.
+    @app.get("/ping", tags=["meta"])
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
+
+    @app.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
+    async def force_push_tick() -> dict:
+        worker = getattr(app.state, "push_worker", None)
+        if worker is None:
+            return {"ok": False, "error": "push_worker not available"}
+        from server.push.pipeline import run_push_tick
+        await run_push_tick(worker)
+        return {"ok": True}
 
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
     # them before issuing requests. The cipher is None when credential keys
@@ -209,54 +240,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_attempts=settings.auth_login_max_attempts,
         window_seconds=settings.auth_login_window_seconds,
     )
+    from server.routes.auth import (
+        _CREDENTIALS_MAX_ATTEMPTS,
+        _CREDENTIALS_WINDOW_SECONDS,
+        _REFRESH_MAX_ATTEMPTS,
+        _REFRESH_WINDOW_SECONDS,
+    )
+    app.state.refresh_limiter = SlidingWindowLimiter(
+        max_attempts=_REFRESH_MAX_ATTEMPTS,
+        window_seconds=_REFRESH_WINDOW_SECONDS,
+    )
+    app.state.credentials_limiter = SlidingWindowLimiter(
+        max_attempts=_CREDENTIALS_MAX_ATTEMPTS,
+        window_seconds=_CREDENTIALS_WINDOW_SECONDS,
+    )
     try:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
         app.state.credential_cipher = None
 
-    _mount_api(app, settings.api_base_path, env=settings.env)
-    for legacy in settings.api_legacy_base_paths:
-        _mount_api(app, legacy, env=settings.env)
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)
 
-    if settings.api_legacy_base_paths:
-        _install_deprecation_middleware(
-            app,
-            current=settings.api_base_path,
-            legacy_paths=tuple(settings.api_legacy_base_paths),
-            sunset=settings.api_legacy_sunset,
-        )
-
     return app
-
-
-def _mount_api(app: FastAPI, prefix: str, *, env: str) -> None:
-    # ping / health are registered per-prefix so the deprecation middleware
-    # stamps /v1/* responses just like the routed endpoints. The root /health
-    # also stays mounted in create_app() for infra probes that don't carry a
-    # version prefix (load balancers, kubelet).
-    async def ping() -> dict[str, str]:
-        return {"pong": "tigerduck"}
-
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "env": env}
-
-    async def version() -> dict[str, str]:
-        return {"version": __version__, "api_base_path": prefix}
-
-    app.add_api_route(f"{prefix}/ping", ping, methods=["GET"], tags=["meta"])
-    app.add_api_route(f"{prefix}/health", health, methods=["GET"], tags=["meta"])
-    app.add_api_route(f"{prefix}/version", version, methods=["GET"], tags=["meta"])
-    app.include_router(devices_routes.router, prefix=prefix)
-    app.include_router(live_activities_routes.router, prefix=prefix)
-    app.include_router(schedule_routes.router, prefix=prefix)
-    app.include_router(debug_routes.router, prefix=prefix)
-    app.include_router(bulletins_routes.router, prefix=prefix)
-    app.include_router(bulletins_routes.device_router, prefix=prefix)
-    app.include_router(bulletins_routes.admin_router, prefix=prefix)
-    app.include_router(custom_push_routes.router, prefix=prefix)
-    app.include_router(device_lists_routes.router, prefix=prefix)
 
 
 def _mount_api_v3(app: FastAPI, prefix: str) -> None:
@@ -265,39 +271,19 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(auth_routes.router, prefix=prefix)
     app.include_router(user_devices_routes.router, prefix=prefix)
     app.include_router(sync_routes.router, prefix=prefix)
+    app.include_router(overrides_routes.router, prefix=f"{prefix}/sync")
     app.include_router(sync_jobs_routes.router, prefix=prefix)
     app.include_router(sync_jobs_routes.admin_router, prefix=prefix)
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
+    app.include_router(bulletins_feed_routes.router, prefix=prefix)
     app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
     app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
+    app.include_router(schedule_v3_routes.router, prefix=prefix)
+    app.include_router(live_activities_v3_routes.router, prefix=prefix)
 
 
-def _install_deprecation_middleware(
-    app: FastAPI,
-    *,
-    current: str,
-    legacy_paths: tuple[str, ...],
-    sunset: str,
-) -> None:
-    """Stamp RFC 8594 Deprecation + successor-version Link on legacy responses."""
-
-    @app.middleware("http")
-    async def _deprecation_headers(request, call_next):
-        response = await call_next(request)
-        path = request.url.path
-        for legacy in legacy_paths:
-            if path == legacy or path.startswith(f"{legacy}/"):
-                response.headers["Deprecation"] = "true"
-                successor = current + path[len(legacy):]
-                response.headers["Link"] = (
-                    f'<{successor}>; rel="successor-version"'
-                )
-                if sunset:
-                    response.headers["Sunset"] = sunset
-                break
-        return response
 
 
 app = create_app()

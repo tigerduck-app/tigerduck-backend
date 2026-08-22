@@ -74,8 +74,21 @@ class ObtainedToken:
     private_token: str | None
 
 
+@dataclass(frozen=True)
+class FetchedCourse:
+    moodle_course_id: int
+    short_name: str | None
+    full_name: str
+    category_id: int | None
+    enrolled_user_count: int | None
+
+
 class AssignmentFetcher(Protocol):
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]: ...
+
+
+class CourseFetcher(Protocol):
+    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]: ...
 
 
 class TokenObtainer(Protocol):
@@ -164,6 +177,80 @@ class HttpAssignmentFetcher:
                     )
                 )
         return fetched
+
+
+class HttpCourseFetcher:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout_seconds
+        self._transport = transport
+
+    async def _get_moodle_userid(self, client: httpx.AsyncClient, token: str) -> int:
+        params = {
+            "wstoken": token,
+            "wsfunction": "core_webservice_get_site_info",
+            "moodlewsrestformat": "json",
+        }
+        response = await client.get(f"{self._base_url}{_WS_PATH}", params=params)
+        body = response.json()
+        if isinstance(body, dict) and "exception" in body:
+            errorcode = str(body.get("errorcode", ""))
+            if errorcode == "invalidtoken":
+                raise MoodleTokenInvalid(errorcode)
+            raise MoodleUnreachable(errorcode or "moodle_exception")
+        if not isinstance(body, dict) or "userid" not in body:
+            raise MoodleUnreachable("missing_userid_in_site_info")
+        return int(body["userid"])
+
+    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]:
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, transport=self._transport
+            ) as client:
+                userid = await self._get_moodle_userid(client, token)
+                params = {
+                    "wstoken": token,
+                    "wsfunction": "core_enrol_get_users_courses",
+                    "userid": str(userid),
+                    "moodlewsrestformat": "json",
+                }
+                response = await client.get(
+                    f"{self._base_url}{_WS_PATH}", params=params
+                )
+        except httpx.HTTPError as exc:
+            logger.warning("syncjobs.moodle.courses_unreachable", error=str(exc)[:200])
+            raise MoodleUnreachable(str(exc)[:200]) from exc
+
+        if response.status_code == 429:
+            raise MoodleRateLimited("http_429")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise MoodleUnreachable("invalid_json") from exc
+        if isinstance(body, dict) and "exception" in body:
+            errorcode = str(body.get("errorcode", ""))
+            if errorcode == "invalidtoken":
+                raise MoodleTokenInvalid(errorcode)
+            raise MoodleUnreachable(errorcode or "moodle_exception")
+        if not isinstance(body, list):
+            raise MoodleUnreachable(f"unexpected_shape_{type(body).__name__}")
+
+        return [
+            FetchedCourse(
+                moodle_course_id=c["id"],
+                short_name=c.get("shortname"),
+                full_name=str(c.get("fullname") or c.get("shortname") or ""),
+                category_id=c.get("categoryid"),
+                enrolled_user_count=c.get("enrolledusercount"),
+            )
+            for c in body
+            if isinstance(c.get("id"), int)
+        ]
 
 
 class HttpTokenObtainer:

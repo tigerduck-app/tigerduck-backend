@@ -37,16 +37,24 @@ async def _login(client) -> dict:
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
 
 
-async def _get_job(client) -> SyncJob:
+async def _get_job(client, job_type: str = "moodle_assignments") -> SyncJob:
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
-        return (await session.execute(select(SyncJob))).scalar_one()
+        return (
+            await session.execute(
+                select(SyncJob).where(SyncJob.job_type == job_type)
+            )
+        ).scalar_one()
 
 
-async def _set_job(client, **values):
+async def _set_job(client, job_type: str = "moodle_assignments", **values):
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
+        job = (
+            await session.execute(
+                select(SyncJob).where(SyncJob.job_type == job_type)
+            )
+        ).scalar_one()
         for key, value in values.items():
             setattr(job, key, value)
         await session.commit()
@@ -168,8 +176,9 @@ async def test_run_now_no_job_and_invalid_credentials_409_without_provisioning(
     headers = await _login(client)
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
-        job = (await session.execute(select(SyncJob))).scalar_one()
-        await session.delete(job)
+        jobs = (await session.execute(select(SyncJob))).scalars().all()
+        for j in jobs:
+            await session.delete(j)
         account = (
             await session.execute(select(ExternalAccount))
         ).scalar_one()
@@ -183,8 +192,12 @@ async def test_run_now_no_job_and_invalid_credentials_409_without_provisioning(
     assert response.json()["detail"]["error"] == "credential_invalid"
 
     async with factory() as session:
-        jobs = (await session.execute(select(SyncJob))).scalars().all()
-        assert jobs == []  # nothing got provisioned
+        jobs = (
+            await session.execute(
+                select(SyncJob).where(SyncJob.job_type == "moodle_assignments")
+            )
+        ).scalars().all()
+        assert jobs == []
 
 async def test_run_now_disabled_policy_409_without_burning_cooldown(client):
     """Greptile #4: with the policy disabled the executor never claims the

@@ -42,6 +42,7 @@ logger = structlog.get_logger(__name__)
 PROVIDER_NTUST_SSO = "ntust_sso"
 
 
+
 @dataclass(frozen=True)
 class LoginResult:
     access_token: str
@@ -80,27 +81,31 @@ async def login(
     cipher: CredentialCipher | None,
     *,
     student_id: str,
-    password: str,
-    moodle_token: str,
+    moodle_token: str | None,
     moodle_private_token: str | None,
     device_info: DeviceInfo,
     client_ip: str,
+    skip_rate_limit: bool = False,
 ) -> LoginResult:
     ensure_auth_configured(settings, cipher)
     assert cipher is not None  # narrowed by ensure_auth_configured
 
-    sid_key = f"login:sid:{student_id.lower()}"
-    ip_key = f"login:ip:{client_ip}"
-    if not limiter.allow(sid_key) or not limiter.allow(ip_key):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="too_many_login_attempts",
-        )
-    # Record BEFORE the Moodle call: every verification attempt counts, so
-    # the endpoint can't be hammered as a token-validation oracle.
-    limiter.record(sid_key)
-    limiter.record(ip_key)
+    if not skip_rate_limit:
+        sid_key = f"login:sid:{student_id.lower()}"
+        ip_key = f"login:ip:{client_ip}"
+        if not limiter.allow(sid_key) or not limiter.allow(ip_key):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too_many_login_attempts",
+            )
+        limiter.record(sid_key)
+        limiter.record(ip_key)
 
+    if not moodle_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="moodle_token_required",
+        )
     result = await verifier.verify(token=moodle_token, student_id=student_id)
     if not result.ok:
         logger.info(
@@ -121,7 +126,6 @@ async def login(
             session,
             cipher=cipher,
             account=account,
-            password=password,
             moodle_token=moodle_token,
             moodle_private_token=moodle_private_token,
             now=now,
@@ -437,19 +441,15 @@ async def _store_credentials(
     *,
     cipher: CredentialCipher,
     account: ExternalAccount,
-    password: str,
     moodle_token: str,
     moodle_private_token: str | None,
     now: datetime,
 ) -> None:
-    # Security review 1.4: the backend verified the Moodle token, NOT the
-    # password. Store it unverified; the Phase-3 sync worker may use it at
-    # most once and must disable sync on the first SSO failure instead of
-    # retrying (repeated wrong-password logins could lock the student's
-    # school account).
+    # Token-only: no NTUST password is stored. The Moodle wstoken is the
+    # only credential the sync worker uses. When it expires or gets
+    # revoked, the sync job disables and a push notification asks the user
+    # to open the app (which sends a fresh token via PATCH /auth/credentials).
     payload = {
-        "ntust_password": password,
-        "password_verified": False,
         "token_cache": {
             "moodle_token": moodle_token,
             "moodle_private_token": moodle_private_token,
@@ -485,6 +485,30 @@ async def _store_credentials(
 async def _upsert_device(
     session: AsyncSession, *, user: User, info: DeviceInfo, now: datetime
 ) -> UserDevice:
+    # Clean up stale device rows: if the same physical device
+    # (client_device_id) was previously registered under a different user,
+    # delete those rows. The CASCADE wipes tokens, sessions, and push
+    # deliveries tied to that old device entry.
+    old_devices = (
+        await session.execute(
+            select(UserDevice).where(
+                UserDevice.client_device_id == info.client_device_id,
+                UserDevice.user_id != user.id,
+            )
+        )
+    ).scalars().all()
+    for old in old_devices:
+        logger.info(
+            "auth.device.cross_user_cleanup",
+            client_device_id=info.client_device_id,
+            old_user_id=str(old.user_id),
+            old_device_id=str(old.id),
+            new_user_id=str(user.id),
+        )
+        await session.delete(old)
+    if old_devices:
+        await session.flush()
+
     device = (
         await session.execute(
             select(UserDevice).where(
@@ -501,9 +525,10 @@ async def _upsert_device(
         )
         session.add(device)
     device.platform = info.platform
-    device.device_name = info.device_name
-    device.app_version = info.app_version
-    device.os_version = info.os_version
+    if info.app_version is not None:
+        device.app_version = info.app_version
+    if info.os_version is not None:
+        device.os_version = info.os_version
     device.deleted_at = None
     device.last_seen_at = now
     device.last_login_at = now

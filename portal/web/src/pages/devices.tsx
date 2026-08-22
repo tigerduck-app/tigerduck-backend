@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useHashTab } from "@/hooks/use-hash-tab";
 import { toast } from "sonner";
-import { Plus, Search, Smartphone } from "lucide-react";
+import { Plus, Search, Smartphone, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,33 +43,91 @@ import type {
   DevicesPayload,
   DeviceRow,
 } from "@/types/api";
+import { ListsPage } from "@/pages/lists";
 
-// Sub-tab key → matcher on the device row. Apple `device_class` is
-// either "iphone" or "ipad"; Android registers without an apns env so we
-// gate on `platform` instead of `device_class` to catch the (rare but
-// real) older rows where `device_class` was left blank.
+// Sub-tab key → matcher on the device row. v3 reports platform
+// `ios`/`ipados` (mapped to device_class iphone/ipad server-side);
+// Android registers without an apns env so we gate on `platform`.
 const TABS: Array<{
-  key: "iphone" | "ipad" | "android" | "apple-deprecated";
+  key: string;
   label: string;
   match: (d: DeviceRow) => boolean;
 }> = [
   { key: "iphone", label: "iPhone", match: (d) => d.device_class === "iphone" },
   { key: "ipad", label: "iPad", match: (d) => d.device_class === "ipad" },
-  {
-    key: "android",
-    label: "Android",
-    match: (d) => d.platform === "android",
-  },
-  {
-    key: "apple-deprecated",
-    label: "Apple (Deprecated)",
-    match: (d) => d.platform === "apple" && d.device_class === "",
-  },
+  { key: "macos", label: "macOS", match: (d) => d.platform === "macos" },
+  { key: "android", label: "Android", match: (d) => d.platform === "android" },
 ];
+
+const CHART_COLORS = [
+  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
+  "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
+];
+
+function MiniPie({ data }: { data: { label: string; value: number; color: string }[] }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+  const size = 140;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 4;
+  if (data.length === 1) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={cx} cy={cy} r={r} fill={data[0].color} />
+      </svg>
+    );
+  }
+  let cumAngle = -90;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {data.map((d, i) => {
+        const angle = (d.value / total) * 360;
+        const startRad = (cumAngle * Math.PI) / 180;
+        const endRad = ((cumAngle + angle) * Math.PI) / 180;
+        cumAngle += angle;
+        const largeArc = angle > 180 ? 1 : 0;
+        const x1 = cx + r * Math.cos(startRad);
+        const y1 = cy + r * Math.sin(startRad);
+        const x2 = cx + r * Math.cos(endRad);
+        const y2 = cy + r * Math.sin(endRad);
+        return (
+          <path key={i} d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`} fill={d.color} />
+        );
+      })}
+    </svg>
+  );
+}
+
+function StatBlock({ title, counts, total }: { title: string; counts: [string, number][]; total: number }) {
+  const chartData = counts.map(([label, value], i) => ({
+    label, value, color: CHART_COLORS[i % CHART_COLORS.length],
+  }));
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium">{title}</h4>
+      <div className="flex items-start gap-6">
+        <MiniPie data={chartData} />
+        <div className="space-y-1 text-xs min-w-0">
+          {chartData.map((d) => (
+            <div key={d.label} className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: d.color }} />
+              <span className="truncate">{d.label}</span>
+              <span className="text-muted-foreground ml-auto tabular-nums">
+                {d.value} ({total > 0 ? ((d.value / total) * 100).toFixed(0) : 0}%)
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function DevicesPage() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useHashTab("iphone");
 
   const q = useQuery<DevicesPayload>({
     // Include the trimmed search in the key so React Query treats it as
@@ -100,14 +159,14 @@ export function DevicesPage() {
     <div className="space-y-6">
       <PageHeader
         title="Registered devices"
-        description="Every row in device_registrations. Newest activity first."
+        description="Every device in user_devices (v3). Newest activity first."
       />
 
       <div className="flex items-center gap-2">
         <div className="relative flex-1 max-w-md">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search by device_id or user_id…"
+            placeholder="Search by Device ID or Student ID…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-8"
@@ -137,7 +196,7 @@ export function DevicesPage() {
         </Card>
       )}
       {q.data && (
-        <Tabs defaultValue="iphone" className="space-y-4">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
           <TabsList>
             {TABS.map((t) => {
               const count = q.data.items.filter(t.match).length;
@@ -150,6 +209,8 @@ export function DevicesPage() {
                 </TabsTrigger>
               );
             })}
+            <TabsTrigger value="stats">Statistics</TabsTrigger>
+            <TabsTrigger value="lists">Lists</TabsTrigger>
           </TabsList>
           {TABS.map((t) => {
             const rows = q.data!.items.filter(t.match);
@@ -163,6 +224,12 @@ export function DevicesPage() {
               </TabsContent>
             );
           })}
+          <TabsContent value="stats">
+            <DeviceStats items={q.data.items} />
+          </TabsContent>
+          <TabsContent value="lists">
+            <ListsPage embedded />
+          </TabsContent>
         </Tabs>
       )}
     </div>
@@ -194,8 +261,8 @@ function DevicesTable({
           <TableHead className="w-10"></TableHead>
           <TableHead>Device ID</TableHead>
           <TableHead>User</TableHead>
-          <TableHead>Bundle</TableHead>
-          <TableHead>APNs env</TableHead>
+          <TableHead>App</TableHead>
+          <TableHead>OS</TableHead>
           <TableHead>Push</TableHead>
           <TableHead>Tokens</TableHead>
           <TableHead>Updated</TableHead>
@@ -232,18 +299,12 @@ function Row({
           onCheckedChange={() => onToggle(d.device_id)}
         />
       </TableCell>
-      <TableCell className="font-mono text-xs">
-        <span className="block max-w-[16ch] truncate" title={d.device_id}>
-          {d.device_id}
-        </span>
+      <TableCell className="font-mono text-xs break-all">
+        {d.device_id}
       </TableCell>
       <TableCell className="font-mono text-xs">{d.user_id || "—"}</TableCell>
-      <TableCell className="font-mono text-xs text-muted-foreground">
-        {d.bundle_id || "—"}
-      </TableCell>
-      <TableCell className="text-sm text-muted-foreground">
-        {d.apns_env || "—"}
-      </TableCell>
+      <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
+      <TableCell className="text-xs">{d.os_version ?? "—"}</TableCell>
       <TableCell>
         {d.server_push_enabled ? (
           <Badge variant="success">on</Badge>
@@ -258,7 +319,10 @@ function Row({
         {d.has_device_token ? (
           <Badge variant="default">apns</Badge>
         ) : null}
-        {!d.has_pts_token && !d.has_device_token ? (
+        {d.has_fcm_token ? (
+          <Badge variant="default">fcm</Badge>
+        ) : null}
+        {!d.has_pts_token && !d.has_device_token && !d.has_fcm_token ? (
           <Badge variant="muted">none</Badge>
         ) : null}
       </TableCell>
@@ -281,6 +345,7 @@ function SelectionBar({
   const qc = useQueryClient();
   const [listId, setListId] = useState<string>("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [confirmDeregister, setConfirmDeregister] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
 
@@ -330,6 +395,24 @@ function SelectionBar({
     onError: (e) => toast.error(asMessage(e)),
   });
 
+  const deregisterMut = useMutation({
+    mutationFn: () =>
+      api<{ deleted: number }>("/api/devices/deregister", {
+        method: "POST",
+        json: { device_ids: Array.from(selected) },
+      }),
+    onSuccess: (r) => {
+      toast.success(`Deregistered ${r.deleted} device(s)`);
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      setConfirmDeregister(false);
+      onClear();
+    },
+    onError: (e) => {
+      toast.error(asMessage(e));
+      setConfirmDeregister(false);
+    },
+  });
+
   return (
     <Card className="border-primary/40 bg-primary/5">
       <CardContent className="flex flex-wrap items-center gap-3 py-3">
@@ -368,11 +451,49 @@ function SelectionBar({
           >
             Add
           </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setConfirmDeregister(true)}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            Deregister
+          </Button>
           <Button variant="ghost" size="sm" onClick={onClear}>
             Clear
           </Button>
         </div>
       </CardContent>
+
+      <Dialog open={confirmDeregister} onOpenChange={setConfirmDeregister}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Deregister {selected.size} device(s)?</DialogTitle>
+            <DialogDescription>
+              This will soft-delete the selected devices and invalidate all their
+              push tokens. The devices will need to re-register on next app
+              launch. This action cannot be easily undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setConfirmDeregister(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={deregisterMut.isPending}
+              onClick={() => deregisterMut.mutate()}
+            >
+              {deregisterMut.isPending ? "Deregistering…" : "Confirm deregister"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
@@ -418,6 +539,68 @@ function SelectionBar({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </Card>
+  );
+}
+
+const PLATFORM_LABELS: Record<string, string> = {
+  ios: "iOS",
+  ipados: "iPadOS",
+  macos: "macOS",
+  watchos: "watchOS",
+  android: "Android",
+  wearos: "Wear OS",
+  web: "Web",
+};
+
+function platformLabel(p: string) {
+  return PLATFORM_LABELS[p] ?? p;
+}
+
+function DeviceStats({ items }: { items: DeviceRow[] }) {
+  const [platformFilter, setPlatformFilter] = useState("all");
+
+  const platforms = ["ios", "ipados", "macos", "android"];
+  const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
+  const filtered = items.filter((d) => {
+    if (platformFilter === "all") return true;
+    if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
+    return d.platform === platformFilter;
+  });
+
+  const countBy = (key: "os_version" | "app_version") => {
+    const map: Record<string, number> = {};
+    for (const d of filtered) {
+      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      map[v] = (map[v] ?? 0) + 1;
+    }
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+
+  return (
+    <Card>
+      <CardContent className="space-y-6 pt-4">
+        <Select value={platformFilter} onValueChange={setPlatformFilter}>
+          <SelectTrigger className="w-44">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Platforms</SelectItem>
+            <SelectItem value="apple">All Apple</SelectItem>
+            {platforms.map((p) => (
+              <SelectItem key={p} value={p}>{platformLabel(p)}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {filtered.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No devices for this platform filter.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <StatBlock title="OS Version" counts={countBy("os_version")} total={filtered.length} />
+            <StatBlock title="App Version" counts={countBy("app_version")} total={filtered.length} />
+          </div>
+        )}
+      </CardContent>
     </Card>
   );
 }

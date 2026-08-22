@@ -15,7 +15,9 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from server.auth.models import AuthSession
+from sqlalchemy import update
+
+from server.auth.models import AuthSession, UserDevice
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -71,6 +73,12 @@ async def require_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="session_user_mismatch",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+    if device_id:
+        await session.execute(
+            update(UserDevice)
+            .where(UserDevice.id == device_id, UserDevice.deleted_at.isnot(None))
+            .values(deleted_at=None)
         )
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id

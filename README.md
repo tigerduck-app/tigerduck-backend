@@ -16,7 +16,7 @@
 
 ## 總覽
 
-TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) iOS App 的後端服務，跑在 `api.tigerduck.app`。負責五件事：
+TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app)（iOS / Android）的後端服務，跑在 `api.tigerduck.app`。負責五件事：
 
 - 🔐 **帳號與認證（v3）** — NTUST SSO 登入驗證、JWT access + refresh rotation（盜用偵測滅族）、AES-256-GCM 憑證加密儲存、使用者裝置與 push token 管理
 - 🔄 **使用者資料同步（v3）** — 課表 / 作業 / 設定 / 公告訂閱的多裝置同步：client 初始上傳 + per-user changelog 增量下行，伺服器端再定期代抓 Moodle 作業權威更新
@@ -55,9 +55,9 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 📲 推播（`server/push/`）
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
 - **提醒來源** — 作業提醒（due 前 24h / 2h，依使用者 notification 設定）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
-- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；登入裝置優先採用 v3 註冊的 update token（v2 舊表為 fallback）
+- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token
-- **認證** — v3 路由走 Bearer JWT；v2 寫入類路由（裝置註冊、訂閱寫入）驗 `X-Shared-Secret`，讀類路由（公告 list / detail / taxonomy）開放
+- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Shared-Secret`；公告讀取開放
 
 ### ⏰ 排程
 - **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send（見 [`docs/scheduler.md`](docs/scheduler.md)）
@@ -188,50 +188,103 @@ TIGERDUCK_LLM_MODEL=gemma-4-E4B-it-GGUF
 
 macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama-server 包成 launchd 服務。
 
-## API 端點概覽（v2）
+## 已日落 API
 
-| Method | Path | 用途 | 認證 |
-|---|---|---|---|
-| `GET` | `/v2/health` | liveness | 無 |
-| `POST` | `/v2/devices` | 裝置註冊（含 APNs token、`platform=apple` / `android`） | shared secret |
-| `GET` | `/v2/bulletins` | 公告列表（cursor 分頁、newest first） | 無 |
-| `GET` | `/v2/bulletins/{id}` | 公告詳情 | 無 |
-| `GET` | `/v2/bulletins/taxonomy` | 取得 org / tag 標籤對照 | 無 |
-| `GET/PUT` | `/v2/devices/{id}/subscriptions` | 訂閱規則讀寫 | shared secret |
-| `PATCH` | `/v2/devices/{id}/preferences` | 裝置偏好設定（如 `server_push_enabled`） | shared secret |
-| `POST` | `/v2/live-activities/start-tokens` | Live Activity push-to-start token 上報 | shared secret |
-| `POST` | `/v2/schedule/sync` | 課表同步（驅動 Live Activity 排程） | shared secret |
-| `POST` | `/v2/custom-push/preview` | 預覽自訂推播 payload | shared secret |
-| `POST` | `/v2/custom-push` | 對指定裝置或裝置清單發送自訂推播 | shared secret |
-| `GET` | `/v2/custom-push/recent` | 最近的自訂推播發送紀錄 | shared secret |
-| `GET/POST` | `/v2/device-lists` | 列出 / 新增裝置清單（命名群組） | shared secret |
-| `GET/PATCH/DELETE` | `/v2/device-lists/{id}` | 讀取 / 更新 / 刪除裝置清單 | shared secret |
-| `GET/POST/DELETE` | `/v2/device-lists/{id}/members` | 管理清單成員 | shared secret |
+`/v1/*` 和 `/v2/*` 已全面日落，所有請求回 **410 Gone**。舊版 client 需更新 App 才能使用 `/v3` 端點。
 
-`/v1/*` 保留為 deprecated alias，iOS 1.6.1 起改打 `/v2`。
+## API 端點概覽（v3）
 
-## API 端點概覽（v3 — 使用者帳號）
+所有 v3 路由走 `Authorization: Bearer <JWT>`，除下方標註外。
 
-v3 是 user-centric 的新介面（v2 為 device-centric，維持凍結）。除標註外都走 `Authorization: Bearer <JWT>`。
+### 認證
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
 | `POST` | `/v3/auth/login` | NTUST SSO 登入（Moodle token 驗證）→ access + refresh token | 無 |
 | `POST` | `/v3/auth/refresh` | refresh token rotation（重放偵測滅族） | refresh token |
+| `PATCH` | `/v3/auth/credentials` | 更新已儲存的加密憑證 | JWT |
 | `POST` | `/v3/auth/logout` | 撤銷目前 session | JWT |
-| `POST/GET` | `/v3/devices/register`、`/v3/devices` | 使用者裝置 + push token 註冊 / 列表 | JWT |
+
+### 裝置
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `POST` | `/v3/devices/register` | 使用者裝置 + push token 註冊 | JWT |
+| `GET` | `/v3/devices` | 裝置列表 | JWT |
 | `DELETE` | `/v3/devices/{id}` | 刪除裝置（連動撤銷 session、失效 token） | JWT |
+| `PATCH` | `/v3/devices/{id}/preferences` | 更新同步偏好（sync_courses / colors / names / assignments） | JWT |
+
+### 同步
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
 | `POST` | `/v3/sync/initial-upload` | 初始上傳本機資料（課表 / 作業 / 設定 / 訂閱） | JWT |
 | `GET` | `/v3/sync?since_revision=N` | changelog 增量同步（過舊回 410） | JWT |
 | `GET` | `/v3/sync/full` | 全量快照 | JWT |
-| `GET` | `/v3/courses`、`/v3/assignments` | 課表 / 作業列表 | JWT |
-| `PUT` | `/v3/courses/{id}/override`、`/v3/courses/{id}/skipped-dates/{date}` | 課程覆寫 / 停課日 | JWT |
-| `PUT` | `/v3/assignments/{id}/override` | 作業本機狀態（完成 / 忽略 / 封存） | JWT |
-| `GET/PUT` | `/v3/settings/{namespace}` | 設定文件（revision 樂觀並發，衝突回 409） | JWT |
-| `GET/POST/PATCH/DELETE` | `/v3/bulletin-subscriptions[/{id}]` | 使用者公告訂閱規則（PATCH 用 base_revision；DELETE 可選帶） | JWT |
-| `GET/PUT` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |
+| `GET` | `/v3/sync/revision` | 目前 revision 數字 | JWT |
+| `POST` | `/v3/sync/courses/upload` | 上傳課表 | JWT |
+| `DELETE` | `/v3/sync/courses` | 刪除全部課程 | JWT |
+| `DELETE` | `/v3/sync/courses/{key}` | 刪除單一課程 | JWT |
+| `POST` | `/v3/sync/assignments/upload` | 上傳作業 | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱覆寫（outbox drain） | JWT |
+| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain） | JWT |
+
+### 課表 / 作業
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/v3/courses` | 課表列表 | JWT |
+| `PUT` | `/v3/courses/{id}/override` | 課程覆寫（authoritative） | JWT |
+| `PUT` | `/v3/courses/{id}/skipped-dates/{date}` | 新增停課日 | JWT |
+| `DELETE` | `/v3/courses/{id}/skipped-dates/{date}` | 移除停課日 | JWT |
+| `GET` | `/v3/assignments` | 作業列表 | JWT |
+| `PUT` | `/v3/assignments/{id}/override` | 作業狀態覆寫（authoritative） | JWT |
+
+### 設定
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/v3/settings` | 列出所有 namespace | JWT |
+| `GET` | `/v3/settings/{namespace}` | 取得特定 namespace 設定 | JWT |
+| `PUT` | `/v3/settings/{namespace}` | 更新設定（revision CAS，衝突回 409） | JWT |
+
+### 公告
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/v3/bulletins` | 公告列表（cursor 分頁） | JWT |
+| `GET` | `/v3/bulletins/{id}` | 公告詳情 | JWT |
+| `GET` | `/v3/bulletins/taxonomy` | org / tag 標籤對照 | JWT |
+| `GET` | `/v3/bulletin-subscriptions` | 訂閱規則列表 | JWT |
+| `PUT` | `/v3/bulletin-subscriptions` | 批次覆寫訂閱規則 | JWT |
+| `POST` | `/v3/bulletin-subscriptions` | 新增訂閱規則 | JWT |
+| `PATCH` | `/v3/bulletin-subscriptions/{id}` | 更新訂閱規則（base_revision） | JWT |
+| `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | 刪除訂閱規則（可帶 id 或批次） | JWT |
+| `GET` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |
+| `PUT` | `/v3/bulletin-states/{id}` | 設定單一公告狀態 | JWT |
+
+### 排程 / Live Activity
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程） | JWT |
+| `DELETE` | `/v3/schedule/sync` | 刪除排程資料 | JWT |
+| `POST` | `/v3/live-activities/register` | 註冊 Live Activity update token | JWT |
+
+### 伺服器代抓 / 管理
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
 | `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh 觸發伺服器代抓（cooldown） | JWT |
-| `GET/PATCH` | `/v3/admin/sync-policies[/{job_type}]` | 同步策略管理 | shared secret |
+| `GET` | `/v3/admin/sync-policies` | 列出同步策略 | shared secret |
+| `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略 | shared secret |
+
+### 基礎
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/health` | liveness | 無 |
+| `GET` | `/version` | 版本與 API base path | 無 |
 
 ## 開發
 
@@ -260,7 +313,7 @@ tigerduck-backend/
 │   ├── auth/                    # v3 身分層：crypto（憑證加密）/ tokens / service / rate_limit / moodle / models
 │   ├── sync/                    # v3 使用者同步：upload / changelog / serializers / retention / models
 │   ├── syncjobs/                # 伺服器代抓：executor / credentials（密碼鐵律）/ moodle_client / assignments / provisioning
-│   ├── routes/                  # v2：devices / schedule / bulletins / …；v3：auth / user_devices / sync / academics / settings_docs / bulletins_v3 / sync_jobs
+│   ├── routes/                  # v3：auth / user_devices / sync / academics / overrides / settings_docs / bulletins_feed / bulletins_v3 / sync_jobs / schedule_v3 / live_activities_v3
 │   ├── push/                    # apns_client / fcm_client / router / pipeline（兩階段投遞）/ reminders / course_reminders / job_payloads
 │   ├── scheduler/               # APScheduler runtime、dispatch、retention
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher（匿名）/ user_dispatch（登入使用者）/ taxonomy

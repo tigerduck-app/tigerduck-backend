@@ -155,9 +155,10 @@ async def test_delete_device_revokes_sessions_and_tokens(client) -> None:
         },
     )
 
-    # Delete the phone from the mac.
+    # Delete the phone from the mac. The path takes the client-owned
+    # client_device_id, not the server row PK.
     response = await client.delete(
-        f"/v3/devices/{login_phone['device_id']}", headers=bearer(login_mac)
+        "/v3/devices/iphone-abc", headers=bearer(login_mac)
     )
     assert response.status_code == 204
 
@@ -201,8 +202,10 @@ async def test_delete_device_revokes_sessions_and_tokens(client) -> None:
 async def test_delete_other_users_device_404(client) -> None:
     login_a = await do_login(client)
     login_b = await do_login(client, student_id="B11015999", device="other-dev")
+    # User A's real client_device_id, called with B's auth: must 404
+    # (device lookup is user-scoped).
     response = await client.delete(
-        f"/v3/devices/{login_a['device_id']}", headers=bearer(login_b)
+        "/v3/devices/iphone-abc", headers=bearer(login_b)
     )
     assert response.status_code == 404
 
@@ -227,7 +230,7 @@ async def test_session_revoked_when_own_device_deleted(client) -> None:
     # Deleting the device you're calling from logs that device out too.
     login = await do_login(client)
     response = await client.delete(
-        f"/v3/devices/{login['device_id']}", headers=bearer(login)
+        "/v3/devices/iphone-abc", headers=bearer(login)
     )
     assert response.status_code == 204
 
@@ -240,14 +243,24 @@ async def test_session_revoked_when_own_device_deleted(client) -> None:
 # --- Phase 4c: linked-user marker on device_registrations (review 1.8) ---
 
 
-V2_PAYLOAD = {
-    "user_id": "anon-1",
-    "device_id": "iphone-abc",
-    "pts_token_hex": "a1b2c3" * 10,
-    "bundle_id": "org.ntust.app.TigerDuck",
-    "attrs_type": "TigerDuckActivityAttributes",
-    "apns_env": "development",
-}
+async def _seed_anonymous_registration(client, device_id="iphone-abc") -> None:
+    """The v2 register endpoint is retired (410); seed the pre-sunset
+    anonymous row the marker logic reconciles directly instead."""
+    from server.models import DeviceRegistration
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add(
+            DeviceRegistration(
+                device_id=device_id,
+                user_id="anon-1",
+                pts_token_hex="a1b2c3" * 10,
+                bundle_id="org.ntust.app.TigerDuck",
+                attrs_type="TigerDuckActivityAttributes",
+                apns_env="development",
+            )
+        )
+        await session.commit()
 
 
 async def _linked_user_id(client, device_id="iphone-abc"):
@@ -260,7 +273,7 @@ async def _linked_user_id(client, device_id="iphone-abc"):
 
 
 async def test_v3_register_links_anonymous_registration(client) -> None:
-    assert (await client.post("/v2/devices/register", json=V2_PAYLOAD)).status_code == 200
+    await _seed_anonymous_registration(client)
     login = await do_login(client)
     response = await client.post(
         "/v3/devices/register",
@@ -281,20 +294,42 @@ async def test_v3_register_links_anonymous_registration(client) -> None:
         assert await _linked_user_id(client) == device.user_id
 
 
-async def test_v2_register_after_v3_rederives_marker(client) -> None:
+async def test_v3_reregister_rederives_lost_marker(client) -> None:
+    """The marker is rederivable, not one-shot: if linked_user_id is lost
+    (e.g. manual DB surgery, or the anonymous row appearing after the v3
+    one pre-sunset), the next v3 register restores it."""
+    from server.models import DeviceRegistration
+    from sqlalchemy import update as sa_update
+
+    await _seed_anonymous_registration(client)
     login = await do_login(client)
     await client.post(
         "/v3/devices/register",
         headers=bearer(login),
         json={"client_device_id": "iphone-abc", "platform": "ios"},
     )
-    # Anonymous (dual-write) registration arrives AFTER the v3 one.
-    assert (await client.post("/v2/devices/register", json=V2_PAYLOAD)).status_code == 200
+    assert await _linked_user_id(client) is not None
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        await session.execute(
+            sa_update(DeviceRegistration)
+            .where(DeviceRegistration.device_id == "iphone-abc")
+            .values(linked_user_id=None)
+        )
+        await session.commit()
+
+    # Re-registration (every app launch) rederives the marker.
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-abc", "platform": "ios"},
+    )
     assert await _linked_user_id(client) is not None
 
 
 async def test_v3_device_delete_clears_marker(client) -> None:
-    await client.post("/v2/devices/register", json=V2_PAYLOAD)
+    await _seed_anonymous_registration(client)
     login = await do_login(client)
     await client.post(
         "/v3/devices/register",
@@ -304,7 +339,79 @@ async def test_v3_device_delete_clears_marker(client) -> None:
     assert await _linked_user_id(client) is not None
 
     response = await client.delete(
-        f"/v3/devices/{login['device_id']}", headers=bearer(login)
+        "/v3/devices/iphone-abc", headers=bearer(login)
     )
     assert response.status_code == 204
     assert await _linked_user_id(client) is None
+
+
+async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> None:
+    """Disabling the last device's sync categories must delete the orphaned
+    server data AND record per-entity `delete` changelog entries — using only
+    entity types / operations the DB check constraints allow."""
+    from server.sync.models import (
+        UserAssignment,
+        UserChangeLog,
+        UserCourse,
+        UserSyncState,
+    )
+
+    login = await do_login(client)
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = (
+            await session.execute(
+                select(UserDevice).where(
+                    UserDevice.client_device_id == "iphone-abc"
+                )
+            )
+        ).scalar_one()
+        user_id = device.user_id
+        course = UserCourse(
+            user_id=user_id,
+            semester="1132",
+            course_key="1132:CS101",
+            course_no="CS101",
+            course_name="Intro to CS",
+        )
+        assignment = UserAssignment(
+            user_id=user_id,
+            moodle_course_id=1,
+            moodle_assignment_id=2,
+            title="HW1",
+        )
+        session.add_all([course, assignment])
+        await session.commit()
+        course_id, assignment_id = course.id, assignment.id
+
+    response = await client.patch(
+        "/v3/devices/iphone-abc/preferences",
+        headers=bearer(login),
+        json={"sync_courses": False, "sync_assignments": False},
+    )
+    assert response.status_code == 200, response.text
+
+    async with factory() as session:
+        assert (await session.execute(select(UserCourse))).scalars().all() == []
+        assert (
+            await session.execute(select(UserAssignment))
+        ).scalars().all() == []
+
+        entries = (
+            (
+                await session.execute(
+                    select(UserChangeLog).order_by(UserChangeLog.revision)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        deletes = {(e.entity_type, e.entity_id, e.operation) for e in entries}
+        assert ("course", str(course_id), "delete") in deletes
+        assert ("assignment", str(assignment_id), "delete") in deletes
+
+        # Revision watermark advanced over the cleanup entries so clients
+        # polling /changes actually see them.
+        state = (await session.execute(select(UserSyncState))).scalar_one()
+        assert state.current_revision == max(e.revision for e in entries)

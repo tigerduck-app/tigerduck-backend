@@ -21,6 +21,7 @@ pull-to-refresh or re-login revives them.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 from dataclasses import dataclass
@@ -36,27 +37,31 @@ from server.auth.models import ExternalAccount
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
+from server.syncjobs.availability import is_moodle_available
+from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential_blob,
     mark_credentials_invalid,
-    refresh_moodle_token_durably,
 )
 from server.syncjobs.models import (
     SyncJob,
     SyncJobStatus,
+    SyncJobType,
     SyncPolicy,
     SyncRun,
     SyncRunStatus,
 )
 from server.syncjobs.moodle_client import (
     AssignmentFetcher,
+    CourseFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
-    SsoUnavailable,
-    TokenObtainer,
 )
+
+from server.auth.models import PushJob
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 logger = structlog.get_logger(__name__)
 
@@ -77,22 +82,72 @@ def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
+async def _enqueue_sync_trigger(session: AsyncSession, user_id) -> None:
+    now = datetime.now(UTC)
+    stmt = (
+        pg_insert(PushJob)
+        .values(
+            user_id=user_id,
+            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now,
+            payload={"kind": "sync_trigger", "source_device_id": None},
+        )
+        .on_conflict_do_nothing()
+    )
+    await session.execute(stmt)
+
+
 @dataclass(frozen=True)
 class SyncWorker:
     session_factory: async_sessionmaker[AsyncSession]
     settings: Settings
     cipher: CredentialCipher
     fetcher: AssignmentFetcher
-    token_obtainer: TokenObtainer
+    course_fetcher: CourseFetcher
     worker_id: str
+
+
+def _in_maintenance_window(window: str) -> bool:
+    """Return True if current UTC time falls within the maintenance window.
+
+    *window* format: ``"HH:MM-HH:MM"`` (start-end, UTC).  Wrapping past
+    midnight is supported (e.g. ``"23:00-02:00"``).  Empty string or
+    unparseable values → ``False`` (no window).
+    """
+    if not window or "-" not in window:
+        return False
+    try:
+        start_str, end_str = window.split("-", 1)
+        sh, sm = (int(x) for x in start_str.strip().split(":"))
+        eh, em = (int(x) for x in end_str.strip().split(":"))
+    except (ValueError, TypeError):
+        return False
+    now = datetime.now(UTC)
+    now_minutes = now.hour * 60 + now.minute
+    start_minutes = sh * 60 + sm
+    end_minutes = eh * 60 + em
+    if start_minutes <= end_minutes:
+        return start_minutes <= now_minutes < end_minutes
+    # Window wraps past midnight (e.g. 23:00-02:00).
+    return now_minutes >= start_minutes or now_minutes < end_minutes
 
 
 async def run_sync_tick(worker: SyncWorker) -> int:
     """One scheduler tick: recover stale locks, claim due jobs, execute
     them sequentially. Returns the number of jobs executed."""
+    if _in_maintenance_window(worker.settings.sync_maintenance_window):
+        logger.info(
+            "syncjobs.maintenance_window",
+            window=worker.settings.sync_maintenance_window,
+        )
+        return 0
     await _recover_stale_jobs(worker)
     claimed = await _claim_due_jobs(worker)
-    for job_id, run_id in claimed:
+    for idx, (job_id, run_id) in enumerate(claimed):
+        if idx > 0:
+            await asyncio.sleep(worker.settings.sync_job_min_interval_seconds)
         await _execute_job(worker, job_id=job_id, run_id=run_id)
     return len(claimed)
 
@@ -241,38 +296,49 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             )
             token = (blob.get("token_cache") or {}).get("moodle_token")
 
-            fetched = None
-            if isinstance(token, str) and token:
+            if not isinstance(token, str) or not token:
+                raise CredentialInvalid("moodle_token_missing")
+
+            from .log_entries import log_sync
+
+            await log_sync(session, user_id=job.user_id, source="executor",
+                           message=f"Job started: {job.job_type}",
+                           detail={"job_id": job.id, "run_id": run_id})
+
+            now = datetime.now(UTC)
+            if job.job_type == SyncJobType.ntust_courses.value:
+                try:
+                    courses = await worker.course_fetcher.fetch_courses(token=token)
+                except MoodleTokenInvalid:
+                    raise CredentialInvalid("moodle_token_invalid")
+                await log_sync(session, user_id=job.user_id, source="executor",
+                               message=f"Fetched {len(courses)} courses from Moodle")
+                stats = await apply_fetched_courses(
+                    session, user_id=job.user_id, fetched=courses, now=now
+                )
+            else:
                 try:
                     fetched = await worker.fetcher.fetch_assignments(token=token)
                 except MoodleTokenInvalid:
-                    logger.info("syncjobs.token_expired", account_id=account.id)
-            if fetched is None:
-                # Runs in its OWN committed transactions: the iron-rule
-                # marker must be durable, and the fresh token must survive
-                # a later fetch failure rolling this work session back.
-                # NOTE: no work-session statements may run between
-                # load_credential_blob above and this call — the pending
-                # last_used_at update must stay unflushed so the durable
-                # sessions can write the credential row without blocking.
-                token = await refresh_moodle_token_durably(
-                    worker.session_factory,
-                    worker.cipher,
-                    worker.token_obtainer,
-                    external_account_id=job.external_account_id,
+                    raise CredentialInvalid("moodle_token_invalid")
+                await log_sync(session, user_id=job.user_id, source="executor",
+                               message=f"Fetched {len(fetched)} assignments from Moodle")
+                stats = await apply_fetched_assignments(
+                    session, user_id=job.user_id, fetched=fetched, now=now
                 )
-                fetched = await worker.fetcher.fetch_assignments(token=token)
-
-            now = datetime.now(UTC)
-            stats = await apply_fetched_assignments(
-                session, user_id=job.user_id, fetched=fetched, now=now
-            )
 
             if run is not None:
                 run.status = SyncRunStatus.succeeded.value
                 run.finished_at = now
                 run.fetched_count = stats.fetched_count
                 run.changed_count = stats.changed_count
+
+            await log_sync(session, user_id=job.user_id, source="executor",
+                           message=f"Job succeeded: {job.job_type} — fetched={stats.fetched_count} changed={stats.changed_count}",
+                           detail={"fetched": stats.fetched_count, "changed": stats.changed_count})
+
+            if stats.changed_count > 0:
+                await _enqueue_sync_trigger(session, job.user_id)
 
             interval = (
                 policy.default_interval_seconds
@@ -295,24 +361,20 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 changed=stats.changed_count,
             )
     except CredentialInvalid as exc:
-        await _record_failure(
-            worker,
-            job_id=job_id,
-            run_id=run_id,
-            error=ERROR_CREDENTIAL_INVALID,
-            disable=True,
-            detail=exc.reason,
+        await _handle_moodle_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=ERROR_CREDENTIAL_INVALID, detail=exc.reason,
+            is_token_invalid=True,
         )
     except MoodleRateLimited:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED
         )
-    except (MoodleUnreachable, SsoUnavailable) as exc:
-        await _record_failure(
-            worker,
-            job_id=job_id,
-            run_id=run_id,
+    except MoodleUnreachable as exc:
+        await _handle_moodle_failure(
+            worker, job_id=job_id, run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{str(exc)[:120]}",
+            is_token_invalid=False,
         )
     except Exception as exc:  # unexpected — never kill the tick loop
         logger.exception("syncjobs.run_crashed", job_id=job_id)
@@ -321,6 +383,62 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             job_id=job_id,
             run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{type(exc).__name__}",
+        )
+
+
+async def _handle_moodle_failure(
+    worker: SyncWorker,
+    *,
+    job_id: int,
+    run_id: int,
+    error: str,
+    detail: str | None = None,
+    is_token_invalid: bool,
+) -> None:
+    """Check availability windows before disabling a sync job.
+
+    If Moodle is in a maintenance/suspend window, reschedule instead of
+    disabling — the failure is likely transient. Only disable + push
+    notification when Moodle should be available but isn't.
+    """
+    async with session_scope(worker.session_factory) as session:
+        available, resume_at = await is_moodle_available(
+            session, worker.settings
+        )
+    if not available and resume_at is not None:
+        logger.info(
+            "syncjobs.moodle_unavailable_window",
+            job_id=job_id,
+            resume_at=resume_at.isoformat(),
+        )
+        async with session_scope(worker.session_factory) as session:
+            job = (
+                await session.execute(
+                    select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            if job is not None:
+                run = await session.get(SyncRun, run_id)
+                if run is not None and run.status == SyncRunStatus.running.value:
+                    run.status = SyncRunStatus.failed.value
+                    run.finished_at = datetime.now(UTC)
+                    run.error = f"moodle_maintenance:{error}"
+                job.status = SyncJobStatus.pending.value
+                job.run_after = resume_at
+                job.locked_by = None
+                job.locked_at = None
+                job.last_error = f"moodle_maintenance:{error}"
+        return
+
+    if is_token_invalid:
+        await _record_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=error, disable=True, detail=detail,
+        )
+    else:
+        await _record_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=error,
         )
 
 

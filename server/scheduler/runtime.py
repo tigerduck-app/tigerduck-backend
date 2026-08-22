@@ -22,6 +22,7 @@ from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
 from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.retention import prune_terminal_push_jobs
 from server.push.reminders import scan_assignment_reminders
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
@@ -56,6 +57,7 @@ def build_scheduler(
     * `bulletin_retention` — prune aged-out soft-deleted bulletins daily.
     * `live_activity_token_retention` — prune terminal update-token rows daily.
     * `sync_changelog_retention` — purge aged changelog entries daily.
+    * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 30s
@@ -91,6 +93,9 @@ def build_scheduler(
 
     async def sync_changelog_retention() -> None:
         await purge_expired_changelog(session_factory, settings)
+
+    async def push_job_retention() -> None:
+        await prune_terminal_push_jobs(session_factory, settings)
 
     scheduler.add_job(
         pts_tick,
@@ -156,6 +161,16 @@ def build_scheduler(
             hours=settings.sync_changelog_retention_interval_hours
         ),
         id="sync_changelog_retention",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        push_job_retention,
+        trigger=IntervalTrigger(
+            hours=settings.push_job_retention_interval_hours
+        ),
+        id="push_job_retention",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

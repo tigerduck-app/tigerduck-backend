@@ -44,20 +44,25 @@ def course_to_dict(c: UserCourse) -> dict:
         "classroom_map": c.classroom_map,
         "enrollment_status": c.enrollment_status,
         "fetched_at": _iso(c.fetched_at),
-        "deleted_at": _iso(c.deleted_at),
         "updated_at": _iso(c.updated_at),
+        "version": c.version,
     }
 
 
-def course_override_to_dict(o: UserCourseOverride) -> dict:
+def course_override_to_dict(
+    o: UserCourseOverride,
+    *,
+    moodle_id: str | None = None,
+    course_no: str | None = None,
+) -> dict:
     return {
         "user_course_id": o.user_course_id,
-        "custom_name": o.custom_name,
+        "moodle_id": moodle_id,
+        "course_no": course_no,
+        "custom_names": o.custom_names or {},
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
         "color_hex": o.color_hex,
         "color_hex_updated_at": _iso(o.color_hex_updated_at),
-        "is_hidden": o.is_hidden,
-        "is_hidden_updated_at": _iso(o.is_hidden_updated_at),
     }
 
 
@@ -94,9 +99,12 @@ def assignment_to_dict(a: UserAssignment) -> dict:
     }
 
 
-def assignment_override_to_dict(o: UserAssignmentOverride) -> dict:
+def assignment_override_to_dict(
+    o: UserAssignmentOverride, *, moodle_assignment_id: int | None = None
+) -> dict:
     return {
         "user_assignment_id": o.user_assignment_id,
+        "moodle_assignment_id": moodle_assignment_id,
         "local_status": o.local_status,
         "local_status_updated_at": _iso(o.local_status_updated_at),
         "note": o.note,

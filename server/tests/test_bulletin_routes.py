@@ -1,8 +1,14 @@
-"""HTTP integration tests for /v2/bulletins and subscription CRUD.
+"""HTTP integration tests for the /v3 bulletin feed and subscription PUT.
 
 Uses the `client` fixture from conftest which swaps in a fresh DB per test
 (unlike the session-scoped `prepared_engine` used by lower-level tests),
 so we get clean state for each HTTP-level scenario.
+
+The v2 device-scoped surface is retired (410 Gone). The read-only feed now
+lives at /v3/bulletins (server/routes/bulletins_feed.py, public GETs) and
+snapshot-style rule replacement lives at PUT /v3/bulletin-subscriptions
+(server/routes/bulletins_v3.py, JWT-scoped). Per-rule subscription CRUD is
+covered separately in test_bulletins_v3_api.py.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from httpx import AsyncClient
 from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 
@@ -22,7 +29,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def test_taxonomy_lists_every_org_and_tag(client: AsyncClient) -> None:
-    resp = await client.get("/v2/bulletins/taxonomy")
+    resp = await client.get("/v3/bulletins/taxonomy")
     assert resp.status_code == 200
     body = resp.json()
     assert {o["id"] for o in body["orgs"]} == {o.value for o in CanonicalOrg}
@@ -38,7 +45,7 @@ async def test_taxonomy_lists_every_org_and_tag(client: AsyncClient) -> None:
 
 
 async def _seed_bulletins(client: AsyncClient, count: int = 3) -> list[int]:
-    factory: async_sessionmaker = client._transport.app.state.session_factory  # type: ignore[attr-defined]
+    factory: async_sessionmaker = client.app.state.session_factory  # type: ignore[attr-defined]
     ids: list[int] = []
     async with factory() as session:
         for i in range(count):
@@ -73,7 +80,7 @@ async def _seed_bulletins(client: AsyncClient, count: int = 3) -> list[int]:
 
 async def test_list_bulletins_newest_first_paginates(client: AsyncClient) -> None:
     ids = await _seed_bulletins(client, count=5)
-    resp = await client.get("/v2/bulletins?limit=2")
+    resp = await client.get("/v3/bulletins?limit=2")
     assert resp.status_code == 200
     body = resp.json()
     returned_ids = [item["id"] for item in body["items"]]
@@ -82,14 +89,14 @@ async def test_list_bulletins_newest_first_paginates(client: AsyncClient) -> Non
     assert body["next_cursor"] == returned_ids[-1]
 
     # Fetch the next page via cursor
-    resp2 = await client.get(f"/v2/bulletins?limit=2&cursor={body['next_cursor']}")
+    resp2 = await client.get(f"/v3/bulletins?limit=2&cursor={body['next_cursor']}")
     next_ids = [item["id"] for item in resp2.json()["items"]]
     assert max(next_ids) < min(returned_ids)
 
 
 async def test_list_bulletins_hides_deleted_by_default(client: AsyncClient) -> None:
     ids = await _seed_bulletins(client, count=2)
-    factory: async_sessionmaker = client._transport.app.state.session_factory  # type: ignore[attr-defined]
+    factory: async_sessionmaker = client.app.state.session_factory  # type: ignore[attr-defined]
     async with factory() as session:
         from sqlalchemy import update
 
@@ -98,19 +105,19 @@ async def test_list_bulletins_hides_deleted_by_default(client: AsyncClient) -> N
         )
         await session.commit()
 
-    resp = await client.get("/v2/bulletins")
+    resp = await client.get("/v3/bulletins")
     returned_ids = {item["id"] for item in resp.json()["items"]}
     assert ids[0] not in returned_ids
     assert ids[1] in returned_ids
 
-    resp_with_deleted = await client.get("/v2/bulletins?include_deleted=true")
+    resp_with_deleted = await client.get("/v3/bulletins?include_deleted=true")
     with_ids = {item["id"] for item in resp_with_deleted.json()["items"]}
     assert ids[0] in with_ids
 
 
 async def test_get_bulletin_returns_detail(client: AsyncClient) -> None:
     ids = await _seed_bulletins(client, count=1)
-    resp = await client.get(f"/v2/bulletins/{ids[0]}")
+    resp = await client.get(f"/v3/bulletins/{ids[0]}")
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == ids[0]
@@ -120,40 +127,46 @@ async def test_get_bulletin_returns_detail(client: AsyncClient) -> None:
 
 
 async def test_get_bulletin_404s_when_missing(client: AsyncClient) -> None:
-    resp = await client.get("/v2/bulletins/999999999")
+    resp = await client.get("/v3/bulletins/999999999")
     assert resp.status_code == 404
 
 
-# --- Subscription CRUD ----------------------------------------------------
+# --- Subscription snapshot PUT ---------------------------------------------
 
 
-async def _register_device(client: AsyncClient, device_id: str = "dev-routes") -> None:
-    resp = await client.post(
-        "/v2/devices/register",
-        json={
-            "user_id": "u1",
-            "device_id": device_id,
-            "pts_token_hex": "pts",
-            "device_token_hex": "alert",
-            "bundle_id": "org.ntust.app.TigerDuck",
-            "attrs_type": "TigerDuckActivityAttributes",
-            "apns_env": "development",
-        },
+_LOGIN_BODY = {
+    "student_id": "B11015000",
+    "password": "pw",
+    "moodle_token": "tok",
+    "device_info": {"client_device_id": "dev-routes", "platform": "ios"},
+}
+
+
+async def _login(client: AsyncClient) -> dict:
+    client.app.state.moodle_verifier = StaticMoodleVerifier(  # type: ignore[attr-defined]
+        MoodleVerifyResult(ok=True, username="b11015000")
     )
+    resp = await client.post("/v3/auth/login", json=_LOGIN_BODY)
     assert resp.status_code == 200
+    return resp.json()
+
+
+def _bearer(login: dict) -> dict:
+    return {"Authorization": f"Bearer {login['access_token']}"}
 
 
 async def test_list_subscriptions_empty_then_after_put(
     client: AsyncClient,
 ) -> None:
-    await _register_device(client)
+    login = await _login(client)
 
-    empty = await client.get("/v2/devices/dev-routes/subscriptions")
+    empty = await client.get("/v3/bulletin-subscriptions", headers=_bearer(login))
     assert empty.status_code == 200
-    assert empty.json()["rules"] == []
+    assert empty.json()["items"] == []
 
     put = await client.put(
-        "/v2/devices/dev-routes/subscriptions",
+        "/v3/bulletin-subscriptions",
+        headers=_bearer(login),
         json={
             "rules": [
                 {
@@ -174,13 +187,13 @@ async def test_list_subscriptions_empty_then_after_put(
         },
     )
     assert put.status_code == 200
-    saved = put.json()["rules"]
+    saved = put.json()["items"]
     assert len(saved) == 2
     assert {r["name"] for r in saved} == {"學務處獎學金", "任何免費便當"}
     assert all(r["id"] for r in saved)
 
-    again = await client.get("/v2/devices/dev-routes/subscriptions")
-    assert [r["name"] for r in again.json()["rules"]] == [
+    again = await client.get("/v3/bulletin-subscriptions", headers=_bearer(login))
+    assert [r["name"] for r in again.json()["items"]] == [
         "學務處獎學金",
         "任何免費便當",
     ]
@@ -190,10 +203,11 @@ async def test_put_subscriptions_is_snapshot_replacement(
     client: AsyncClient,
 ) -> None:
     """Second PUT with a shorter list removes the extras."""
-    await _register_device(client, device_id="dev-snap")
+    login = await _login(client)
 
     await client.put(
-        "/v2/devices/dev-snap/subscriptions",
+        "/v3/bulletin-subscriptions",
+        headers=_bearer(login),
         json={
             "rules": [
                 {"orgs": [CanonicalOrg.library.value], "tags": [], "mode": "AND"},
@@ -202,66 +216,26 @@ async def test_put_subscriptions_is_snapshot_replacement(
         },
     )
     await client.put(
-        "/v2/devices/dev-snap/subscriptions",
+        "/v3/bulletin-subscriptions",
+        headers=_bearer(login),
         json={
             "rules": [
                 {"orgs": [CanonicalOrg.library.value], "tags": [], "mode": "AND"}
             ]
         },
     )
-    got = await client.get("/v2/devices/dev-snap/subscriptions")
-    rules = got.json()["rules"]
+    got = await client.get("/v3/bulletin-subscriptions", headers=_bearer(login))
+    rules = got.json()["items"]
     assert len(rules) == 1
     assert rules[0]["orgs"] == [CanonicalOrg.library.value]
 
 
-async def test_subscriptions_get_returns_empty_when_device_missing(
-    client: AsyncClient,
-) -> None:
-    """GET tolerates the first-launch race where subscriptions load fires
-    before APNs token registration finishes — returning 200 empty lets the
-    editor render immediately without the client special-casing 404."""
-    resp = await client.get("/v2/devices/ghost-device/subscriptions")
-    assert resp.status_code == 200
-    assert resp.json() == {"device_id": "ghost-device", "rules": []}
-
-
-async def test_subscriptions_put_requires_registered_device(
-    client: AsyncClient,
-) -> None:
-    """PUT still 404s for unknown devices so a saved ruleset can't end up
-    orphaned with no DeviceRegistration to push to."""
+async def test_subscriptions_put_requires_auth(client: AsyncClient) -> None:
+    """PUT without a bearer token is rejected so a saved ruleset can't end
+    up orphaned with no authenticated user to attach it to (the v3 analogue
+    of the old "PUT 404s for unregistered devices" guard)."""
     put = await client.put(
-        "/v2/devices/ghost-device/subscriptions",
+        "/v3/bulletin-subscriptions",
         json={"rules": []},
     )
-    assert put.status_code == 404
-
-
-async def test_put_rejects_unknown_org_value(client: AsyncClient) -> None:
-    await _register_device(client, device_id="dev-bad")
-    resp = await client.put(
-        "/v2/devices/dev-bad/subscriptions",
-        json={
-            "rules": [
-                {"orgs": ["not_a_real_org"], "tags": [], "mode": "AND"}
-            ]
-        },
-    )
-    assert resp.status_code == 422
-
-
-async def test_register_accepts_device_token_hex_end_to_end(
-    client: AsyncClient,
-) -> None:
-    """Smoke test that the standard APNs token round-trips through register
-    and is available for the matcher on later calls."""
-    await _register_device(client, device_id="dev-token-smoke")
-
-    # Subscription that would match anything — ensures the device is in
-    # the matcher's eligible pool (which gates on device_token_hex).
-    put = await client.put(
-        "/v2/devices/dev-token-smoke/subscriptions",
-        json={"rules": [{"orgs": [], "tags": [], "mode": "AND"}]},
-    )
-    assert put.status_code == 200
+    assert put.status_code == 401

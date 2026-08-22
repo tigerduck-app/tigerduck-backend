@@ -229,9 +229,12 @@ class DeviceListMember(Base):
         ForeignKey("device_lists.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    device_id: Mapped[str] = mapped_column(
-        String(128),
-        ForeignKey("device_registrations.device_id", ondelete="CASCADE"),
+    # v3: membership references user_devices (the persistent-UUID device
+    # row), not the abandoned v2 device_registrations. See migration
+    # a8c2f1e0d4b6.
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="CASCADE"),
         primary_key=True,
     )
     added_at: Mapped[datetime] = mapped_column(

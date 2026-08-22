@@ -48,6 +48,8 @@ def issue_access_token(
         "sub": user_id,
         "sid": session_id,
         "token_use": "access",
+        "iss": "tigerduck-backend",
+        "aud": "tigerduck-api",
         "iat": now,
         "exp": now + timedelta(seconds=ttl_seconds),
     }
@@ -62,7 +64,9 @@ def decode_access_token(secret: str, token: str) -> AccessClaims:
             token,
             secret,
             algorithms=[_ALGORITHM],
-            options={"require": ["sub", "sid", "exp"]},
+            issuer="tigerduck-backend",
+            audience="tigerduck-api",
+            options={"require": ["sub", "sid", "exp", "iss", "aud"]},
         )
     except pyjwt.PyJWTError as exc:
         raise InvalidAccessToken(str(exc)) from exc

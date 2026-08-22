@@ -51,7 +51,7 @@ import type {
 
 // ─── ListsPage ────────────────────────────────────────────────────────
 
-export function ListsPage() {
+export function ListsPage({ embedded }: { embedded?: boolean } = {}) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [createOpen, setCreateOpen] = useState(false);
@@ -84,11 +84,13 @@ export function ListsPage() {
   });
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Lists"
-        description="Named cohorts of devices. Pick one as a custom-push target."
-      />
+    <div className={embedded ? "space-y-4" : "space-y-6"}>
+      {!embedded && (
+        <PageHeader
+          title="Lists"
+          description="Named cohorts of devices. Pick one as a custom-push target."
+        />
+      )}
 
       <div className="flex justify-end">
         <Button onClick={() => setCreateOpen(true)}>

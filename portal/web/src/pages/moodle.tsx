@@ -1,0 +1,2127 @@
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import {
+  Check,
+  CheckCircle2,
+  CloudOff,
+  Loader2,
+  Minus,
+  Monitor,
+  Tablet,
+  Pause,
+  Play,
+  RefreshCw,
+  Search,
+  Server,
+  Smartphone,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { PageHeader, Section } from "@/components/ui/section";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+type MoodleStatus = {
+  suspended_until: string | null;
+  job_counts: {
+    active: number;
+    running: number;
+    failed: number;
+    disabled: number;
+  };
+};
+
+
+function fmt(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString();
+}
+
+export function MoodlePage() {
+  return (
+    <>
+      <PageHeader
+        title="Moodle"
+        description="Manage server-side Moodle sync jobs"
+      />
+      <ActionsTab />
+    </>
+  );
+}
+
+export function DataInspectionPage() {
+  return (
+    <>
+      <PageHeader
+        title="Data Inspection"
+        description="Inspect per-student sync state, device data, and live logs"
+      />
+      <SyncTab />
+    </>
+  );
+}
+
+function ActionsTab() {
+  const qc = useQueryClient();
+  const [hours, setHours] = useState("4");
+  const [notifyOnRetry, setNotifyOnRetry] = useState(false);
+
+  const status = useQuery<MoodleStatus>({
+    queryKey: ["moodle-status"],
+    queryFn: () => fetch("/api/moodle/status").then((r) => r.json()),
+    refetchInterval: 10_000,
+  });
+
+  const suspendMut = useMutation({
+    mutationFn: () =>
+      fetch("/api/moodle/suspend", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hours: parseFloat(hours) }),
+      }).then((r) => r.json()),
+    onSuccess: () => {
+      toast.success(`Moodle sync suspended for ${hours}h`);
+      qc.invalidateQueries({ queryKey: ["moodle-status"] });
+    },
+  });
+
+  const resumeMut = useMutation({
+    mutationFn: () =>
+      fetch("/api/moodle/resume", { method: "POST" }).then((r) => r.json()),
+    onSuccess: () => {
+      toast.success("Moodle sync resumed");
+      qc.invalidateQueries({ queryKey: ["moodle-status"] });
+    },
+  });
+
+  const retryAllMut = useMutation({
+    mutationFn: () =>
+      fetch("/api/moodle/retry-all-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notify: notifyOnRetry }),
+      }).then((r) => r.json()),
+    onSuccess: (data: { retried: number; notified: number }) => {
+      const msg = data.notified
+        ? `Re-queued ${data.retried} job(s), notified ${data.notified} user(s)`
+        : `Re-queued ${data.retried} job(s)`;
+      toast.success(msg);
+      qc.invalidateQueries({ queryKey: ["moodle-status"] });
+      qc.invalidateQueries({ queryKey: ["moodle-students"] });
+    },
+  });
+
+  const retryMut = useMutation({
+    mutationFn: () =>
+      fetch("/api/moodle/retry-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notify: notifyOnRetry }),
+      }).then((r) => r.json()),
+    onSuccess: (data: { retried: number; notified: number }) => {
+      const msg = data.notified
+        ? `Retried ${data.retried} job(s), notified ${data.notified} user(s)`
+        : `Retried ${data.retried} job(s)`;
+      toast.success(msg);
+      qc.invalidateQueries({ queryKey: ["moodle-status"] });
+      qc.invalidateQueries({ queryKey: ["moodle-students"] });
+    },
+  });
+
+  const isSuspended = !!status.data?.suspended_until;
+  const c = status.data?.job_counts;
+
+  return (
+    <Section>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            {isSuspended ? (
+              <>
+                <Pause className="h-5 w-5 text-orange-500" />
+                Suspended
+              </>
+            ) : (
+              <>
+                <CheckCircle2 className="h-5 w-5 text-green-500" />
+                Active
+              </>
+            )}
+          </CardTitle>
+          {isSuspended && (
+            <CardDescription>
+              Suspended until {fmt(status.data!.suspended_until)}
+            </CardDescription>
+          )}
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {c && (
+            <div className="flex gap-2 text-sm">
+              <Badge variant="default">{c.active + c.running} active</Badge>
+              {c.failed > 0 && (
+                <Badge variant="destructive">{c.failed} failed</Badge>
+              )}
+              {c.disabled > 0 && (
+                <Badge variant="outline">{c.disabled} disabled</Badge>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+            <span className="text-sm font-medium">Suspend sync</span>
+            {isSuspended ? (
+              <Button
+                size="sm"
+                onClick={() => resumeMut.mutate()}
+                disabled={resumeMut.isPending}
+              >
+                <Play className="mr-1.5 h-3.5 w-3.5" />
+                Resume now
+              </Button>
+            ) : (
+              <>
+                <Select value={hours} onValueChange={setHours}>
+                  <SelectTrigger className="w-24">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1">1 h</SelectItem>
+                    <SelectItem value="2">2 h</SelectItem>
+                    <SelectItem value="4">4 h</SelectItem>
+                    <SelectItem value="8">8 h</SelectItem>
+                    <SelectItem value="12">12 h</SelectItem>
+                    <SelectItem value="24">24 h</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => suspendMut.mutate()}
+                  disabled={suspendMut.isPending}
+                >
+                  <Pause className="mr-1.5 h-3.5 w-3.5" />
+                  Suspend
+                </Button>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="notify-retry"
+                checked={notifyOnRetry}
+                onCheckedChange={(v) => setNotifyOnRetry(v === true)}
+              />
+              <label
+                htmlFor="notify-retry"
+                className="text-sm text-muted-foreground"
+              >
+                Send expire notification to users
+              </label>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => retryAllMut.mutate()}
+                disabled={retryAllMut.isPending}
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Retry all
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => retryMut.mutate()}
+                disabled={retryMut.isPending}
+              >
+                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                Retry all failed
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <SyncStats />
+      <JobsTable />
+    </Section>
+  );
+}
+
+type SyncStatsData = {
+  summary: {
+    succeeded_24h: number;
+    failed_24h: number;
+    running_now: number;
+    total_24h: number;
+    avg_duration_s: number;
+    total_fetched: number;
+  };
+  recent_runs: {
+    id: number;
+    student_id: string;
+    job_type: string;
+    status: string;
+    started_at: string | null;
+    finished_at: string | null;
+    fetched_count: number | null;
+    changed_count: number | null;
+  }[];
+};
+
+function SyncStats() {
+  const stats = useQuery<SyncStatsData>({
+    queryKey: ["moodle-stats"],
+    queryFn: () => fetch("/api/moodle/stats").then((r) => r.json()),
+    refetchInterval: 10_000,
+  });
+
+  const s = stats.data?.summary;
+  const runs = stats.data?.recent_runs ?? [];
+
+  return (
+    <>
+      {s && (
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle className="text-base">Last 24h sync results</CardTitle>
+            <CardDescription>
+              Tick every 30s, batch size 5, per-user interval 8h
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-3 gap-4 sm:grid-cols-6">
+              <div className="text-center">
+                <div className="text-2xl font-bold text-green-600">{s.succeeded_24h}</div>
+                <div className="text-xs text-muted-foreground">Succeeded</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-red-500">{s.failed_24h}</div>
+                <div className="text-xs text-muted-foreground">Failed</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold text-blue-500">{s.running_now}</div>
+                <div className="text-xs text-muted-foreground">Running</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.total_24h}</div>
+                <div className="text-xs text-muted-foreground">Total runs</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.avg_duration_s}s</div>
+                <div className="text-xs text-muted-foreground">Avg duration</div>
+              </div>
+              <div className="text-center">
+                <div className="text-2xl font-bold">{s.total_fetched}</div>
+                <div className="text-xs text-muted-foreground">Items fetched</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle className="text-base">Recent runs (last 50)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto"><Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Student</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Started</TableHead>
+                <TableHead>Duration</TableHead>
+                <TableHead className="text-right">Fetched</TableHead>
+                <TableHead className="text-right">Changed</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {runs.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-muted-foreground">
+                    No runs in the last 24h
+                  </TableCell>
+                </TableRow>
+              ) : (
+                runs.map((r) => {
+                  const dur = r.started_at && r.finished_at
+                    ? ((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1) + "s"
+                    : "—";
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-mono text-xs">{r.student_id}</TableCell>
+                      <TableCell className="text-xs">{r.job_type.replace("_", " ")}</TableCell>
+                      <TableCell>{statusBadge(r.status)}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{fmt(r.started_at)}</TableCell>
+                      <TableCell className="text-xs font-mono">{dur}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{r.fetched_count ?? "—"}</TableCell>
+                      <TableCell className="text-right font-mono text-xs">{r.changed_count ?? "—"}</TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table></div>
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+type GlobalSyncJob = {
+  id: number;
+  student_id: string;
+  job_type: string;
+  status: string;
+  priority: number;
+  run_after: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  attempts: number;
+};
+
+function statusBadge(s: string) {
+  switch (s) {
+    case "pending": return <Badge variant="default">pending</Badge>;
+    case "running": return <Badge className="bg-blue-600">running</Badge>;
+    case "failed": return <Badge variant="destructive">failed</Badge>;
+    case "disabled": return <Badge variant="outline">disabled</Badge>;
+    default: return <Badge variant="secondary">{s}</Badge>;
+  }
+}
+
+function JobsTable() {
+  const jobs = useQuery<{ jobs: GlobalSyncJob[] }>({
+    queryKey: ["moodle-jobs"],
+    queryFn: () => fetch("/api/moodle/jobs").then((r) => r.json()),
+    refetchInterval: 10_000,
+  });
+
+  const list = jobs.data?.jobs ?? [];
+
+  return (
+    <Card className="mt-4">
+      <CardHeader>
+        <CardTitle className="text-base">Sync jobs</CardTitle>
+        <CardDescription>{list.length} job(s)</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-x-auto"><Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Student</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Next run</TableHead>
+              <TableHead>Last success</TableHead>
+              <TableHead>Error</TableHead>
+              <TableHead className="text-right">Attempts</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {list.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7} className="text-center text-muted-foreground">
+                  No sync jobs
+                </TableCell>
+              </TableRow>
+            ) : (
+              list.map((j) => (
+                <TableRow key={j.id}>
+                  <TableCell className="font-mono text-xs">{j.student_id}</TableCell>
+                  <TableCell className="text-xs">{j.job_type.replace("_", " ")}</TableCell>
+                  <TableCell>{statusBadge(j.status)}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{fmt(j.run_after)}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{fmt(j.last_success_at)}</TableCell>
+                  <TableCell className="text-xs text-red-500 max-w-[150px] truncate">{j.last_error ?? "—"}</TableCell>
+                  <TableCell className="text-right font-mono text-xs">{j.attempts}</TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table></div>
+      </CardContent>
+    </Card>
+  );
+}
+
+type SyncJob = {
+  id: number;
+  job_type: string;
+  job_status: string;
+  attempts: number;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string | null;
+  run_after: string | null;
+};
+
+type SyncRun = {
+  id: number;
+  job_type: string;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  fetched_count: number | null;
+  changed_count: number | null;
+  error: string | null;
+  meta: Record<string, unknown> | null;
+};
+
+type SyncOverride = {
+  moodle_assignment_id: number;
+  title: string | null;
+  local_status: string;
+  updated_at: string;
+};
+
+type SyncCourse = {
+  id: number;
+  moodle_id: string | null;
+  course_no: string;
+  course_name: string;
+  course_name_en: string | null;
+  client_course_no: string;
+  source: string;
+  color_hex: string | null;
+  custom_names: Record<string, string> | null;
+  default_palette_index: number;
+  default_color_light: string;
+  default_color_dark: string;
+  updated_by_device_id?: string | null;
+  updated_at?: string | null;
+  color_hex_device_id?: string | null;
+  semester?: string;
+};
+
+type SyncTombstone = {
+  course_key: string;
+  course_no: string;
+  semester: string;
+  deleted_at: string;
+  deleted_by_device_id: string | null;
+};
+
+type SyncAssignment = {
+  id: number;
+  moodle_assignment_id: number;
+  course_no: string;
+  course_name: string;
+  title: string;
+  due_at: string | null;
+  moodle_url: string | null;
+  provider_is_submitted: boolean;
+  provider_grade: string | null;
+};
+
+type SyncCoursesResponse = {
+  semester: string;
+  palette_light: string[];
+  palette_dark: string[];
+  courses: SyncCourse[];
+  tombstones?: SyncTombstone[];
+  assignments?: SyncAssignment[];
+};
+
+type SyncDevice = {
+  id: string;
+  client_device_id: string;
+  platform: string;
+  app_version: string | null;
+  os_version: string | null;
+  last_seen_at: string | null;
+  last_login_at: string | null;
+  created_at: string | null;
+  sync_courses: boolean | null;
+  sync_course_colors: boolean | null;
+  sync_course_names: boolean | null;
+  sync_assignments: boolean | null;
+  cloud_sync_enabled: boolean | null;
+};
+
+type PushJobRow = {
+  id: number;
+  scenario: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  fire_at: string;
+  sent_at: string | null;
+  last_error: string | null;
+  dedupe_key: string;
+  created_at: string;
+  source_device_id: string | null;
+};
+
+type PushDeliveryRow = {
+  id: number;
+  push_job_id: number;
+  device_id: string | null;
+  provider: string;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  failure_code: string | null;
+  failure_message: string | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
+type SyncEventsResponse = {
+  student_id: string;
+  found: boolean;
+  jobs?: SyncJob[];
+  runs?: SyncRun[];
+  overrides?: SyncOverride[];
+  devices?: SyncDevice[];
+  push_jobs?: PushJobRow[];
+  push_deliveries?: PushDeliveryRow[];
+  topology?: {
+    revision: number;
+    course_count: number;
+    tombstone_count: number;
+    courses_reset_at: string | null;
+  };
+  poll_status?: Record<string, "foreground" | "background">;
+};
+
+type LogEntry = {
+  id: number;
+  ts: string;
+  level: string;
+  source: string;
+  message: string;
+  detail: Record<string, unknown> | null;
+  device_label: string | null;
+  platform: string | null;
+};
+
+type LogsResponse = {
+  entries: LogEntry[];
+  latest_id: number;
+};
+
+const CHART_COLORS = [
+  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
+  "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
+];
+const PLATFORM_LABELS: Record<string, string> = {
+  ios: "iOS", ipados: "iPadOS", macos: "macOS", watchos: "watchOS",
+  android: "Android", wearos: "Wear OS", web: "Web",
+};
+function platformLabel(p: string) { return PLATFORM_LABELS[p] ?? p; }
+const PLATFORM_ORDER: Record<string, number> = {
+  android: 0, wearos: 1, ios: 2, ipados: 3, macos: 4, watchos: 5, web: 6,
+};
+function sortedDevices(devices: SyncDevice[]): SyncDevice[] {
+  return [...devices].sort((a, b) => {
+    const pa = PLATFORM_ORDER[a.platform] ?? 99;
+    const pb = PLATFORM_ORDER[b.platform] ?? 99;
+    if (pa !== pb) return pa - pb;
+    return a.client_device_id.localeCompare(b.client_device_id);
+  });
+}
+
+function deviceLabel(deviceId: string | null | undefined, devices: SyncDevice[]): string {
+  if (!deviceId) return "—";
+  const d = devices.find(d => d.id === deviceId);
+  if (!d) return deviceId.slice(0, 8);
+  return `${platformLabel(d.platform)} ${d.client_device_id.slice(0, 8)}`;
+}
+
+function MiniPieChart({ data }: { data: { label: string; value: number; color: string }[] }) {
+  const total = data.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return null;
+  const size = 140;
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 4;
+
+  if (data.length === 1) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        <circle cx={cx} cy={cy} r={r} fill={data[0].color} />
+      </svg>
+    );
+  }
+
+  let cumAngle = -90;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      {data.map((d, i) => {
+        const angle = (d.value / total) * 360;
+        const startRad = (cumAngle * Math.PI) / 180;
+        const endRad = ((cumAngle + angle) * Math.PI) / 180;
+        cumAngle += angle;
+        const largeArc = angle > 180 ? 1 : 0;
+        const x1 = cx + r * Math.cos(startRad);
+        const y1 = cy + r * Math.sin(startRad);
+        const x2 = cx + r * Math.cos(endRad);
+        const y2 = cy + r * Math.sin(endRad);
+        return (
+          <path
+            key={i}
+            d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`}
+            fill={d.color}
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+function StatSection({ title, counts, total }: { title: string; counts: [string, number][]; total: number }) {
+  const chartData = counts.map(([label, value], i) => ({
+    label,
+    value,
+    color: CHART_COLORS[i % CHART_COLORS.length],
+  }));
+  return (
+    <div className="space-y-3">
+      <h4 className="text-sm font-medium">{title}</h4>
+      <div className="flex items-start gap-6">
+        <MiniPieChart data={chartData} />
+        <div className="space-y-1 text-xs min-w-0">
+          {chartData.map((d) => (
+            <div key={d.label} className="flex items-center gap-2">
+              <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: d.color }} />
+              <span className="truncate">{d.label}</span>
+              <span className="text-muted-foreground ml-auto tabular-nums">
+                {d.value} ({total > 0 ? ((d.value / total) * 100).toFixed(0) : 0}%)
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices: SyncDevice[]; pushJobs?: PushJobRow[]; pushDeliveries?: PushDeliveryRow[]; studentId: string }) {
+  const [platformFilter, setPlatformFilter] = useState("all");
+
+  const platforms = ["ios", "ipados", "macos", "android"];
+
+  const filtered = devices.filter((d) => {
+    if (platformFilter === "all") return true;
+    if (platformFilter === "apple") return ["ios", "ipados", "macos", "watchos"].includes(d.platform);
+    return d.platform === platformFilter;
+  });
+
+  const countBy = (key: "os_version" | "app_version") => {
+    const map: Record<string, number> = {};
+    for (const d of filtered) {
+      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      map[v] = (map[v] ?? 0) + 1;
+    }
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Devices ({devices.length})</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <Tabs defaultValue="list">
+          <TabsList>
+            <TabsTrigger value="list">List</TabsTrigger>
+            <TabsTrigger value="stats">Statistics</TabsTrigger>
+            <TabsTrigger value="push">Push Queue{pushJobs && pushJobs.length > 0 ? ` (${pushJobs.length})` : ""}</TabsTrigger>
+          </TabsList>
+          <TabsContent value="list">
+            <div className="overflow-x-auto"><Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Platform</TableHead>
+                  <TableHead>Device ID</TableHead>
+                  <TableHead>App Version</TableHead>
+                  <TableHead>OS</TableHead>
+                  <TableHead>Last Seen</TableHead>
+                  <TableHead>Registered</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {devices.map((d) => (
+                  <TableRow key={d.id}>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5">
+                        <Badge variant="outline">{d.platform}</Badge>
+                        {d.cloud_sync_enabled === false && <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground"><CloudOff className="h-2.5 w-2.5" />local</Badge>}
+                      </div>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground break-all">
+                      {d.client_device_id}
+                    </TableCell>
+                    <TableCell className="text-xs">{d.app_version ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{d.os_version ? `${platformLabel(d.platform)} ${d.os_version}` : "—"}</TableCell>
+                    <TableCell className="text-xs">{fmt(d.last_seen_at)}</TableCell>
+                    <TableCell className="text-xs">{fmt(d.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table></div>
+          </TabsContent>
+          <TabsContent value="stats">
+            <div className="mb-4">
+              <Select value={platformFilter} onValueChange={setPlatformFilter}>
+                <SelectTrigger className="w-44">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Platforms</SelectItem>
+                  <SelectItem value="apple">All Apple</SelectItem>
+                  {platforms.map((p) => (
+                    <SelectItem key={p} value={p}>{platformLabel(p)}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {filtered.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No devices for this platform filter.</p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <StatSection title="OS Version" counts={countBy("os_version")} total={filtered.length} />
+                <StatSection title="App Version" counts={countBy("app_version")} total={filtered.length} />
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="push">
+            <div className="mb-4 flex flex-wrap gap-2">
+              {pushJobs && pushJobs.length > 0 && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      try {
+                        const res = await fetch("/api/moodle/push-tick", { method: "POST" });
+                        const data = await res.json();
+                        if (!data.ok) alert("Push tick failed: " + (data.error ?? "unknown"));
+                      } catch (e) {
+                        alert("Push tick request failed");
+                      }
+                    }}
+                  >
+                    Force Execute Pipeline
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      if (!confirm(`Cancel all ${pushJobs.length} pending push jobs?`)) return;
+                      try {
+                        const res = await fetch(`/api/moodle/push-clear?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                        const data = await res.json();
+                        if (!data.ok) alert("Clear failed: " + (data.error ?? "unknown"));
+                      } catch (e) {
+                        alert("Clear request failed");
+                      }
+                    }}
+                  >
+                    Clear Queue
+                  </Button>
+                </>
+              )}
+              <Button
+                size="sm"
+                variant="default"
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/moodle/push-sync-trigger?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                    const data = await res.json();
+                    if (data.deduplicated) alert("Deduplicated — a sync_trigger already exists in this window");
+                    else if (!data.ok) alert("Failed: " + (data.error ?? "unknown"));
+                  } catch (e) {
+                    alert("Request failed");
+                  }
+                }}
+              >
+                Force Sync Push
+              </Button>
+            </div>
+            {!pushJobs || pushJobs.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-4">No pending push jobs.</p>
+            ) : (
+              <div className="space-y-4">
+                {pushJobs.map((pj) => {
+                  const deliveries = (pushDeliveries ?? []).filter((d) => d.push_job_id === pj.id);
+                  const sourceDevice = devices.find((d) => d.id === pj.source_device_id);
+                  return (
+                    <div key={pj.id} className="border rounded-md p-3 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={pj.status === "pending" ? "default" : "secondary"}>{pj.status}</Badge>
+                        <span className="font-mono text-xs">{pj.scenario}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; fires {fmt(pj.fire_at)} &middot; created {fmt(pj.created_at)}
+                        </span>
+                      </div>
+                      {sourceDevice && (
+                        <p className="text-xs text-muted-foreground">
+                          Source: <Badge variant="outline" className="text-[10px] px-1 py-0">{sourceDevice.platform}</Badge> {sourceDevice.client_device_id.slice(0, 8)}...
+                        </p>
+                      )}
+                      {pj.last_error && <p className="text-xs text-destructive">{pj.last_error}</p>}
+                      {deliveries.length > 0 && (
+                        <div className="overflow-x-auto"><Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Target Device</TableHead>
+                              <TableHead className="text-xs">Provider</TableHead>
+                              <TableHead className="text-xs">Status</TableHead>
+                              <TableHead className="text-xs">Attempts</TableHead>
+                              <TableHead className="text-xs">Error</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {deliveries.map((dl) => {
+                              const targetDevice = devices.find((d) => d.id === dl.device_id);
+                              return (
+                                <TableRow key={dl.id}>
+                                  <TableCell className="text-xs">
+                                    {targetDevice ? (
+                                      <><Badge variant="outline" className="text-[10px] px-1 py-0">{targetDevice.platform}</Badge> {targetDevice.client_device_id.slice(0, 8)}...</>
+                                    ) : (
+                                      <span className="text-muted-foreground">{dl.device_id?.slice(0, 8) ?? "—"}...</span>
+                                    )}
+                                  </TableCell>
+                                  <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                                  <TableCell>
+                                    <Badge variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"} className="text-[10px]">
+                                      {dl.status}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                                  <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table></div>
+                      )}
+                      {deliveries.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(pj.fire_at) > new Date()
+                            ? `Scheduled — fires at ${fmt(pj.fire_at)}`
+                            : "Not yet materialized (waiting for pipeline tick)"}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+void DevicesCard; // Kept for reuse; topology UI now handles device display
+
+type TopologyNode =
+  | { kind: "backend" }
+  | { kind: "device"; device: SyncDevice };
+
+function relativeTime(iso: string | null): string {
+  if (!iso) return "never";
+  const diff = Date.now() - new Date(iso).getTime();
+  if (diff < 0) return "just now";
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function platformIcon(platform: string) {
+  if (["android", "wearos"].includes(platform))
+    return <Tablet className="h-5 w-5" />;
+  if (["ios", "ipados", "watchos"].includes(platform))
+    return <Smartphone className="h-5 w-5" />;
+  return <Monitor className="h-5 w-5" />;
+}
+
+function TopologyOverview({
+  topology,
+  pollStatus,
+  devices,
+  pushJobs,
+  selectedNode,
+  onSelectNode,
+}: {
+  topology: SyncEventsResponse["topology"];
+  pollStatus: SyncEventsResponse["poll_status"];
+  devices: SyncDevice[];
+  pushJobs?: PushJobRow[];
+  selectedNode: TopologyNode | null;
+  onSelectNode: (node: TopologyNode) => void;
+}) {
+  const isBackendSelected =
+    selectedNode !== null && selectedNode.kind === "backend";
+
+  const pendingByDevice = (deviceId: string) =>
+    (pushJobs ?? []).filter(
+      (pj) =>
+        pj.status === "pending" &&
+        pj.source_device_id !== deviceId
+    ).length;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Wifi className="h-4 w-4" />
+          Sync Topology
+        </CardTitle>
+        <CardDescription>
+          Click a node to see details below.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+          {/* Backend node */}
+            <button
+              type="button"
+              onClick={() => onSelectNode({ kind: "backend" })}
+              className={`w-full rounded-lg border-2 p-4 text-left transition-colors ${
+                isBackendSelected
+                  ? "border-blue-500 bg-blue-500/5"
+                  : "border-border hover:border-blue-300 bg-card"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-2">
+                <Server className="h-5 w-5 text-blue-500" />
+                <span className="font-semibold text-sm">Backend</span>
+              </div>
+              {topology ? (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                  <div>Rev: <span className="font-mono text-foreground">{topology.revision}</span></div>
+                  <div>{topology.course_count} courses</div>
+                  {topology.tombstone_count > 0 && (
+                    <div className="text-orange-500">
+                      {topology.tombstone_count} tombstones
+                    </div>
+                  )}
+                  {topology.courses_reset_at && (
+                    <div className="truncate" title={fmt(topology.courses_reset_at)}>
+                      Reset: {relativeTime(topology.courses_reset_at)}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">No topology data</div>
+              )}
+            </button>
+
+          {/* Device nodes */}
+          <div className="space-y-2">
+            {sortedDevices(devices).map((device) => {
+              const ps = pollStatus?.[device.id];
+              const seenAgo = device.last_seen_at
+                ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
+                : Infinity;
+              const isOnline = ps ? ps === "foreground" : seenAgo < 30;
+              const isMacOs = device.platform === "macos";
+              const pending = pendingByDevice(device.id);
+              const isSelected =
+                selectedNode !== null &&
+                selectedNode.kind === "device" &&
+                selectedNode.device.id === device.id;
+
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  onClick={() => onSelectNode({ kind: "device", device })}
+                  className={`w-full rounded-lg border-2 p-3 text-left transition-colors ${
+                    isSelected
+                      ? "border-blue-500 bg-blue-500/5"
+                      : "border-border hover:border-blue-300 bg-card"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {platformIcon(device.platform)}
+                    <div className="min-w-0">
+                      <div className="font-semibold text-sm truncate">
+                        {platformLabel(device.platform)}
+                      </div>
+                    </div>
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {device.client_device_id.slice(0, 12)}
+                    </span>
+                    {isOnline ? (
+                      <Badge
+                        variant="default"
+                        className="bg-green-500/10 text-green-600 text-[10px] px-1.5 py-0"
+                      >
+                        <Wifi className="h-2.5 w-2.5 mr-0.5" />
+                        Online
+                      </Badge>
+                    ) : (
+                      <Badge variant="default" className="bg-gray-500/10 text-gray-500 text-[10px] px-1.5 py-0">
+                        <WifiOff className="h-2.5 w-2.5 mr-0.5" />
+                        Offline
+                      </Badge>
+                    )}
+                    {device.cloud_sync_enabled === false && (
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground">
+                        <CloudOff className="h-2.5 w-2.5" />device only
+                      </Badge>
+                    )}
+                    {isMacOs && (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-muted-foreground">
+                        No push
+                      </Badge>
+                    )}
+                    {pending > 0 && (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-orange-500">
+                        {pending} scheduled
+                      </Badge>
+                    )}
+                    <span className="text-xs text-muted-foreground ml-auto">
+                      {relativeTime(device.last_seen_at)}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+            {devices.length === 0 && (
+              <div className="text-sm text-muted-foreground py-4">
+                No devices registered
+              </div>
+            )}
+          </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NodeDetailPanel({
+  selectedNode,
+  data,
+  coursesData,
+  courseNameLang,
+  setCourseNameLang,
+  studentId,
+}: {
+  selectedNode: TopologyNode;
+  data: SyncEventsResponse;
+  coursesData?: SyncCoursesResponse;
+  courseNameLang: "en" | "zh";
+  setCourseNameLang: (v: "en" | "zh") => void;
+  studentId: string;
+}) {
+  if (selectedNode.kind === "backend") {
+    return (
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Server className="h-4 w-4 text-blue-500" />
+              Backend Details
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Tabs defaultValue="courses">
+            <TabsList>
+              <TabsTrigger value="courses">
+                Courses{coursesData ? ` (${coursesData.courses.length}${coursesData.tombstones?.length ? ` + ${coursesData.tombstones.length} deleted` : ""})` : ""}
+              </TabsTrigger>
+              <TabsTrigger value="assignments">
+                Assignments{coursesData?.assignments ? ` (${coursesData.assignments.length})` : ""}
+              </TabsTrigger>
+              <TabsTrigger value="overrides">
+                Overrides{data.overrides ? ` (${data.overrides.length})` : ""}
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="courses">
+              {!coursesData ? (
+                <div className="flex items-center justify-center py-6 text-muted-foreground">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+                </div>
+              ) : coursesData.courses.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground">No courses</div>
+              ) : (
+                <div className="space-y-2">
+                <div className="flex justify-end">
+                  <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+                    <SelectTrigger className="w-28 h-7 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="en">English</SelectItem>
+                      <SelectItem value="zh">Chinese</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Color</TableHead>
+                        <TableHead>Course Code</TableHead>
+                        <TableHead>Name</TableHead>
+                        <TableHead>Custom Names</TableHead>
+                        <TableHead>Device</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {[...coursesData.courses]
+                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
+                        .map((c) => {
+                          const paletteLight = coursesData.palette_light ?? [];
+                          const paletteDark = coursesData.palette_dark ?? [];
+                          const overrideIdx = c.color_hex
+                            ? paletteLight.findIndex(
+                                (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
+                              )
+                            : -1;
+                          const isPresetOverride = overrideIdx >= 0;
+                          const isCustom = !!c.color_hex && !isPresetOverride;
+                          return (
+                            <TableRow key={c.id}>
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  {isPresetOverride ? (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
+                                      <span className="font-mono text-xs">#{overrideIdx}</span>
+                                    </>
+                                  ) : isCustom ? (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                      <span className="font-mono text-xs">{c.color_hex}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
+                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
+                                      <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                              <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
+                                {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                              </TableCell>
+                              <TableCell className="text-xs max-w-[200px] truncate">
+                                {(() => {
+                                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
+                                  return names && typeof names === "object" && Object.keys(names).length > 0
+                                    ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
+                                    : "—";
+                                })()}
+                              </TableCell>
+                              <TableCell>
+                                {c.updated_by_device_id ? (
+                                  <Badge variant="secondary" className="text-[10px] font-normal">
+                                    {deviceLabel(c.updated_by_device_id, data.devices ?? [])}
+                                  </Badge>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      {coursesData.tombstones?.map((t) => (
+                        <TableRow key={`tomb-${t.course_key}`} className="opacity-50">
+                          <TableCell>
+                            <Badge variant="destructive" className="text-[10px] px-1 py-0">Deleted</Badge>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs line-through">{t.course_no}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground line-through">{t.semester}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{relativeTime(t.deleted_at)}</TableCell>
+                          <TableCell>
+                            {t.deleted_by_device_id ? (
+                              <Badge variant="secondary" className="text-[10px] font-normal">
+                                {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="assignments">
+              {!coursesData ? (
+                <div className="flex items-center justify-center py-6 text-muted-foreground">
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+                </div>
+              ) : !coursesData.assignments || coursesData.assignments.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground">No assignments</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Title</TableHead>
+                        <TableHead>Course</TableHead>
+                        <TableHead>Due</TableHead>
+                        <TableHead>Submitted</TableHead>
+                        <TableHead>Status</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {coursesData.assignments.map((a) => {
+                        const override = (data.overrides ?? []).find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
+                        return (
+                        <TableRow key={a.id}>
+                          <TableCell className="text-xs max-w-[200px] truncate" title={a.title}>{a.title}</TableCell>
+                          <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
+                          <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                          <TableCell className="text-center">
+                            {a.provider_is_submitted ? (
+                              <Check className="h-4 w-4 text-green-500 inline-block" />
+                            ) : (
+                              <Minus className="h-4 w-4 text-muted-foreground inline-block" />
+                            )}
+                          </TableCell>
+                          <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
+                        </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </TabsContent>
+            <TabsContent value="overrides">
+              {data.overrides && data.overrides.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Moodle ID</TableHead>
+                        <TableHead>Title</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Updated</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.overrides.map((o) => (
+                        <TableRow key={o.moodle_assignment_id}>
+                          <TableCell className="font-mono text-xs">{o.moodle_assignment_id}</TableCell>
+                          <TableCell className="text-xs max-w-[200px] truncate">{o.title ?? "—"}</TableCell>
+                          <TableCell><RunStatusBadge status={o.local_status} /></TableCell>
+                          <TableCell className="text-xs">{fmt(o.updated_at)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : (
+                <div className="py-6 text-center text-muted-foreground">No overrides</div>
+              )}
+            </TabsContent>
+          </Tabs>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Device selected — use fresh data from the latest poll, not the stale snapshot in selectedNode
+  const device = (data.devices ?? []).find((d) => d.id === selectedNode.device.id) ?? selectedNode.device;
+  const deviceDeliveries = (data.push_deliveries ?? []).filter(
+    (d) => d.device_id === device.id
+  );
+  const devicePushJobs = (data.push_jobs ?? []).filter(
+    (pj) => pj.source_device_id === device.id
+  );
+
+  const allCourses = coursesData?.courses ?? [];
+  const allAssignments = coursesData?.assignments ?? [];
+  const allOverrides = data.overrides ?? [];
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          {platformIcon(device.platform)}
+          {platformLabel(device.platform)}
+          <span className="font-mono text-xs text-muted-foreground">
+            {device.client_device_id.slice(0, 12)}
+          </span>
+          {device.cloud_sync_enabled === false && <Badge variant="secondary" className="text-[10px] px-1.5 py-0 gap-0.5 text-muted-foreground"><CloudOff className="h-2.5 w-2.5" />local</Badge>}
+        </CardTitle>
+        <CardDescription>
+          {device.app_version && `v${device.app_version}`}
+          {device.os_version && ` on ${platformLabel(device.platform)} ${device.os_version}`}
+          {device.last_seen_at && ` · Last seen ${relativeTime(device.last_seen_at)}`}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Tabs defaultValue="data">
+          <TabsList>
+            <TabsTrigger value="data">Data</TabsTrigger>
+            <TabsTrigger value="synced-list">Synced List</TabsTrigger>
+            <TabsTrigger value="push">
+              Push{deviceDeliveries.length > 0 ? ` (${deviceDeliveries.length})` : ""}
+            </TabsTrigger>
+            <TabsTrigger value="source-push">
+              Source Jobs{devicePushJobs.length > 0 ? ` (${devicePushJobs.length})` : ""}
+            </TabsTrigger>
+            <TabsTrigger value="info">Info</TabsTrigger>
+          </TabsList>
+          <TabsContent value="data">
+            {device.cloud_sync_enabled === false ? (
+              <div className="flex items-center gap-3 rounded-md border border-border p-4 my-2">
+                <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">Device only</div>
+                  <div className="text-xs text-muted-foreground">Cloud Sync is off — data on this device is not tracked by the server</div>
+                </div>
+              </div>
+            ) : !coursesData ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+              </div>
+            ) : (
+              <Tabs defaultValue="courses">
+                <TabsList className="mb-2">
+                  <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
+                  <TabsTrigger value="custom-names">Custom Names ({allCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
+                  <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="courses">
+                  {allCourses.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">No courses</p>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex justify-end">
+                        <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
+                          <SelectTrigger className="w-28 h-7 text-xs">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="en">English</SelectItem>
+                            <SelectItem value="zh">Chinese</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Color</TableHead>
+                              <TableHead className="text-xs">Code</TableHead>
+                              <TableHead className="text-xs">Name</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {[...allCourses].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
+                              const paletteLight = coursesData?.palette_light ?? [];
+                              const paletteDark = coursesData?.palette_dark ?? [];
+                              const overrideIdx = c.color_hex ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()) : -1;
+                              const isPresetOverride = overrideIdx >= 0;
+                              const isCustom = !!c.color_hex && !isPresetOverride;
+                              return (
+                                <TableRow key={c.id}>
+                                  <TableCell>
+                                    <div className="flex items-center gap-1">
+                                      {isPresetOverride ? (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Light" />
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Dark" />
+                                          <span className="font-mono text-xs">#{overrideIdx}</span>
+                                        </>
+                                      ) : isCustom ? (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                          <span className="font-mono text-xs">{c.color_hex}</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Light" />
+                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Dark" />
+                                          <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                        </>
+                                      )}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                                  <TableCell className="text-xs max-w-[200px] truncate">
+                                    {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="custom-names">
+                  {(() => {
+                    const withNames = allCourses
+                      .map((c) => {
+                        const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
+                        return { ...c, parsedNames: (names && typeof names === "object") ? names as Record<string, string> : {} };
+                      })
+                      .filter((c) => Object.keys(c.parsedNames).length > 0)
+                      .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""));
+                    return withNames.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4">All courses using default names</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Course Code</TableHead>
+                              <TableHead className="text-xs">Custom Name (Chinese)</TableHead>
+                              <TableHead className="text-xs">Custom Name (English)</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {withNames.map((c) => (
+                              <TableRow key={c.id}>
+                                <TableCell className="font-mono text-xs">{c.client_course_no ?? c.course_no}</TableCell>
+                                <TableCell className="text-xs">{c.parsedNames["zh"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                                <TableCell className="text-xs">{c.parsedNames["en"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
+                <TabsContent value="assignments">
+                  {allAssignments.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">No assignments</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="text-xs">Title</TableHead>
+                            <TableHead className="text-xs">Course</TableHead>
+                            <TableHead className="text-xs">Due</TableHead>
+                            <TableHead className="text-xs">Status</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {allAssignments.map((a) => {
+                            const override = allOverrides.find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
+                            return (
+                            <TableRow key={a.id}>
+                              <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
+                              <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
+                              <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                              <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
+                            </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </TabsContent>
+
+              </Tabs>
+            )}
+          </TabsContent>
+          <TabsContent value="synced-list">
+            <div className="space-y-2 py-2">
+              {device.cloud_sync_enabled === false ? (
+                <div className="flex items-center gap-3 rounded-md border border-border p-3">
+                  <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Device local only</div>
+                    <div className="text-xs text-muted-foreground">Cloud Sync is off — this device is not participating in cross-device sync</div>
+                  </div>
+                </div>
+              ) : (() => {
+                const colorCount = allCourses.filter((c) => c.color_hex).length;
+                const customNameCount = allCourses.filter((c) => {
+                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
+                  return names && typeof names === "object" && Object.keys(names).length > 0;
+                }).length;
+                const categories = [
+                  { label: "Courses", count: allCourses.length, enabled: device.sync_courses !== false, detail: `${allCourses.length} courses in backend` },
+                  { label: "Course colours", count: colorCount, enabled: device.sync_course_colors !== false, detail: colorCount > 0 ? `${colorCount} of ${allCourses.length} have synced colours` : `All using auto-assigned colours` },
+                  { label: "Custom course names", count: customNameCount, enabled: device.sync_course_names !== false, detail: customNameCount > 0 ? `${customNameCount} of ${allCourses.length} have custom names` : `All using default names` },
+                  { label: "Assignments", count: allAssignments.length, enabled: device.sync_assignments !== false, detail: `${allAssignments.length} assignments in backend` },
+                ];
+                return categories.map((cat) => {
+                  const dotColor = cat.enabled
+                    ? "bg-green-500"
+                    : cat.count > 0 ? "bg-orange-400" : "bg-muted-foreground/30";
+                  const statusNote = !cat.enabled && cat.count > 0 ? " · sync to other devices off" : "";
+                  return (
+                  <div key={cat.label} className="flex items-center gap-3 rounded-md border border-border p-3">
+                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${dotColor}`} />
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">{cat.label}</div>
+                      <div className="text-xs text-muted-foreground">{cat.detail}{statusNote}</div>
+                    </div>
+                  </div>
+                  );
+                });
+              })()}
+            </div>
+          </TabsContent>
+          <TabsContent value="push">
+            <div className="mb-4 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const res = await fetch("/api/moodle/push-tick", { method: "POST" });
+                    const resp = await res.json();
+                    if (!resp.ok) alert("Push tick failed: " + (resp.error ?? "unknown"));
+                  } catch {
+                    alert("Push tick request failed");
+                  }
+                }}
+              >
+                Force Execute Pipeline
+              </Button>
+              {(data.push_jobs ?? []).length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    if (!confirm(`Cancel all ${(data.push_jobs ?? []).length} pending push jobs?`)) return;
+                    try {
+                      const res = await fetch(`/api/moodle/push-clear?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                      const resp = await res.json();
+                      if (!resp.ok) alert("Clear failed: " + (resp.error ?? "unknown"));
+                    } catch {
+                      alert("Clear request failed");
+                    }
+                  }}
+                >
+                  Clear Queue
+                </Button>
+              )}
+              <Button
+                size="sm"
+                variant="default"
+                onClick={async () => {
+                  try {
+                    const res = await fetch(`/api/moodle/push-sync-trigger?student_id=${encodeURIComponent(studentId)}`, { method: "POST" });
+                    const resp = await res.json();
+                    if (resp.deduplicated) alert("Deduplicated — a sync_trigger already exists in this window");
+                    else if (!resp.ok) alert("Failed: " + (resp.error ?? "unknown"));
+                  } catch {
+                    alert("Request failed");
+                  }
+                }}
+              >
+                Force Sync Push
+              </Button>
+            </div>
+            {deviceDeliveries.length === 0 ? (
+              <div className="py-4 text-sm text-muted-foreground">No push deliveries for this device.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="text-xs">Job ID</TableHead>
+                      <TableHead className="text-xs">Provider</TableHead>
+                      <TableHead className="text-xs">Status</TableHead>
+                      <TableHead className="text-xs">Attempts</TableHead>
+                      <TableHead className="text-xs">Sent</TableHead>
+                      <TableHead className="text-xs">Error</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {deviceDeliveries.map((dl) => (
+                      <TableRow key={dl.id}>
+                        <TableCell className="font-mono text-xs">#{dl.push_job_id}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"}
+                            className="text-[10px]"
+                          >
+                            {dl.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                        <TableCell className="text-xs">{fmt(dl.sent_at)}</TableCell>
+                        <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="source-push">
+            {devicePushJobs.length === 0 ? (
+              <div className="py-4 text-sm text-muted-foreground">No push jobs sourced from this device.</div>
+            ) : (
+              <div className="space-y-4">
+                {devicePushJobs.map((pj) => {
+                  const deliveries = (data.push_deliveries ?? []).filter((d) => d.push_job_id === pj.id);
+                  return (
+                    <div key={pj.id} className="border rounded-md p-3 space-y-2">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant={pj.status === "pending" ? "default" : "secondary"}>{pj.status}</Badge>
+                        <span className="font-mono text-xs">{pj.scenario}</span>
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          #{pj.id} &middot; {pj.attempts}/{pj.max_attempts} attempts &middot; fires {fmt(pj.fire_at)}
+                        </span>
+                      </div>
+                      {pj.last_error && <p className="text-xs text-destructive">{pj.last_error}</p>}
+                      {deliveries.length > 0 && (
+                        <div className="overflow-x-auto">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead className="text-xs">Target</TableHead>
+                                <TableHead className="text-xs">Provider</TableHead>
+                                <TableHead className="text-xs">Status</TableHead>
+                                <TableHead className="text-xs">Attempts</TableHead>
+                                <TableHead className="text-xs">Error</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {deliveries.map((dl) => {
+                                const target = (data.devices ?? []).find((d) => d.id === dl.device_id);
+                                return (
+                                  <TableRow key={dl.id}>
+                                    <TableCell className="text-xs">
+                                      {target ? (
+                                        <><Badge variant="outline" className="text-[10px] px-1 py-0">{target.platform}</Badge> {target.client_device_id.slice(0, 8)}...</>
+                                      ) : (
+                                        <span className="text-muted-foreground">{dl.device_id?.slice(0, 8) ?? "—"}...</span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell><Badge variant="outline" className="text-[10px]">{dl.provider}</Badge></TableCell>
+                                    <TableCell>
+                                      <Badge variant={dl.status === "sent" ? "default" : dl.status === "failed" ? "destructive" : "secondary"} className="text-[10px]">{dl.status}</Badge>
+                                    </TableCell>
+                                    <TableCell className="text-xs">{dl.attempts}/{dl.max_attempts}</TableCell>
+                                    <TableCell className="text-xs text-destructive">{dl.failure_code ?? "—"}</TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+          <TabsContent value="info">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableBody>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs w-36">Device ID</TableCell>
+                    <TableCell className="font-mono text-xs break-all">{device.client_device_id}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Internal ID</TableCell>
+                    <TableCell className="font-mono text-xs">{device.id}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Platform</TableCell>
+                    <TableCell className="text-xs">{platformLabel(device.platform)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">App Version</TableCell>
+                    <TableCell className="text-xs">{device.app_version ?? "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">OS Version</TableCell>
+                    <TableCell className="text-xs">{device.os_version ? `${platformLabel(device.platform)} ${device.os_version}` : "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Last Seen</TableCell>
+                    <TableCell className="text-xs">{fmt(device.last_seen_at)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Last Login</TableCell>
+                    <TableCell className="text-xs">{fmt(device.last_login_at)}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Registered</TableCell>
+                    <TableCell className="text-xs">{fmt(device.created_at)}</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SyncTab() {
+  const [studentId, setStudentId] = useState(() => {
+    try { return localStorage.getItem("sync-student-id") ?? ""; } catch { return ""; }
+  });
+  const [query, setQuery] = useState(() => {
+    try { return localStorage.getItem("sync-query") ?? ""; } catch { return ""; }
+  });
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [latestId, setLatestId] = useState(0);
+  const [courseNameLang, setCourseNameLang] = useState<"en" | "zh">("en");
+  const [selectedNode, setSelectedNode] = useState<TopologyNode | null>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const logContainerRef = useRef<HTMLDivElement>(null);
+
+  const events = useQuery<SyncEventsResponse>({
+    queryKey: ["sync-events", query],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-events?student_id=${encodeURIComponent(query)}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 5_000 : false,
+  });
+
+  const logsQuery = useQuery<LogsResponse>({
+    queryKey: ["sync-logs", query, latestId],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-logs?student_id=${encodeURIComponent(query)}&after_id=${latestId}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 2_000 : false,
+  });
+
+  const [newLogIds, setNewLogIds] = useState<Set<number>>(new Set());
+  const isInitialLoad = useRef(true);
+  useEffect(() => {
+    const d = logsQuery.data;
+    if (d && d.entries.length > 0) {
+      const container = logContainerRef.current;
+      const wasAtBottom = container
+        ? container.scrollHeight - container.scrollTop - container.clientHeight < 40
+        : false;
+
+      if (!isInitialLoad.current) {
+        const ids = new Set(d.entries.map((e) => e.id));
+        setNewLogIds((prev) => new Set([...prev, ...ids]));
+        setTimeout(() => {
+          setNewLogIds((prev) => {
+            const next = new Set(prev);
+            ids.forEach((id) => next.delete(id));
+            return next;
+          });
+        }, 2000);
+        setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
+        setLatestId(d.latest_id);
+        if (wasAtBottom && logContainerRef.current) {
+          setTimeout(() => {
+            const c = logContainerRef.current;
+            if (c) c.scrollTop = c.scrollHeight;
+          }, 50);
+        }
+      }
+      isInitialLoad.current = false;
+      setLogEntries((prev) => [...prev, ...d.entries].slice(-500));
+      setLatestId(d.latest_id);
+      setTimeout(() => {
+        const c = logContainerRef.current;
+        if (c) c.scrollTop = c.scrollHeight;
+      }, 50);
+    }
+  }, [logsQuery.data]);
+
+  const handleSearch = () => {
+    const trimmed = studentId.trim();
+    if (trimmed) {
+      setQuery(trimmed);
+      try { localStorage.setItem("sync-student-id", trimmed); localStorage.setItem("sync-query", trimmed); } catch {}
+      setLogEntries([]);
+      setLatestId(0);
+      isInitialLoad.current = true;
+      setSelectedNode(null);
+    }
+  };
+
+  const coursesQuery = useQuery<SyncCoursesResponse>({
+    queryKey: ["sync-courses", query],
+    queryFn: () =>
+      fetch(`/api/moodle/sync-courses?student_id=${encodeURIComponent(query)}`).then((r) => r.json()),
+    enabled: query.length > 0,
+    refetchInterval: query ? 10_000 : false,
+  });
+
+  const data = events.data;
+  const coursesData = coursesQuery.data;
+
+  return (
+    <Section className="space-y-4">
+      {/* 1. Search card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Search className="h-5 w-5" />
+            Sync Events
+          </CardTitle>
+          <CardDescription>
+            Enter a student ID to view sync job history, run logs, and override state.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="flex items-center gap-2"
+            onSubmit={(e) => { e.preventDefault(); handleSearch(); }}
+          >
+            <Input
+              placeholder="Student ID (e.g. B11234567)"
+              value={studentId}
+              onChange={(e) => setStudentId(e.target.value)}
+              className="max-w-xs font-mono"
+            />
+            <Button type="submit" size="sm" disabled={!studentId.trim() || events.isFetching}>
+              {events.isFetching ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+              Start monitoring
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      {data && !data.found && (
+        <Card>
+          <CardContent className="py-6 text-center text-muted-foreground">
+            Student &quot;{data.student_id}&quot; not found
+          </CardContent>
+        </Card>
+      )}
+
+      {query && data?.found !== false && (
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      {/* ===== LEFT COLUMN: Topology + Details ===== */}
+      <div className="space-y-4">
+      {/* 2. Topology overview */}
+      {data?.found && (
+        <TopologyOverview
+          topology={data.topology}
+          pollStatus={data.poll_status}
+          devices={data.devices ?? []}
+          pushJobs={data.push_jobs}
+          selectedNode={selectedNode}
+          onSelectNode={setSelectedNode}
+        />
+      )}
+
+      {/* 3. Detail panel */}
+      {data?.found && selectedNode && (
+        <NodeDetailPanel
+          selectedNode={selectedNode}
+          data={data}
+          coursesData={coursesData}
+          courseNameLang={courseNameLang}
+          setCourseNameLang={setCourseNameLang}
+          studentId={query}
+        />
+      )}
+      </div>
+
+      {/* ===== RIGHT COLUMN: Jobs + History + Log ===== */}
+      <div className="space-y-4">
+      {/* 4. Sync Jobs card */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Sync Jobs</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!data ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+              </div>
+            ) : (
+            <div className="overflow-x-auto"><Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Job Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Attempts</TableHead>
+                  <TableHead>Last Success</TableHead>
+                  <TableHead>Last Failure</TableHead>
+                  <TableHead>Error</TableHead>
+                  <TableHead>Next Run</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(data.jobs ?? []).map((j) => (
+                  <TableRow key={j.id}>
+                    <TableCell className="font-mono text-xs">{j.job_type}</TableCell>
+                    <TableCell><RunStatusBadge status={j.job_status} /></TableCell>
+                    <TableCell>{j.attempts}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.last_success_at)}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.last_failure_at)}</TableCell>
+                    <TableCell className="max-w-[200px] truncate text-xs text-destructive">{j.last_error ?? "—"}</TableCell>
+                    <TableCell className="text-xs">{fmt(j.run_after)}</TableCell>
+                  </TableRow>
+                ))}
+                {(data.jobs ?? []).length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync jobs</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table></div>
+            )}
+          </CardContent>
+        </Card>
+
+      {/* 5. Run History card */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Run History{data?.runs ? ` (${data.runs.length})` : ""}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!data ? (
+              <div className="flex items-center justify-center py-6 text-muted-foreground">
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
+              </div>
+            ) : (
+            <div className="overflow-x-auto"><Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Started</TableHead>
+                  <TableHead>Job Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Duration</TableHead>
+                  <TableHead>Fetched</TableHead>
+                  <TableHead>Changed</TableHead>
+                  <TableHead>Error</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(data.runs ?? []).map((r) => {
+                  const dur = r.finished_at && r.started_at
+                    ? `${((new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()) / 1000).toFixed(1)}s`
+                    : "—";
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="text-xs">{fmt(r.started_at)}</TableCell>
+                      <TableCell className="font-mono text-xs">{r.job_type}</TableCell>
+                      <TableCell><RunStatusBadge status={r.status} /></TableCell>
+                      <TableCell className="text-xs">{dur}</TableCell>
+                      <TableCell>{r.fetched_count ?? "—"}</TableCell>
+                      <TableCell>{r.changed_count ?? "—"}</TableCell>
+                      <TableCell className="max-w-[250px] truncate text-xs text-destructive">{r.error ?? "—"}</TableCell>
+                    </TableRow>
+                  );
+                })}
+                {(data.runs ?? []).length === 0 && (
+                  <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground">No sync runs yet</TableCell></TableRow>
+                )}
+              </TableBody>
+            </Table></div>
+            )}
+          </CardContent>
+        </Card>
+
+      {/* 6. Live Sync Log card */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <RefreshCw className={`h-4 w-4 ${query ? "animate-spin" : ""}`} />
+              Live Sync Log
+            </CardTitle>
+            <CardDescription>
+              Auto-refreshes every 2s. Shows executor events, override PATCHes, and auth events.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div ref={logContainerRef} className="rounded-md border bg-muted/30 font-mono text-xs h-80 overflow-y-auto p-3 space-y-0.5">
+              {logEntries.length === 0 && (
+                <div className="text-muted-foreground text-center py-8">
+                  Waiting for sync events...
+                </div>
+              )}
+              {logEntries.map((e) => {
+                const ts = new Date(e.ts).toLocaleTimeString();
+                const levelColor =
+                  e.level === "ERROR" ? "text-red-500" :
+                  e.level === "WARN" ? "text-yellow-500" : "text-muted-foreground";
+                return (
+                  <div key={e.id} className={`flex gap-2 leading-5 transition-colors duration-1000 ${newLogIds.has(e.id) ? "bg-yellow-500/20 rounded px-1 -mx-1" : ""}`}>
+                    <span className="text-muted-foreground shrink-0">{ts}</span>
+                    <span className={`shrink-0 w-12 ${levelColor}`}>{e.level}</span>
+                    <span className="shrink-0 text-blue-500 w-16">{e.source}</span>
+                    {e.device_label && (
+                      <span className="shrink-0 text-purple-400">
+                        [{e.platform ?? "?"}/{e.device_label}]
+                      </span>
+                    )}
+                    <span className="text-foreground">{e.message}</span>
+                  </div>
+                );
+              })}
+              <div ref={logEndRef} />
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      </div>
+      )}
+    </Section>
+  );
+}
+
+function RunStatusBadge({ status }: { status: string }) {
+  const colors: Record<string, string> = {
+    succeeded: "bg-green-500/10 text-green-600",
+    running: "bg-blue-500/10 text-blue-600",
+    pending: "bg-yellow-500/10 text-yellow-600",
+    failed: "bg-red-500/10 text-red-600",
+    disabled: "bg-gray-500/10 text-gray-600",
+    cancelled: "bg-gray-500/10 text-gray-600",
+    ignored: "bg-gray-500/10 text-gray-600",
+    locally_completed: "bg-green-500/10 text-green-600",
+    none: "bg-gray-500/10 text-gray-600",
+  };
+  return (
+    <Badge variant="default" className={colors[status] ?? "bg-gray-500/10 text-gray-600"}>
+      {status}
+    </Badge>
+  );
+}
+

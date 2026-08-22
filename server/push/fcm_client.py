@@ -62,6 +62,7 @@ class FcmSender:
             android=messaging.AndroidConfig(
                 priority="high",
                 ttl=timedelta(seconds=request.ttl_seconds),
+                collapse_key=request.collapse_key,
             ),
         )
         try:
@@ -137,6 +138,7 @@ class FcmSender:
                     android=messaging.AndroidConfig(
                         priority="high",
                         ttl=timedelta(seconds=r.ttl_seconds),
+                        collapse_key=r.collapse_key,
                     ),
                 )
                 for r in chunk
