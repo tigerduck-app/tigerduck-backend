@@ -19,7 +19,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
+    """Add `live_activity_update_tokens` — one APNs update token per in-flight
+    Live Activity, indexed on `countdown_target` so the scheduler can select
+    what is due without scanning."""
     op.create_table(
         'live_activity_update_tokens',
         sa.Column('activity_id', sa.String(length=256), nullable=False),
@@ -44,7 +46,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Drop the table and its indexes. Live Activities already on screen stop
+    receiving updates until the next one is started."""
     op.drop_index('ix_live_activity_tokens_due', table_name='live_activity_update_tokens')
     op.drop_index(op.f('ix_live_activity_update_tokens_device_id'), table_name='live_activity_update_tokens')
     op.drop_index(op.f('ix_live_activity_update_tokens_countdown_target'), table_name='live_activity_update_tokens')
