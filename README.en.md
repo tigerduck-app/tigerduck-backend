@@ -68,6 +68,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 | Layer | Choice |
 |---|---|
 | Web | FastAPI 0.115 + Uvicorn + structlog (JSON logs) |
+| Operator portal | FastAPI for the API + a React 19 / Vite 8 / Tailwind 4 / TypeScript 7 SPA |
 | ORM | SQLAlchemy 2.x async + Alembic |
 | DB | Postgres 17 (containerised, internal-only network) |
 | Scheduling | APScheduler 3.x (IntervalTrigger) |
@@ -85,7 +86,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
                                               │   │           │                │
    ┌──────────────┐                           │   │           ├── APNs         │
    │ Operator     │ ── HTTPS ──▶ cloudflared ─┼──▶│  tigerduck-portal          │
-   └──────────────┘   (Zero Trust)            │   │  (FastAPI + Jinja, :40010) │
+   └──────────────┘   (Zero Trust)            │   │  (FastAPI + React, :40010) │
                                               │   │           │                │
                                               │   │           ▼                │
                                               │   │  ┌────────────────┐        │
@@ -153,11 +154,11 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 
 ### Operator portal
 
-`tigerduck-portal` is a sibling compose service that comes up alongside the backend. Dev mode publishes it at `http://localhost:40010`; production typically lives behind cloudflared / Cloudflare Zero Trust if you want a signin gate (the portal itself does not enforce one). It can:
+`tigerduck-portal` is a sibling compose service that comes up alongside the backend. Its frontend is the React SPA in `portal/web`, compiled to `web/dist` by the Dockerfile's node build stage and served statically by FastAPI; `/api/*` carries the JSON endpoints. Dev mode publishes it at `http://localhost:40010`; production typically lives behind cloudflared / Cloudflare Zero Trust if you want a signin gate (the portal itself does not enforce one). It can:
 
 - Show stack status (every field `./start.sh` prints, plus containers via the docker engine UDS, backend version via `/version`, postgres row counts, LLM reachability, APNs/FCM secret presence, host LAN IPs as clickable links)
 - Stream the last N lines of each container's logs with per-tab search; Android / Apple tabs are substring-filtered slices of the backend log
-- Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + portal's SQLite + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
+- Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 
 Full design: [`docs/portal-design.md`](docs/portal-design.md).
@@ -170,8 +171,8 @@ The backend talks to a [llama-server](https://github.com/ggml-org/llama.cpp) run
 # Example (a gemma-style instruct small model)
 llama-server \
   --hf ggml-org/gemma-4-E4B-it-GGUF \
-  --alias gemma-4-E4B-it-GGUF \
-  --host 0.0.0.0 --port 40006 \
+  --alias gemma-4-e4b-it \
+  --host 0.0.0.0 --port 40001 \
   --api-key <your-key> \
   --json-schema '{}'
 ```
@@ -179,9 +180,9 @@ llama-server \
 Matching `.env`:
 
 ```dotenv
-TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40006/v1
+TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1
 TIGERDUCK_LLM_API_KEY=<your-key>
-TIGERDUCK_LLM_MODEL=gemma-4-E4B-it-GGUF
+TIGERDUCK_LLM_MODEL=gemma-4-e4b-it
 ```
 
 > ⚠️ Models that emit reasoning channels (harmony format, e.g. `<|channel>thought<channel|>`) are **incompatible** — the JSON parser only strips markdown fences, not channel markers. Pick a plain instruct model.
@@ -324,7 +325,8 @@ tigerduck-backend/
 ├── portal/                      # Operator portal — separate FastAPI app (see docs/portal-design.md)
 │   ├── Dockerfile
 │   ├── pyproject.toml
-│   └── app/                     # main / config / db (SQLite) / auth / status / routes / templates / static
+│   ├── app/                     # FastAPI: main / config / db (asyncpg) / logs / status / routes / static
+│   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA (built into the image as web/dist)
 ├── scripts/                     # One-shot tools (backfill, seed, etc.)
 ├── deploy/launchd/              # macOS launchd plist (llama-server and other host-side services)
 ├── docker-compose.yml           # Base (backend + postgres + portal, all on proxy-net)

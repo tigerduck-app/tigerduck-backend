@@ -68,6 +68,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 | 層 | 用什麼 |
 |---|---|
 | Web | FastAPI 0.115 + Uvicorn + structlog（JSON log）|
+| 管理介面 | FastAPI 供 API + React 19 / Vite 8 / Tailwind 4 / TypeScript 7 SPA |
 | ORM | SQLAlchemy 2.x async + Alembic |
 | DB | Postgres 17（容器化、internal-only network）|
 | 排程 | APScheduler 3.x（IntervalTrigger）|
@@ -85,7 +86,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
                                                │   │           │                │
    ┌──────────────┐                            │   │           ├── APNs         │
    │ 管理者瀏覽器   │ ── HTTPS ──▶ cloudflared ──┼──▶│  tigerduck-portal          │
-   └──────────────┘   (Zero Trust)             │   │  (FastAPI + Jinja, :40010) │
+   └──────────────┘   (Zero Trust)             │   │  (FastAPI + React, :40010) │
                                                │   │           │                │
                                                │   │           ▼                │
                                                │   │  ┌────────────────┐        │
@@ -153,11 +154,11 @@ docker compose exec backend curl -sS localhost:40000/health
 
 ### 管理介面（portal）
 
-`tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
+`tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。前端是 `portal/web` 的 React SPA，由 Dockerfile 的 node build stage 打包成 `web/dist` 後由 FastAPI 靜態供應，`/api/*` 才是 JSON 端點。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
 
 - 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
 - 看每個 container 的 log（5 個 tab：Backend / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Android / Apple 是針對 backend log 做關鍵字過濾
-- 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + portal 的 SQLite + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
+- 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 
 詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
@@ -170,8 +171,8 @@ backend 連的 LLM 是 host 上的 [llama-server](https://github.com/ggml-org/ll
 # 範例（gemma-style instruct 小模型）
 llama-server \
   --hf ggml-org/gemma-4-E4B-it-GGUF \
-  --alias gemma-4-E4B-it-GGUF \
-  --host 0.0.0.0 --port 40006 \
+  --alias gemma-4-e4b-it \
+  --host 0.0.0.0 --port 40001 \
   --api-key <your-key> \
   --json-schema '{}'
 ```
@@ -179,9 +180,9 @@ llama-server \
 對應 `.env`：
 
 ```dotenv
-TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40006/v1
+TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1
 TIGERDUCK_LLM_API_KEY=<your-key>
-TIGERDUCK_LLM_MODEL=gemma-4-E4B-it-GGUF
+TIGERDUCK_LLM_MODEL=gemma-4-e4b-it
 ```
 
 > ⚠️ 帶 reasoning channel（harmony 格式 / `<|channel>thought<channel|>`）的模型目前**不相容** — JSON parser 只剝 markdown fence、不認 channel marker。請挑純 instruct 模型。
@@ -324,7 +325,8 @@ tigerduck-backend/
 ├── portal/                      # 管理介面 — 另一個 FastAPI app（見 docs/portal-design.md）
 │   ├── Dockerfile
 │   ├── pyproject.toml
-│   └── app/                     # main / config / db (SQLite) / auth / status / routes / templates / static
+│   ├── app/                     # FastAPI：main / config / db (asyncpg) / logs / status / routes / static
+│   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA（build 進 image 的 web/dist）
 ├── scripts/                     # backfill / seed 等一次性腳本
 ├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
 ├── docker-compose.yml           # 基底（backend + postgres + portal，都掛 proxy-net）
