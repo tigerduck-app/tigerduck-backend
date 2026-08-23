@@ -19,10 +19,16 @@ depends_on: Union[str, Sequence[str], None] = ${repr(depends_on)}
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
+    """TODO: what this changes, and why. "Upgrade schema" is what the
+    signature already says — describe the intent, and call out anything a
+    reviewer could not infer from the ops below (backfills, partial
+    indexes, data that becomes unrecoverable).
+    """
     ${upgrades if upgrades else "pass"}
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """TODO: what reverting costs. Say plainly if it destroys data or
+    fails against rows the upgrade made possible.
+    """
     ${downgrades if downgrades else "pass"}

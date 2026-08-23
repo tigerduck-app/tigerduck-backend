@@ -37,5 +37,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """Drop the `platform` column. The dispatcher then has no way to tell APNs
+    devices from FCM ones, so downgrade only alongside the code that used it."""
     op.drop_column("device_registrations", "platform")

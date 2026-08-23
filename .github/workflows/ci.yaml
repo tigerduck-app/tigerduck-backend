@@ -1,0 +1,122 @@
+name: CI
+
+# Compile + test gate for PRs. This repo had no automated checks at all until
+# now: the React 18→19 / Tailwind 3→4 / Vite 6→8 / TypeScript 5→7 jump landed
+# with nothing verifying it built, and the only thing standing between a
+# broken portal and a deploy was whoever remembered to run the build locally.
+#
+# Three jobs, deliberately narrow:
+#   server-tests  the 391-test pytest suite, against a real Postgres — the
+#                 fixtures DROP/CREATE their own database, so a throwaway
+#                 service container is the honest way to run them.
+#   portal-web    `tsc -b && vite build`. The typecheck is the point; a
+#                 dependency bump that breaks types fails here, not on deploy.
+#   portal-app    the operator portal's Python. It has no tests, so this
+#                 checks the lockfile resolves and the app imports — which is
+#                 what actually broke when routes/moodle.py became a package.
+#
+# No Docker build, no lint gate, no coverage threshold. Add them when they
+# would have caught something.
+
+on:
+  pull_request:
+    branches: [ dev, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Matches docker-compose.yml so a test passing here means the same
+        # server version the stack actually deploys against.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: tigerduck
+          POSTGRES_PASSWORD: tigerduck
+          # server/tests/conftest.py connects to the `tigerduck` database as
+          # admin, then drops and recreates `tigerduck_test` per session. The
+          # admin database has to exist before the first connection.
+          POSTGRES_DB: tigerduck
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tigerduck -d tigerduck"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # conftest.py reads this and falls back to the same localhost URL, so
+      # the suite runs identically here and on a developer machine.
+      TIGERDUCK_TEST_DATABASE_URL: postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck_test
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install dependencies
+        # --frozen fails if uv.lock is stale rather than silently resolving
+        # something the lockfile does not describe.
+        run: uv sync --frozen
+
+      - name: Run tests
+        run: uv run --frozen pytest server/tests -q
+
+  portal-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portal/web
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Vite 8 requires Node 20.19+/22.12+, and vite.config.ts uses
+          # `import.meta.dirname`, which needs 20.11+. 22 clears both.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: portal/web/package-lock.json
+
+      - name: Install dependencies
+        # `ci` rather than `install` so a lockfile that disagrees with
+        # package.json is an error instead of a silent update.
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run build
+
+  portal-app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portal
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: portal/uv.lock
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Import the app
+        # No tests to run, so the check is that every module still imports.
+        # A package split that leaves a route module unreferenced, or an
+        # __init__ that forgets to re-export, fails right here.
+        run: uv run --frozen python -c "import app.main; print('portal app imports OK')"

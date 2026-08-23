@@ -19,10 +19,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema."""
+    """No-op. This revision exists only to rejoin the two heads that 4e6c604ad58c
+    and b3d5f7a9c1e2 left behind; it carries no schema change of its own."""
     pass
 
 
 def downgrade() -> None:
-    """Downgrade schema."""
+    """No-op — see `upgrade`."""
     pass
