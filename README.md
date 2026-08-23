@@ -342,9 +342,12 @@ tigerduck-backend/
 
 歡迎 PR 與 Issue。送出前請確認：
 1. `uv run pytest` 全綠
-2. 有改 schema 的話附上 alembic revision
-3. 以 `feature/your-feature` 或 `fix/your-fix` 命名分支，PR 目標分支 `dev`
-4. PR 描述寫清楚 user-visible 影響（會 ship 給 iOS / Android client 的部分）
+2. portal 前端有動到的話，`cd portal/web && npm run build` 也要過（`tsc -b` 的型別檢查是重點）
+3. 有改 schema 的話附上 alembic revision
+4. 以 `feature/your-feature` 或 `fix/your-fix` 命名分支，PR 目標分支 `dev`
+5. PR 描述寫清楚 user-visible 影響（會 ship 給 iOS / Android client 的部分）
+
+上面 1 與 2 會由 `.github/workflows/ci.yaml` 在每個對 `dev` / `main` 的 PR 上自動跑。
 
 ## 授權
 

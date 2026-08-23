@@ -342,9 +342,12 @@ tigerduck-backend/
 
 PRs and issues are welcome. Before submitting:
 1. `uv run pytest` is green
-2. Include an alembic revision if you touch the schema
-3. Name your branch `feature/your-feature` or `fix/your-fix`; target the `dev` branch in the PR
-4. Spell out the user-visible impact in the PR description (anything that ships to the iOS / Android client)
+2. If you touched the portal frontend, `cd portal/web && npm run build` passes too — the `tsc -b` typecheck is the part that matters
+3. Include an alembic revision if you touch the schema
+4. Name your branch `feature/your-feature` or `fix/your-fix`; target the `dev` branch in the PR
+5. Spell out the user-visible impact in the PR description (anything that ships to the iOS / Android client)
+
+Items 1 and 2 run automatically via `.github/workflows/ci.yaml` on every PR to `dev` / `main`.
 
 ## License
 
