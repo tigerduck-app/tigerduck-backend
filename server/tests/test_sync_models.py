@@ -170,8 +170,13 @@ async def test_bulletin_user_match_run_round_trip(db_session) -> None:
     assert run.bulletin_id == bulletin.id
     assert run.matched_at is not None
 
-    # PK = bulletin_id → second run row for the same bulletin must fail.
-    db_session.add(BulletinUserMatchRun(bulletin_id=bulletin.id))
+    # PK = bulletin_id → a second run row for the same bulletin must fail.
+    # Expunge the row we just read first: left in the identity map, SQLAlchemy
+    # objects to the duplicate identity before the INSERT ever reaches
+    # Postgres, which is not the constraint this asserts.
+    bulletin_id = bulletin.id
+    db_session.expunge(run)
+    db_session.add(BulletinUserMatchRun(bulletin_id=bulletin_id))
     with pytest.raises(IntegrityError):
         await db_session.commit()
     await db_session.rollback()
