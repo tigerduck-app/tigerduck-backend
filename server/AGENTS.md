@@ -135,9 +135,12 @@ into the backend container via `docker-compose.yml`.
   Never spin up a second replica — see `docs/scheduler.md`.
 
 ## ANTI-PATTERNS
-- ❌ Do not store user Moodle/NTUST credentials in this service. The
-  design assumes the client owns credentials; the server only knows
-  schedule metadata.
+- ❌ Do not handle Moodle/NTUST credentials outside `server/auth/`.
+  v3 keeps the Moodle token (never the NTUST password) encrypted at
+  rest via `CredentialCipher` so the server-side sync job can fetch on
+  the user's behalf; it is decrypted only in `server/syncjobs/credentials.py`,
+  never logged, and dropped with the account. Anything else that needs a
+  credential goes through that path.
 - ❌ Do not send APNs pushes from inside request handlers. Scheduling
   goes through `scheduled_pushes` and is dispatched by the APScheduler
   tick.

@@ -166,8 +166,9 @@ async def login(
         now=now,
     )
 
-    limiter.reset(sid_key)
-    limiter.reset(ip_key)
+    if not skip_rate_limit:
+        limiter.reset(sid_key)
+        limiter.reset(ip_key)
     logger.info(
         "auth.login.success",
         user_id=str(user.id),

@@ -8,6 +8,11 @@ never removed them. The app now ignores such rows on sync; the migration
 that imports this statement deletes them server-side so reminders and
 the portal stop seeing them. Manual courses and portal rows are safe: the
 app always derives their Moodle id from the term it files them under.
+
+The predicate only matches the exact shape the bug produced — a Moodle id
+that is a four-character term code followed by the row's own course
+number, where that term differs from the one the row is filed under. A
+plain numeric Moodle id (e.g. `777`) or anything else never matches.
 """
 
 from sqlalchemy import text
@@ -16,6 +21,6 @@ MISFILED_CLIENT_COURSES_DELETE = text(
     "DELETE FROM user_courses "
     "WHERE course_key LIKE 'client:%' "
     "AND length(semester) = 4 "
-    "AND moodle_id ~ '^[0-9]{3}' "
+    "AND moodle_id = left(moodle_id, 4) || split_part(course_key, ':', 3) "
     "AND left(moodle_id, 4) <> semester"
 )

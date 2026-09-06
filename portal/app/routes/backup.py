@@ -173,7 +173,12 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
         # Python memory and gives pg_restore clearer error output
         # when the format is wrong.
         proc = await asyncio.create_subprocess_exec(
+            # --single-transaction makes the restore all-or-nothing: a
+            # failure part-way rolls back instead of leaving the live
+            # schema half dropped. Writers should still be stopped first
+            # (see the module docstring).
             "pg_restore", *pg_args, "--clean", "--if-exists", "--no-owner",
+            "--single-transaction",
             str(pg_dump_path),
             env=pg_env,
             stdout=asyncio.subprocess.PIPE,

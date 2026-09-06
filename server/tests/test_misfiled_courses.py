@@ -38,6 +38,8 @@ async def test_delete_keeps_rows_whose_moodle_id_matches_their_term(client) -> N
         {"semester": "1142", "course_no": "CS2", "course_name": "manual"},
         # A summer term, whose code is not all digits.
         {"semester": "114H", "course_no": "CS3", "course_name": "summer", "moodle_id": "114HCS3"},
+        # A plain numeric Moodle id: not term-prefixed, must survive.
+        {"semester": "1142", "course_no": "CS4", "course_name": "numeric", "moodle_id": "777"},
     ]})
     assert upload.status_code == 200
 
@@ -52,4 +54,4 @@ async def test_delete_keeps_rows_whose_moodle_id_matches_their_term(client) -> N
         )).all()
 
     assert deleted == 1
-    assert sorted(rows) == [("1142", "CS2"), ("114H", "CS3"), ("1151", "CS1")]
+    assert sorted(rows) == [("1142", "CS2"), ("1142", "CS4"), ("114H", "CS3"), ("1151", "CS1")]

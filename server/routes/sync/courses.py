@@ -53,10 +53,10 @@ async def delete_all_courses(
         .where(*course_scope)
         .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
     )).all()
-    if not rows:
-        return {"deleted": 0}
 
     # Clear the tombstones in scope so the immediate re-upload isn't blocked.
+    # This runs even when no course row matched: a user who deleted every
+    # course one by one and then resets still needs those tombstones gone.
     await session.execute(delete(UserCourseTombstone).where(*tombstone_scope))
 
     # courses_reset_at tells other devices to wipe their local course
@@ -66,6 +66,9 @@ async def delete_all_courses(
         await session.execute(
             update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
         )
+
+    if not rows:
+        return {"deleted": 0}
 
     state = await lock_sync_state(session, auth.user_id)
     for row in rows:
