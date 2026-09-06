@@ -36,29 +36,36 @@ async def delete_all_courses(
     session: SessionDep,
     request: Request,
     background_tasks: BackgroundTasks,
+    semester: str | None = Query(default=None, max_length=16),
 ):
-    """Wipe all courses for the user. Used by 'reset course timetable'."""
+    """Wipe the user's courses — every semester, or only `semester` when
+    given. Used by 'reset course timetable'."""
     now = datetime.now(UTC)
+
+    course_scope = [UserCourse.user_id == auth.user_id]
+    tombstone_scope = [UserCourseTombstone.user_id == auth.user_id]
+    if semester:
+        course_scope.append(UserCourse.semester == semester)
+        tombstone_scope.append(UserCourseTombstone.semester == semester)
 
     rows = (await session.execute(
         delete(UserCourse)
-        .where(UserCourse.user_id == auth.user_id)
+        .where(*course_scope)
         .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
     )).all()
     if not rows:
         return {"deleted": 0}
 
-    # Full reset: clear ALL tombstones so the immediate re-upload isn't
-    # blocked. courses_reset_at signals other devices that a reset happened.
-    await session.execute(
-        delete(UserCourseTombstone).where(
-            UserCourseTombstone.user_id == auth.user_id,
-        )
-    )
+    # Clear the tombstones in scope so the immediate re-upload isn't blocked.
+    await session.execute(delete(UserCourseTombstone).where(*tombstone_scope))
 
-    await session.execute(
-        update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
-    )
+    # courses_reset_at tells other devices to wipe their local course
+    # overlays wholesale, so only a full reset may set it. A semester reset
+    # propagates through the change log + per-semester reconcile instead.
+    if semester is None:
+        await session.execute(
+            update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
+        )
 
     state = await lock_sync_state(session, auth.user_id)
     for row in rows:
@@ -99,13 +106,14 @@ async def delete_all_courses(
         session,
         user_id=auth.user_id,
         source="sync",
-        message=f"All courses deleted: {len(rows)} removed — {push_status}",
+        message=f"{'Semester ' + semester if semester else 'All'} courses deleted: {len(rows)} removed — {push_status}",
         device_id=auth.device_id,
-        detail={"deleted": len(rows), "course_keys": deleted_keys},
+        detail={"deleted": len(rows), "semester": semester, "course_keys": deleted_keys},
     )
     logger.info(
         "sync.delete_all_courses",
         user_id=str(auth.user_id),
+        semester=semester,
         deleted=len(rows),
     )
     return {"deleted": len(rows)}
