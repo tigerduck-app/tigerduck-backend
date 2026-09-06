@@ -1,7 +1,7 @@
 """drop_misfiled_client_courses
 
 Revision ID: 9c4d1e2f3a5b
-Revises: f7e3a6d9c2b1
+Revises: d5e6f7a8b9c0
 Create Date: 2026-09-07 06:00:00.000000
 
 """
@@ -13,7 +13,7 @@ from server.sync.misfiled_courses import MISFILED_CLIENT_COURSES_DELETE
 
 # revision identifiers, used by Alembic.
 revision: str = '9c4d1e2f3a5b'
-down_revision: str | Sequence[str] | None = 'f7e3a6d9c2b1'
+down_revision: str | Sequence[str] | None = 'd5e6f7a8b9c0'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
