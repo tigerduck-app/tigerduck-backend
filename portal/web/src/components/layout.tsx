@@ -57,13 +57,30 @@ export function Layout() {
     <div className="flex min-h-screen bg-background">
       <aside className={`sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-card/30 lg:flex transition-all duration-200 ${sidebarCollapsed ? "w-14" : "w-60"}`}>
         <div className={`flex items-center gap-2.5 pb-3 pt-5 ${sidebarCollapsed ? "justify-center px-2" : "px-5"}`}>
-          <img
-            src="/static/tigerduck-logo.png"
-            alt=""
-            className="h-7 w-7 rounded shrink-0"
-          />
-          {!sidebarCollapsed && (
+          {sidebarCollapsed ? (
+            // Stacked rather than side by side: 56px minus padding leaves 40px,
+            // which the 28px logo and a tap target cannot share.
+            <div className="flex flex-col items-center gap-4">
+              <img
+                src="/static/tigerduck-logo.png"
+                alt=""
+                className="h-7 w-7 rounded"
+              />
+              <button
+                onClick={() => setSidebarCollapsed(false)}
+                className="rounded-md p-1.5 hover:bg-accent text-muted-foreground"
+                title="Expand sidebar"
+              >
+                <Menu className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
             <>
+              <img
+                src="/static/tigerduck-logo.png"
+                alt=""
+                className="h-7 w-7 rounded shrink-0"
+              />
               <div className="leading-tight">
                 <div className="text-sm font-semibold">TigerDuck</div>
                 <div className="text-xs text-muted-foreground">Backend Portal</div>
@@ -119,7 +136,7 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
-        <div className="border-t border-border px-3 py-4">
+        <div className={`border-t border-border py-4 ${sidebarCollapsed ? "px-1" : "px-3"}`}>
           {!sidebarCollapsed && (
             <div className="space-y-1.5 px-2 text-xs text-foreground/80 mb-3">
               <div className="flex items-center gap-2">
@@ -136,17 +153,7 @@ export function Layout() {
               </div>
             </div>
           )}
-          {sidebarCollapsed ? (
-            <button
-              onClick={() => setSidebarCollapsed(false)}
-              className="rounded-md p-1.5 hover:bg-accent text-muted-foreground mx-auto"
-              title="Expand sidebar"
-            >
-              <Menu className="h-4 w-4" />
-            </button>
-          ) : (
-            <ThemeToggle />
-          )}
+          <ThemeToggle iconOnly={sidebarCollapsed} />
         </div>
       </aside>
 
