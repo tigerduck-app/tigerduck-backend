@@ -107,6 +107,10 @@ export type SyncAssignment = {
   moodle_assignment_id: number;
   course_no: string;
   course_name: string;
+  /** Derived server-side from the Moodle course name; null if unparseable. */
+  semester?: string | null;
+  /** `course_no` when the client sent one, else read out of the course name. */
+  client_course_no?: string | null;
   title: string;
   due_at: string | null;
   moodle_url: string | null;
@@ -115,7 +119,10 @@ export type SyncAssignment = {
 };
 
 export type SyncCoursesResponse = {
+  /** The term the table opens on, not the only one present. */
   semester: string;
+  /** Every term the user has course rows or tombstones for, newest first. */
+  semesters?: string[];
   palette_light: string[];
   palette_dark: string[];
   courses: SyncCourse[];
