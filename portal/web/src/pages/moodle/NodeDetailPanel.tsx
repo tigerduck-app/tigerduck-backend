@@ -2,6 +2,7 @@
 // node kind would be the next step; today it is a single switch, kept
 // together because the kinds share their table and empty-state chrome.
 
+import { Fragment, useMemo, useState } from "react";
 import { Check, CloudOff, Loader2, Minus, Server } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,55 @@ import {
 import { RunStatusBadge, deviceLabel, fmt, platformIcon, platformLabel, relativeTime } from "./format";
 import type { SyncCoursesResponse, SyncEventsResponse, TopologyNode } from "./types";
 
+/**
+ * Split rows into one section per NTUST term, newest first. Rows whose term
+ * could not be determined collect under a trailing heading of their own
+ * rather than being dropped or filed under a term they may not belong to.
+ */
+function groupBySemester<T>(rows: T[], termOf: (row: T) => string | null | undefined) {
+  const byTerm = new Map<string, T[]>();
+  for (const row of rows) {
+    const term = termOf(row) || "";
+    const bucket = byTerm.get(term);
+    if (bucket) bucket.push(row);
+    else byTerm.set(term, [row]);
+  }
+  return [...byTerm.entries()]
+    // Unknown last, real terms newest first.
+    .sort(([a], [b]) => (a ? 0 : 1) - (b ? 0 : 1) || b.localeCompare(a))
+    .map(([semester, items]) => ({ semester, items }));
+}
+
+function SemesterHeadingRow({
+  semester,
+  count,
+  colSpan,
+  current,
+}: {
+  semester: string;
+  count: string;
+  colSpan: number;
+  current?: boolean;
+}) {
+  return (
+    <TableRow className="bg-muted/50 hover:bg-muted/50">
+      <TableCell colSpan={colSpan} className="py-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs font-medium">
+            {semester || "Unknown semester"}
+          </span>
+          {current && (
+            <Badge variant="outline" className="text-[10px] px-1 py-0">
+              Current
+            </Badge>
+          )}
+          <span className="text-xs text-muted-foreground">{count}</span>
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
 export function NodeDetailPanel({
   selectedNode,
   data,
@@ -46,6 +96,54 @@ export function NodeDetailPanel({
   setCourseNameLang: (v: "en" | "zh") => void;
   studentId: string;
 }) {
+  // Clients reconcile every semester against the backend, so the courses
+  // response spans terms. Everything is shown by default and grouped under a
+  // heading per term — silently narrowing to one term is what made rows look
+  // lost. The filter narrows on demand; it is not the default.
+  const [semesterFilter, setSemesterFilter] = useState<string>("__all__");
+  const courseSemesters = useMemo(() => {
+    const fromRows = [
+      ...(coursesData?.courses ?? []).map((c) => c.semester),
+      ...(coursesData?.assignments ?? []).map((a) => a.semester),
+    ].filter((s): s is string => !!s);
+    return [...new Set(fromRows.concat(coursesData?.semesters ?? []))].sort().reverse();
+  }, [coursesData]);
+  const activeSemester =
+    semesterFilter === "__focus__" ? coursesData?.semester ?? "" : semesterFilter;
+  const visibleCourses = useMemo(() => {
+    const all = coursesData?.courses ?? [];
+    if (semesterFilter === "__all__") return all;
+    if (!activeSemester) return all;
+    return all.filter((c) => (c.semester ?? "") === activeSemester);
+  }, [coursesData, semesterFilter, activeSemester]);
+  const visibleTombstones = useMemo(() => {
+    const all = coursesData?.tombstones ?? [];
+    if (semesterFilter === "__all__" || !activeSemester) return all;
+    return all.filter((t) => t.semester === activeSemester);
+  }, [coursesData, semesterFilter, activeSemester]);
+  const visibleAssignments = useMemo(() => {
+    const all = coursesData?.assignments ?? [];
+    if (semesterFilter === "__all__" || !activeSemester) return all;
+    return all.filter((a) => (a.semester ?? "") === activeSemester);
+  }, [coursesData, semesterFilter, activeSemester]);
+  // One section per term, newest first, each with its own deletions — a term
+  // with a tombstone and no live rows still gets a heading, which is exactly
+  // the case someone opens this panel to look at.
+  const semesterGroups = useMemo(() => {
+    const terms = [
+      ...new Set([
+        ...visibleCourses.map((c) => c.semester ?? ""),
+        ...visibleTombstones.map((t) => t.semester ?? ""),
+      ]),
+    ].sort().reverse();
+    return terms.map((term) => ({
+      semester: term,
+      courses: visibleCourses
+        .filter((c) => (c.semester ?? "") === term)
+        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")),
+      tombstones: visibleTombstones.filter((t) => (t.semester ?? "") === term),
+    }));
+  }, [visibleCourses, visibleTombstones]);
   if (selectedNode.kind === "backend") {
     return (
       <Card>
@@ -61,7 +159,7 @@ export function NodeDetailPanel({
           <Tabs defaultValue="courses">
             <TabsList>
               <TabsTrigger value="courses">
-                Courses{coursesData ? ` (${coursesData.courses.length}${coursesData.tombstones?.length ? ` + ${coursesData.tombstones.length} deleted` : ""})` : ""}
+                Courses{coursesData ? ` (${visibleCourses.length}${semesterFilter !== "__all__" && coursesData.courses.length !== visibleCourses.length ? ` of ${coursesData.courses.length}` : ""}${visibleTombstones.length ? ` + ${visibleTombstones.length} deleted` : ""})` : ""}
               </TabsTrigger>
               <TabsTrigger value="assignments">
                 Assignments{coursesData?.assignments ? ` (${coursesData.assignments.length})` : ""}
@@ -77,9 +175,27 @@ export function NodeDetailPanel({
                 </div>
               ) : coursesData.courses.length === 0 ? (
                 <div className="py-6 text-center text-muted-foreground">No courses</div>
+              ) : visibleCourses.length === 0 && visibleTombstones.length === 0 ? (
+                <div className="py-6 text-center text-muted-foreground">
+                  No courses in {activeSemester || "this semester"} — {coursesData.courses.length} in other semesters.
+                </div>
               ) : (
                 <div className="space-y-2">
-                <div className="flex justify-end">
+                <div className="flex justify-end gap-2">
+                  <Select value={semesterFilter} onValueChange={setSemesterFilter}>
+                    <SelectTrigger className="w-36 h-7 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All semesters</SelectItem>
+                      <SelectItem value="__focus__">
+                        {coursesData.semester ? `Current (${coursesData.semester})` : "Current"}
+                      </SelectItem>
+                      {courseSemesters.map((sem) => (
+                        <SelectItem key={sem} value={sem}>{sem}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <Select value={courseNameLang} onValueChange={(v) => setCourseNameLang(v as "en" | "zh")}>
                     <SelectTrigger className="w-28 h-7 text-xs">
                       <SelectValue />
@@ -102,84 +218,104 @@ export function NodeDetailPanel({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {[...coursesData.courses]
-                        .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""))
-                        .map((c) => {
-                          const paletteLight = coursesData.palette_light ?? [];
-                          const paletteDark = coursesData.palette_dark ?? [];
-                          const overrideIdx = c.color_hex
-                            ? paletteLight.findIndex(
-                                (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
-                              )
-                            : -1;
-                          const isPresetOverride = overrideIdx >= 0;
-                          const isCustom = !!c.color_hex && !isPresetOverride;
-                          return (
-                            <TableRow key={c.id}>
-                              <TableCell>
-                                <div className="flex items-center gap-1">
-                                  {isPresetOverride ? (
-                                    <>
-                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
-                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
-                                      <span className="font-mono text-xs">#{overrideIdx}</span>
-                                    </>
-                                  ) : isCustom ? (
-                                    <>
-                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
-                                      <span className="font-mono text-xs">{c.color_hex}</span>
-                                    </>
+                      {semesterGroups.map((group) => (
+                        <Fragment key={group.semester || "unfiled"}>
+                          <TableRow className="bg-muted/50 hover:bg-muted/50">
+                            <TableCell colSpan={5} className="py-1.5">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-xs font-medium">
+                                  {group.semester || "No semester"}
+                                </span>
+                                {group.semester === coursesData.semester && (
+                                  <Badge variant="outline" className="text-[10px] px-1 py-0">
+                                    Current
+                                  </Badge>
+                                )}
+                                <span className="text-xs text-muted-foreground">
+                                  {group.courses.length} course{group.courses.length === 1 ? "" : "s"}
+                                  {group.tombstones.length ? ` · ${group.tombstones.length} deleted` : ""}
+                                </span>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                          {group.courses.map((c) => {
+                            const paletteLight = coursesData.palette_light ?? [];
+                            const paletteDark = coursesData.palette_dark ?? [];
+                            const overrideIdx = c.color_hex
+                              ? paletteLight.findIndex(
+                                  (p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()
+                                )
+                              : -1;
+                            const isPresetOverride = overrideIdx >= 0;
+                            const isCustom = !!c.color_hex && !isPresetOverride;
+                            return (
+                              <TableRow key={c.id}>
+                                <TableCell>
+                                  <div className="flex items-center gap-1">
+                                    {isPresetOverride ? (
+                                      <>
+                                        <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Preset (light)" />
+                                        <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Preset (dark)" />
+                                        <span className="font-mono text-xs">#{overrideIdx}</span>
+                                      </>
+                                    ) : isCustom ? (
+                                      <>
+                                        <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                        <span className="font-mono text-xs">{c.color_hex}</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
+                                        <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
+                                        <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                      </>
+                                    )}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                                <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
+                                  {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                                </TableCell>
+                                <TableCell className="text-xs max-w-[200px] truncate">
+                                  {(() => {
+                                    const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
+                                    return names && typeof names === "object" && Object.keys(names).length > 0
+                                      ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
+                                      : "—";
+                                  })()}
+                                </TableCell>
+                                <TableCell>
+                                  {c.updated_by_device_id ? (
+                                    <Badge variant="secondary" className="text-[10px] font-normal">
+                                      {deviceLabel(c.updated_by_device_id, data.devices ?? [])}
+                                    </Badge>
                                   ) : (
-                                    <>
-                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Default (light)" />
-                                      <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Default (dark)" />
-                                      <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
-                                    </>
+                                    <span className="text-xs text-muted-foreground">—</span>
                                   )}
-                                </div>
-                              </TableCell>
-                              <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
-                              <TableCell className="text-xs max-w-[200px] truncate" title={`${c.course_name}${c.course_name_en ? ` / ${c.course_name_en}` : ""}`}>
-                                {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
-                              </TableCell>
-                              <TableCell className="text-xs max-w-[200px] truncate">
-                                {(() => {
-                                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names) : c.custom_names;
-                                  return names && typeof names === "object" && Object.keys(names).length > 0
-                                    ? Object.entries(names).map(([lang, name]) => `${lang}: ${name}`).join(", ")
-                                    : "—";
-                                })()}
-                              </TableCell>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                          {group.tombstones.map((t) => (
+                            <TableRow key={`tomb-${t.course_key}`} className="opacity-50">
                               <TableCell>
-                                {c.updated_by_device_id ? (
+                                <Badge variant="destructive" className="text-[10px] px-1 py-0">Deleted</Badge>
+                              </TableCell>
+                              <TableCell className="font-mono text-xs line-through">{t.course_no}</TableCell>
+                              <TableCell className="text-xs text-muted-foreground">deleted {relativeTime(t.deleted_at)}</TableCell>
+                              <TableCell className="text-xs text-muted-foreground">—</TableCell>
+                              <TableCell>
+                                {t.deleted_by_device_id ? (
                                   <Badge variant="secondary" className="text-[10px] font-normal">
-                                    {deviceLabel(c.updated_by_device_id, data.devices ?? [])}
+                                    {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
                                   </Badge>
                                 ) : (
                                   <span className="text-xs text-muted-foreground">—</span>
                                 )}
                               </TableCell>
                             </TableRow>
-                          );
-                        })}
-                      {coursesData.tombstones?.map((t) => (
-                        <TableRow key={`tomb-${t.course_key}`} className="opacity-50">
-                          <TableCell>
-                            <Badge variant="destructive" className="text-[10px] px-1 py-0">Deleted</Badge>
-                          </TableCell>
-                          <TableCell className="font-mono text-xs line-through">{t.course_no}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground line-through">{t.semester}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{relativeTime(t.deleted_at)}</TableCell>
-                          <TableCell>
-                            {t.deleted_by_device_id ? (
-                              <Badge variant="secondary" className="text-[10px] font-normal">
-                                {deviceLabel(t.deleted_by_device_id, data.devices ?? [])}
-                              </Badge>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                        </TableRow>
+                          ))}
+                        </Fragment>
                       ))}
                     </TableBody>
                   </Table>
@@ -212,7 +348,7 @@ export function NodeDetailPanel({
                         return (
                         <TableRow key={a.id}>
                           <TableCell className="text-xs max-w-[200px] truncate" title={a.title}>{a.title}</TableCell>
-                          <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
+                          <TableCell className="font-mono text-xs">{a.client_course_no || a.course_no || "—"}</TableCell>
                           <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
                           <TableCell className="text-center">
                             {a.provider_is_submitted ? (
@@ -322,15 +458,35 @@ export function NodeDetailPanel({
               </div>
             ) : (
               <Tabs defaultValue="courses">
-                <TabsList className="mb-2">
-                  <TabsTrigger value="courses">Courses ({allCourses.length})</TabsTrigger>
-                  <TabsTrigger value="custom-names">Custom Names ({allCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
-                  <TabsTrigger value="assignments">Assignments ({allAssignments.length})</TabsTrigger>
-                </TabsList>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <TabsList>
+                    <TabsTrigger value="courses">Courses ({visibleCourses.length})</TabsTrigger>
+                    <TabsTrigger value="custom-names">Custom Names ({visibleCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
+                    <TabsTrigger value="assignments">Assignments ({visibleAssignments.length})</TabsTrigger>
+                  </TabsList>
+                  <Select value={semesterFilter} onValueChange={setSemesterFilter}>
+                    <SelectTrigger className="w-40 h-7 text-xs shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All semesters</SelectItem>
+                      <SelectItem value="__focus__">
+                        {coursesData.semester ? `Current (${coursesData.semester})` : "Current"}
+                      </SelectItem>
+                      {courseSemesters.map((sem) => (
+                        <SelectItem key={sem} value={sem}>{sem}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
                 <TabsContent value="courses">
-                  {allCourses.length === 0 ? (
-                    <p className="text-sm text-muted-foreground py-4">No courses</p>
+                  {visibleCourses.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">
+                      {activeSemester && (coursesData?.courses ?? []).length > 0
+                        ? `No courses in ${activeSemester} — ${(coursesData?.courses ?? []).length} in other semesters.`
+                        : "No courses"}
+                    </p>
                   ) : (
                     <div className="space-y-2">
                       <div className="flex justify-end">
@@ -354,43 +510,53 @@ export function NodeDetailPanel({
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {[...allCourses].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
-                              const paletteLight = coursesData?.palette_light ?? [];
-                              const paletteDark = coursesData?.palette_dark ?? [];
-                              const overrideIdx = c.color_hex ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()) : -1;
-                              const isPresetOverride = overrideIdx >= 0;
-                              const isCustom = !!c.color_hex && !isPresetOverride;
-                              return (
-                                <TableRow key={c.id}>
-                                  <TableCell>
-                                    <div className="flex items-center gap-1">
-                                      {isPresetOverride ? (
-                                        <>
-                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Light" />
-                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Dark" />
-                                          <span className="font-mono text-xs">#{overrideIdx}</span>
-                                        </>
-                                      ) : isCustom ? (
-                                        <>
-                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
-                                          <span className="font-mono text-xs">{c.color_hex}</span>
-                                        </>
-                                      ) : (
-                                        <>
-                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Light" />
-                                          <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Dark" />
-                                          <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
-                                        </>
-                                      )}
-                                    </div>
-                                  </TableCell>
-                                  <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
-                                  <TableCell className="text-xs max-w-[200px] truncate">
-                                    {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
-                                  </TableCell>
-                                </TableRow>
-                              );
-                            })}
+                            {groupBySemester(visibleCourses, (c) => c.semester).map((group) => (
+                              <Fragment key={group.semester || "unknown"}>
+                                <SemesterHeadingRow
+                                  semester={group.semester}
+                                  colSpan={3}
+                                  current={group.semester === coursesData?.semester}
+                                  count={`${group.items.length} course${group.items.length === 1 ? "" : "s"}`}
+                                />
+                              {[...group.items].sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? "")).map((c) => {
+                                const paletteLight = coursesData?.palette_light ?? [];
+                                const paletteDark = coursesData?.palette_dark ?? [];
+                                const overrideIdx = c.color_hex ? paletteLight.findIndex((p: string) => p.toLowerCase() === c.color_hex!.toLowerCase()) : -1;
+                                const isPresetOverride = overrideIdx >= 0;
+                                const isCustom = !!c.color_hex && !isPresetOverride;
+                                return (
+                                  <TableRow key={c.id}>
+                                    <TableCell>
+                                      <div className="flex items-center gap-1">
+                                        {isPresetOverride ? (
+                                          <>
+                                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteLight[overrideIdx] }} title="Light" />
+                                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: paletteDark[overrideIdx] }} title="Dark" />
+                                            <span className="font-mono text-xs">#{overrideIdx}</span>
+                                          </>
+                                        ) : isCustom ? (
+                                          <>
+                                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.color_hex! }} title="Custom" />
+                                            <span className="font-mono text-xs">{c.color_hex}</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_light }} title="Light" />
+                                            <div className="h-4 w-4 rounded border" style={{ backgroundColor: c.default_color_dark }} title="Dark" />
+                                            <span className="font-mono text-xs text-muted-foreground">#{c.default_palette_index}</span>
+                                          </>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="font-mono text-xs">{c.client_course_no}</TableCell>
+                                    <TableCell className="text-xs max-w-[200px] truncate">
+                                      {courseNameLang === "en" ? (c.course_name_en || c.course_name) : c.course_name}
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                              </Fragment>
+                            ))}
                           </TableBody>
                         </Table>
                       </div>
@@ -400,7 +566,7 @@ export function NodeDetailPanel({
 
                 <TabsContent value="custom-names">
                   {(() => {
-                    const withNames = allCourses
+                    const withNames = visibleCourses
                       .map((c) => {
                         const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
                         return { ...c, parsedNames: (names && typeof names === "object") ? names as Record<string, string> : {} };
@@ -408,7 +574,11 @@ export function NodeDetailPanel({
                       .filter((c) => Object.keys(c.parsedNames).length > 0)
                       .sort((a, b) => (a.course_no ?? "").localeCompare(b.course_no ?? ""));
                     return withNames.length === 0 ? (
-                      <p className="text-sm text-muted-foreground py-4">All courses using default names</p>
+                      <p className="text-sm text-muted-foreground py-4">
+                        {activeSemester
+                          ? `All ${activeSemester} courses using default names`
+                          : "All courses using default names"}
+                      </p>
                     ) : (
                       <div className="overflow-x-auto">
                         <Table>
@@ -420,12 +590,22 @@ export function NodeDetailPanel({
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {withNames.map((c) => (
-                              <TableRow key={c.id}>
-                                <TableCell className="font-mono text-xs">{c.client_course_no ?? c.course_no}</TableCell>
-                                <TableCell className="text-xs">{c.parsedNames["zh"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
-                                <TableCell className="text-xs">{c.parsedNames["en"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
-                              </TableRow>
+                            {groupBySemester(withNames, (c) => c.semester).map((group) => (
+                              <Fragment key={group.semester || "unknown"}>
+                                <SemesterHeadingRow
+                                  semester={group.semester}
+                                  colSpan={3}
+                                  current={group.semester === coursesData?.semester}
+                                  count={`${group.items.length} renamed`}
+                                />
+                              {group.items.map((c) => (
+                                <TableRow key={c.id}>
+                                  <TableCell className="font-mono text-xs">{c.client_course_no ?? c.course_no}</TableCell>
+                                  <TableCell className="text-xs">{c.parsedNames["zh"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                                  <TableCell className="text-xs">{c.parsedNames["en"] ?? <span className="text-muted-foreground">—</span>}</TableCell>
+                                </TableRow>
+                              ))}
+                              </Fragment>
                             ))}
                           </TableBody>
                         </Table>
@@ -435,8 +615,12 @@ export function NodeDetailPanel({
                 </TabsContent>
 
                 <TabsContent value="assignments">
-                  {allAssignments.length === 0 ? (
-                    <p className="text-sm text-muted-foreground py-4">No assignments</p>
+                  {visibleAssignments.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-4">
+                      {activeSemester && (coursesData?.assignments ?? []).length > 0
+                        ? `No assignments in ${activeSemester} — ${(coursesData?.assignments ?? []).length} in other semesters.`
+                        : "No assignments"}
+                    </p>
                   ) : (
                     <div className="overflow-x-auto">
                       <Table>
@@ -449,17 +633,27 @@ export function NodeDetailPanel({
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {allAssignments.map((a) => {
-                            const override = allOverrides.find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
-                            return (
-                            <TableRow key={a.id}>
-                              <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
-                              <TableCell className="font-mono text-xs">{a.course_no}</TableCell>
-                              <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
-                              <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
-                            </TableRow>
-                            );
-                          })}
+                          {groupBySemester(visibleAssignments, (a) => a.semester).map((group) => (
+                            <Fragment key={group.semester || "unknown"}>
+                              <SemesterHeadingRow
+                                semester={group.semester}
+                                colSpan={4}
+                                current={group.semester === coursesData?.semester}
+                                count={`${group.items.length} assignment${group.items.length === 1 ? "" : "s"}`}
+                              />
+                            {group.items.map((a) => {
+                              const override = allOverrides.find((o) => o.moodle_assignment_id === a.moodle_assignment_id);
+                              return (
+                              <TableRow key={a.id}>
+                                <TableCell className="text-xs max-w-[200px] truncate">{a.title}</TableCell>
+                                <TableCell className="font-mono text-xs">{a.client_course_no || a.course_no || "—"}</TableCell>
+                                <TableCell className="text-xs">{fmt(a.due_at)}</TableCell>
+                                <TableCell>{override ? <RunStatusBadge status={override.local_status} /> : <span className="text-xs text-muted-foreground">normal</span>}</TableCell>
+                              </TableRow>
+                              );
+                            })}
+                            </Fragment>
+                          ))}
                         </TableBody>
                       </Table>
                     </div>
