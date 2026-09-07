@@ -15,7 +15,7 @@ import structlog
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import delete as sa_delete, func, select, update
 
-from server.models import DeviceRegistration
+from server.models import DevicePlatform, DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import (
@@ -35,9 +35,101 @@ from server.auth.schemas import (
     PushTokenIn,
 )
 from server.db import SessionDep
+from pydantic import BaseModel, Field
+from typing import Literal
 
 router = APIRouter(prefix="/devices", tags=["devices-v3"])
 logger = structlog.get_logger(__name__)
+
+
+class AnonymousDeviceRequest(BaseModel):
+    device_id: str = Field(min_length=8, max_length=128)
+    platform: Literal["apple", "android"]
+    device_class: Literal["iphone", "ipad", "android"] | None = None
+    push_token: str | None = Field(default=None, max_length=512)
+    bundle_id: str = Field(default="", max_length=128)
+
+
+class AnonymousDeviceResponse(BaseModel):
+    device_id: str
+    registered: bool
+
+
+@router.post("/anonymous", response_model=AnonymousDeviceResponse)
+async def register_anonymous_device(
+    payload: AnonymousDeviceRequest, session: SessionDep
+) -> AnonymousDeviceResponse:
+    """Register a device that has no account, so operators can reach it.
+
+    A device only appears in the inventory that `custom_push_targeting`
+    queries once it has a `device_registrations` row. Signing in creates a
+    `user_devices` row instead, which that targeting never sees, so an app
+    that has never been signed into was invisible and unreachable — there was
+    no way to tell that an Android, iPhone or iPad was running the app at all.
+
+    Deliberately unauthenticated: there is no account to authenticate
+    against. The only secret is `device_id`, a client-generated UUID, which
+    is the same trust model the retired /v2 registration used. To keep the
+    blast radius of a guessed id small this endpoint may only create a row or
+    refresh its token — it never rewrites `user_id`, never touches
+    `linked_user_id` (the signed-in path owns that, and clearing it would
+    double-push every bulletin), and never re-enables push for a device whose
+    owner opted out.
+    """
+    now = datetime.now(UTC)
+    existing = (
+        await session.execute(
+            select(DeviceRegistration).where(
+                DeviceRegistration.device_id == payload.device_id
+            )
+        )
+    ).scalar_one_or_none()
+
+    # Apple alert pushes consume `device_token_hex`; Android goes via FCM,
+    # whose token lives in `pts_token_hex`. Mirrors the gate in
+    # `custom_push_targeting` and `bulletins/matcher` — keep the three in sync.
+    is_android = payload.platform == DevicePlatform.android.value
+    token = payload.push_token or ""
+
+    if existing is None:
+        session.add(
+            DeviceRegistration(
+                device_id=payload.device_id,
+                user_id=f"anon-{payload.device_id}",
+                platform=payload.platform,
+                device_class=payload.device_class or "",
+                pts_token_hex=token if is_android else "",
+                device_token_hex=None if is_android else (payload.push_token or None),
+                bundle_id=payload.bundle_id,
+                attrs_type="",
+                apns_env="",
+                created_at=now,
+            )
+        )
+    else:
+        existing.platform = payload.platform
+        if payload.device_class:
+            existing.device_class = payload.device_class
+        # An absent token means "nothing new to report", not "drop the one you
+        # have" — the app calls this on every launch, and FCM only hands over a
+        # token once it is ready.
+        if payload.push_token:
+            if is_android:
+                existing.pts_token_hex = payload.push_token
+            else:
+                existing.device_token_hex = payload.push_token
+        existing.updated_at = now
+
+    await session.commit()
+    logger.info(
+        "device.anonymous_registered",
+        device_id=payload.device_id,
+        platform=payload.platform,
+        device_class=payload.device_class,
+        created=existing is None,
+        has_token=bool(payload.push_token),
+    )
+    return AnonymousDeviceResponse(device_id=payload.device_id, registered=True)
 
 
 @router.post("/register", response_model=DeviceRegisterV3Response)
