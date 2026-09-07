@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models import DeviceListMember, DevicePlatform, DeviceRegistration
 
-TargetClass = Literal["iphone", "ipad", "android"]
+TargetClass = Literal["iphone", "ipad", "mac", "android"]
 
 
 @dataclass(frozen=True)
@@ -137,7 +137,7 @@ async def count_by_class(
             # selected, attribute to it; if both are, the split is
             # unknowable, so bucket separately rather than skewing iPhone
             # (and leaving iPad showing 0 while these rows are targeted).
-            apple_selected = [c for c in ("iphone", "ipad") if c in counts]
+            apple_selected = [c for c in ("iphone", "ipad", "mac") if c in counts]
             if len(apple_selected) == 1:
                 counts[apple_selected[0]] += 1
             else:

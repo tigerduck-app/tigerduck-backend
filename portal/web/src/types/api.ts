@@ -179,7 +179,7 @@ export type BulletinList = {
   next_cursor: number | null;
 };
 
-export type CustomPushTargetClass = "iphone" | "ipad" | "android";
+export type CustomPushTargetClass = "iphone" | "ipad" | "mac" | "android";
 
 export type CustomPushTargetFilter = {
   target_classes: CustomPushTargetClass[];

@@ -45,7 +45,7 @@ logger = structlog.get_logger(__name__)
 class AnonymousDeviceRequest(BaseModel):
     device_id: str = Field(min_length=8, max_length=128)
     platform: Literal["apple", "android"]
-    device_class: Literal["iphone", "ipad", "android"] | None = None
+    device_class: Literal["iphone", "ipad", "mac", "android"] | None = None
     push_token: str | None = Field(default=None, max_length=512)
     bundle_id: str = Field(default="", max_length=128)
 

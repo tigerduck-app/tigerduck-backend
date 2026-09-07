@@ -27,12 +27,19 @@ from ..db import get_pool
 
 router = APIRouter(prefix="/api/custom-push")
 
-_CLASS_TO_PLATFORM = {"iphone": "ios", "ipad": "ipados", "android": "android"}
-_PLATFORM_TO_CLASS = {"ios": "iphone", "ipados": "ipad", "android": "android"}
+_CLASS_TO_PLATFORM = {
+    "iphone": "ios",
+    "ipad": "ipados",
+    "mac": "macos",
+    "android": "android",
+}
+_PLATFORM_TO_CLASS = {v: k for k, v in _CLASS_TO_PLATFORM.items()}
 
 
 class _TargetFilter(BaseModel):
-    target_classes: list[Literal["iphone", "ipad", "android"]] = Field(min_length=1)
+    target_classes: list[Literal["iphone", "ipad", "mac", "android"]] = Field(
+        min_length=1
+    )
     user_id: str | None = Field(default=None, max_length=64)
     device_id: str | None = Field(default=None, max_length=128)
     list_id: int | None = Field(default=None, ge=1)
