@@ -83,6 +83,12 @@ async def resolve_target_device_ids(
     )
     stmt = select(DeviceRegistration.device_id).where(
         DeviceRegistration.server_push_enabled.is_(True),
+        # Linked devices are served by the user-level push_jobs flow, which
+        # the portal targets straight off `user_devices` at send time. Without
+        # this a device present in both tables receives every custom push
+        # twice — the same rule `bulletins/matcher` already applies, and the
+        # one `DeviceRegistration.linked_user_id` was added for.
+        DeviceRegistration.linked_user_id.is_(None),
         token_clause,
         or_(class_clause, legacy_clause) if legacy_clause is not None else class_clause,
     )
