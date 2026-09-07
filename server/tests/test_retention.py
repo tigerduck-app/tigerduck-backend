@@ -6,13 +6,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from httpx import AsyncClient
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from server.config import Settings
 from server.db import build_session_factory
-from server.models import LiveActivityTokenStatus, LiveActivityUpdateToken
+from server.models import (
+    DeviceRegistration,
+    LiveActivityTokenStatus,
+    LiveActivityUpdateToken,
+)
 from server.scheduler.retention import prune_terminal_activity_tokens
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -21,17 +24,20 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 DEVICE_ID = "device-retention"
 
 
-async def _register_device(client: AsyncClient) -> None:
-    response = await client.post(
-        "/v2/devices/register",
-        json={
-            "user_id": "user-retention",
-            "device_id": DEVICE_ID,
-            "pts_token_hex": "a" * 128,
-            "apns_env": "development",
-        },
+async def _seed_device(s: AsyncSession) -> None:
+    # The v2 register endpoint is retired (410 Gone); insert the
+    # device_registrations row the token FK points at directly instead.
+    s.add(
+        DeviceRegistration(
+            device_id=DEVICE_ID,
+            user_id="user-retention",
+            pts_token_hex="a" * 128,
+            bundle_id="org.ntust.app.TigerDuck",
+            attrs_type="a",
+            apns_env="development",
+        )
     )
-    assert response.status_code == 200, response.text
+    await s.commit()
 
 
 async def _seed_token(
@@ -69,11 +75,14 @@ async def _seed_token(
 
 
 async def test_retention_prunes_terminal_rows_past_cutoff(
-    client: AsyncClient,
+    db_session: AsyncSession,
     prepared_engine: AsyncEngine,
     test_settings: Settings,
 ):
-    await _register_device(client)
+    # db_session resets the schema for this test; seed the device through
+    # it, then drive the pruner with its own factory like the scheduler
+    # runtime does.
+    await _seed_device(db_session)
     factory = build_session_factory(prepared_engine)
 
     retention = timedelta(days=test_settings.live_activity_token_retention_days)

@@ -1,0 +1,51 @@
+# Dev-mode override, auto-loaded by start.sh / stop.sh / logs.sh /
+# clean-db.sh when TIGERDUCK_ENV=development in .env.
+#
+# What it does:
+#   * Replaces `proxy-net` (a production-only external network shared
+#     with nginx-proxy-manager — see docker-compose.yml header) with
+#     `tigerduck-host` (a plain bridge declared below). Locally there's
+#     no NPM, so requiring `proxy-net` would break `docker compose up`
+#     with "network proxy-net declared as external, but could not be
+#     found".
+#   * Publishes backend port 40000 on `tigerduck-host` so iPhone
+#     Simulator hits `localhost:40000` and physical devices hit
+#     `<your-mac-LAN-IP>:40000`.
+#
+# Why `tigerduck-host` instead of leaving backend on only `tigerduck-db`:
+# the base file's `tigerduck-db` network has `internal: true`
+# (postgres-only, no outbound NAT). Docker Desktop on Mac refuses to
+# publish host ports for containers that are ONLY on internal networks —
+# the binding is declared in `HostConfig.PortBindings` but never
+# installed (`NetworkSettings.Ports` stays null, `docker port` returns
+# empty). Joining the backend to a regular bridge alongside the internal
+# one restores port publishing. In prod the same role is filled by
+# `proxy-net` (external = also not internal).
+#
+# `!override` is required because Compose merges list-form `networks:`
+# by union — without it the base file's `[tigerduck-db, proxy-net]`
+# would still apply. Requires Docker Compose v2.24+.
+#
+# NOT auto-loaded by docker compose itself (filename intentionally is
+# *not* `docker-compose.override.yml`, which would auto-load and break
+# prod deploys). The repo's scripts opt in based on TIGERDUCK_ENV.
+
+networks:
+  tigerduck-host:
+    driver: bridge
+
+services:
+  backend:
+    networks: !override
+      - tigerduck-db
+      - tigerduck-host
+    ports:
+      - "40000:40000"
+  portal:
+    # Same internal-network gotcha as backend — portal must join a
+    # non-internal network for its port to publish on the host.
+    networks: !override
+      - tigerduck-db
+      - tigerduck-host
+    ports:
+      - "40010:40010"

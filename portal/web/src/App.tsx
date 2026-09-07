@@ -1,0 +1,32 @@
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Layout } from "@/components/layout";
+import { StatusPage } from "@/pages/status";
+import { LogsPage } from "@/pages/logs";
+import { BackupPage } from "@/pages/backup";
+import { AnnouncementPage } from "@/pages/announcement";
+import { CustomPushPage } from "@/pages/custom-push";
+import { DevicesPage } from "@/pages/devices";
+import { ListsPage, ListDetailPage } from "@/pages/lists";
+import { MoodlePage, DataInspectionPage } from "@/pages/moodle";
+import { DeregisterPage } from "@/pages/deregister";
+
+export function App() {
+  return (
+    <Routes>
+      <Route element={<Layout />}>
+        <Route index element={<StatusPage />} />
+        <Route path="logs" element={<LogsPage />} />
+        <Route path="backup" element={<BackupPage />} />
+        <Route path="announcement" element={<AnnouncementPage />} />
+        <Route path="custom-push" element={<CustomPushPage />} />
+        <Route path="devices" element={<DevicesPage />} />
+        <Route path="lists" element={<ListsPage />} />
+        <Route path="lists/:id" element={<ListDetailPage />} />
+        <Route path="moodle" element={<MoodlePage />} />
+        <Route path="inspect" element={<DataInspectionPage />} />
+        <Route path="deregister" element={<DeregisterPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Route>
+    </Routes>
+  );
+}

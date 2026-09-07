@@ -30,14 +30,29 @@ class DeviceRegisterRequest(BaseModel):
     # below fills the apple defaults.
     attrs_type: str | None = Field(default=None, max_length=128)
     apns_env: str | None = Field(default=None, pattern="^(development|production)$")
+    device_class: str = Field(default="", max_length=16)
+    server_push_enabled: bool = True
 
     @model_validator(mode="after")
-    def _require_apple_fields(self) -> "DeviceRegisterRequest":
+    def _validate(self) -> "DeviceRegisterRequest":
         if self.platform == "apple":
             if not self.attrs_type:
                 self.attrs_type = "TigerDuckActivityAttributes"
             if not self.apns_env:
                 self.apns_env = "development"
+            if self.device_class and self.device_class not in {
+                "iphone",
+                "ipad",
+                "mac",
+            }:
+                raise ValueError(
+                    f"device_class for platform=apple must be iphone|ipad|mac|'', got {self.device_class!r}"
+                )
+        elif self.platform == "android":
+            if self.device_class and self.device_class != "android":
+                raise ValueError(
+                    f"device_class for platform=android must be 'android' or '', got {self.device_class!r}"
+                )
         return self
 
 
@@ -110,3 +125,12 @@ class LiveActivityTokenRegisterResponse(BaseModel):
     device_id: str
     activity_id: str
     registered_at: datetime
+
+
+class DevicePreferencesRequest(BaseModel):
+    server_push_enabled: bool
+
+
+class DevicePreferencesResponse(BaseModel):
+    device_id: str
+    server_push_enabled: bool

@@ -13,11 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
+from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.scheduler.dispatcher import dispatch_due_pushes
 from server.scheduler.retention import prune_terminal_activity_tokens
+from server.push.course_reminders import scan_course_reminders
+from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.retention import prune_terminal_push_jobs
+from server.push.reminders import scan_assignment_reminders
+from server.sync.retention import purge_expired_changelog
+from server.syncjobs.executor import SyncWorker, run_sync_tick
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
@@ -37,8 +45,10 @@ def build_scheduler(
     settings: Settings,
     *,
     llm: LLMProvider | None = None,
+    sync_worker: SyncWorker | None = None,
+    push_worker: PushPipelineWorker | None = None,
 ) -> AsyncIOScheduler:
-    """Wire APScheduler with the five TigerDuck jobs:
+    """Wire APScheduler with the TigerDuck jobs:
 
     * `dispatcher_tick` — existing PTS dispatcher (Live Activity).
     * `bulletin_scrape` — fetch NTUST bulletin list every 10 min.
@@ -46,6 +56,12 @@ def build_scheduler(
     * `bulletin_dispatch` — fan out alert pushes every 60s.
     * `bulletin_retention` — prune aged-out soft-deleted bulletins daily.
     * `live_activity_token_retention` — prune terminal update-token rows daily.
+    * `sync_changelog_retention` — purge aged changelog entries daily.
+    * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
+    * `sync_jobs_tick` — server-side academic sync executor every 30s
+      (only when a `sync_worker` is provided, i.e. credential keys exist).
+    * `push_pipeline_tick` — user push_jobs delivery pipeline every 30s
+      (only when a `push_worker` is provided).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -66,11 +82,20 @@ def build_scheduler(
     async def bulletin_dispatch() -> None:
         await bulletin_jobs.dispatch_job(session_factory, router, settings)
 
+    async def custom_push_dispatch() -> None:
+        await dispatch_pending_custom_pushes(session_factory, router, settings)
+
     async def bulletin_retention() -> None:
         await bulletin_jobs.retention_job(session_factory, settings)
 
     async def live_activity_token_retention() -> None:
         await prune_terminal_activity_tokens(session_factory, settings)
+
+    async def sync_changelog_retention() -> None:
+        await purge_expired_changelog(session_factory, settings)
+
+    async def push_job_retention() -> None:
+        await prune_terminal_push_jobs(session_factory, settings)
 
     scheduler.add_job(
         pts_tick,
@@ -105,6 +130,14 @@ def build_scheduler(
         misfire_grace_time=30,
     )
     scheduler.add_job(
+        custom_push_dispatch,
+        trigger=IntervalTrigger(seconds=settings.bulletin_dispatch_interval_seconds),
+        id="custom_push_dispatch",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+    scheduler.add_job(
         bulletin_retention,
         trigger=IntervalTrigger(hours=settings.bulletin_retention_interval_hours),
         id="bulletin_retention",
@@ -122,4 +155,89 @@ def build_scheduler(
         coalesce=True,
         misfire_grace_time=3600,
     )
+    scheduler.add_job(
+        sync_changelog_retention,
+        trigger=IntervalTrigger(
+            hours=settings.sync_changelog_retention_interval_hours
+        ),
+        id="sync_changelog_retention",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        push_job_retention,
+        trigger=IntervalTrigger(
+            hours=settings.push_job_retention_interval_hours
+        ),
+        id="push_job_retention",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    if sync_worker is not None:
+
+        async def sync_jobs_tick() -> None:
+            await run_sync_tick(sync_worker)
+
+        scheduler.add_job(
+            sync_jobs_tick,
+            trigger=IntervalTrigger(seconds=settings.sync_job_tick_seconds),
+            id="sync_jobs_tick",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+    if push_worker is not None:
+
+        async def push_pipeline_tick() -> None:
+            await run_push_tick(push_worker)
+
+        async def assignment_reminder_scan() -> None:
+            await scan_assignment_reminders(session_factory, settings)
+
+        async def course_reminder_scan() -> None:
+            await scan_course_reminders(session_factory, settings)
+
+        async def bulletin_user_dispatch() -> None:
+            await dispatch_user_bulletins(session_factory, settings)
+
+        scheduler.add_job(
+            push_pipeline_tick,
+            trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
+            id="push_pipeline_tick",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        scheduler.add_job(
+            assignment_reminder_scan,
+            trigger=IntervalTrigger(
+                seconds=settings.assignment_reminder_scan_interval_seconds
+            ),
+            id="assignment_reminder_scan",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            course_reminder_scan,
+            trigger=IntervalTrigger(
+                seconds=settings.course_reminder_scan_interval_seconds
+            ),
+            id="course_reminder_scan",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            bulletin_user_dispatch,
+            trigger=IntervalTrigger(
+                seconds=settings.bulletin_user_dispatch_interval_seconds
+            ),
+            id="bulletin_user_dispatch",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
     return scheduler

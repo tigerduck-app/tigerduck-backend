@@ -15,12 +15,15 @@ common case is just: pull, rebuild, restart.
 
 ```bash
 # Same host, same DB volume — the normal upgrade.
-cd backend
+cd tigerduck-backend
 git pull
 docker compose pull postgres            # only if Postgres image was bumped
-docker compose up -d --build backend    # start.sh runs `alembic upgrade head`
-docker compose logs -f backend          # confirm migrations applied cleanly
+./start.sh                              # rebuilds backend + runs `alembic upgrade head` + tails logs
 ```
+
+`./start.sh` automatically picks the right compose files for the
+`TIGERDUCK_ENV` in your `.env`, so the same upgrade flow works for both
+development and production hosts without remembering `-f` flags.
 
 The named volume `tigerduck_pgdata` survives `up -d --build` and even
 `down` (without `-v`), so data is preserved.
@@ -32,17 +35,30 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 Even though migrations are reversible in principle, it is cheap insurance
 and the only thing that protects you from operator error.
 
+**Preferred path — portal export button.** Visit the portal (dev:
+`http://localhost:40010/backup`, prod: through your auth-proxy URL),
+click "Download backup." You get a `tigerduck-export-<timestamp>.tar.gz`
+containing `pg_dump --format=custom` of the tigerduck DB plus a
+manifest. To restore: same page, "Restore" form — then restart the
+backend as prompted.
+
+**Manual fallback** — when the portal isn't running (fresh install or
+upgrade from a pre-portal commit):
+
 ```bash
-# From the backend/ directory, while the postgres container is running:
+# From the repo root, while the postgres container is running:
 docker compose exec -T postgres \
   pg_dump -U tigerduck -d tigerduck --format=custom --no-owner \
   > "backup-$(date +%Y%m%d-%H%M%S).dump"
 ```
 
 `--format=custom` is restorable with `pg_restore` and supports parallel
-restore. `--no-owner` makes the dump portable across roles.
+restore. `--no-owner` makes the dump portable across roles. The portal
+also accepts this bare `pg_dump` file (no `.tar.gz` wrapper) so you can
+import a manual dump through the UI.
 
-To restore that dump into an empty database:
+To restore that dump into an empty database directly (bypassing the
+portal):
 
 ```bash
 docker compose exec -T postgres \
@@ -59,9 +75,9 @@ data; Alembic walks the version chain from whatever `alembic_version` says
 up to `head`.
 
 ```bash
-cd backend
+cd tigerduck-backend
 git pull
-docker compose up -d --build backend
+./start.sh
 ```
 
 If you want to apply migrations manually (e.g. to inspect SQL first):
@@ -102,7 +118,8 @@ use `pg_dump` / `pg_restore`.
 
    ```bash
    # On the new host
-   git clone <repo> && cd <repo>/backend
+   git clone git@github.com:tigerduck-app/tigerduck-backend.git
+   cd tigerduck-backend
    cp .env.example .env   # fill in secrets, POSTGRES_PASSWORD, etc.
    docker compose up -d postgres
    docker compose exec postgres pg_isready -U tigerduck -d tigerduck

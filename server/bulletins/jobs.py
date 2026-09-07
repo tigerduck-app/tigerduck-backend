@@ -15,6 +15,7 @@ re-notifying devices (the unique index + `notified_at` stamp do the work).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -335,12 +336,20 @@ async def _mark_failed(
     )
 
 
+# Serializes the periodic dispatch tick against the immediate kick fired
+# from `POST /custom-push` (record path). Single-process backend, so a
+# module-level Lock is sufficient — see custom_push_dispatcher for the
+# same pattern and rationale.
+_dispatch_job_lock = asyncio.Lock()
+
+
 async def dispatch_job(
     session_factory: async_sessionmaker[AsyncSession],
     router: PushRouter,
     settings: Settings,
 ) -> None:
-    await dispatch_pending_bulletins(session_factory, router, settings)
+    async with _dispatch_job_lock:
+        await dispatch_pending_bulletins(session_factory, router, settings)
 
 
 async def retention_job(

@@ -1,0 +1,71 @@
+"""phase4c linked user marker and bulletin match runs
+
+Revision ID: db27e6d1b65a
+Revises: e0f7f827758f
+Create Date: 2026-06-10 15:29:17.770728
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'db27e6d1b65a'
+down_revision: Union[str, Sequence[str], None] = 'e0f7f827758f'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Phase 4c: link `device_registrations` rows to their v3 user, and add
+    `bulletin_user_match_runs` so per-user matching is idempotent.
+
+    Includes a backfill — see the comment on the UPDATE for why it is
+    DISTINCT ON. Without it the anonymous bulletin fan-out keeps
+    double-pushing to devices that are already covered per-user."""
+    op.create_table('bulletin_user_match_runs',
+    sa.Column('bulletin_id', sa.BigInteger(), autoincrement=False, nullable=False),
+    sa.Column('matched_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['bulletin_id'], ['bulletins.id'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('bulletin_id')
+    )
+    op.add_column('device_registrations', sa.Column('linked_user_id', sa.UUID(), nullable=True))
+    op.create_foreign_key(
+        'fk_device_registrations_linked_user',
+        'device_registrations', 'users',
+        ['linked_user_id'], ['id'], ondelete='SET NULL',
+    )
+    # Backfill: devices already registered by a logged-in v3 user_device
+    # (matched on client_device_id) start out linked, so the anonymous
+    # bulletin fan-out stops double-pushing to them immediately.
+    # DISTINCT ON keeps the pick deterministic when several users have an
+    # active user_device with the same client_device_id (account switch on
+    # one physical device) — newest last_seen_at wins, mirroring the
+    # re-derive logic in the /v2/devices/register route.
+    op.execute(
+        """
+        UPDATE device_registrations dr
+        SET linked_user_id = ud.user_id
+        FROM (
+            SELECT DISTINCT ON (client_device_id) client_device_id, user_id
+            FROM user_devices
+            WHERE deleted_at IS NULL
+            ORDER BY client_device_id, last_seen_at DESC NULLS LAST
+        ) ud
+        WHERE ud.client_device_id = dr.device_id
+        """
+    )
+
+
+def downgrade() -> None:
+    """Unlink the devices and drop the match-run table. Re-running `upgrade`
+    re-derives the links from `user_devices`, so this is reversible."""
+    op.drop_constraint(
+        'fk_device_registrations_linked_user',
+        'device_registrations',
+        type_='foreignkey',
+    )
+    op.drop_column('device_registrations', 'linked_user_id')
+    op.drop_table('bulletin_user_match_runs')

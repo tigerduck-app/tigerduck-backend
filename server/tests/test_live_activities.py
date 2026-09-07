@@ -1,21 +1,25 @@
-"""Live Activity update-token endpoint tests."""
+"""v3 Live Activity update-token registration tests.
+
+The v2 device-scoped endpoint is retired; /v3/live-activities/register is
+auth-scoped and upserts a DevicePushToken (kind=live_activity_update) plus
+an "end" PushJob at countdown_target.
+"""
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from httpx import AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine
 
+from server.auth.models import DevicePushToken, PushJob
+from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.models import LiveActivityTokenStatus, LiveActivityUpdateToken
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-
-DEVICE_ID = "device-live-activity"
+ACTIVITY_ID = "classPreparing::slot-live"
 
 
 def _iso(dt: datetime) -> str:
@@ -37,110 +41,123 @@ def _snapshot(countdown_target: datetime) -> dict:
     }
 
 
-async def _register_device(client: AsyncClient) -> None:
+def _register_body(target: datetime, token_hex: str, snapshot: dict | None = None) -> dict:
+    return {
+        "activity_id": ACTIVITY_ID,
+        "source_id": "slot-live",
+        "update_token_hex": token_hex,
+        "countdown_target": _iso(target),
+        "snapshot": snapshot if snapshot is not None else _snapshot(target),
+        "environment": "development",
+    }
+
+
+async def _login(client) -> dict:
+    client.app.state.moodle_verifier = StaticMoodleVerifier(
+        MoodleVerifyResult(ok=True, username="whatever")
+    )
     response = await client.post(
-        "/v2/devices/register",
+        "/v3/auth/login",
         json={
-            "user_id": "user-live",
-            "device_id": DEVICE_ID,
-            "pts_token_hex": "a" * 128,
-            "apns_env": "development",
+            "student_id": "B11015000",
+            "password": "pw",
+            "moodle_token": "tok",
+            "device_info": {"client_device_id": "iphone-live", "platform": "ios"},
         },
     )
     assert response.status_code == 200, response.text
+    return response.json()
 
 
-async def test_register_live_activity_token_requires_device(client: AsyncClient):
+def _bearer(login: dict) -> dict:
+    return {"Authorization": f"Bearer {login['access_token']}"}
+
+
+async def test_register_live_activity_requires_auth(client) -> None:
     target = datetime.now(timezone.utc) + timedelta(minutes=15)
     response = await client.post(
-        "/v2/live-activities/register",
-        json={
-            "device_id": "missing-device",
-            "activity_id": "classPreparing::slot-live",
-            "source_id": "slot-live",
-            "scenario": "classPreparing",
-            "update_token_hex": "b" * 128,
-            "countdown_target": _iso(target),
-            "snapshot": _snapshot(target),
-        },
+        "/v3/live-activities/register", json=_register_body(target, "b" * 128)
     )
-    assert response.status_code == 404
+    assert response.status_code == 401
 
 
-async def test_register_live_activity_token_rejects_mismatched_source_id(
-    client: AsyncClient,
-):
-    """`snapshot.sourceId` must equal the top-level `source_id`. A bug on the
-    client that sends mismatched values would otherwise silently store a row
-    whose snapshot points at the wrong assignment/slot, so the later
-    cancel_by_source / end-push flow would reference divergent ids."""
-    await _register_device(client)
-    target = datetime.now(timezone.utc) + timedelta(minutes=15)
-    snapshot = _snapshot(target)
-    snapshot["sourceId"] = "slot-other"  # deliberately mismatched
-    response = await client.post(
-        "/v2/live-activities/register",
-        json={
-            "device_id": DEVICE_ID,
-            "activity_id": "classPreparing::slot-live",
-            "source_id": "slot-live",
-            "scenario": "classPreparing",
-            "update_token_hex": "b" * 128,
-            "countdown_target": _iso(target),
-            "snapshot": snapshot,
-        },
-    )
-    assert response.status_code == 422, response.text
-
-
-async def test_register_live_activity_token_upserts(
-    client: AsyncClient,
-    prepared_engine: AsyncEngine,
-):
-    await _register_device(client)
+async def test_register_live_activity_token_upserts(client) -> None:
+    login = await _login(client)
     target = datetime.now(timezone.utc) + timedelta(minutes=15)
 
     first = await client.post(
-        "/v2/live-activities/register",
-        json={
-            "device_id": DEVICE_ID,
-            "activity_id": "classPreparing::slot-live",
-            "source_id": "slot-live",
-            "scenario": "classPreparing",
-            "update_token_hex": "b" * 128,
-            "countdown_target": _iso(target),
-            "snapshot": _snapshot(target),
-        },
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "b" * 128),
     )
     assert first.status_code == 200, first.text
+    assert first.json()["end_job_id"] is not None
 
     second_target = target + timedelta(minutes=5)
     second = await client.post(
-        "/v2/live-activities/register",
-        json={
-            "device_id": DEVICE_ID,
-            "activity_id": "classPreparing::slot-live",
-            "source_id": "slot-live",
-            "scenario": "classPreparing",
-            "update_token_hex": "c" * 128,
-            "countdown_target": _iso(second_target),
-            "snapshot": _snapshot(second_target),
-        },
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(second_target, "c" * 128),
     )
     assert second.status_code == 200, second.text
 
-    factory = build_session_factory(prepared_engine)
+    factory = build_session_factory(client.app.state.engine)
     async with factory() as s:
-        rows = (
+        tokens = (
             await s.execute(
-                select(LiveActivityUpdateToken).where(
-                    LiveActivityUpdateToken.device_id == DEVICE_ID
+                select(DevicePushToken).where(
+                    DevicePushToken.token_kind == "live_activity_update",
+                    DevicePushToken.scope_key == ACTIVITY_ID,
                 )
             )
         ).scalars().all()
-    assert len(rows) == 1
-    assert rows[0].update_token_hex == "c" * 128
-    assert rows[0].status == LiveActivityTokenStatus.active.value
-    # Re-registering a previously-ended activity (ended_at would be set by the
-    # dispatcher) must reset the terminal markers so the row is eligible again.
-    assert rows[0].ended_at is None
+        by_status = {t.status: t for t in tokens}
+        # Re-registering with a new token invalidates the previous one and
+        # leaves exactly one active row pointing at the new token.
+        assert set(by_status) == {"active", "invalidated"}
+        assert (
+            by_status["active"].token_hash
+            == hashlib.sha256(b"c" * 128).hexdigest()
+        )
+
+        # The "end" push job is deduped per activity: the second register
+        # moves fire_at instead of queueing a second job.
+        jobs = (
+            await s.execute(
+                select(PushJob).where(
+                    PushJob.dedupe_key == f"la_end:{ACTIVITY_ID}"
+                )
+            )
+        ).scalars().all()
+        assert len(jobs) == 1
+        assert jobs[0].fire_at == second_target
+        assert jobs[0].payload["kind"] == "live_activity_end"
+
+
+async def test_end_job_source_id_comes_from_top_level_field(client) -> None:
+    """The end-push payload must reference the top-level source_id even if
+    the client snapshot carries a divergent sourceId — the cancel_by_source
+    and end-push flows key off source_id, so divergence would strand the
+    activity (the invariant the old v2 endpoint enforced with a 422)."""
+    login = await _login(client)
+    target = datetime.now(timezone.utc) + timedelta(minutes=15)
+    snapshot = _snapshot(target)
+    snapshot["sourceId"] = "slot-other"  # deliberately mismatched
+
+    response = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "b" * 128, snapshot=snapshot),
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        job = (
+            await s.execute(
+                select(PushJob).where(
+                    PushJob.dedupe_key == f"la_end:{ACTIVITY_ID}"
+                )
+            )
+        ).scalar_one()
+        assert job.payload["source_id"] == "slot-live"

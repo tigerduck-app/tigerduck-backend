@@ -9,7 +9,7 @@ Version-controlled launchd plists for TigerDuck services that run NATIVE on the 
 ### Install (once)
 
 ```bash
-cd /Users/xinshoutw/selfhost/Docker/tigerduck-app
+cd /Users/xinshoutw/selfhost/Docker/tigerduck-backend   # the repo checkout on the host
 
 # Symlink so edits to the repo copy auto-apply on next launchctl kickstart.
 ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.llm.plist" \

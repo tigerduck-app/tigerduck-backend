@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from collections.abc import AsyncIterator
@@ -10,13 +11,14 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.config import Settings
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
+from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
 # interpolate. Enforce a strict whitelist instead to neutralise SQL injection
@@ -81,7 +83,16 @@ def test_settings() -> Settings:
         database_url=database_url,
         apns_env="development",
         scheduler_tick_seconds=99999,
+        sync_job_tick_seconds=99999,
+        push_pipeline_tick_seconds=99999,
+        assignment_reminder_scan_interval_seconds=99999,
+        course_reminder_scan_interval_seconds=99999,
+        bulletin_user_dispatch_interval_seconds=99999,
         api_shared_secret="",
+        auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
+        auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",
+        credential_keys={"v1": base64.b64encode(b"0" * 32).decode()},
+        credential_active_key_id="v1",
     )
 
 
@@ -121,4 +132,30 @@ async def client(
         # transport context enters so our shared DB survives per-test cycles.
         app.state.engine = prepared_engine
         app.state.session_factory = build_session_factory(prepared_engine)
+        # ASGITransport does not run the lifespan handler, so mirror its
+        # sync-policy seeding here for e2e tests that expect defaults.
+        async with app.state.session_factory() as seed_session:
+            await ensure_default_policies(seed_session)
+            await seed_session.commit()
+        # Expose the app so tests can override app.state collaborators
+        # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
+        ac.app = app
         yield ac
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def db_session(
+    prepared_engine: AsyncEngine,
+) -> AsyncIterator[AsyncSession]:
+    """Yield a per-test AsyncSession against a freshly reset schema.
+
+    Used by unit tests that exercise DB helpers without going through the
+    HTTP transport (e.g. custom-push targeting resolver).
+    """
+    async with prepared_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = build_session_factory(prepared_engine)
+    async with factory() as s:
+        yield s

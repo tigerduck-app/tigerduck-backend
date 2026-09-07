@@ -29,17 +29,22 @@ DEVICE_ID = "dev-dispatcher"
 
 
 async def _register_device(client: AsyncClient) -> None:
-    resp = await client.post(
-        "/v2/devices/register",
-        json={
-            "user_id": "user-dispatcher",
-            "device_id": DEVICE_ID,
-            "pts_token_hex": "aa" * 80,
-            "device_token_hex": "bb" * 32,
-            "apns_env": "development",
-        },
-    )
-    assert resp.status_code == 200, resp.text
+    """The v2 register endpoint is retired (410); insert the anonymous
+    device_registrations row the dispatcher fans out to directly."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        s.add(
+            DeviceRegistration(
+                user_id="user-dispatcher",
+                device_id=DEVICE_ID,
+                pts_token_hex="aa" * 80,
+                device_token_hex="bb" * 32,
+                bundle_id="org.ntust.app.TigerDuck",
+                attrs_type="TigerDuckActivityAttributes",
+                apns_env="development",
+            )
+        )
+        await s.commit()
 
 
 async def _seed_push(
@@ -391,3 +396,125 @@ async def test_future_live_activity_end_is_skipped(
     assert sender.requests == []
     status, _, _ = await _activity_status_of(factory, activity_id)
     assert status == LiveActivityTokenStatus.active.value
+
+
+# --- Phase 4d: v3 live-activity update tokens take over (v2 fallback) ---
+
+
+async def _link_device_with_v3_token(
+    factory: async_sessionmaker,
+    *,
+    scope_key: str,
+    token_value: str,
+    token_status: str = "active",
+) -> None:
+    """Mark the v2 device as linked to a v3 user owning a
+    live_activity_update push token with `scope_key`."""
+    from server.auth.models import DevicePushToken, User, UserDevice
+
+    async with factory() as s:
+        user = User(student_id="B11015888")
+        s.add(user)
+        await s.flush()
+        device = UserDevice(
+            user_id=user.id, client_device_id=DEVICE_ID, platform="ios"
+        )
+        s.add(device)
+        await s.flush()
+        s.add(
+            DevicePushToken(
+                device_id=device.id,
+                provider="apns",
+                token_kind="live_activity_update",
+                token_hash=f"hash-{token_value[:16]}",
+                token_value=token_value,
+                bundle_id="org.ntust.app.TigerDuck",
+                scope_key=scope_key,
+                status=token_status,
+            )
+        )
+        reg = await s.get(DeviceRegistration, DEVICE_ID)
+        reg.linked_user_id = user.id
+        await s.commit()
+
+
+async def test_linked_device_prefers_v3_update_token(
+    client: AsyncClient,
+    prepared_engine: AsyncEngine,
+    test_settings: Settings,
+):
+    await _register_device(client)
+    factory = build_session_factory(prepared_engine)
+    now = datetime.now(timezone.utc)
+    await _seed_live_activity_token(
+        factory,
+        activity_id="inClass::slot-v3",
+        source_id="slot-v3",
+        scenario="inClass",
+        countdown_target=now,
+    )
+    await _link_device_with_v3_token(
+        factory, scope_key="inClass:slot-v3", token_value="ee" * 80
+    )
+
+    sender = RecordingSender()
+    outcome = await dispatch_due_pushes(factory, sender, test_settings, now=now)
+
+    assert outcome.sent == 1
+    assert sender.requests[0].device_token == "ee" * 80  # v3 token wins
+
+
+async def test_linked_device_without_matching_scope_falls_back(
+    client: AsyncClient,
+    prepared_engine: AsyncEngine,
+    test_settings: Settings,
+):
+    await _register_device(client)
+    factory = build_session_factory(prepared_engine)
+    now = datetime.now(timezone.utc)
+    await _seed_live_activity_token(
+        factory,
+        activity_id="inClass::slot-other",
+        source_id="slot-other",
+        scenario="inClass",
+        countdown_target=now,
+    )
+    # v3 token exists but for a DIFFERENT activity scope.
+    await _link_device_with_v3_token(
+        factory, scope_key="inClass:some-other-slot", token_value="ee" * 80
+    )
+
+    sender = RecordingSender()
+    outcome = await dispatch_due_pushes(factory, sender, test_settings, now=now)
+
+    assert outcome.sent == 1
+    assert sender.requests[0].device_token == "cc" * 80  # v2 fallback
+
+
+async def test_invalidated_v3_update_token_ignored(
+    client: AsyncClient,
+    prepared_engine: AsyncEngine,
+    test_settings: Settings,
+):
+    await _register_device(client)
+    factory = build_session_factory(prepared_engine)
+    now = datetime.now(timezone.utc)
+    await _seed_live_activity_token(
+        factory,
+        activity_id="inClass::slot-dead",
+        source_id="slot-dead",
+        scenario="inClass",
+        countdown_target=now,
+    )
+    await _link_device_with_v3_token(
+        factory,
+        scope_key="inClass:slot-dead",
+        token_value="ee" * 80,
+        token_status="invalidated",
+    )
+
+    sender = RecordingSender()
+    outcome = await dispatch_due_pushes(factory, sender, test_settings, now=now)
+
+    assert outcome.sent == 1
+    assert sender.requests[0].device_token == "cc" * 80  # v2 fallback

@@ -96,6 +96,10 @@ async def match_device_ids(
         )
         .where(
             BulletinSubscription.enabled.is_(True),
+            # Phase 4c (review 1.8): devices linked to a logged-in v3 user
+            # are served by the user-level push_jobs flow — skip them here
+            # so the dual-track migration doesn't double-push bulletins.
+            DeviceRegistration.linked_user_id.is_(None),
             # Apple devices need an APNs standard token (`device_token_hex`);
             # Android devices need an FCM registration token, which lives in
             # `pts_token_hex`. Originally only the apple branch was checked,
