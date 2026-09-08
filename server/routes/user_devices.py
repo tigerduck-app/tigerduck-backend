@@ -12,7 +12,7 @@ import hashlib
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import delete as sa_delete, func, select, update
 
 from server.models import DevicePlatform, DeviceRegistration
@@ -36,11 +36,31 @@ from server.auth.schemas import (
     PushTokenIn,
 )
 from server.db import SessionDep
+# Shared so the anonymous endpoint honours the same `auth_trust_forwarded_for`
+# setting as login — two different notions of "the client's IP" behind the
+# same proxy would make one of the two limits trivially wrong.
+from server.routes.auth import _client_ip
 from pydantic import BaseModel, Field
 from typing import Literal
 
 router = APIRouter(prefix="/devices", tags=["devices-v3"])
 logger = structlog.get_logger(__name__)
+
+# Rate limits for the unauthenticated anonymous registration. Two keys,
+# because neither works alone here.
+#
+# Per device_id catches the case that actually matters — one client looping
+# on the endpoint. The app calls it once per launch, so ten a minute is
+# already far more than a healthy device produces.
+#
+# Per IP has to be much looser than it would be for a login: this is a
+# campus app, and a few hundred students behind one NAT egress is the normal
+# case, not an attack. It is a ceiling on a single source flooding the table,
+# not a per-user limit.
+_ANON_DEVICE_MAX_ATTEMPTS = 10
+_ANON_DEVICE_WINDOW_SECONDS = 60
+_ANON_IP_MAX_ATTEMPTS = 300
+_ANON_IP_WINDOW_SECONDS = 60
 
 
 class AnonymousDeviceRequest(BaseModel):
@@ -49,6 +69,12 @@ class AnonymousDeviceRequest(BaseModel):
     device_class: DeviceClass | None = None
     push_token: str | None = Field(default=None, max_length=512)
     bundle_id: str = Field(default="", max_length=128)
+    # The signed-out half of the push opt-out. `PATCH /devices/{id}/
+    # preferences` needs a session and writes `user_devices`, so a device
+    # with no account had no way to express the setting at all — and this
+    # row is the one `custom_push_targeting` filters on. None means "not
+    # reported", not "reset to the default".
+    server_push_enabled: bool | None = None
 
 
 class AnonymousDeviceResponse(BaseModel):
@@ -58,7 +84,7 @@ class AnonymousDeviceResponse(BaseModel):
 
 @router.post("/anonymous", response_model=AnonymousDeviceResponse)
 async def register_anonymous_device(
-    payload: AnonymousDeviceRequest, session: SessionDep
+    payload: AnonymousDeviceRequest, request: Request, session: SessionDep
 ) -> AnonymousDeviceResponse:
     """Register a device that has no account, so operators can reach it.
 
@@ -70,13 +96,32 @@ async def register_anonymous_device(
 
     Deliberately unauthenticated: there is no account to authenticate
     against. The only secret is `device_id`, a client-generated UUID, which
-    is the same trust model the retired /v2 registration used. To keep the
-    blast radius of a guessed id small this endpoint may only create a row or
-    refresh its token — it never rewrites `user_id`, never touches
-    `linked_user_id` (the signed-in path owns that, and clearing it would
-    double-push every bulletin), and never re-enables push for a device whose
-    owner opted out.
+    is the same trust model the retired /v2 registration used.
+
+    Scope is kept narrow: this endpoint may create a row, refresh its token,
+    and carry its owner's push preference. It never rewrites `user_id` and
+    never touches `linked_user_id` — the signed-in path owns that, and
+    clearing it would double-push every bulletin.
+
+    `server_push_enabled` is honoured in both directions. The app is the
+    only thing that knows the setting while signed out, so it has to be able
+    to both set the opt-out and walk it back; an opt-out-only field would
+    strand a user who changed their mind before ever signing in.
     """
+    # Two limiters rather than two keys on one, because the two ceilings are
+    # deliberately an order of magnitude apart — see the constants above.
+    device_limiter = request.app.state.anon_device_limiter
+    ip_limiter = request.app.state.anon_ip_limiter
+    device_key = payload.device_id
+    ip_key = _client_ip(request)
+    if not device_limiter.allow(device_key) or not ip_limiter.allow(ip_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too_many_registration_attempts",
+        )
+    device_limiter.record(device_key)
+    ip_limiter.record(ip_key)
+
     now = datetime.now(UTC)
     existing = (
         await session.execute(
@@ -104,6 +149,13 @@ async def register_anonymous_device(
                 bundle_id=payload.bundle_id,
                 attrs_type="",
                 apns_env="",
+                # Absent means the app had nothing to report, which for a
+                # brand-new row is the column default (opted in).
+                server_push_enabled=(
+                    True
+                    if payload.server_push_enabled is None
+                    else payload.server_push_enabled
+                ),
                 created_at=now,
             )
         )
@@ -111,6 +163,8 @@ async def register_anonymous_device(
         existing.platform = payload.platform
         if payload.device_class:
             existing.device_class = payload.device_class
+        if payload.server_push_enabled is not None:
+            existing.server_push_enabled = payload.server_push_enabled
         # An absent token means "nothing new to report", not "drop the one you
         # have" — the app calls this on every launch, and FCM only hands over a
         # token once it is ready.
@@ -129,6 +183,7 @@ async def register_anonymous_device(
         device_class=payload.device_class,
         created=existing is None,
         has_token=bool(payload.push_token),
+        server_push_enabled=payload.server_push_enabled,
     )
     return AnonymousDeviceResponse(device_id=payload.device_id, registered=True)
 

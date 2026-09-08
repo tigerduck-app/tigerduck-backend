@@ -254,6 +254,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_attempts=_CREDENTIALS_MAX_ATTEMPTS,
         window_seconds=_CREDENTIALS_WINDOW_SECONDS,
     )
+    from server.routes.user_devices import (
+        _ANON_DEVICE_MAX_ATTEMPTS,
+        _ANON_DEVICE_WINDOW_SECONDS,
+        _ANON_IP_MAX_ATTEMPTS,
+        _ANON_IP_WINDOW_SECONDS,
+    )
+    app.state.anon_device_limiter = SlidingWindowLimiter(
+        max_attempts=_ANON_DEVICE_MAX_ATTEMPTS,
+        window_seconds=_ANON_DEVICE_WINDOW_SECONDS,
+    )
+    app.state.anon_ip_limiter = SlidingWindowLimiter(
+        max_attempts=_ANON_IP_MAX_ATTEMPTS,
+        window_seconds=_ANON_IP_WINDOW_SECONDS,
+    )
     try:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
