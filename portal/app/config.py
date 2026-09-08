@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # --- Shared with backend (for the status page) ---
     env: str = "production"
     apns_env: str = ""
+    # Needed to call the backend's internal endpoints (`/push-tick`),
+    # which sit behind `require_shared_secret`. Same env var the backend
+    # reads, so the shared .env supplies both.
+    api_shared_secret: str = ""
     skip_llm_probe: bool = False
     llm_base_url: str = ""
     log_level: str = "INFO"
@@ -64,6 +68,7 @@ class Settings(BaseSettings):
         return cls(
             env=env_mode,
             apns_env=env.get("TIGERDUCK_APNS_ENV", ""),
+            api_shared_secret=env.get("TIGERDUCK_API_SHARED_SECRET", ""),
             skip_llm_probe=(
                 env.get("TIGERDUCK_SKIP_LLM_PROBE", "false").lower()
                 in {"true", "1", "yes"}

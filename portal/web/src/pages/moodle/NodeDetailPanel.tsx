@@ -756,12 +756,28 @@ export function NodeDetailPanel({
                 size="sm"
                 variant="outline"
                 onClick={async () => {
+                  // Every branch has to name a reason. The previous version
+                  // read only `resp.error`, so a FastAPI rejection — which
+                  // comes back as `detail` — surfaced as "unknown", and the
+                  // catch discarded the exception entirely. Both produced a
+                  // failure with nothing to act on.
                   try {
                     const res = await fetch("/api/moodle/push-tick", { method: "POST" });
-                    const resp = await res.json();
-                    if (!resp.ok) alert("Push tick failed: " + (resp.error ?? "unknown"));
-                  } catch {
-                    alert("Push tick request failed");
+                    const body = await res.text();
+                    let resp: { ok?: boolean; error?: string; detail?: string } = {};
+                    try {
+                      resp = JSON.parse(body);
+                    } catch {
+                      resp = { error: body.slice(0, 300) || `HTTP ${res.status}` };
+                    }
+                    if (!res.ok || resp.ok === false) {
+                      alert(
+                        "Push tick failed: " +
+                          (resp.error ?? resp.detail ?? `HTTP ${res.status}`)
+                      );
+                    }
+                  } catch (e) {
+                    alert("Push tick request failed: " + (e instanceof Error ? e.message : String(e)));
                   }
                 }}
               >
