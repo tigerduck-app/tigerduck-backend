@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select, text, update
+from server.academic_calendar.models import UserHolidayOverride
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
@@ -174,6 +175,12 @@ async def _read_full_snapshot(session, user_id):
     bulletin_states = await rows(
         select(UserBulletinState).where(UserBulletinState.user_id == user_id)
     )
+    # Holidays themselves are school-wide and arrive over the public
+    # calendar feed; only the user's "notify me anyway" exceptions are
+    # user-scoped, so only those belong in this snapshot.
+    holiday_overrides = await rows(
+        select(UserHolidayOverride).where(UserHolidayOverride.user_id == user_id)
+    )
 
     _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
     _course_pk_to_moodle = {c.id: c.moodle_id for c in courses}
@@ -199,6 +206,10 @@ async def _read_full_snapshot(session, user_id):
                 "deleted_at": _iso(t.deleted_at),
             }
             for t in tombstones
+        ],
+        "holiday_overrides": [
+            {"holiday_id": o.holiday_id, "notify": o.notify}
+            for o in holiday_overrides
         ],
         "courses": [serializers.course_to_dict(c) for c in courses],
         "course_overrides": [

@@ -21,6 +21,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.auth.models import PushJob, PushJobStatus
 from server.config import Settings
 from server.db import session_scope
@@ -228,6 +229,40 @@ async def scan_course_reminders(
                 bucket[course.user_id] = course.semester
         latest_semester = {**fallback_latest, **portal_latest}
 
+        # Days classes do not meet, and the per-user exceptions that put
+        # them back. Apple guards twice — the app also stays quiet — but the
+        # backend half is what stops a push being *sent*, which is the only
+        # half that works when the app is not running to suppress anything.
+        holiday_ranges = (
+            await session.execute(
+                select(
+                    AcademicHoliday.id,
+                    AcademicHoliday.start_date,
+                    AcademicHoliday.end_date,
+                )
+            )
+        ).all()
+        opted_in: dict[uuid.UUID, set[int]] = {}
+        for user_id, holiday_id in (
+            await session.execute(
+                select(
+                    UserHolidayOverride.user_id, UserHolidayOverride.holiday_id
+                ).where(UserHolidayOverride.notify.is_(True))
+            )
+        ).all():
+            opted_in.setdefault(user_id, set()).add(holiday_id)
+
+        def is_quiet(user_id: uuid.UUID, day) -> bool:
+            covering = [
+                hid for hid, start, end in holiday_ranges if start <= day <= end
+            ]
+            if not covering:
+                return False
+            # Opting in to any covering holiday un-suppresses the day: the
+            # user said "I have class", and a second overlapping holiday
+            # they never saw should not overrule that.
+            return not (opted_in.get(user_id, set()) & set(covering))
+
         eligible = [
             (course, override)
             for course, override in rows
@@ -298,7 +333,10 @@ async def scan_course_reminders(
                 else course.course_name
             )
             for occurrence in occurrences:
-                if (course.id, occurrence.astimezone(tz).date()) in skipped:
+                occurrence_day = occurrence.astimezone(tz).date()
+                if (course.id, occurrence_day) in skipped:
+                    continue
+                if is_quiet(course.user_id, occurrence_day):
                     continue
                 start_epoch = int(occurrence.timestamp())
                 for offset in offsets:

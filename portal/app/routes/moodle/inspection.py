@@ -311,7 +311,7 @@ async def sync_courses(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
         if not user:
-            return {"courses": [], "semesters": []}
+            return {"courses": [], "semesters": [], "holiday_overrides": []}
 
         uid = user["id"]
 
@@ -334,6 +334,21 @@ async def sync_courses(
             "deleted_by_device_id "
             "FROM user_course_tombstones WHERE user_id = $1 "
             "ORDER BY deleted_at DESC",
+            uid,
+        )
+
+        # Joined to the holiday so the operator reads a name and a date
+        # range rather than an opaque id. Rows only exist for users with
+        # cloud sync on — a sync-off device keeps the choice locally and
+        # never writes here, which is why this tab can legitimately be
+        # empty for a device that has the toggle set.
+        holiday_rows = await conn.fetch(
+            "SELECT o.holiday_id, o.notify, o.updated_at, "
+            "h.name_zh, h.name_en, h.start_date, h.end_date "
+            "FROM user_holiday_overrides o "
+            "JOIN academic_holidays h ON h.id = o.holiday_id "
+            "WHERE o.user_id = $1 "
+            "ORDER BY h.start_date DESC",
             uid,
         )
 
@@ -406,9 +421,23 @@ async def sync_courses(
         reverse=True,
     )
 
+    holiday_overrides = [
+        {
+            "holiday_id": h["holiday_id"],
+            "name_zh": h["name_zh"],
+            "name_en": h["name_en"],
+            "start_date": h["start_date"].isoformat(),
+            "end_date": h["end_date"].isoformat(),
+            "notify": h["notify"],
+            "updated_at": h["updated_at"].isoformat() if h["updated_at"] else None,
+        }
+        for h in holiday_rows
+    ]
+
     return {
         "semester": focus,
         "semesters": all_semesters,
+        "holiday_overrides": holiday_overrides,
         "palette_light": COURSE_PALETTE_LIGHT,
         "palette_dark": COURSE_PALETTE_DARK,
         "courses": courses,

@@ -128,6 +128,25 @@ export type SyncCoursesResponse = {
   courses: SyncCourse[];
   tombstones?: SyncTombstone[];
   assignments?: SyncAssignment[];
+  holiday_overrides?: SyncHolidayOverride[];
+};
+
+/**
+ * One user's "notify me anyway" exception for a school holiday.
+ *
+ * Only exists for users with cloud sync on — a sync-off device keeps the
+ * choice in its own preferences and never uploads it, so an empty list here
+ * does not mean the user has no exceptions set on their phone.
+ */
+export type SyncHolidayOverride = {
+  holiday_id: number;
+  name_zh: string;
+  name_en: string;
+  start_date: string;
+  /** Inclusive last day; a single-day holiday repeats start_date. */
+  end_date: string;
+  notify: boolean;
+  updated_at: string | null;
 };
 
 export type SyncDevice = {

@@ -463,6 +463,7 @@ export function NodeDetailPanel({
                     <TabsTrigger value="courses">Courses ({visibleCourses.length})</TabsTrigger>
                     <TabsTrigger value="custom-names">Custom Names ({visibleCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
                     <TabsTrigger value="assignments">Assignments ({visibleAssignments.length})</TabsTrigger>
+                    <TabsTrigger value="holiday-overrides">Holiday Overrides ({(coursesData.holiday_overrides ?? []).length})</TabsTrigger>
                   </TabsList>
                   <Select value={semesterFilter} onValueChange={setSemesterFilter}>
                     <SelectTrigger className="w-40 h-7 text-xs shrink-0">
@@ -562,6 +563,52 @@ export function NodeDetailPanel({
                       </div>
                     </div>
                   )}
+                </TabsContent>
+
+                <TabsContent value="holiday-overrides">
+                  {(() => {
+                    const overrides = coursesData.holiday_overrides ?? [];
+                    return overrides.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4">
+                        No holiday exceptions synced. A device with cloud sync
+                        off keeps this choice locally and never uploads it.
+                      </p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Holiday</TableHead>
+                              <TableHead className="text-xs">Dates</TableHead>
+                              <TableHead className="text-xs">Class reminders</TableHead>
+                              <TableHead className="text-xs">Updated</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {overrides.map((o) => (
+                              <TableRow key={o.holiday_id}>
+                                <TableCell className="text-xs">
+                                  <div>{o.name_zh}</div>
+                                  <div className="text-muted-foreground">{o.name_en}</div>
+                                </TableCell>
+                                <TableCell className="text-xs whitespace-nowrap">
+                                  {o.start_date === o.end_date
+                                    ? o.start_date
+                                    : `${o.start_date} \u2192 ${o.end_date}`}
+                                </TableCell>
+                                <TableCell className="text-xs">
+                                  {o.notify ? "On (user opted in)" : "Off (default)"}
+                                </TableCell>
+                                <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                                  {o.updated_at ?? "\u2014"}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    );
+                  })()}
                 </TabsContent>
 
                 <TabsContent value="custom-names">

@@ -2,6 +2,7 @@ import * as React from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import {
   Activity,
+  CalendarDays,
   GraduationCap,
   HardDrive,
   Menu,
@@ -34,6 +35,7 @@ const NAV: NavItem[] = [
   { to: "/devices", label: "Devices", icon: Monitor },
   { to: "/moodle", label: "Moodle", icon: GraduationCap },
   { to: "/inspect", label: "Data Inspection", icon: Search },
+  { to: "/semester-dates", label: "Semester dates", icon: CalendarDays },
 ];
 
 const NAV_BOTTOM: NavItem[] = [
