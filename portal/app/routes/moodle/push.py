@@ -3,9 +3,11 @@ trigger a client sync."""
 
 from __future__ import annotations
 import time
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from ...db import get_pool
+from ...status import BACKEND_INTERNAL_URL
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
@@ -38,8 +40,6 @@ async def force_push_tick(request: Request) -> JSONResponse:
     outside dev, where the dependency short-circuits on an empty secret.
     That is why this worked locally and not in a real deployment.
     """
-    import httpx
-    from ..status import BACKEND_INTERNAL_URL
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -86,9 +86,6 @@ async def force_sync_trigger(
     request: Request = None,
 ) -> JSONResponse:
     """Create a fresh sync_trigger push job and execute immediately."""
-    import httpx
-    from ..status import BACKEND_INTERNAL_URL
-
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
