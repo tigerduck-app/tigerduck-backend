@@ -27,19 +27,23 @@ from ..db import get_pool
 
 router = APIRouter(prefix="/api/custom-push")
 
+# Fallback for `user_devices` rows written before `device_class` existed.
+# Those rows only say which platform they are, and for Apple that is three
+# form factors under one value — so the mapping is class -> platform, and a
+# legacy row matches whenever any class sharing its platform is selected.
 _CLASS_TO_PLATFORM = {
     "iphone": "ios",
     "ipad": "ipados",
     "mac": "macos",
     "android": "android",
+    "android_tablet": "android",
 }
-_PLATFORM_TO_CLASS = {v: k for k, v in _CLASS_TO_PLATFORM.items()}
 
 
 class _TargetFilter(BaseModel):
-    target_classes: list[Literal["iphone", "ipad", "mac", "android"]] = Field(
-        min_length=1
-    )
+    target_classes: list[
+        Literal["iphone", "ipad", "mac", "android", "android_tablet"]
+    ] = Field(min_length=1)
     user_id: str | None = Field(default=None, max_length=64)
     device_id: str | None = Field(default=None, max_length=128)
     list_id: int | None = Field(default=None, ge=1)
@@ -55,17 +59,29 @@ class _SendRequest(_TargetFilter):
 def _targeting_where(filt: _TargetFilter) -> tuple[str, list]:
     """Build the shared WHERE clause + params for a target filter.
 
-    A device is targetable when it's live, push-enabled, on one of the
-    requested platforms, and has an active 'standard' delivery token.
+    A device is targetable when it's live, push-enabled, one of the
+    requested form factors, and has an active 'standard' delivery token.
+
+    Form factor comes from `device_class`, which is the only field that can
+    tell an Android tablet from an Android phone — `platform` reports
+    "android" for both. Rows registered before that column exists carry '',
+    and are matched on `platform` instead; this mirrors the same two-branch
+    rule `server.push.custom_push_targeting` applies to the signed-out
+    half of a send, so both halves resolve the same audience.
     """
-    platforms = [
-        _CLASS_TO_PLATFORM[c] for c in filt.target_classes if c in _CLASS_TO_PLATFORM
-    ]
-    params: list = [platforms]
+    classes = list(filt.target_classes)
+    platforms = sorted(
+        {_CLASS_TO_PLATFORM[c] for c in classes if c in _CLASS_TO_PLATFORM}
+    )
+    params: list = [classes, platforms]
     clauses = [
         "ud.deleted_at IS NULL",
         "ud.server_push_enabled = true",
-        "ud.platform = ANY($1::text[])",
+        (
+            "(ud.device_class = ANY($1::text[]) "
+            "OR (coalesce(ud.device_class, '') = '' "
+            "AND ud.platform = ANY($2::text[])))"
+        ),
         (
             "EXISTS (SELECT 1 FROM device_push_tokens t "
             "WHERE t.device_id = ud.id AND t.token_kind = 'standard' "
@@ -91,17 +107,32 @@ def _targeting_where(filt: _TargetFilter) -> tuple[str, list]:
 async def preview(filt: _TargetFilter, pool=Depends(get_pool)) -> JSONResponse:
     where, params = _targeting_where(filt)
     sql = (
-        f"SELECT ud.platform AS platform, count(*) AS n "
+        f"SELECT coalesce(ud.device_class, '') AS device_class, "
+        f"ud.platform AS platform, count(*) AS n "
         f"FROM user_devices ud JOIN users u ON u.id = ud.user_id "
-        f"WHERE {where} GROUP BY ud.platform"
+        f"WHERE {where} GROUP BY 1, 2"
     )
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
     matched = {c: 0 for c in filt.target_classes}
     for r in rows:
-        cls = _PLATFORM_TO_CLASS.get(r["platform"])
+        n = int(r["n"])
+        cls = r["device_class"]
         if cls in matched:
-            matched[cls] += int(r["n"])
+            matched[cls] += n
+            continue
+        # A row with no class is one of the classes sharing its platform,
+        # but which one is unknowable. Credit it only when the selection
+        # leaves no ambiguity; otherwise show it as its own line rather
+        # than inflating whichever class happens to sort first.
+        candidates = [
+            c for c in matched if _CLASS_TO_PLATFORM.get(c) == r["platform"]
+        ]
+        if len(candidates) == 1:
+            matched[candidates[0]] += n
+        elif candidates:
+            key = f"{r['platform']} (unspecified)"
+            matched[key] = matched.get(key, 0) + n
     return JSONResponse(content={"matched": matched})
 
 

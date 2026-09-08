@@ -26,6 +26,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.auth.schemas import (
+    DeviceClass,
     DeviceItem,
     DeviceListV3Response,
     DevicePreferencesV3Request,
@@ -45,7 +46,7 @@ logger = structlog.get_logger(__name__)
 class AnonymousDeviceRequest(BaseModel):
     device_id: str = Field(min_length=8, max_length=128)
     platform: Literal["apple", "android"]
-    device_class: Literal["iphone", "ipad", "mac", "android"] | None = None
+    device_class: DeviceClass | None = None
     push_token: str | None = Field(default=None, max_length=512)
     bundle_id: str = Field(default="", max_length=128)
 
@@ -156,6 +157,11 @@ async def register_device(
         )
         session.add(device)
     device.platform = payload.platform
+    # Absent means an older client that predates the field, so keep whatever
+    # a previous register stored rather than blanking the row back to
+    # "unknown form factor" and dropping it out of class-scoped sends.
+    if payload.device_class is not None:
+        device.device_class = payload.device_class
     if payload.app_version is not None:
         device.app_version = payload.app_version
     if payload.os_version is not None:

@@ -64,6 +64,7 @@ type FormState = {
   target_ipad: boolean;
   target_mac: boolean;
   target_android: boolean;
+  target_android_tablet: boolean;
   // Empty string means "no list filter". Stored as string to match the
   // Select primitive's value contract; converted to int before sending.
   list_id: string;
@@ -81,6 +82,7 @@ const EMPTY: FormState = {
   target_ipad: true,
   target_mac: true,
   target_android: true,
+  target_android_tablet: true,
   list_id: "",
   user_id: "",
   device_id: "",
@@ -93,6 +95,7 @@ function selectedClasses(f: FormState): CustomPushTargetClass[] {
   if (f.target_ipad) out.push("ipad");
   if (f.target_mac) out.push("mac");
   if (f.target_android) out.push("android");
+  if (f.target_android_tablet) out.push("android_tablet");
   return out;
 }
 
@@ -305,6 +308,15 @@ export function CustomPushPage() {
                     }
                   />
                   Android
+                </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox
+                    checked={form.target_android_tablet}
+                    onCheckedChange={(v) =>
+                      setForm({ ...form, target_android_tablet: v === true })
+                    }
+                  />
+                  Android tablet
                 </label>
               </div>
             </div>

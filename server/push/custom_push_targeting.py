@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models import DeviceListMember, DevicePlatform, DeviceRegistration
 
-TargetClass = Literal["iphone", "ipad", "mac", "android"]
+TargetClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,11 @@ def _legacy_platforms_for(classes: list[str]) -> set[str]:
     out: set[str] = set()
     if "iphone" in classes or "ipad" in classes or "mac" in classes:
         out.add("apple")
-    if "android" in classes:
+    # A legacy Android row cannot say whether it is a phone or a tablet, the
+    # same way a legacy Apple row cannot pick between three. Both Android
+    # classes therefore pull in the unclassified rows, and `count_by_class`
+    # buckets them separately when the choice is ambiguous.
+    if "android" in classes or "android_tablet" in classes:
         out.add("android")
     return out
 
@@ -144,6 +148,18 @@ async def count_by_class(
                 counts["apple (unspecified)"] = (
                     counts.get("apple (unspecified)", 0) + 1
                 )
-        elif device_class == "" and "android" in counts and platform == "android":
-            counts["android"] += 1
+        elif device_class == "" and platform == "android":
+            # Same rule as the Apple branch: attribute to the single Android
+            # class if only one is selected, otherwise bucket separately
+            # rather than quietly crediting phones for devices that might be
+            # tablets.
+            android_selected = [
+                c for c in ("android", "android_tablet") if c in counts
+            ]
+            if len(android_selected) == 1:
+                counts[android_selected[0]] += 1
+            elif android_selected:
+                counts["android (unspecified)"] = (
+                    counts.get("android (unspecified)", 0) + 1
+                )
     return {**counts, "total": sum(counts.values())}

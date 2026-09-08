@@ -49,9 +49,13 @@ class DeviceRegisterRequest(BaseModel):
                     f"device_class for platform=apple must be iphone|ipad|mac|'', got {self.device_class!r}"
                 )
         elif self.platform == "android":
-            if self.device_class and self.device_class != "android":
+            if self.device_class and self.device_class not in {
+                "android",
+                "android_tablet",
+            }:
                 raise ValueError(
-                    f"device_class for platform=android must be 'android' or '', got {self.device_class!r}"
+                    "device_class for platform=android must be "
+                    f"android|android_tablet|'', got {self.device_class!r}"
                 )
         return self
 

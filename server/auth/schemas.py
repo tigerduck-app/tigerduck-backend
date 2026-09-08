@@ -12,10 +12,23 @@ Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
 ]
 
+# The operator-facing form factors. Kept in step with
+# `server.push.custom_push_targeting.TargetClass` and the `device_class`
+# literal on the anonymous registration — all three describe the same set,
+# and a value that only one of them knows about is a device nobody can send
+# to.
+DeviceClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
+
 
 class DeviceInfo(BaseModel):
     client_device_id: str = Field(min_length=1, max_length=128)
     platform: Platform
+    # Form factor for operator targeting. `platform` already separates
+    # ios / ipados / macos, but Android reports one value for phones and
+    # tablets alike, so the distinction has to ride here. Optional: a client
+    # that does not send it leaves the column empty and targeting falls back
+    # to matching on `platform`, which is what every pre-column row does.
+    device_class: DeviceClass | None = None
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
 

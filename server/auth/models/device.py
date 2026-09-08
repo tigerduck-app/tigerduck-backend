@@ -46,6 +46,16 @@ class UserDevice(Base):
     )
     client_device_id: Mapped[str] = mapped_column(String(128))
     platform: Mapped[str] = mapped_column(String(16))
+    # Form factor, for operator targeting. `platform` already separates
+    # ios / ipados / macos, but every Android device — phone or tablet —
+    # reports platform "android", so without this column an operator could
+    # address an iPad and not an Android tablet. Mirrors
+    # `device_registrations.device_class`; empty means a client that
+    # registered before the column existed, and the targeting query falls
+    # back to `platform` for those.
+    device_class: Mapped[str] = mapped_column(
+        String(16), default="", server_default=""
+    )
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
