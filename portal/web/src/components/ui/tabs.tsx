@@ -11,7 +11,12 @@ export const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
+      // Wraps rather than overflowing: several of these lists carry five
+      // triggers with counts baked into the label ("Source Jobs (12)"),
+      // which is already wider than a phone. `min-h-9` rather than `h-9`
+      // so a second row has somewhere to go, and the vertical gap only
+      // shows up once there is one.
+      "inline-flex min-h-9 max-w-full flex-wrap items-center justify-center gap-y-1 rounded-lg bg-muted p-1 text-muted-foreground",
       className,
     )}
     {...props}

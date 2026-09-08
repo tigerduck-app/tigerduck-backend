@@ -397,7 +397,7 @@ export function SemesterDatesPage() {
                   readOnly={knownCodes.has(termDraft.code)}
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="term-start">First day of classes</Label>
                   <Input
@@ -457,7 +457,7 @@ export function SemesterDatesPage() {
           </DialogHeader>
           {holidayDraft && (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="holiday-zh">Name (Chinese)</Label>
                   <Input
@@ -487,7 +487,7 @@ export function SemesterDatesPage() {
                   />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="holiday-start">First day</Label>
                   <Input

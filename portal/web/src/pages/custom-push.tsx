@@ -323,12 +323,12 @@ export function CustomPushPage() {
 
             <div className="grid gap-1.5">
               <Label htmlFor="target-list">Target list (optional)</Label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Select
                   value={form.list_id}
                   onValueChange={(v) => setForm({ ...form, list_id: v })}
                 >
-                  <SelectTrigger id="target-list" className="w-72">
+                  <SelectTrigger id="target-list" className="w-72 max-w-full">
                     <SelectValue placeholder="No list filter — all matching devices" />
                   </SelectTrigger>
                   <SelectContent>

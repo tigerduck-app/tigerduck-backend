@@ -60,7 +60,7 @@ export function LogsPage() {
             setParams(next, { replace: true });
           }}
         >
-          <TabsList className="flex w-full justify-start overflow-x-auto">
+          <TabsList className="flex w-full justify-start">
             {tabs.map((t) => (
               <TabsTrigger key={t.id} value={t.id} className="shrink-0">
                 {t.label}

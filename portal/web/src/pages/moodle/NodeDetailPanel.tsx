@@ -458,7 +458,7 @@ export function NodeDetailPanel({
               </div>
             ) : (
               <Tabs defaultValue="courses">
-                <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <TabsList>
                     <TabsTrigger value="courses">Courses ({visibleCourses.length})</TabsTrigger>
                     <TabsTrigger value="custom-names">Custom Names ({visibleCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>

@@ -113,7 +113,7 @@ export function DeregisterPage() {
       {lastReport && (
         <Card>
           <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold">Deletion report</h3>
               <Button
                 variant="outline"

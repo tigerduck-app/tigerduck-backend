@@ -116,12 +116,12 @@ export function SelectionBar({
           {selected.size} selected
         </span>
         <div className="flex-1" />
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Label htmlFor="bulk-list" className="text-xs text-muted-foreground">
             Add to list
           </Label>
           <Select value={listId} onValueChange={setListId}>
-            <SelectTrigger id="bulk-list" className="w-56">
+            <SelectTrigger id="bulk-list" className="w-56 max-w-full">
               <SelectValue placeholder="Pick a list…" />
             </SelectTrigger>
             <SelectContent>
