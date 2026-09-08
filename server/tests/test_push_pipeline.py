@@ -509,3 +509,114 @@ async def test_zero_work_round_does_not_burn_final_attempt(
     await run_push_tick(worker)
     await db_session.refresh(job)
     assert job.status == "sent"
+
+
+# A Live Activity that is already running can only be updated or ended
+# through its own update token. A push-to-start token starts activities and
+# nothing else, so addressing one leaves the running activity untouched —
+# which is what kept the Dynamic Island up after a class ended.
+
+
+async def _add_activity_token(session, device, *, scope_key, token_value):
+    token = DevicePushToken(
+        device_id=device.id,
+        provider="apns",
+        token_kind="live_activity_update",
+        token_hash=f"hash-{token_value}",
+        token_value=token_value,
+        bundle_id="org.ntust.app.TigerDuck",
+        scope_key=scope_key,
+    )
+    session.add(token)
+    await session.flush()
+    return token
+
+
+def _activity_job(user, device, *, activity_id="inClass:c1"):
+    return _job(
+        user,
+        device_id=device.id,
+        channel="schedule",
+        scenario="activityEnd",
+        dedupe_key=f"la_end:{activity_id}",
+        payload={
+            "kind": "live_activity_end",
+            "activity_id": activity_id,
+            "source_id": "c1",
+            "scenario": "inClass",
+            "title": "Math",
+        },
+    )
+
+
+async def test_activity_job_uses_the_activity_update_token(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="push_to_start",
+            token_hash="hash-pts",
+            token_value="pts-tok",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    await _add_activity_token(
+        db_session, device, scope_key="inClass:c1", token_value="la-tok"
+    )
+    db_session.add(_activity_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["la-tok"]
+
+
+async def test_activity_job_does_not_end_a_sibling_activity(
+    db_session, prepared_engine, test_settings
+):
+    """Two activities on one device hold two update tokens. Only the one the
+    job names may be ended."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    await _add_activity_token(
+        db_session, device, scope_key="inClass:c1", token_value="la-c1"
+    )
+    await _add_activity_token(
+        db_session, device, scope_key="inClass:c2", token_value="la-c2"
+    )
+    db_session.add(_activity_job(user, device, activity_id="inClass:c1"))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["la-c1"]
+
+
+async def test_activity_job_without_activity_id_sends_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """Better a job that fails loudly than one that dismisses the wrong
+    activity."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    await _add_activity_token(
+        db_session, device, scope_key="inClass:c1", token_value="la-tok"
+    )
+    job = _activity_job(user, device)
+    job.payload = {"kind": "live_activity_end", "scenario": "inClass"}
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert apple.requests == []
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    assert job.last_error == "no_active_tokens"

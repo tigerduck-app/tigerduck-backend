@@ -68,17 +68,29 @@ def build_apns_for_job(
             event = "end"
         else:
             event = "update"
-        scenario = payload.get("scenario", "")
-        snapshot = {k: v for k, v in payload.items() if k not in ("kind", "scenario", "source_id")}
+        # The job payload is the client's snapshot flattened together with
+        # the routing keys `/live-activities/register` added alongside it.
+        # Strip only those routing keys — every remaining entry is a
+        # LiveActivitySnapshot field and has to survive the trip back.
+        # `scenario` in particular: it is non-optional on the client, so
+        # hoisting it out of the snapshot makes the state undecodable.
+        snapshot = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("kind", "activity_id", "source_id")
+        }
         normalized_snapshot = _normalize_snapshot_for_apns(snapshot)
         message: dict[str, Any] = {
             "aps": {
                 "timestamp": timestamp,
                 "event": event,
-                "content-state": {
-                    "scenario": scenario,
-                    **normalized_snapshot,
-                },
+                # `TigerDuckActivityAttributes.ContentState` is a single
+                # `snapshot` property, so the state nests under that key.
+                # A flat object fails to decode, and ActivityKit discards
+                # a push it cannot decode — for an "end" that means the
+                # activity is never dismissed and the Dynamic Island sits
+                # there until iOS's own stale cleanup.
+                "content-state": {"snapshot": normalized_snapshot},
             },
         }
         if event == "end":

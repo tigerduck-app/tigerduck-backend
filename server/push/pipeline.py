@@ -183,8 +183,9 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
 
 async def _materialize(session: AsyncSession, job: PushJob) -> None:
     """Create one delivery row per active token (channel-aware: standard tokens
-    for regular pushes, push_to_start tokens for schedule). Idempotent —
-    a stale-recovered job re-materializes onto the same unique index.
+    for regular pushes, the activity's own update token for schedule).
+    Idempotent — a stale-recovered job re-materializes onto the same unique
+    index.
 
     Skips macOS devices (foreground-only, no background push). Non-macOS
     devices always receive the push — collapse keys deduplicate on the
@@ -192,9 +193,13 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     """
 
     now = datetime.now(UTC)
-    target_token_kind = (
-        "push_to_start" if job.channel == "schedule" else "standard"
-    )
+    # A schedule job addresses one Live Activity that is already running, so
+    # it needs that activity's update token. A push-to-start token can only
+    # start an activity — APNs accepts an "update"/"end" sent to one and the
+    # running activity is left untouched, which is what stopped the Dynamic
+    # Island clearing at the end of a class.
+    is_activity_job = job.channel == "schedule"
+    target_token_kind = "live_activity_update" if is_activity_job else "standard"
     token_query = (
         select(DevicePushToken, UserDevice)
         .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
@@ -209,6 +214,19 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
+
+    if is_activity_job:
+        # `scope_key` is the activity id the register endpoint filed the
+        # token under. Narrowing by it is load-bearing: a device running
+        # two activities holds two update tokens, and an unscoped query
+        # would end both from the one job. No activity id means we cannot
+        # tell them apart, so send nothing and let the job fail loudly
+        # rather than dismiss the wrong activity.
+        activity_id = (job.payload or {}).get("activity_id")
+        if not activity_id:
+            logger.warning("push.activity_job_without_activity_id", job_id=job.id)
+            return
+        token_query = token_query.where(DevicePushToken.scope_key == activity_id)
 
     is_sync_trigger = job.scenario == "sync_trigger"
     source_device_id: str | None = None
