@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
 
     scheduler.start()
-    logger.info("scheduler.started", tick_seconds=settings.scheduler_tick_seconds)
+    logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
 
     try:
         yield

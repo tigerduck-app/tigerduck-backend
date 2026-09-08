@@ -12,7 +12,7 @@ from server.push.apns_client import (
     RecordingSender,
     build_sender,
 )
-from server.push.payload import SCENARIO_CLASS_PREPARING, build_apns_request
+from server.push.job_payloads import build_apns_for_job
 
 
 def _no_apns_settings() -> Settings:
@@ -49,18 +49,20 @@ def test_aioapns_sender_rejects_partial_config(tmp_path):
 @pytest.mark.asyncio
 async def test_recording_sender_captures_requests():
     sender = RecordingSender()
-    request = build_apns_request(
-        device_token="deadbeef" * 8,
-        bundle_id="org.ntust.app.TigerDuck",
-        scenario=SCENARIO_CLASS_PREPARING,
-        source_id="slot-777",
-        fire_at=datetime(2026, 4, 22, 3, 0, tzinfo=timezone.utc),
-        snapshot={
+    request = build_apns_for_job(
+        payload={
+            "kind": "live_activity_end",
+            "activity_id": "classPreparing:slot-777",
+            "source_id": "slot-777",
+            "scenario": "classPreparing",
             "title": "Algorithms",
             "subtitle": "10:10-12:00",
             "locationText": "T2-401",
             "sourceId": "slot-777",
         },
+        channel="schedule",
+        token_value="deadbeef" * 8,
+        bundle_id="org.ntust.app.TigerDuck",
         now=datetime(2026, 4, 22, 2, 45, tzinfo=timezone.utc),
     )
     result = await sender.send(request)

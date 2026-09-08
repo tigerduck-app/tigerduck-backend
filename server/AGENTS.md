@@ -2,55 +2,74 @@
 
 ## OVERVIEW
 `server/` is the TigerDuck push + bulletin backend. Runs on the Mac mini
-behind nginx-proxy-manager + Cloudflare, serves the iOS app at
-`https://api.tigerduck.app/v2/`. `/v1/*` is mounted as a deprecated alias
-for older iOS builds (see `MIGRATE.md` § API version compatibility).
+behind nginx-proxy-manager + Cloudflare, serves the apps at
+`https://api.tigerduck.app/v3/`. **`/v1/*` and `/v2/*` are retired** — a
+middleware in `main.py` answers both with 410 Gone, so an out-of-date
+client gets an unambiguous "update the app" signal rather than a 404.
 
 What ships today:
-- Device registration (APNs + FCM tokens, per-device subscription rules)
-- Schedule sync (client-authoritative list of next-48h events; drives
-  Live Activity Push-to-Start)
-- APNs payload builder + sender (Push-to-Start, update, end)
+- User identity + auth (`routes/auth.py`, JWT). Device identity rides in
+  the token rather than in the request body.
+- Device registration under `/v3/devices` (`routes/user_devices.py`)
+- Sync (courses, assignments, overrides, changelog) plus the server-side
+  sync job executor
+- Push delivery through `push_jobs` → `push_deliveries` (`push/pipeline.py`)
+- Live Activity update / end pushes, built in `push/job_payloads.py`
 - FCM fan-out (Android push)
 - Bulletin pipeline (scrape → dedup → LLM classify → match → dispatch)
 - APScheduler-in-lifespan (single worker — see `docs/scheduler.md`)
-- Live Activity update-token push
 
 ## STRUCTURE
 ```text
 server/
 ├── __init__.py
 ├── _ssl_compat.py             # OpenSSL 3 leniency for NTUST's broken TLS chain
-├── main.py                    # FastAPI app + lifespan (LLM probe, engine, scheduler)
+├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
 ├── db.py                      # Base, async engine/session, SessionDep
-├── models.py                  # DeviceRegistration, ScheduledPush, etc.
-├── schemas.py                 # Pydantic request/response (cross-route)
+├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token)
+├── system_settings.py         # operator-tunable settings read at runtime
 ├── logging_setup.py           # structlog console/JSON
+├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
+├── sync/                      # v3 sync models + changelog retention
+├── syncjobs/                  # server-side academic sync executor
 ├── routes/
-│   ├── devices.py             # /v2/devices/{register,unregister,…}
-│   ├── schedule.py            # /v2/schedule/sync, …
-│   ├── bulletins.py           # /v2/bulletins/{list,detail,taxonomy}
-│   ├── live_activities.py     # /v2/live-activities/start-tokens
-│   └── debug.py               # debug-only routes
+│   ├── auth.py                # /v3/auth/*
+│   ├── user_devices.py        # /v3/devices/*
+│   ├── sync/                  # /v3/sync/*
+│   ├── sync_jobs.py           # /v3/sync-jobs/* (+ admin router)
+│   ├── academics.py           # /v3/courses, /v3/assignments
+│   ├── overrides.py           # /v3/sync/overrides
+│   ├── holiday_overrides.py   # /v3/sync/holiday-overrides
+│   ├── academic_calendar.py   # /v3/calendar/*
+│   ├── bulletins_feed.py      # /v3/bulletins/*
+│   ├── bulletins_v3.py        # subscriptions + read-state
+│   ├── schedule_v3.py         # /v3/schedule/*
+│   ├── live_activities_v3.py  # /v3/live-activities/register
+│   └── settings_docs.py       # operator-facing settings docs
 ├── push/
-│   ├── payload.py             # build_apns_request, build_pts_payload
+│   ├── pipeline.py            # push_jobs -> push_deliveries worker (THE send path)
+│   ├── job_payloads.py        # build_apns_for_job / build_fcm_for_job
+│   ├── payload.py             # alert + custom-push builders, ApnsRequest/FcmRequest
 │   ├── apns_client.py         # AioApnsSender + RecordingSender (factory)
 │   ├── fcm_client.py          # FCM v1 sender + RecordingFcmSender
-│   └── router.py              # platform routing for outbound pushes
+│   ├── router.py              # platform routing for outbound pushes
+│   ├── reminders.py           # assignment reminder scan
+│   ├── course_reminders.py    # course reminder scan
+│   ├── custom_push_*.py       # operator-authored pushes: targeting + dispatch
+│   └── retention.py           # prune terminal push_jobs
 ├── bulletins/
 │   ├── scraper.py             # NTUST HTML → metadata
 │   ├── dedup.py               # content_hash gating
 │   ├── detail.py / models.py / schemas.py / taxonomy.py
 │   ├── matcher.py             # subscription-rule evaluation
-│   ├── dispatcher.py          # outbound push fan-out
+│   ├── dispatcher.py          # outbound push fan-out (anonymous devices)
+│   ├── user_dispatch.py       # fan-out for logged-in users
 │   ├── jobs.py                # APScheduler tick handlers
 │   └── llm/                   # OpenAI-compatible client + prompts
 ├── scheduler/
-│   ├── runtime.py             # APScheduler bootstrap (in FastAPI lifespan)
-│   ├── dispatcher.py          # Live Activity / scheduled-push tick
-│   └── retention.py           # cleanup tick (bulletins, dead tokens)
+│   └── runtime.py             # APScheduler bootstrap (in FastAPI lifespan)
 ├── migrations/                # Alembic, async template
 ├── secrets/                   # .p8 / fcm_service_account.json (gitignored)
 └── tests/                     # pytest-asyncio integration + unit tests
@@ -125,40 +144,43 @@ into the backend container via `docker-compose.yml`.
 ## CONVENTIONS
 - All DB timestamps stored as `timestamp with time zone` (UTC in, UTC out)
 - Session management: `SessionDep` in routes auto-commits/rolls-back
-- `push_id = f"{device_id}:{source_id}:{scenario}"` — deterministic so client
-  UPSERTs are idempotent
-- `/v2/schedule/sync` = full replacement per device (pending pushes not
-  in the payload get cancelled; sent/failed history preserved)
-- APNs topic for PTS: `{bundle_id}.push-type.liveactivity` (payload
-  builder handles this — do not hardcode elsewhere)
+- `dedupe_key` on a `push_job` is what makes client retries idempotent —
+  the partial unique index only covers active statuses, so an ON CONFLICT
+  must repeat that predicate or Postgres cannot match the index.
+- A Live Activity job addresses one running activity, so it is delivered
+  to that activity's own `live_activity_update` token (scoped by
+  `scope_key` = activity id), never to a `push_to_start` token — a PTS
+  token can only start an activity, not update or end one.
+- APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
+  (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
   Never spin up a second replica — see `docs/scheduler.md`.
 
 ## ANTI-PATTERNS
-- ❌ Do not handle Moodle/NTUST credentials outside `server/auth/`.
+- Do not handle Moodle/NTUST credentials outside `server/auth/`.
   v3 keeps the Moodle token (never the NTUST password) encrypted at
   rest via `CredentialCipher` so the server-side sync job can fetch on
   the user's behalf; it is decrypted only in `server/syncjobs/credentials.py`,
   never logged, and dropped with the account. Anything else that needs a
   credential goes through that path.
-- ❌ Do not send APNs pushes from inside request handlers. Scheduling
-  goes through `scheduled_pushes` and is dispatched by the APScheduler
-  tick.
-- ❌ Do not commit `.env`, `server/secrets/*.p8`, or anything under
+- Do not send APNs pushes from inside request handlers. Scheduling
+  goes through a `push_jobs` row and is delivered by the push pipeline
+  (`server/push/pipeline.py`) on its APScheduler tick.
+- Do not commit `.env`, `server/secrets/*.p8`, or anything under
   `server/migrations/versions/` without reviewing first (migrations are
   fine to commit; the warning is to avoid accidentally committing test
   SQL dumps).
-- ❌ Do not use the standard `apns-topic: {bundle_id}` for Live
+- Do not use the standard `apns-topic: {bundle_id}` for Live
   Activities; iOS will silently drop the push.
-- ❌ Do not commit `docker-compose.override.yml` — it's the gitignored
+- Do not commit `docker-compose.override.yml` — it's the gitignored
   per-machine tweak file. The canonical dev override is the committed
   `docker-compose.dev.yml`.
-- ❌ Do not add app-level auth (basic-auth, sessions, JWT…) to the
+- Do not add app-level auth (basic-auth, sessions, JWT…) to the
   portal. The portal is stateless and trusts whatever is in front of
   it (Cloudflare Zero Trust in prod, nothing in dev). Add an
   auth-proxy if a gate becomes necessary, rather than re-introducing
   an admin list / session store inside the portal.
-- ❌ Do not let the portal drive backend lifecycle (start/stop/restart).
+- Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow
   shows the user a "restart manually" banner instead.

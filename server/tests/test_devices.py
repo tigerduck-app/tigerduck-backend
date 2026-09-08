@@ -3,21 +3,18 @@
 The anonymous /v2/devices HTTP endpoints were retired (middleware answers
 410 Gone); the user-scoped replacement lives at /v3/devices and is covered
 end-to-end in test_user_devices_v3.py. This file keeps what is still live:
-the /v3 device-preferences PATCH contract, the DeviceRegisterRequest
-schema validation, and the `device_registrations` model columns the push
-pipeline still reads.
+the /v3 device-preferences PATCH contract and the `device_registrations`
+model columns the push pipeline still reads.
 """
 
 from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
-from pydantic import ValidationError
 from sqlalchemy import select
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.models import DeviceRegistration
-from server.schemas import DeviceRegisterRequest
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -42,21 +39,6 @@ async def _login_headers(client: AsyncClient, device_id: str) -> dict:
     )
     assert response.status_code == 200, response.text
     return {"Authorization": f"Bearer {response.json()['access_token']}"}
-
-
-async def test_register_schema_rejects_invalid_apns_env():
-    # The v2 HTTP endpoint is gone, but DeviceRegisterRequest still lives in
-    # server/schemas.py; it must keep rejecting anything but the two real
-    # APNs environments.
-    with pytest.raises(ValidationError):
-        DeviceRegisterRequest(
-            user_id="user-abc",
-            device_id="device-xyz",
-            pts_token_hex="a1b2c3" * 10,
-            bundle_id="org.ntust.app.TigerDuck",
-            attrs_type="TigerDuckActivityAttributes",
-            apns_env="staging",
-        )
 
 
 async def test_device_registration_persists_class_and_opt_in(db_session):

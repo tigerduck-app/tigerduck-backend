@@ -373,8 +373,12 @@ async def _send_apple_safely(router: PushRouter, request: ApnsRequest) -> SendRe
 
 
 def _classify(result: SendResult, *, platform: str) -> str:
-    """Shared classifier with scheduler/dispatcher but local copy so changes
-    to one push path don't accidentally mutate the other."""
+    """Map an APNs/FCM result onto 'sent' | 'bad_token' | 'transient'.
+
+    Was a deliberate copy of the one in `scheduler/dispatcher`, so a change
+    to one push path couldn't mutate the other. That module went with the
+    v2 sunset; this is now the bulletin path's own.
+    """
     if result.success:
         return "sent"
     status = str(result.status).lower()

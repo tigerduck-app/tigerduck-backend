@@ -18,8 +18,6 @@ from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
-from server.scheduler.dispatcher import dispatch_due_pushes
-from server.scheduler.retention import prune_terminal_activity_tokens
 from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.retention import prune_terminal_push_jobs
@@ -50,12 +48,10 @@ def build_scheduler(
 ) -> AsyncIOScheduler:
     """Wire APScheduler with the TigerDuck jobs:
 
-    * `dispatcher_tick` — existing PTS dispatcher (Live Activity).
     * `bulletin_scrape` — fetch NTUST bulletin list every 10 min.
     * `bulletin_process` — drain pending bulletins through the LLM every 60s.
     * `bulletin_dispatch` — fan out alert pushes every 60s.
     * `bulletin_retention` — prune aged-out soft-deleted bulletins daily.
-    * `live_activity_token_retention` — prune terminal update-token rows daily.
     * `sync_changelog_retention` — purge aged changelog entries daily.
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
@@ -68,10 +64,6 @@ def build_scheduler(
     """
     scheduler = AsyncIOScheduler(timezone="UTC")
     llm_provider = llm if llm is not None else build_llm_provider(settings)
-
-    async def pts_tick() -> None:
-        # Live Activity / scheduled iOS pushes only need APNs.
-        await dispatch_due_pushes(session_factory, router.apple, settings)
 
     async def bulletin_scrape() -> None:
         await bulletin_jobs.scrape_job(session_factory, settings)
@@ -88,23 +80,12 @@ def build_scheduler(
     async def bulletin_retention() -> None:
         await bulletin_jobs.retention_job(session_factory, settings)
 
-    async def live_activity_token_retention() -> None:
-        await prune_terminal_activity_tokens(session_factory, settings)
-
     async def sync_changelog_retention() -> None:
         await purge_expired_changelog(session_factory, settings)
 
     async def push_job_retention() -> None:
         await prune_terminal_push_jobs(session_factory, settings)
 
-    scheduler.add_job(
-        pts_tick,
-        trigger=IntervalTrigger(seconds=settings.scheduler_tick_seconds),
-        id="dispatcher_tick",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
     scheduler.add_job(
         bulletin_scrape,
         trigger=IntervalTrigger(seconds=settings.bulletin_scrape_interval_seconds),
@@ -141,16 +122,6 @@ def build_scheduler(
         bulletin_retention,
         trigger=IntervalTrigger(hours=settings.bulletin_retention_interval_hours),
         id="bulletin_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        live_activity_token_retention,
-        trigger=IntervalTrigger(
-            hours=settings.live_activity_token_retention_interval_hours
-        ),
-        id="live_activity_token_retention",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

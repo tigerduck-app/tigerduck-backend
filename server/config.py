@@ -104,20 +104,6 @@ class Settings(BaseSettings):
     # indefinitely and APScheduler skips every following tick.
     fcm_send_timeout_seconds: float = 15.0
 
-    # --- Scheduler ---
-    # how often dispatcher polls DB for due pushes
-    scheduler_tick_seconds: int = 30
-    # fire_at within [now, now + window_seconds] becomes eligible each tick
-    scheduler_window_seconds: int = 60
-
-    # --- Live Activity token retention ---
-    # Prune update-token rows that reached a terminal state (ended / failed /
-    # cancelled) and have not been touched since `live_activity_token_retention_days`.
-    # Active rows are never pruned; a device that stops syncing keeps its
-    # pending rows until the device itself is unregistered and the cascade
-    # delete fires.
-    live_activity_token_retention_days: int = 30
-    live_activity_token_retention_interval_hours: int = 24
 
     # --- Sync change log retention ---
     # Entries older than this are purged; clients further behind than the
