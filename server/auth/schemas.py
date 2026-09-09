@@ -20,6 +20,28 @@ Platform = Literal[
 DeviceClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
 
 
+# Which form factors a platform can honestly report. Custom-push targeting
+# matches on `device_class` alone once one is stored, so a mismatched pair
+# would put a device in the wrong audience and drop it from the right one.
+_APPLE_CLASSES = frozenset({"iphone", "ipad", "mac"})
+_ANDROID_CLASSES = frozenset({"android", "android_tablet"})
+_CLASSES_FOR_PLATFORM: dict[str, frozenset[str]] = {
+    "ios": _APPLE_CLASSES,
+    "ipados": _APPLE_CLASSES,
+    "macos": _APPLE_CLASSES,
+    "apple": _APPLE_CLASSES,
+    "android": _ANDROID_CLASSES,
+}
+
+
+def check_device_class(platform: str, device_class: str | None) -> None:
+    """Raise ValueError unless `device_class` is one `platform` can report."""
+    if device_class is None:
+        return
+    if device_class not in _CLASSES_FOR_PLATFORM.get(platform, frozenset()):
+        raise ValueError(f"device_class {device_class!r} does not fit platform {platform!r}")
+
+
 class DeviceInfo(BaseModel):
     client_device_id: str = Field(min_length=1, max_length=128)
     platform: Platform
@@ -31,6 +53,11 @@ class DeviceInfo(BaseModel):
     device_class: DeviceClass | None = None
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def device_class_fits_platform(self) -> "DeviceInfo":
+        check_device_class(self.platform, self.device_class)
+        return self
 
 
 class LoginRequest(BaseModel):

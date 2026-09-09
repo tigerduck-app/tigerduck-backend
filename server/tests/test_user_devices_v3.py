@@ -514,3 +514,33 @@ async def test_fcm_tokens_are_standard_only(client) -> None:
         headers=headers,
     )
     assert response.status_code == 422
+
+
+async def test_device_class_must_fit_the_platform(client) -> None:
+    """Targeting matches on device_class alone once one is stored; an
+    Android phone claiming to be an iPhone would land in the iPhone audience
+    and drop out of the Android one."""
+    client.app.state.moodle_verifier = StaticMoodleVerifier(
+        MoodleVerifyResult(ok=True, username="whatever")
+    )
+    body = login_body(device="android-liar")
+    body["device_info"]["platform"] = "android"
+    body["device_info"]["device_class"] = "iphone"
+    assert (await client.post("/v3/auth/login", json=body)).status_code == 422
+
+    body["device_info"]["device_class"] = "android_tablet"
+    assert (await client.post("/v3/auth/login", json=body)).status_code == 200
+
+    headers = bearer(await do_login(client, device="ipad-honest"))
+    response = await client.post(
+        "/v3/devices/register",
+        json={"client_device_id": "ipad-honest", "platform": "ipados", "device_class": "ipad"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    response = await client.post(
+        "/v3/devices/register",
+        json={"client_device_id": "ipad-honest", "platform": "ipados", "device_class": "android"},
+        headers=headers,
+    )
+    assert response.status_code == 422

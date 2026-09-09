@@ -111,23 +111,30 @@ async def test_a_second_reset_keeps_binding_the_other_device(client) -> None:
     assert await _server_course_nos(client, iphone) == sorted(KEPT)
 
 
-async def test_a_reset_lifts_single_deletes_but_binds_by_reset(client) -> None:
-    """Deleting every course by hand and then resetting must let the portal
-    roster come back on the resetting device (the single-delete tombstones
-    bound it too), while a reset tombstone another device left behind is
-    re-authored rather than dropped."""
+async def test_a_reset_converts_hand_deletes_into_its_own_tombstones(client) -> None:
+    """Deleting every course by hand and then resetting. The single-delete
+    tombstones bound the resetting device too, so the portal roster could
+    not come back through its refetch; dropping them instead let a stale
+    device push the whole old roster back. They become reset tombstones of
+    the resetting device: it may refill the term, nobody else may."""
     iphone = await _login(client, "iphone-mixed", "ios")
+    android = await _login(client, "android-mixed", "android")
     assert (await _upload(client, iphone, KEPT)).status_code == 200
     for no in KEPT:
         assert (
             await client.delete(f"/v3/sync/courses/client:{SEMESTER}:{no}", headers=iphone)
         ).status_code == 200
-    assert (
-        await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
-    ).status_code == 200
-    # Nothing binds the author any more: the hand deletes were lifted and
-    # there were no rows left to tombstone by reset.
-    assert await _tombstones(client, iphone) == {}
+    reset = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
+    assert reset.json()["deleted"] == 0
+
+    on_phone = await _tombstones(client, iphone)
+    assert set(on_phone) == set(KEPT)
+    assert all(t["deleted_by_reset"] and t["deleted_by_this_device"] for t in on_phone.values())
+
+    stale = await _upload(client, android, KEPT)
+    assert stale.json()["skipped_tombstoned"] == len(KEPT)
+    assert await _server_course_nos(client, android) == []
+
     assert (await _upload(client, iphone, KEPT)).status_code == 200
     assert await _server_course_nos(client, iphone) == sorted(KEPT)
 
@@ -188,15 +195,17 @@ async def test_snapshot_says_who_wrote_each_tombstone(client) -> None:
     assert on_phone[KEPT[0]]["deleted_by_this_device"] is True
     assert on_android[KEPT[0]]["deleted_by_this_device"] is False
 
-    # A reset from the phone binds the tablet, not the phone. (It also
-    # replaces the term's earlier tombstones: the reset is the deletion of
-    # record for everything the term held.)
+    # A reset from the phone binds the tablet, not the phone. It also takes
+    # over the term's earlier tombstones: the reset is the deletion of
+    # record for everything the term held, and the hand delete becomes the
+    # phone's reset tombstone too.
     assert (
         await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
     ).status_code == 200
     on_phone = await _tombstones(client, iphone)
     on_android = await _tombstones(client, android)
-    assert KEPT[0] not in on_phone
+    assert on_phone[KEPT[0]]["deleted_by_reset"] is True
+    assert on_phone[KEPT[0]]["deleted_by_this_device"] is True
     assert on_phone[DROPPED[0]]["deleted_by_reset"] is True
     assert on_phone[DROPPED[0]]["deleted_by_this_device"] is True
     assert on_android[DROPPED[0]]["deleted_by_reset"] is True

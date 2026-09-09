@@ -91,17 +91,22 @@ async def delete_all_courses(
         # term held, and it binds every device but its author, who is
         # known by device id (see `upload_courses`).
         #
-        # Single-delete tombstones go: they bound this device too, and the
-        # roster the portal returns next is allowed to bring those courses
-        # back. Reset tombstones are rewritten, not cleared — one per row
-        # just deleted, and any the term already carried re-authored to
-        # this device. Clearing them was what a second tap on Reset did
-        # while the first was still refetching: no rows left to delete, so
-        # nothing was rewritten, and every other device's next refresh
-        # pushed its pre-reset roster straight back.
+        # Every tombstone the term already carries becomes a reset
+        # tombstone of this device's: a single delete bound this device
+        # too, and the roster the portal returns next is allowed to bring
+        # that course back — but only through this device's upload, which
+        # releases exactly the keys it names. Dropping those tombstones
+        # instead let a stale device push the whole old roster back the
+        # moment a user who had deleted every course by hand pressed
+        # Reset; and clearing reset tombstones was what a second tap did
+        # while the first was still refetching, with the same result.
         await session.execute(
-            delete(UserCourseTombstone).where(
-                *tombstone_scope, UserCourseTombstone.deleted_by_reset.is_(False)
+            update(UserCourseTombstone)
+            .where(*tombstone_scope)
+            .values(
+                deleted_at=now,
+                deleted_by_device_id=auth.device_id,
+                deleted_by_reset=True,
             )
         )
         if rows:
@@ -128,11 +133,6 @@ async def delete_all_courses(
                     },
                 )
             )
-        await session.execute(
-            update(UserCourseTombstone)
-            .where(*tombstone_scope, UserCourseTombstone.deleted_by_reset.is_(True))
-            .values(deleted_at=now, deleted_by_device_id=auth.device_id)
-        )
 
     if semester is None:
         await session.execute(

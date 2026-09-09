@@ -64,12 +64,16 @@ async def get_academic_calendar(
     # has not made.
     revision = int(max(stamps).timestamp()) if stamps else 0
 
-    # Row counts are in the ETag alongside the revision so a delete — which
-    # removes the newest timestamp rather than advancing it — still changes
-    # the tag. Revision alone would let a client keep a stale holiday after
-    # the operator removed it.
+    # The tag hashes the newest timestamp at full precision, not the
+    # whole-second `revision`: two edits inside one second would otherwise
+    # share a tag, and a conditional client would keep the first edit's
+    # dates until something else changed. Row counts ride along so a
+    # delete — which removes the newest timestamp rather than advancing it
+    # — still changes the tag; revision alone would let a client keep a
+    # stale holiday after the operator removed it.
+    newest = max(stamps).isoformat() if stamps else "0"
     tag = hashlib.sha256(
-        f"{revision}:{len(terms)}:{len(holidays)}".encode()
+        f"{newest}:{len(terms)}:{len(holidays)}".encode()
     ).hexdigest()[:32]
     etag = f'W/"{tag}"'
     # Short enough that an operator edit reaches devices the same day,

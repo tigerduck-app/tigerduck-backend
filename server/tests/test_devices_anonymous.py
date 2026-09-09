@@ -168,3 +168,19 @@ async def test_per_device_flood_is_rejected(client) -> None:
     # A different device is unaffected — the cap is per device, not global.
     other = await client.post("/v3/devices/anonymous", json=body("bystander"))
     assert other.status_code == 200
+
+
+async def test_device_class_must_fit_the_platform(client) -> None:
+    """Targeting matches on device_class alone once one is stored; an
+    Android phone announcing itself as an iPhone would land in the iPhone
+    audience and drop out of the Android one."""
+    liar = await client.post(
+        "/v3/devices/anonymous",
+        json=body("android-liar", platform="android", device_class="iphone"),
+    )
+    assert liar.status_code == 422
+    honest = await client.post(
+        "/v3/devices/anonymous",
+        json=body("apple-honest", platform="apple", device_class="mac"),
+    )
+    assert honest.status_code == 200

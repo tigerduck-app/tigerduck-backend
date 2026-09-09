@@ -128,8 +128,9 @@ async def test_delete_courses_scoped_to_semester_leaves_other_terms(client) -> N
         {"semester": "1141", "course_no": "CS202", "course_name": "New"},
     ])
     # A per-course delete leaves a tombstone that binds its own author. The
-    # semester reset clears it, so the reset device's re-upload of CS101 at
-    # the end of this test is not skipped as tombstoned.
+    # semester reset turns it into a reset tombstone of this device's, so
+    # the reset device's re-upload of CS101 at the end of this test is
+    # released rather than skipped, while every other device stays bound.
     tomb = await client.delete("/v3/sync/courses/client:1132:CS101", headers=bearer(login))
     assert tomb.json() == {"deleted": 1}
     await _upload(client, login, [{"semester": "1132", "course_no": "CS303", "course_name": "Kept"}])
@@ -145,7 +146,10 @@ async def test_delete_courses_scoped_to_semester_leaves_other_terms(client) -> N
     # yet cannot upload the term straight back. Reset tombstones bind every
     # device except the one that wrote them -- the CS101 round trip below is
     # that exemption.
-    assert [t["course_key"] for t in snap["course_tombstones"]] == ["client:1132:CS303"]
+    assert sorted(t["course_key"] for t in snap["course_tombstones"]) == [
+        "client:1132:CS101", "client:1132:CS303",
+    ]
+    assert all(t["deleted_by_reset"] for t in snap["course_tombstones"])
     # Only a full reset may flag courses_reset_at — other devices wipe every
     # semester's local overlay when they see it.
     assert snap["courses_reset_at"] is None

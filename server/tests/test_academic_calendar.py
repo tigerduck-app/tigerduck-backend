@@ -117,6 +117,28 @@ async def test_deleting_a_holiday_changes_the_etag(client) -> None:
     assert after.json()["holidays"] == []
 
 
+async def test_an_edit_inside_the_same_second_changes_the_etag(client) -> None:
+    """`revision` is whole seconds, and an operator's second edit lands
+    within one of the first. A tag built from the revision alone answered
+    304 to the second, and the client kept the first edit's dates."""
+    await seed(
+        client,
+        holidays=[("校慶", "Anniversary", date(2026, 11, 1), date(2026, 11, 1))],
+    )
+    before = (await client.get(PATH)).headers["ETag"]
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        holiday = (await session.execute(_all_holidays())).scalars().one()
+        holiday.name_en = "Founders' Day"
+        await session.commit()
+
+    after = await client.get(PATH, headers={"If-None-Match": before})
+    assert after.status_code == 200
+    assert after.headers["ETag"] != before
+    assert after.json()["holidays"][0]["name_en"] == "Founders' Day"
+
+
 def _all_holidays():
     from sqlalchemy import select
 

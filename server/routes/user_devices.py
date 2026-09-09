@@ -27,6 +27,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.auth.schemas import (
+    check_device_class,
     DeviceClass,
     DeviceItem,
     DeviceListV3Response,
@@ -41,7 +42,7 @@ from server.db import SessionDep
 # setting as login — two different notions of "the client's IP" behind the
 # same proxy would make one of the two limits trivially wrong.
 from server.routes.auth import _client_ip
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Literal
 
 router = APIRouter(prefix="/devices", tags=["devices-v3"])
@@ -68,6 +69,11 @@ class AnonymousDeviceRequest(BaseModel):
     device_id: str = Field(min_length=8, max_length=128)
     platform: Literal["apple", "android"]
     device_class: DeviceClass | None = None
+
+    @model_validator(mode="after")
+    def device_class_fits_platform(self) -> "AnonymousDeviceRequest":
+        check_device_class(self.platform, self.device_class)
+        return self
     push_token: str | None = Field(default=None, max_length=512)
     bundle_id: str = Field(default="", max_length=128)
     # The signed-out half of the push opt-out. `PATCH /devices/{id}/
