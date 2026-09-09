@@ -6,6 +6,7 @@ course numbers repeatedly while someone clicks around."""
 
 from __future__ import annotations
 import asyncio
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Query, Request
@@ -252,8 +253,46 @@ async def _course_names_for_nos(
                 result[no] = name
 
     return result
+# NTUST Moodle names a course "113.1【資工系】CS1011301 數位電子導論 Introduction
+# to Digital Electronics" — term, owning unit, course number, then the name in
+# both languages.
+_MOODLE_NAME_SEMESTER = re.compile(r"^\s*(\d{3})\.(\d|H)")
+_MOODLE_NAME_COURSE_NO = re.compile(r"】\s*(\S+)")
+
+
+def _assignment_semester(course_name: str | None) -> str | None:
+    """The term an assignment belongs to, read off its Moodle course name.
+
+    Assignments have no term of their own to read: `user_assignments` has no
+    semester column, its `user_course_id` FK is never populated by any client,
+    and `course_no` arrives blank. The fullname prefix is the only term
+    information that reaches the server, so it is what the portal groups on.
+    Returns None rather than guessing when the name is not in that shape —
+    those rows collect under an "Unknown" heading instead of being filed
+    under someone else's term.
+    """
+    m = _MOODLE_NAME_SEMESTER.match(course_name or "")
+    return f"{m.group(1)}{m.group(2)}" if m else None
+
+
+def _assignment_course_no(course_name: str | None) -> str | None:
+    """Course number out of the same name, for the blank `course_no` column."""
+    m = _MOODLE_NAME_COURSE_NO.search(course_name or "")
+    return m.group(1) if m else None
+
+
 def _current_semester_prefix() -> str:
-    """NTUST semester prefix: e.g. '1132' for 2024 spring semester."""
+    """NTUST semester prefix: e.g. '1132' for 2024 spring semester.
+
+    Only a presentation default — which term the portal opens on when the
+    user has uploaded several. It must never filter the query: clients
+    reconcile every semester against the backend (app-side
+    `reconcileCourses`), so a term this guess does not name is still real
+    data, and hiding it made the portal look like rows had been lost. The
+    guess is also a third copy of the month heuristic the apps replaced
+    with the server-driven `SemesterCatalog`, so it can disagree with the
+    term rows were actually filed under.
+    """
     now = datetime.now(UTC)
     roc_year = now.year - 1911
     if now.month >= 8:
@@ -272,10 +311,9 @@ async def sync_courses(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
         if not user:
-            return {"courses": []}
+            return {"courses": [], "semesters": [], "holiday_overrides": []}
 
         uid = user["id"]
-        prefix = _current_semester_prefix()
 
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "
@@ -286,9 +324,9 @@ async def sync_courses(
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "
             "  ON o.user_id = c.user_id AND o.user_course_id = c.id "
-            "WHERE c.user_id = $1 AND c.semester = $2 "
-            "ORDER BY c.course_name",
-            uid, prefix,
+            "WHERE c.user_id = $1 "
+            "ORDER BY c.semester DESC, c.course_name",
+            uid,
         )
 
         tombstones = await conn.fetch(
@@ -299,26 +337,59 @@ async def sync_courses(
             uid,
         )
 
+        # Joined to the holiday so the operator reads a name and a date
+        # range rather than an opaque id. Rows only exist for users with
+        # cloud sync on — a sync-off device keeps the choice locally and
+        # never writes here, which is why this tab can legitimately be
+        # empty for a device that has the toggle set.
+        holiday_rows = await conn.fetch(
+            "SELECT o.holiday_id, o.notify, o.updated_at, "
+            "h.name_zh, h.name_en, h.start_date, h.end_date "
+            "FROM user_holiday_overrides o "
+            "JOIN academic_holidays h ON h.id = o.holiday_id "
+            "WHERE o.user_id = $1 "
+            "ORDER BY h.start_date DESC",
+            uid,
+        )
+
         assignments = await conn.fetch(
             "SELECT a.id, a.moodle_assignment_id, a.course_no, "
             "a.course_name, a.title, a.due_at, a.moodle_url, "
             "a.provider_is_submitted, a.provider_grade "
             "FROM user_assignments a "
             "WHERE a.user_id = $1 AND a.deleted_at IS NULL "
-            "ORDER BY a.due_at DESC NULLS LAST LIMIT 50",
+            "ORDER BY a.due_at DESC NULLS LAST LIMIT 500",
             uid,
         )
 
-    course_nos = list({r["course_no"] for r in rows if r["course_no"]})
-    zh_names, en_names = await asyncio.gather(
-        _course_names_for_nos(prefix, "zh", course_nos),
-        _course_names_for_nos(prefix, "en", course_nos),
-    )
+    # Names resolve against the term the row is filed under — the
+    # querycourse catalogue is keyed by semester, so looking 1131 course
+    # numbers up under 1151 silently returns nothing and every older term
+    # would fall back to the stored name.
+    nos_by_semester: dict[str, set[str]] = {}
+    for r in rows:
+        if r["course_no"]:
+            nos_by_semester.setdefault(r["semester"], set()).add(r["course_no"])
+
+    semesters_present = sorted(nos_by_semester, reverse=True)
+    lookups = await asyncio.gather(*(
+        _course_names_for_nos(sem, lang, sorted(nos_by_semester[sem]))
+        for sem in semesters_present
+        for lang in ("zh", "en")
+    ))
+    zh_by_semester: dict[str, dict[str, str]] = {}
+    en_by_semester: dict[str, dict[str, str]] = {}
+    for i, sem in enumerate(semesters_present):
+        zh_by_semester[sem] = lookups[i * 2]
+        en_by_semester[sem] = lookups[i * 2 + 1]
 
     courses = []
     for r in rows:
         d = dict(r)
         course_no = d.get("course_no") or ""
+        semester = d.get("semester") or ""
+        zh_names = zh_by_semester.get(semester, {})
+        en_names = en_by_semester.get(semester, {})
         zh_name = zh_names.get(course_no)
         if zh_name:
             d["course_name"] = zh_name
@@ -338,11 +409,47 @@ async def sync_courses(
         d["default_color_dark"] = COURSE_PALETTE_DARK[idx]
         courses.append(d)
 
+    # `semester` stays the term the UI opens on, for the existing client
+    # field; `semesters` is the real list now that every term is uploaded.
+    # The heuristic only wins if the user actually has rows for it.
+    prefix = _current_semester_prefix()
+    focus = prefix if prefix in nos_by_semester else (
+        semesters_present[0] if semesters_present else prefix
+    )
+    all_semesters = sorted(
+        {r["semester"] for r in rows} | {t["semester"] for t in tombstones},
+        reverse=True,
+    )
+
+    holiday_overrides = [
+        {
+            "holiday_id": h["holiday_id"],
+            "name_zh": h["name_zh"],
+            "name_en": h["name_en"],
+            "start_date": h["start_date"].isoformat(),
+            "end_date": h["end_date"].isoformat(),
+            "notify": h["notify"],
+            "updated_at": h["updated_at"].isoformat() if h["updated_at"] else None,
+        }
+        for h in holiday_rows
+    ]
+
     return {
-        "semester": prefix,
+        "semester": focus,
+        "semesters": all_semesters,
+        "holiday_overrides": holiday_overrides,
         "palette_light": COURSE_PALETTE_LIGHT,
         "palette_dark": COURSE_PALETTE_DARK,
         "courses": courses,
         "tombstones": [dict(t) for t in tombstones],
-        "assignments": [dict(a) for a in assignments],
+        "assignments": [
+            {
+                **dict(a),
+                "semester": _assignment_semester(a["course_name"]),
+                "client_course_no": (
+                    a["course_no"] or _assignment_course_no(a["course_name"])
+                ),
+            }
+            for a in assignments
+        ],
     }

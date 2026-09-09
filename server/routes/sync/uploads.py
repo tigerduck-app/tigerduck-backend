@@ -104,6 +104,23 @@ async def upload_courses(
             )
         )
 
+    # A reset tombstone does not bind the device that wrote it. That reset
+    # cleared the term precisely so this upload could replace it, and the
+    # roster the portal returned seconds later is the replacement -- so
+    # retire the rows it covers and let the upsert through. Anything the
+    # reset dropped that this upload does not mention keeps its tombstone
+    # and goes on binding every device, this one included.
+    payload_keys = {f"client:{c.semester}:{c.course_no}" for c in payload.courses}
+    if auth.device_id and payload_keys:
+        await session.execute(
+            delete(UserCourseTombstone).where(
+                UserCourseTombstone.user_id == auth.user_id,
+                UserCourseTombstone.deleted_by_reset.is_(True),
+                UserCourseTombstone.deleted_by_device_id == auth.device_id,
+                UserCourseTombstone.course_key.in_(payload_keys),
+            )
+        )
+
     # Tombstoned courses must not be resurrected by a bulk portal upload.
     tombstoned_keys = set(
         (await session.execute(
@@ -304,4 +321,13 @@ async def upload_courses(
         if device:
             device.last_seen_at = datetime.now(UTC)
     await session.commit()
-    return {"upserted": upserted, "skipped_tombstoned": skipped, "overrides_applied": overrides_applied}
+    return {
+        "upserted": upserted,
+        "skipped_tombstoned": skipped,
+        "overrides_applied": overrides_applied,
+        # What actually landed. A 200 with `skipped_tombstoned` > 0 is not
+        # "the server has seen these courses", and a client that records
+        # it as such retires a hand-typed course's protection on the
+        # strength of an upload the server refused.
+        "accepted_keys": sorted(uploaded_keys),
+    }

@@ -12,20 +12,23 @@ import hashlib
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import delete as sa_delete, func, select, update
 
-from server.models import DeviceRegistration
+from server.models import DevicePlatform, DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import (
     AuthSession,
     DevicePushToken,
+    PushTokenKind,
     PushTokenStatus,
     SessionRevokedReason,
     UserDevice,
 )
 from server.auth.schemas import (
+    check_device_class,
+    DeviceClass,
     DeviceItem,
     DeviceListV3Response,
     DevicePreferencesV3Request,
@@ -35,9 +38,161 @@ from server.auth.schemas import (
     PushTokenIn,
 )
 from server.db import SessionDep
+# Shared so the anonymous endpoint honours the same `auth_trust_forwarded_for`
+# setting as login — two different notions of "the client's IP" behind the
+# same proxy would make one of the two limits trivially wrong.
+from server.routes.auth import _client_ip
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal
 
 router = APIRouter(prefix="/devices", tags=["devices-v3"])
 logger = structlog.get_logger(__name__)
+
+# Rate limits for the unauthenticated anonymous registration. Two keys,
+# because neither works alone here.
+#
+# Per device_id catches the case that actually matters — one client looping
+# on the endpoint. The app calls it once per launch, so ten a minute is
+# already far more than a healthy device produces.
+#
+# Per IP has to be much looser than it would be for a login: this is a
+# campus app, and a few hundred students behind one NAT egress is the normal
+# case, not an attack. It is a ceiling on a single source flooding the table,
+# not a per-user limit.
+_ANON_DEVICE_MAX_ATTEMPTS = 10
+_ANON_DEVICE_WINDOW_SECONDS = 60
+_ANON_IP_MAX_ATTEMPTS = 300
+_ANON_IP_WINDOW_SECONDS = 60
+
+
+class AnonymousDeviceRequest(BaseModel):
+    device_id: str = Field(min_length=8, max_length=128)
+    platform: Literal["apple", "android"]
+    device_class: DeviceClass | None = None
+
+    @model_validator(mode="after")
+    def device_class_fits_platform(self) -> "AnonymousDeviceRequest":
+        check_device_class(self.platform, self.device_class)
+        return self
+    push_token: str | None = Field(default=None, max_length=512)
+    bundle_id: str = Field(default="", max_length=128)
+    # The signed-out half of the push opt-out. `PATCH /devices/{id}/
+    # preferences` needs a session and writes `user_devices`, so a device
+    # with no account had no way to express the setting at all — and this
+    # row is the one `custom_push_targeting` filters on. None means "not
+    # reported", not "reset to the default".
+    server_push_enabled: bool | None = None
+
+
+class AnonymousDeviceResponse(BaseModel):
+    device_id: str
+    registered: bool
+
+
+@router.post("/anonymous", response_model=AnonymousDeviceResponse)
+async def register_anonymous_device(
+    payload: AnonymousDeviceRequest, request: Request, session: SessionDep
+) -> AnonymousDeviceResponse:
+    """Register a device that has no account, so operators can reach it.
+
+    A device only appears in the inventory that `custom_push_targeting`
+    queries once it has a `device_registrations` row. Signing in creates a
+    `user_devices` row instead, which that targeting never sees, so an app
+    that has never been signed into was invisible and unreachable — there was
+    no way to tell that an Android, iPhone or iPad was running the app at all.
+
+    Deliberately unauthenticated: there is no account to authenticate
+    against. The only secret is `device_id`, a client-generated UUID, which
+    is the same trust model the retired /v2 registration used.
+
+    Scope is kept narrow: this endpoint may create a row, refresh its token,
+    and carry its owner's push preference. It never rewrites `user_id` and
+    never touches `linked_user_id` — the signed-in path owns that, and
+    clearing it would double-push every bulletin.
+
+    `server_push_enabled` is honoured in both directions. The app is the
+    only thing that knows the setting while signed out, so it has to be able
+    to both set the opt-out and walk it back; an opt-out-only field would
+    strand a user who changed their mind before ever signing in.
+    """
+    # Two limiters rather than two keys on one, because the two ceilings are
+    # deliberately an order of magnitude apart — see the constants above.
+    device_limiter = request.app.state.anon_device_limiter
+    ip_limiter = request.app.state.anon_ip_limiter
+    device_key = payload.device_id
+    ip_key = _client_ip(request)
+    if not device_limiter.allow(device_key) or not ip_limiter.allow(ip_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too_many_registration_attempts",
+        )
+    device_limiter.record(device_key)
+    ip_limiter.record(ip_key)
+
+    now = datetime.now(UTC)
+    existing = (
+        await session.execute(
+            select(DeviceRegistration).where(
+                DeviceRegistration.device_id == payload.device_id
+            )
+        )
+    ).scalar_one_or_none()
+
+    # Apple alert pushes consume `device_token_hex`; Android goes via FCM,
+    # whose token lives in `pts_token_hex`. Mirrors the gate in
+    # `custom_push_targeting` and `bulletins/matcher` — keep the three in sync.
+    is_android = payload.platform == DevicePlatform.android.value
+    token = payload.push_token or ""
+
+    if existing is None:
+        session.add(
+            DeviceRegistration(
+                device_id=payload.device_id,
+                user_id=f"anon-{payload.device_id}",
+                platform=payload.platform,
+                device_class=payload.device_class or "",
+                pts_token_hex=token if is_android else "",
+                device_token_hex=None if is_android else (payload.push_token or None),
+                bundle_id=payload.bundle_id,
+                attrs_type="",
+                apns_env="",
+                # Absent means the app had nothing to report, which for a
+                # brand-new row is the column default (opted in).
+                server_push_enabled=(
+                    True
+                    if payload.server_push_enabled is None
+                    else payload.server_push_enabled
+                ),
+                created_at=now,
+            )
+        )
+    else:
+        existing.platform = payload.platform
+        if payload.device_class:
+            existing.device_class = payload.device_class
+        if payload.server_push_enabled is not None:
+            existing.server_push_enabled = payload.server_push_enabled
+        # An absent token means "nothing new to report", not "drop the one you
+        # have" — the app calls this on every launch, and FCM only hands over a
+        # token once it is ready.
+        if payload.push_token:
+            if is_android:
+                existing.pts_token_hex = payload.push_token
+            else:
+                existing.device_token_hex = payload.push_token
+        existing.updated_at = now
+
+    await session.commit()
+    logger.info(
+        "device.anonymous_registered",
+        device_id=payload.device_id,
+        platform=payload.platform,
+        device_class=payload.device_class,
+        created=existing is None,
+        has_token=bool(payload.push_token),
+        server_push_enabled=payload.server_push_enabled,
+    )
+    return AnonymousDeviceResponse(device_id=payload.device_id, registered=True)
 
 
 @router.post("/register", response_model=DeviceRegisterV3Response)
@@ -64,6 +219,11 @@ async def register_device(
         )
         session.add(device)
     device.platform = payload.platform
+    # Absent means an older client that predates the field, so keep whatever
+    # a previous register stored rather than blanking the row back to
+    # "unknown form factor" and dropping it out of class-scoped sends.
+    if payload.device_class is not None:
+        device.device_class = payload.device_class
     if payload.app_version is not None:
         device.app_version = payload.app_version
     if payload.os_version is not None:
@@ -138,6 +298,7 @@ async def _upsert_push_token(
         )
         session.add(row)
         await session.flush()
+        await _retire_superseded_tokens(session, device=device, token=row, now=now)
         return row.id
 
     # Same physical token re-registered (possibly from a new device row
@@ -147,7 +308,43 @@ async def _upsert_push_token(
     existing.topic = token.topic
     existing.environment = token.environment
     await session.flush()
+    await _retire_superseded_tokens(session, device=device, token=existing, now=now)
     return existing.id
+
+
+async def _retire_superseded_tokens(
+    session, *, device: UserDevice, token: DevicePushToken, now: datetime
+) -> None:
+    """Invalidate the device's other active tokens of the same kind and scope.
+
+    A device holds one APNs token, one push-to-start token, one FCM token:
+    when the OS rotates one, the value it replaced is dead, and APNs only
+    says so once something is pushed to it. Left active, every rotation
+    added a row, and a pipeline that selects every active token of a kind
+    delivered each push once per row — for a push-to-start, that is one
+    Live Activity per stale token.
+
+    `scope_key` only narrows this for Live Activity update tokens, which
+    are one per running activity. A standard or push-to-start token is one
+    per device whatever its scope says: the push-to-start scope (the
+    attributes type name) was introduced after rows with an empty scope
+    already existed, and a rotation that also filled the scope in must
+    retire the old row rather than sit beside it.
+    """
+    scope = [
+        DevicePushToken.device_id == device.id,
+        DevicePushToken.provider == token.provider,
+        DevicePushToken.token_kind == token.token_kind,
+        DevicePushToken.status == PushTokenStatus.active.value,
+        DevicePushToken.id != token.id,
+    ]
+    if token.token_kind == PushTokenKind.live_activity_update.value:
+        scope.append(DevicePushToken.scope_key == token.scope_key)
+    await session.execute(
+        update(DevicePushToken)
+        .where(*scope)
+        .values(status=PushTokenStatus.invalidated.value, updated_at=now)
+    )
 
 
 @router.get("", response_model=DeviceListV3Response)

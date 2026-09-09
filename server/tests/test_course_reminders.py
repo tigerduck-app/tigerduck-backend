@@ -277,3 +277,96 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
     jobs = await _jobs(db_session, user.id)
     assert created == len(jobs)
     assert {j.payload["user_course_id"] for j in jobs} == {portal.id}
+
+
+# --- holiday suppression ---
+#
+# Apple guards twice: the app stays quiet AND the backend never sends. This
+# is the backend half, and it is the only one that works while the app is
+# not running to suppress anything.
+
+
+def _holiday(local, *, name_zh="中秋節", name_en="Mid-Autumn"):
+    from server.academic_calendar.models import AcademicHoliday
+
+    day = local.date()
+    return AcademicHoliday(
+        name_zh=name_zh, name_en=name_en, start_date=day, end_date=day
+    )
+
+
+async def test_no_job_when_the_class_falls_on_a_holiday(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    db_session.add(_holiday(local))
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, settings) == 0
+    assert await _jobs(db_session, user.id) == []
+
+
+async def test_a_holiday_on_another_day_changes_nothing(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    db_session.add(_holiday(local + timedelta(days=3)))
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, settings) == 1
+
+
+async def test_opting_in_restores_the_reminder(
+    db_session, prepared_engine, test_settings
+):
+    """The user said "I have class that day" — the server has to believe
+    them, or the toggle in the app would be a lie on Apple."""
+    from server.academic_calendar.models import UserHolidayOverride
+
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    holiday = _holiday(local)
+    db_session.add(holiday)
+    await db_session.flush()
+    db_session.add(
+        UserHolidayOverride(user_id=user.id, holiday_id=holiday.id, notify=True)
+    )
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, settings) == 1
+
+
+async def test_another_users_opt_in_does_not_leak(
+    db_session, prepared_engine, test_settings
+):
+    from server.academic_calendar.models import UserHolidayOverride
+
+    quiet_user = await _make_user(db_session, student_id="b11203058")
+    loud_user = await _make_user(db_session, student_id="b11203059")
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(quiet_user, schedule_json=schedule))
+    db_session.add(_course(loud_user, schedule_json=schedule))
+    holiday = _holiday(local)
+    db_session.add(holiday)
+    await db_session.flush()
+    db_session.add(
+        UserHolidayOverride(user_id=loud_user.id, holiday_id=holiday.id, notify=True)
+    )
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, settings) == 1
+    assert await _jobs(db_session, quiet_user.id) == []
+    assert len(await _jobs(db_session, loud_user.id)) == 1

@@ -3,23 +3,60 @@ trigger a client sync."""
 
 from __future__ import annotations
 import time
+import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from ...db import get_pool
+from ...status import BACKEND_INTERNAL_URL
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
 
 
+def _internal_headers(request: Request | None) -> dict[str, str]:
+    """Auth header for the backend's internal endpoints.
+
+    `/push-tick` is behind `require_shared_secret`, which reads
+    `X-Push-Token`. Omitted when no secret is configured so a dev stack —
+    where the dependency short-circuits on an empty secret — keeps working
+    without one.
+    """
+    # `force_sync_trigger` declares `request: Request = None`; FastAPI always
+    # injects it, but the annotation permits None so this stays total.
+    if request is None:
+        return {}
+    settings = getattr(request.app.state, "settings", None)
+    token = getattr(settings, "api_shared_secret", "") if settings else ""
+    return {"X-Push-Token": token} if token else {}
+
+
 @router.post("/push-tick")
 async def force_push_tick(request: Request) -> JSONResponse:
-    """Proxy to the main API server's /push-tick endpoint."""
-    import httpx
-    from ..status import BACKEND_INTERNAL_URL
+    """Proxy to the main API server's /push-tick endpoint.
+
+    Carries the shared secret: `/push-tick` sits behind
+    `require_shared_secret`, so an unauthenticated proxy call is refused
+    the moment `TIGERDUCK_API_SHARED_SECRET` is set — which it always is
+    outside dev, where the dependency short-circuits on an empty secret.
+    That is why this worked locally and not in a real deployment.
+    """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(f"{BACKEND_INTERNAL_URL}/push-tick")
-            return JSONResponse(resp.json(), status_code=resp.status_code)
+            resp = await client.post(
+                f"{BACKEND_INTERNAL_URL}/push-tick",
+                headers=_internal_headers(request),
+            )
+            # A non-JSON body (an HTML 502 from a proxy, say) must not
+            # become a bare exception with no reason attached — carry the
+            # status and whatever text came back instead.
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {
+                    "ok": False,
+                    "error": f"HTTP {resp.status_code}: {resp.text[:300]}",
+                }
+            return JSONResponse(payload, status_code=resp.status_code)
     except Exception as e:
         logger.exception("force push tick proxy failed")
         return JSONResponse({"ok": False, "error": str(e)}, 500)
@@ -49,9 +86,6 @@ async def force_sync_trigger(
     request: Request = None,
 ) -> JSONResponse:
     """Create a fresh sync_trigger push job and execute immediately."""
-    import httpx
-    from ..status import BACKEND_INTERNAL_URL
-
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
@@ -73,9 +107,22 @@ async def force_sync_trigger(
     if job_id:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                await client.post(f"{BACKEND_INTERNAL_URL}/push-tick")
+                tick = await client.post(
+                    f"{BACKEND_INTERNAL_URL}/push-tick",
+                    headers=_internal_headers(request),
+                )
+            # Logged rather than swallowed: the job row is already written,
+            # so a refused tick means the push sits queued until the next
+            # scheduled run — which looks to an operator like the trigger
+            # silently did nothing.
+            if tick.status_code >= 400:
+                logger.warning(
+                    "sync-trigger follow-up tick refused: HTTP %s %s",
+                    tick.status_code,
+                    tick.text[:200],
+                )
         except Exception:
-            pass
+            logger.exception("sync-trigger follow-up tick failed")
 
     return JSONResponse({
         "ok": True,

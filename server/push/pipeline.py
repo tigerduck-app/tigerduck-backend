@@ -6,8 +6,10 @@ Claim/execute split mirrors `server/syncjobs/executor.py`: stale
 FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
   materialize: one push_deliveries row per active token
-               (channel-aware: standard tokens for regular pushes, push_to_start
-               tokens for schedule; idempotent via ux_push_delivery_job_token DO NOTHING)
+               (channel-aware: standard tokens for regular pushes; on the
+               schedule channel a start goes to the device's push_to_start
+               token and an end to the activity's own live_activity_update
+               token; idempotent via ux_push_delivery_job_token DO NOTHING)
   deliver:     send each due pending delivery once via PushRouter;
                unregistered tokens are invalidated, transient failures
                keep the delivery pending with next_retry_at backoff
@@ -33,11 +35,13 @@ from server.auth.models import (
     PushDeliveryStatus,
     PushJob,
     PushJobStatus,
+    PushTokenKind,
     PushTokenStatus,
     UserDevice,
 )
 from server.config import Settings
 from server.db import session_scope
+from server.push.dedupe import activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.router import PushRouter
 
@@ -155,8 +159,8 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 # commit and now — never double-process.
                 logger.warning("push.job_reclaimed", job_id=job_id)
                 return
-            await _materialize(session, job)
-            await _deliver_round(worker, session, job)
+            if await _materialize(session, job):
+                await _deliver_round(worker, session, job)
     except Exception:
         logger.exception("push.job_crashed", job_id=job_id)
         async with session_scope(worker.session_factory) as session:
@@ -181,10 +185,21 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 )
 
 
-async def _materialize(session: AsyncSession, job: PushJob) -> None:
-    """Create one delivery row per active token (channel-aware: standard tokens
-    for regular pushes, push_to_start tokens for schedule). Idempotent —
-    a stale-recovered job re-materializes onto the same unique index.
+async def _materialize(session: AsyncSession, job: PushJob) -> bool:
+    """Create one delivery row per active token. Idempotent — a stale-
+    recovered job re-materializes onto the same unique index.
+
+    Channel-aware: regular pushes go to standard tokens. On the schedule
+    channel the job's `kind` decides — a start (`schedule`, written by
+    `/schedule/sync`) goes to the device's push-to-start token, an end
+    (`live_activity_end`, written by `/live-activities/register`) to the
+    running activity's own update token. Neither token can do the other's
+    job: APNs accepts an "end" sent to a push-to-start token and leaves the
+    running activity untouched, which is what once kept the Dynamic Island
+    up after class; and an update token can only address an activity that
+    already exists.
+
+    Returns False when the job was settled here and must not be delivered.
 
     Skips macOS devices (foreground-only, no background push). Non-macOS
     devices always receive the push — collapse keys deduplicate on the
@@ -192,9 +207,15 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     """
 
     now = datetime.now(UTC)
-    target_token_kind = (
-        "push_to_start" if job.channel == "schedule" else "standard"
-    )
+    payload = job.payload or {}
+    is_activity_job = job.channel == "schedule"
+    is_activity_end = is_activity_job and payload.get("kind") == "live_activity_end"
+    if is_activity_end:
+        target_token_kind = "live_activity_update"
+    elif is_activity_job:
+        target_token_kind = "push_to_start"
+    else:
+        target_token_kind = "standard"
     token_query = (
         select(DevicePushToken, UserDevice)
         .join(UserDevice, UserDevice.id == DevicePushToken.device_id)
@@ -210,6 +231,51 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
 
+    if is_activity_job:
+        # Both kinds need the activity id. For an end it picks the token:
+        # `scope_key` is the activity id the register endpoint filed the
+        # token under, and a device running two activities holds two update
+        # tokens, so an unscoped query would end both from the one job. For
+        # a start it is the attribute the payload creates the activity with,
+        # and the key the client will register the update token under. No
+        # activity id means we cannot tell activities apart, so send nothing
+        # and let the job fail loudly rather than end or start the wrong one.
+        activity_id = payload.get("activity_id")
+        if not activity_id:
+            logger.warning("push.activity_job_without_activity_id", job_id=job.id)
+            _settle(job, status=PushJobStatus.failed, error="missing_activity_id", now=now)
+            return False
+        if is_activity_end:
+            token_query = token_query.where(DevicePushToken.scope_key == activity_id)
+        elif not await _has_deliveries(session, job) and (
+            await _activity_already_registered(
+                session, job=job, activity_id=activity_id, now=now
+            )
+        ):
+            # The app starts this same activity itself when it is in the
+            # foreground at fire time, and registers the update token as it
+            # does. A start push on top of that puts a second copy on the
+            # lock screen and rings the alert for something already showing.
+            # Settled as cancelled, not failed: nothing went wrong, the
+            # activity simply did not need us.
+            #
+            # Only decided before the first delivery row exists. This runs
+            # again on every retry round, and by then the push may already
+            # have reached one of the job's tokens and started the very
+            # activity the registration now describes — cancelling here
+            # would strand the other deliveries as pending and record a
+            # sent push as never sent.
+            _settle(
+                job,
+                status=PushJobStatus.cancelled,
+                error="activity_already_running",
+                now=now,
+            )
+            logger.info(
+                "push.activity_already_running", job_id=job.id, activity_id=activity_id
+            )
+            return False
+
     is_sync_trigger = job.scenario == "sync_trigger"
     source_device_id: str | None = None
     if is_sync_trigger:
@@ -218,7 +284,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
 
     rows = (await session.execute(token_query)).all()
     if not rows:
-        return
+        return True
     values = []
     for token, device in rows:
         if device.platform == "macos":
@@ -238,7 +304,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
             }
         )
     if not values:
-        return
+        return True
     await session.execute(
         pg_insert(PushDelivery)
         .values(values)
@@ -246,6 +312,58 @@ async def _materialize(session: AsyncSession, job: PushJob) -> None:
             index_elements=["push_job_id", "token_hash", "token_kind", "scope_key"]
         )
     )
+    return True
+
+
+def _settle(job: PushJob, *, status: PushJobStatus, error: str, now: datetime) -> None:
+    """Finish `job` here, without a delivery round."""
+    job.status = status.value
+    job.last_error = error
+    if status is PushJobStatus.cancelled:
+        job.cancelled_at = now
+    job.locked_by = None
+    job.locked_at = None
+
+
+async def _has_deliveries(session: AsyncSession, job: PushJob) -> bool:
+    row = (
+        await session.execute(
+            select(PushDelivery.id).where(PushDelivery.push_job_id == job.id).limit(1)
+        )
+    ).first()
+    return row is not None
+
+
+async def _activity_already_registered(
+    session: AsyncSession, *, job: PushJob, activity_id: str, now: datetime
+) -> bool:
+    """Whether the device this start job addresses has already registered
+    `activity_id` and its countdown has not passed.
+
+    `/live-activities/register` files the activity's end job under the
+    device's `la_end` key at its countdown target; while that job is still
+    waiting to fire, the activity is on screen. Only a pending job can be
+    waiting: the claim only takes jobs whose `fire_at` has passed, and
+    re-registering with a later target puts the job back to pending. The
+    token rows cannot say this — an update token stays active after its
+    activity ends until something is pushed to it and APNs answers 410.
+
+    Every schedule job carries a device: `/schedule/sync` refuses a
+    session without one, as `/live-activities/register` does.
+    """
+    row = (
+        await session.execute(
+            select(PushJob.id)
+            .where(
+                PushJob.user_id == job.user_id,
+                PushJob.dedupe_key == activity_end_key(job.device_id, activity_id),
+                PushJob.status == PushJobStatus.pending.value,
+                PushJob.fire_at > now,
+            )
+            .limit(1)
+        )
+    ).first()
+    return row is not None
 
 
 async def _deliver_round(
@@ -357,6 +475,13 @@ async def _send_one(
             token_value=token.token_value,
             bundle_id=token.bundle_id or worker.settings.apns_bundle_id,
             now=now,
+            # A push-to-start token is registered under the ActivityAttributes
+            # type name it starts; the start payload has to name that type.
+            attributes_type=(
+                (token.scope_key or None)
+                if token.token_kind == PushTokenKind.push_to_start.value
+                else None
+            ),
         )
         result = await worker.router.send_apple(apns_request)
     else:

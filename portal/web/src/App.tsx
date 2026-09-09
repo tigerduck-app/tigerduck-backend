@@ -8,6 +8,7 @@ import { CustomPushPage } from "@/pages/custom-push";
 import { DevicesPage } from "@/pages/devices";
 import { ListsPage, ListDetailPage } from "@/pages/lists";
 import { MoodlePage, DataInspectionPage } from "@/pages/moodle";
+import { SemesterDatesPage } from "@/pages/semester-dates";
 import { DeregisterPage } from "@/pages/deregister";
 
 export function App() {
@@ -24,6 +25,7 @@ export function App() {
         <Route path="lists/:id" element={<ListDetailPage />} />
         <Route path="moodle" element={<MoodlePage />} />
         <Route path="inspect" element={<DataInspectionPage />} />
+        <Route path="semester-dates" element={<SemesterDatesPage />} />
         <Route path="deregister" element={<DeregisterPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

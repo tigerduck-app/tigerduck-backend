@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select, text, update
+from server.academic_calendar.models import UserHolidayOverride
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
@@ -123,8 +124,8 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         await snap_session.connection(
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return await _read_full_snapshot(snap_session, auth.user_id)
-async def _read_full_snapshot(session, user_id):
+        return await _read_full_snapshot(snap_session, auth.user_id, auth.device_id)
+async def _read_full_snapshot(session, user_id, device_id):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
 
@@ -174,6 +175,12 @@ async def _read_full_snapshot(session, user_id):
     bulletin_states = await rows(
         select(UserBulletinState).where(UserBulletinState.user_id == user_id)
     )
+    # Holidays themselves are school-wide and arrive over the public
+    # calendar feed; only the user's "notify me anyway" exceptions are
+    # user-scoped, so only those belong in this snapshot.
+    holiday_overrides = await rows(
+        select(UserHolidayOverride).where(UserHolidayOverride.user_id == user_id)
+    )
 
     _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
     _course_pk_to_moodle = {c.id: c.moodle_id for c in courses}
@@ -191,14 +198,28 @@ async def _read_full_snapshot(session, user_id):
     return {
         "current_revision": state.current_revision if state else 0,
         "courses_reset_at": _iso(user.courses_reset_at) if user else None,
+        # A reset tombstone does not bind the device that wrote it (see
+        # `upload_courses`), and the client applies the same rule: between
+        # its reset's DELETE and the re-upload that releases them, a poll
+        # would otherwise read its own tombstones as "hide everything".
+        # Authorship is resolved here rather than by sending the device id,
+        # so the client needs nothing it does not already have.
         "course_tombstones": [
             {
                 "course_key": t.course_key,
                 "course_no": t.course_no,
                 "semester": t.semester,
                 "deleted_at": _iso(t.deleted_at),
+                "deleted_by_reset": t.deleted_by_reset,
+                "deleted_by_this_device": (
+                    device_id is not None and t.deleted_by_device_id == device_id
+                ),
             }
             for t in tombstones
+        ],
+        "holiday_overrides": [
+            {"holiday_id": o.holiday_id, "notify": o.notify}
+            for o in holiday_overrides
         ],
         "courses": [serializers.course_to_dict(c) for c in courses],
         "course_overrides": [

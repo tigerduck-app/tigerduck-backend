@@ -16,6 +16,7 @@ from server.auth.models import (
 )
 from server.db import build_session_factory
 from server.push.apns_client import SendResult
+from server.push.dedupe import activity_end_key, schedule_key
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.router import PushRouter
 
@@ -507,5 +508,365 @@ async def test_zero_work_round_does_not_burn_final_attempt(
     job.available_at = datetime.now(UTC) - timedelta(minutes=5)
     await db_session.commit()
     await run_push_tick(worker)
+    await db_session.refresh(job)
+    assert job.status == "sent"
+
+
+# A Live Activity that is already running can only be updated or ended
+# through its own update token. A push-to-start token starts activities and
+# nothing else, so addressing one leaves the running activity untouched —
+# which is what kept the Dynamic Island up after a class ended.
+
+
+async def _add_activity_token(session, device, *, scope_key, token_value):
+    token = DevicePushToken(
+        device_id=device.id,
+        provider="apns",
+        token_kind="live_activity_update",
+        token_hash=f"hash-{token_value}",
+        token_value=token_value,
+        bundle_id="org.ntust.app.TigerDuck",
+        scope_key=scope_key,
+    )
+    session.add(token)
+    await session.flush()
+    return token
+
+
+def _activity_job(user, device, *, activity_id="inClass::c1"):
+    return _job(
+        user,
+        device_id=device.id,
+        channel="schedule",
+        scenario="activityEnd",
+        dedupe_key=activity_end_key(device.id, activity_id),
+        payload={
+            "kind": "live_activity_end",
+            "activity_id": activity_id,
+            "source_id": "c1",
+            "scenario": "inClass",
+            "title": "Math",
+        },
+    )
+
+
+async def test_activity_job_uses_the_activity_update_token(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="push_to_start",
+            token_hash="hash-pts",
+            token_value="pts-tok",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    await _add_activity_token(
+        db_session, device, scope_key="inClass::c1", token_value="la-tok"
+    )
+    db_session.add(_activity_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["la-tok"]
+
+
+async def test_activity_job_does_not_end_a_sibling_activity(
+    db_session, prepared_engine, test_settings
+):
+    """Two activities on one device hold two update tokens. Only the one the
+    job names may be ended."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    await _add_activity_token(
+        db_session, device, scope_key="inClass::c1", token_value="la-c1"
+    )
+    await _add_activity_token(
+        db_session, device, scope_key="inClass::c2", token_value="la-c2"
+    )
+    db_session.add(_activity_job(user, device, activity_id="inClass::c1"))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["la-c1"]
+
+
+async def test_activity_job_without_activity_id_sends_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """Better a job that fails loudly than one that dismisses the wrong
+    activity."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    await _add_activity_token(
+        db_session, device, scope_key="inClass::c1", token_value="la-tok"
+    )
+    job = _activity_job(user, device)
+    job.payload = {"kind": "live_activity_end", "scenario": "inClass"}
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert apple.requests == []
+    await db_session.refresh(job)
+    assert job.status == "failed"
+    # Named for what it is: a malformed job, not a device with no token.
+    assert job.last_error == "missing_activity_id"
+
+
+# A schedule job starts an activity that is not running yet, so it goes to
+# the device's push-to-start token — the one kind that can start one. Unless
+# the app already started that activity itself: it does so whenever it is in
+# the foreground at fire time, and registers the update token as it does,
+# which files the end job. While that end job is waiting, a start push would
+# put a second copy on the lock screen and ring the alert for it.
+
+
+def _start_job(user, device, *, activity_id="inClass::c1"):
+    return _job(
+        user,
+        device_id=device.id,
+        channel="schedule",
+        scenario="inClass",
+        dedupe_key=schedule_key(device.id, "c1", "inClass"),
+        payload={
+            "kind": "schedule",
+            "scenario": "inClass",
+            "source_id": "c1",
+            "activity_id": activity_id,
+            "title": "Math",
+            "subtitle": "09:10-10:00",
+            "accentHex": 1,
+            "sourceId": "c1",
+        },
+    )
+
+
+def _push_to_start_token(device, *, token_value="pts-tok", scope_key="RenamedAttributes"):
+    # `scope_key` deliberately differs from the builder's default so a test
+    # can tell "taken from the token" from "fell back to the constant".
+    return DevicePushToken(
+        device_id=device.id,
+        provider="apns",
+        token_kind="push_to_start",
+        token_hash=f"hash-{token_value}",
+        token_value=token_value,
+        bundle_id="org.ntust.app.TigerDuck",
+        scope_key=scope_key,
+    )
+
+
+def _end_job(user, device, *, activity_id, fire_at, status="pending"):
+    return _job(
+        user,
+        device_id=device.id,
+        channel="schedule",
+        scenario="activityEnd",
+        dedupe_key=activity_end_key(device.id, activity_id),
+        fire_at=fire_at,
+        status=status,
+        payload={"kind": "live_activity_end", "activity_id": activity_id},
+    )
+
+
+async def test_start_job_uses_the_push_to_start_token(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    await _add_activity_token(
+        db_session, device, scope_key="inClass:other", token_value="la-other"
+    )
+    db_session.add(_start_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
+    aps = apple.requests[0].message["aps"]
+    assert aps["event"] == "start"
+    # Taken from the token row, which is where the client says which
+    # ActivityAttributes type the token starts.
+    assert aps["attributes-type"] == "RenamedAttributes"
+    assert aps["attributes"] == {"activityId": "inClass::c1"}
+
+
+async def test_start_job_falls_back_to_the_default_attributes_type(
+    db_session, prepared_engine, test_settings
+):
+    """A push-to-start token registered before the client filed the type
+    name under scope_key still starts the app's one attributes type."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device, scope_key=""))
+    db_session.add(_start_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert apple.requests[0].message["aps"]["attributes-type"] == "TigerDuckActivityAttributes"
+
+
+async def test_start_job_is_cancelled_while_the_activity_is_registered(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    db_session.add(
+        _end_job(
+            user,
+            device,
+            activity_id="inClass::c1",
+            fire_at=datetime.now(UTC) + timedelta(minutes=40),
+        )
+    )
+    job = _start_job(user, device)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert apple.requests == []
+    await db_session.refresh(job)
+    assert job.status == "cancelled"
+    assert job.last_error == "activity_already_running"
+
+
+async def _start_fires_despite(db_session, prepared_engine, test_settings, end_job):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    db_session.add(end_job(user, device))
+    db_session.add(_start_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
+
+
+async def test_start_job_fires_once_the_earlier_end_has_been_sent(
+    db_session, prepared_engine, test_settings
+):
+    """A sent end job says the activity is gone."""
+    await _start_fires_despite(
+        db_session, prepared_engine, test_settings,
+        lambda user, device: _end_job(
+            user, device, activity_id="inClass::c1",
+            fire_at=datetime.now(UTC) + timedelta(minutes=40), status="sent",
+        ),
+    )
+
+
+async def test_start_job_fires_once_the_earlier_countdown_has_passed(
+    db_session, prepared_engine, test_settings
+):
+    """An end job whose countdown has passed says the activity is over,
+    whatever its status — a stale pending one, left by a push that never
+    went out, must not block a start."""
+    await _start_fires_despite(
+        db_session, prepared_engine, test_settings,
+        lambda user, device: _end_job(
+            user, device, activity_id="inClass::c1",
+            fire_at=datetime.now(UTC) - timedelta(days=7),
+        ),
+    )
+
+
+async def test_start_job_is_not_blocked_by_another_activity(
+    db_session, prepared_engine, test_settings
+):
+    await _start_fires_despite(
+        db_session, prepared_engine, test_settings,
+        lambda user, device: _end_job(
+            user, device, activity_id="classPreparing::c1",
+            fire_at=datetime.now(UTC) + timedelta(minutes=40),
+        ),
+    )
+
+
+async def test_start_job_is_not_blocked_by_another_devices_activity(
+    db_session, prepared_engine, test_settings
+):
+    """The iPad registering the activity says nothing about the iPhone."""
+    async def other_devices_end_job(user, device):
+        tablet = UserDevice(
+            user_id=user.id, client_device_id="dev-2", platform="ipados"
+        )
+        db_session.add(tablet)
+        await db_session.flush()
+        return _end_job(
+            user, tablet, activity_id="inClass::c1",
+            fire_at=datetime.now(UTC) + timedelta(minutes=40),
+        )
+
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    db_session.add(await other_devices_end_job(user, device))
+    db_session.add(_start_job(user, device))
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
+
+
+async def test_start_job_is_not_cancelled_on_a_retry_round(
+    db_session, prepared_engine, test_settings
+):
+    """Once a delivery row exists the push may already have reached a
+    token and started the activity the registration now describes;
+    cancelling on the retry round would strand the other delivery as
+    pending and record a sent push as never sent."""
+    user, device, token = await _setup_user_device_token(db_session)
+    pts = _push_to_start_token(device)
+    db_session.add(pts)
+    await db_session.flush()
+    job = _start_job(user, device)
+    job.attempts = 1
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add(
+        PushDelivery(
+            push_job_id=job.id,
+            user_id=user.id,
+            device_id=device.id,
+            push_token_id=pts.id,
+            provider="apns",
+            token_kind="push_to_start",
+            token_hash=pts.token_hash,
+            scope_key=pts.scope_key,
+            next_retry_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    )
+    db_session.add(
+        _end_job(
+            user, device, activity_id="inClass::c1",
+            fire_at=datetime.now(UTC) + timedelta(minutes=40),
+        )
+    )
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
     await db_session.refresh(job)
     assert job.status == "sent"

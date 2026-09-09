@@ -26,10 +26,19 @@ from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
 from server.logging_setup import configure as configure_logging
 from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
+# noqa: F401 — imported for the side effect of registering the tables with
+# Base.metadata, which is what create_all in the test fixtures walks.
+from server.academic_calendar.models import (  # noqa: F401
+    AcademicHoliday as _AcademicHoliday,
+    SemesterTerm as _SemesterTerm,
+    UserHolidayOverride as _UserHolidayOverride,
+)
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
+from server.routes import academic_calendar as academic_calendar_routes
 from server.routes import bulletins_feed as bulletins_feed_routes
+from server.routes import holiday_overrides as holiday_overrides_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
@@ -162,7 +171,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
 
     scheduler.start()
-    logger.info("scheduler.started", tick_seconds=settings.scheduler_tick_seconds)
+    logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
 
     try:
         yield
@@ -254,6 +263,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_attempts=_CREDENTIALS_MAX_ATTEMPTS,
         window_seconds=_CREDENTIALS_WINDOW_SECONDS,
     )
+    from server.routes.user_devices import (
+        _ANON_DEVICE_MAX_ATTEMPTS,
+        _ANON_DEVICE_WINDOW_SECONDS,
+        _ANON_IP_MAX_ATTEMPTS,
+        _ANON_IP_WINDOW_SECONDS,
+    )
+    app.state.anon_device_limiter = SlidingWindowLimiter(
+        max_attempts=_ANON_DEVICE_MAX_ATTEMPTS,
+        window_seconds=_ANON_DEVICE_WINDOW_SECONDS,
+    )
+    app.state.anon_ip_limiter = SlidingWindowLimiter(
+        max_attempts=_ANON_IP_MAX_ATTEMPTS,
+        window_seconds=_ANON_IP_WINDOW_SECONDS,
+    )
     try:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
@@ -277,7 +300,9 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
+    app.include_router(academic_calendar_routes.router, prefix=prefix)
     app.include_router(bulletins_feed_routes.router, prefix=prefix)
+    app.include_router(holiday_overrides_routes.router, prefix=f"{prefix}/sync")
     app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
     app.include_router(bulletins_v3_routes.states_router, prefix=prefix)
     app.include_router(schedule_v3_routes.router, prefix=prefix)

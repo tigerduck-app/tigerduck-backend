@@ -62,7 +62,9 @@ type FormState = {
   force_ring: boolean;
   target_iphone: boolean;
   target_ipad: boolean;
+  target_mac: boolean;
   target_android: boolean;
+  target_android_tablet: boolean;
   // Empty string means "no list filter". Stored as string to match the
   // Select primitive's value contract; converted to int before sending.
   list_id: string;
@@ -78,7 +80,9 @@ const EMPTY: FormState = {
   force_ring: true,
   target_iphone: true,
   target_ipad: true,
+  target_mac: true,
   target_android: true,
+  target_android_tablet: true,
   list_id: "",
   user_id: "",
   device_id: "",
@@ -89,7 +93,9 @@ function selectedClasses(f: FormState): CustomPushTargetClass[] {
   const out: CustomPushTargetClass[] = [];
   if (f.target_iphone) out.push("iphone");
   if (f.target_ipad) out.push("ipad");
+  if (f.target_mac) out.push("mac");
   if (f.target_android) out.push("android");
+  if (f.target_android_tablet) out.push("android_tablet");
   return out;
 }
 
@@ -287,6 +293,15 @@ export function CustomPushPage() {
                 </label>
                 <label className="flex items-center gap-2">
                   <Checkbox
+                    checked={form.target_mac}
+                    onCheckedChange={(v) =>
+                      setForm({ ...form, target_mac: v === true })
+                    }
+                  />
+                  Mac
+                </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox
                     checked={form.target_android}
                     onCheckedChange={(v) =>
                       setForm({ ...form, target_android: v === true })
@@ -294,17 +309,26 @@ export function CustomPushPage() {
                   />
                   Android
                 </label>
+                <label className="flex items-center gap-2">
+                  <Checkbox
+                    checked={form.target_android_tablet}
+                    onCheckedChange={(v) =>
+                      setForm({ ...form, target_android_tablet: v === true })
+                    }
+                  />
+                  Android tablet
+                </label>
               </div>
             </div>
 
             <div className="grid gap-1.5">
               <Label htmlFor="target-list">Target list (optional)</Label>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Select
                   value={form.list_id}
                   onValueChange={(v) => setForm({ ...form, list_id: v })}
                 >
-                  <SelectTrigger id="target-list" className="w-72">
+                  <SelectTrigger id="target-list" className="w-72 max-w-full">
                     <SelectValue placeholder="No list filter — all matching devices" />
                   </SelectTrigger>
                   <SelectContent>

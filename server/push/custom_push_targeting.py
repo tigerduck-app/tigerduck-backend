@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models import DeviceListMember, DevicePlatform, DeviceRegistration
 
-TargetClass = Literal["iphone", "ipad", "android"]
+TargetClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,11 @@ def _legacy_platforms_for(classes: list[str]) -> set[str]:
     out: set[str] = set()
     if "iphone" in classes or "ipad" in classes or "mac" in classes:
         out.add("apple")
-    if "android" in classes:
+    # A legacy Android row cannot say whether it is a phone or a tablet, the
+    # same way a legacy Apple row cannot pick between three. Both Android
+    # classes therefore pull in the unclassified rows, and `count_by_class`
+    # buckets them separately when the choice is ambiguous.
+    if "android" in classes or "android_tablet" in classes:
         out.add("android")
     return out
 
@@ -83,6 +87,12 @@ async def resolve_target_device_ids(
     )
     stmt = select(DeviceRegistration.device_id).where(
         DeviceRegistration.server_push_enabled.is_(True),
+        # Linked devices are served by the user-level push_jobs flow, which
+        # the portal targets straight off `user_devices` at send time. Without
+        # this a device present in both tables receives every custom push
+        # twice — the same rule `bulletins/matcher` already applies, and the
+        # one `DeviceRegistration.linked_user_id` was added for.
+        DeviceRegistration.linked_user_id.is_(None),
         token_clause,
         or_(class_clause, legacy_clause) if legacy_clause is not None else class_clause,
     )
@@ -131,13 +141,25 @@ async def count_by_class(
             # selected, attribute to it; if both are, the split is
             # unknowable, so bucket separately rather than skewing iPhone
             # (and leaving iPad showing 0 while these rows are targeted).
-            apple_selected = [c for c in ("iphone", "ipad") if c in counts]
+            apple_selected = [c for c in ("iphone", "ipad", "mac") if c in counts]
             if len(apple_selected) == 1:
                 counts[apple_selected[0]] += 1
             else:
                 counts["apple (unspecified)"] = (
                     counts.get("apple (unspecified)", 0) + 1
                 )
-        elif device_class == "" and "android" in counts and platform == "android":
-            counts["android"] += 1
+        elif device_class == "" and platform == "android":
+            # Same rule as the Apple branch: attribute to the single Android
+            # class if only one is selected, otherwise bucket separately
+            # rather than quietly crediting phones for devices that might be
+            # tablets.
+            android_selected = [
+                c for c in ("android", "android_tablet") if c in counts
+            ]
+            if len(android_selected) == 1:
+                counts[android_selected[0]] += 1
+            elif android_selected:
+                counts["android (unspecified)"] = (
+                    counts.get("android (unspecified)", 0) + 1
+                )
     return {**counts, "total": sum(counts.values())}

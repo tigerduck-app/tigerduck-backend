@@ -87,7 +87,8 @@ class UserChangeLog(Base):
             "'course', 'course_override', 'course_skipped_date', "
             "'assignment', 'assignment_override', "
             "'settings_document', "
-            "'bulletin_subscription', 'bulletin_state', 'bulletin_match')",
+            "'bulletin_subscription', 'bulletin_state', 'bulletin_match', "
+            "'holiday_override')",
             name="chk_changelog_entity_type",
         ),
         Index("idx_change_log_user_revision", "user_id", "revision"),

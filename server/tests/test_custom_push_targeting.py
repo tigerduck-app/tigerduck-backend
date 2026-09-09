@@ -184,3 +184,66 @@ async def test_count_by_class_legacy_apple_both_classes_bucketed(db_session):
         "apple (unspecified)": 1,
         "total": 2,
     }
+
+
+async def test_android_phone_and_tablet_are_separable(db_session):
+    """The point of the class: `platform` says "android" for both, so
+    without device_class an operator could only address them together."""
+    await _seed(
+        db_session, device_id="a-phone", platform="android",
+        device_class="android", device_token_hex=None, attrs_type="", apns_env="",
+    )
+    await _seed(
+        db_session, device_id="a-tab", platform="android",
+        device_class="android_tablet", device_token_hex=None,
+        attrs_type="", apns_env="",
+    )
+    phones = await resolve_target_device_ids(
+        db_session, TargetFilter(target_classes=["android"])
+    )
+    tablets = await resolve_target_device_ids(
+        db_session, TargetFilter(target_classes=["android_tablet"])
+    )
+    assert phones == ["a-phone"]
+    assert tablets == ["a-tab"]
+
+
+async def test_selecting_both_android_classes_matches_both(db_session):
+    await _seed(
+        db_session, device_id="a-phone", platform="android",
+        device_class="android", device_token_hex=None, attrs_type="", apns_env="",
+    )
+    await _seed(
+        db_session, device_id="a-tab", platform="android",
+        device_class="android_tablet", device_token_hex=None,
+        attrs_type="", apns_env="",
+    )
+    ids = sorted(
+        await resolve_target_device_ids(
+            db_session,
+            TargetFilter(target_classes=["android", "android_tablet"]),
+        )
+    )
+    assert ids == ["a-phone", "a-tab"]
+
+
+async def test_legacy_android_row_counts_as_unspecified_when_ambiguous(db_session):
+    """A row with no class predates the column and cannot say which it is.
+    It is still targeted, but the preview must not credit it to phones."""
+    await _seed(
+        db_session, device_id="a-legacy", platform="android",
+        device_class="", device_token_hex=None, attrs_type="", apns_env="",
+    )
+    both = await count_by_class(
+        db_session, TargetFilter(target_classes=["android", "android_tablet"])
+    )
+    assert both["android"] == 0
+    assert both["android_tablet"] == 0
+    assert both["android (unspecified)"] == 1
+    assert both["total"] == 1
+
+    # Only one Android class selected — no ambiguity left to preserve.
+    only_phones = await count_by_class(
+        db_session, TargetFilter(target_classes=["android"])
+    )
+    assert only_phones["android"] == 1

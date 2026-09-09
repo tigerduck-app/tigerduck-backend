@@ -11,7 +11,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useTheme, type Theme } from "@/hooks/use-theme";
 
-export function ThemeToggle() {
+/**
+ * @param iconOnly drops the label and current value, for the collapsed
+ *   sidebar — 56px has no room for "Theme  SYSTEM", and dropping the control
+ *   entirely would mean the theme could only be changed while expanded.
+ */
+export function ThemeToggle({ iconOnly = false }: { iconOnly?: boolean }) {
   const { theme, resolved, setTheme } = useTheme();
   const Icon = resolved === "dark" ? Moon : Sun;
   return (
@@ -20,11 +25,20 @@ export function ThemeToggle() {
         <Button
           variant="ghost"
           size="sm"
-          className="w-full justify-start gap-2 px-2 text-muted-foreground"
+          title={iconOnly ? `Theme: ${theme}` : undefined}
+          className={
+            iconOnly
+              ? "w-full justify-center px-0 text-muted-foreground"
+              : "w-full justify-start gap-2 px-2 text-muted-foreground"
+          }
         >
           <Icon className="h-4 w-4" />
-          <span className="flex-1 text-left">Theme</span>
-          <span className="text-xs uppercase tracking-wide">{theme}</span>
+          {!iconOnly && (
+            <>
+              <span className="flex-1 text-left">Theme</span>
+              <span className="text-xs uppercase tracking-wide">{theme}</span>
+            </>
+          )}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">

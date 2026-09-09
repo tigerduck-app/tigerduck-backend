@@ -6,18 +6,58 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
 ]
 
+# The operator-facing form factors. Kept in step with
+# `server.push.custom_push_targeting.TargetClass` and the `device_class`
+# literal on the anonymous registration — all three describe the same set,
+# and a value that only one of them knows about is a device nobody can send
+# to.
+DeviceClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
+
+
+# Which form factors a platform can honestly report. Custom-push targeting
+# matches on `device_class` alone once one is stored, so a mismatched pair
+# would put a device in the wrong audience and drop it from the right one.
+_APPLE_CLASSES = frozenset({"iphone", "ipad", "mac"})
+_ANDROID_CLASSES = frozenset({"android", "android_tablet"})
+_CLASSES_FOR_PLATFORM: dict[str, frozenset[str]] = {
+    "ios": _APPLE_CLASSES,
+    "ipados": _APPLE_CLASSES,
+    "macos": _APPLE_CLASSES,
+    "apple": _APPLE_CLASSES,
+    "android": _ANDROID_CLASSES,
+}
+
+
+def check_device_class(platform: str, device_class: str | None) -> None:
+    """Raise ValueError unless `device_class` is one `platform` can report."""
+    if device_class is None:
+        return
+    if device_class not in _CLASSES_FOR_PLATFORM.get(platform, frozenset()):
+        raise ValueError(f"device_class {device_class!r} does not fit platform {platform!r}")
+
 
 class DeviceInfo(BaseModel):
     client_device_id: str = Field(min_length=1, max_length=128)
     platform: Platform
+    # Form factor for operator targeting. `platform` already separates
+    # ios / ipados / macos, but Android reports one value for phones and
+    # tablets alike, so the distinction has to ride here. Optional: a client
+    # that does not send it leaves the column empty and targeting falls back
+    # to matching on `platform`, which is what every pre-column row does.
+    device_class: DeviceClass | None = None
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="after")
+    def device_class_fits_platform(self) -> "DeviceInfo":
+        check_device_class(self.platform, self.device_class)
+        return self
 
 
 class LoginRequest(BaseModel):
@@ -72,6 +112,15 @@ class PushTokenIn(BaseModel):
     environment: Literal["development", "production"] | None = None
     scope_key: str = Field(default="", max_length=160)
 
+    @model_validator(mode="after")
+    def live_activity_tokens_are_apns(self) -> "PushTokenIn":
+        # Live Activities are ActivityKit's; an FCM token of either kind
+        # would be selected for a schedule job and handed to FCM with a
+        # per-activity collapse key it cannot honour.
+        if self.provider == "fcm" and self.token_kind != "standard":
+            raise ValueError("fcm tokens are standard only")
+        return self
+
 
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
@@ -123,6 +172,12 @@ class ScheduleScenario(str, Enum):
 
 
 class ScheduleEventV3(BaseModel):
+    # One occurrence, not one course: the client's timetable slot id is
+    # "{course_no}_{yyyyMMdd}_{period}" and an assignment's is its own id, so a
+    # weekly class posts a fresh source_id each week. That is what lets
+    # `ux_push_jobs_dedupe_active` keep a sent start job on record without
+    # blocking next week's, and what makes `"{scenario}::{source_id}"` name
+    # exactly one Live Activity.
     source_id: str = Field(min_length=1, max_length=128, pattern=r"^[^:]+$")
     scenario: ScheduleScenario
     fire_at: datetime

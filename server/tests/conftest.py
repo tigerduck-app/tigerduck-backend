@@ -67,9 +67,9 @@ async def _drop_db(admin_url: str, db_name: str) -> None:
 @pytest.fixture(scope="session")
 def test_settings() -> Settings:
     # Override DB to the same dev Postgres, but drop+recreate schema per session.
-    # `scheduler_tick_seconds=99999` neuters the background APScheduler job
-    # that ASGITransport starts via the lifespan handler — otherwise the
-    # dispatcher could mark test rows `sent` and make assertions flaky.
+    # The `*_tick_seconds=99999` overrides neuter the background APScheduler
+    # jobs that ASGITransport starts via the lifespan handler — otherwise a
+    # worker could mark test rows `sent` and make assertions flaky.
     #
     # Honor TIGERDUCK_TEST_DATABASE_URL so the same tests can run in a
     # CI/container setup where Postgres lives on a different host (e.g. the
@@ -82,7 +82,6 @@ def test_settings() -> Settings:
         env="development",
         database_url=database_url,
         apns_env="development",
-        scheduler_tick_seconds=99999,
         sync_job_tick_seconds=99999,
         push_pipeline_tick_seconds=99999,
         assignment_reminder_scan_interval_seconds=99999,

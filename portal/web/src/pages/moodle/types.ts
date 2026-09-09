@@ -107,6 +107,10 @@ export type SyncAssignment = {
   moodle_assignment_id: number;
   course_no: string;
   course_name: string;
+  /** Derived server-side from the Moodle course name; null if unparseable. */
+  semester?: string | null;
+  /** `course_no` when the client sent one, else read out of the course name. */
+  client_course_no?: string | null;
   title: string;
   due_at: string | null;
   moodle_url: string | null;
@@ -115,12 +119,34 @@ export type SyncAssignment = {
 };
 
 export type SyncCoursesResponse = {
+  /** The term the table opens on, not the only one present. */
   semester: string;
+  /** Every term the user has course rows or tombstones for, newest first. */
+  semesters?: string[];
   palette_light: string[];
   palette_dark: string[];
   courses: SyncCourse[];
   tombstones?: SyncTombstone[];
   assignments?: SyncAssignment[];
+  holiday_overrides?: SyncHolidayOverride[];
+};
+
+/**
+ * One user's "notify me anyway" exception for a school holiday.
+ *
+ * Only exists for users with cloud sync on — a sync-off device keeps the
+ * choice in its own preferences and never uploads it, so an empty list here
+ * does not mean the user has no exceptions set on their phone.
+ */
+export type SyncHolidayOverride = {
+  holiday_id: number;
+  name_zh: string;
+  name_en: string;
+  start_date: string;
+  /** Inclusive last day; a single-day holiday repeats start_date. */
+  end_date: string;
+  notify: boolean;
+  updated_at: string | null;
 };
 
 export type SyncDevice = {

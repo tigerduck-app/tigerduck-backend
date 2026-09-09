@@ -46,6 +46,16 @@ class UserDevice(Base):
     )
     client_device_id: Mapped[str] = mapped_column(String(128))
     platform: Mapped[str] = mapped_column(String(16))
+    # Form factor, for operator targeting. `platform` already separates
+    # ios / ipados / macos, but every Android device — phone or tablet —
+    # reports platform "android", so without this column an operator could
+    # address an iPad and not an Android tablet. Mirrors
+    # `device_registrations.device_class`; empty means a client that
+    # registered before the column existed, and the targeting query falls
+    # back to `platform` for those.
+    device_class: Mapped[str] = mapped_column(
+        String(16), default="", server_default=""
+    )
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -166,8 +176,10 @@ class DevicePushToken(Base):
     bundle_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     topic: Mapped[str | None] = mapped_column(String(160), nullable=True)
     environment: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    # What the token is bound to (e.g. "assignment:12345" for a Live
-    # Activity update token). Empty string for standard / push-to-start.
+    # What the token is bound to: the activity id for a Live Activity
+    # update token, the `ActivityAttributes` type name the client starts
+    # activities with for a push-to-start token (the start push has to name
+    # it as `attributes-type`), empty for a standard token.
     scope_key: Mapped[str] = mapped_column(String(160), default="", server_default="")
     expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

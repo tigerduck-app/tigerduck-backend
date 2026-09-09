@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import Settings
 from .db import close_pool, open_pool
 from .routes import (
+    academic_calendar,
     announcement,
     backup,
     custom_push,
@@ -74,6 +75,7 @@ if (_WEB_DIST / "assets").exists():
         name="assets",
     )
 
+app.include_router(academic_calendar.router)
 app.include_router(status.router)
 app.include_router(status.liveness_router)
 app.include_router(logs.router)

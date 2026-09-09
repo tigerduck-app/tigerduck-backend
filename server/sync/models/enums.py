@@ -32,6 +32,11 @@ class ChangeEntityType(StrEnum):
     bulletin_subscription = "bulletin_subscription"
     bulletin_state = "bulletin_state"
     bulletin_match = "bulletin_match"
+    #: "Notify me anyway on this holiday" — see
+    #: `server.academic_calendar.models.UserHolidayOverride`. The holiday
+    #: itself is school-wide operator data and never syncs per user; only the
+    #: exception does.
+    holiday_override = "holiday_override"
 SETTINGS_NAMESPACES = (
     "home_layout",
     "appearance",

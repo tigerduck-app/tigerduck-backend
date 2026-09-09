@@ -3,7 +3,7 @@ rows, so other devices learn about the deletion on their next sync."""
 
 from __future__ import annotations
 from datetime import UTC, datetime, timedelta
-from fastapi import APIRouter, BackgroundTasks, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
@@ -40,6 +40,14 @@ async def delete_all_courses(
 ):
     """Wipe the user's courses — every semester, or only `semester` when
     given. Used by 'reset course timetable'."""
+    if semester and auth.device_id is None:
+        # A semester reset writes tombstones that bind every device but
+        # their author, and the author is known by device id. Without one
+        # the tombstones would bind this session too, and its next upload
+        # could never release them.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
+        )
     now = datetime.now(UTC)
 
     course_scope = [UserCourse.user_id == auth.user_id]
@@ -54,14 +62,78 @@ async def delete_all_courses(
         .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
     )).all()
 
-    # Clear the tombstones in scope so the immediate re-upload isn't blocked.
-    # This runs even when no course row matched: a user who deleted every
-    # course one by one and then resets still needs those tombstones gone.
-    await session.execute(delete(UserCourseTombstone).where(*tombstone_scope))
+    # Replace the tombstones in scope rather than merely clearing them.
+    #
+    # Clearing was enough to unblock this device's immediate re-upload, and
+    # it still is -- a reset tombstone does not bind its own author. What it
+    # was not enough for is every *other* device: with nothing on record, a
+    # phone that had not yet reconciled would push its pre-reset roster back
+    # on its next refresh, `upload_courses` had no reason to refuse it, and
+    # the term the user had just reset filled straight back up.
+    #
+    # The clear runs first and unconditionally so the rewrite also covers a
+    # user who deleted every course one by one and then reset: those older
+    # single-delete tombstones would otherwise keep binding this device.
+    #
+    # Only a semester reset writes them. A full reset already propagates
+    # through `courses_reset_at` below, which tells every device to drop its
+    # course overlay wholesale; tombstoning on top of that would put a
+    # permanent marker on every course of every past term, and no refresh
+    # re-uploads a term the student finished years ago -- their timetables
+    # would stay blank for good, on the resetting device too.
+    if semester is None:
+        # A full reset propagates through `courses_reset_at` below, which
+        # tells every device to drop its course overlay wholesale, so no
+        # tombstone is needed and every existing one goes.
+        await session.execute(delete(UserCourseTombstone).where(*tombstone_scope))
+    else:
+        # A semester reset is the deletion of record for everything the
+        # term held, and it binds every device but its author, who is
+        # known by device id (see `upload_courses`).
+        #
+        # Every tombstone the term already carries becomes a reset
+        # tombstone of this device's: a single delete bound this device
+        # too, and the roster the portal returns next is allowed to bring
+        # that course back — but only through this device's upload, which
+        # releases exactly the keys it names. Dropping those tombstones
+        # instead let a stale device push the whole old roster back the
+        # moment a user who had deleted every course by hand pressed
+        # Reset; and clearing reset tombstones was what a second tap did
+        # while the first was still refetching, with the same result.
+        await session.execute(
+            update(UserCourseTombstone)
+            .where(*tombstone_scope)
+            .values(
+                deleted_at=now,
+                deleted_by_device_id=auth.device_id,
+                deleted_by_reset=True,
+            )
+        )
+        if rows:
+            await session.execute(
+                pg_insert(UserCourseTombstone)
+                .values([
+                    {
+                        "user_id": auth.user_id,
+                        "course_key": row.course_key,
+                        "semester": row.semester,
+                        "course_no": row.course_no,
+                        "deleted_at": now,
+                        "deleted_by_device_id": auth.device_id,
+                        "deleted_by_reset": True,
+                    }
+                    for row in rows
+                ])
+                .on_conflict_do_update(
+                    index_elements=["user_id", "course_key"],
+                    set_={
+                        "deleted_at": now,
+                        "deleted_by_device_id": auth.device_id,
+                        "deleted_by_reset": True,
+                    },
+                )
+            )
 
-    # courses_reset_at tells other devices to wipe their local course
-    # overlays wholesale, so only a full reset may set it. A semester reset
-    # propagates through the change log + per-semester reconcile instead.
     if semester is None:
         await session.execute(
             update(User).where(User.id == auth.user_id).values(courses_reset_at=now)
