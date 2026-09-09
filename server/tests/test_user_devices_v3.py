@@ -415,3 +415,102 @@ async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> Non
         # polling /changes actually see them.
         state = (await session.execute(select(UserSyncState))).scalar_one()
         assert state.current_revision == max(e.revision for e in entries)
+
+
+async def test_rotated_token_retires_its_predecessor(client) -> None:
+    """A device holds one token of a kind. When the OS rotates it, the old
+    value is dead, and APNs only says so once something is pushed to it.
+    Left active, every rotation added a row, and a push-to-start delivered
+    once per row started one Live Activity per stale token."""
+    headers = bearer(await do_login(client, device="iphone-rot"))
+    body = {
+        "client_device_id": "iphone-rot",
+        "platform": "ios",
+        "push_token": {
+            "provider": "apns",
+            "token_kind": "push_to_start",
+            "token_value": "pts-old",
+            "scope_key": "TigerDuckActivityAttributes",
+        },
+    }
+    old = await client.post("/v3/devices/register", json=body, headers=headers)
+    assert old.status_code == 200, old.text
+    body["push_token"]["token_value"] = "pts-new"
+    new = await client.post("/v3/devices/register", json=body, headers=headers)
+    assert new.status_code == 200, new.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(DevicePushToken).where(
+                        DevicePushToken.token_kind == "push_to_start"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_value = {r.token_value: r.status for r in rows}
+        assert by_value == {"pts-old": "invalidated", "pts-new": "active"}
+
+
+async def test_filling_in_the_scope_retires_the_unscoped_token(client) -> None:
+    """The push-to-start scope (the attributes type name) arrived after rows
+    with an empty scope existed. A client upgrade re-registers the same
+    value with the scope filled in; that must replace the old row, not sit
+    beside it and start a second Live Activity per push."""
+    headers = bearer(await do_login(client, device="iphone-scope"))
+    body = {
+        "client_device_id": "iphone-scope",
+        "platform": "ios",
+        "push_token": {
+            "provider": "apns",
+            "token_kind": "push_to_start",
+            "token_value": "pts-same",
+            "scope_key": "",
+        },
+    }
+    assert (await client.post("/v3/devices/register", json=body, headers=headers)).status_code == 200
+    body["push_token"]["scope_key"] = "TigerDuckActivityAttributes"
+    assert (await client.post("/v3/devices/register", json=body, headers=headers)).status_code == 200
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        rows = (
+            (
+                await s.execute(
+                    select(DevicePushToken).where(
+                        DevicePushToken.token_kind == "push_to_start",
+                        DevicePushToken.token_value == "pts-same",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert {(r.scope_key, r.status) for r in rows} == {
+            ("", "invalidated"),
+            ("TigerDuckActivityAttributes", "active"),
+        }
+
+
+async def test_fcm_tokens_are_standard_only(client) -> None:
+    """Live Activities are ActivityKit's; an FCM push-to-start token would be
+    selected for a schedule job and handed to FCM."""
+    headers = bearer(await do_login(client, device="android-fcm"))
+    response = await client.post(
+        "/v3/devices/register",
+        json={
+            "client_device_id": "android-fcm",
+            "platform": "android",
+            "push_token": {
+                "provider": "fcm",
+                "token_kind": "push_to_start",
+                "token_value": "fcm-tok",
+            },
+        },
+        headers=headers,
+    )
+    assert response.status_code == 422

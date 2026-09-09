@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
@@ -85,6 +85,15 @@ class PushTokenIn(BaseModel):
     environment: Literal["development", "production"] | None = None
     scope_key: str = Field(default="", max_length=160)
 
+    @model_validator(mode="after")
+    def live_activity_tokens_are_apns(self) -> "PushTokenIn":
+        # Live Activities are ActivityKit's; an FCM token of either kind
+        # would be selected for a schedule job and handed to FCM with a
+        # per-activity collapse key it cannot honour.
+        if self.provider == "fcm" and self.token_kind != "standard":
+            raise ValueError("fcm tokens are standard only")
+        return self
+
 
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
@@ -136,6 +145,12 @@ class ScheduleScenario(str, Enum):
 
 
 class ScheduleEventV3(BaseModel):
+    # One occurrence, not one course: the client's timetable slot id is
+    # "{course_no}_{yyyyMMdd}_{period}" and an assignment's is its own id, so a
+    # weekly class posts a fresh source_id each week. That is what lets
+    # `ux_push_jobs_dedupe_active` keep a sent start job on record without
+    # blocking next week's, and what makes `"{scenario}::{source_id}"` name
+    # exactly one Live Activity.
     source_id: str = Field(min_length=1, max_length=128, pattern=r"^[^:]+$")
     scenario: ScheduleScenario
     fire_at: datetime

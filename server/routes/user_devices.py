@@ -21,6 +21,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import (
     AuthSession,
     DevicePushToken,
+    PushTokenKind,
     PushTokenStatus,
     SessionRevokedReason,
     UserDevice,
@@ -291,6 +292,7 @@ async def _upsert_push_token(
         )
         session.add(row)
         await session.flush()
+        await _retire_superseded_tokens(session, device=device, token=row, now=now)
         return row.id
 
     # Same physical token re-registered (possibly from a new device row
@@ -300,7 +302,43 @@ async def _upsert_push_token(
     existing.topic = token.topic
     existing.environment = token.environment
     await session.flush()
+    await _retire_superseded_tokens(session, device=device, token=existing, now=now)
     return existing.id
+
+
+async def _retire_superseded_tokens(
+    session, *, device: UserDevice, token: DevicePushToken, now: datetime
+) -> None:
+    """Invalidate the device's other active tokens of the same kind and scope.
+
+    A device holds one APNs token, one push-to-start token, one FCM token:
+    when the OS rotates one, the value it replaced is dead, and APNs only
+    says so once something is pushed to it. Left active, every rotation
+    added a row, and a pipeline that selects every active token of a kind
+    delivered each push once per row — for a push-to-start, that is one
+    Live Activity per stale token.
+
+    `scope_key` only narrows this for Live Activity update tokens, which
+    are one per running activity. A standard or push-to-start token is one
+    per device whatever its scope says: the push-to-start scope (the
+    attributes type name) was introduced after rows with an empty scope
+    already existed, and a rotation that also filled the scope in must
+    retire the old row rather than sit beside it.
+    """
+    scope = [
+        DevicePushToken.device_id == device.id,
+        DevicePushToken.provider == token.provider,
+        DevicePushToken.token_kind == token.token_kind,
+        DevicePushToken.status == PushTokenStatus.active.value,
+        DevicePushToken.id != token.id,
+    ]
+    if token.token_kind == PushTokenKind.live_activity_update.value:
+        scope.append(DevicePushToken.scope_key == token.scope_key)
+    await session.execute(
+        update(DevicePushToken)
+        .where(*scope)
+        .values(status=PushTokenStatus.invalidated.value, updated_at=now)
+    )
 
 
 @router.get("", response_model=DeviceListV3Response)
