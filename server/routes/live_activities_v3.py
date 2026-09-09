@@ -21,6 +21,7 @@ from server.auth.schemas import (
     LiveActivityRegisterV3Response,
 )
 from server.db import SessionDep
+from server.push.dedupe import activity_end_key
 
 router = APIRouter(prefix="/live-activities", tags=["live-activities"])
 logger = structlog.get_logger(__name__)
@@ -36,6 +37,17 @@ async def register_live_activity(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="device_id_required",
+        )
+
+    # The id has to be the one `/schedule/sync` composes for a start —
+    # "{scenario}::{source_id}" — or a push-started activity and the one the
+    # client registers are two different things to the pipeline: the end
+    # job addresses one and the already-running check looks for the other.
+    scenario = payload.snapshot.get("scenario")
+    if scenario is not None and payload.activity_id != f"{scenario}::{payload.source_id}":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="activity_id_mismatch",
         )
 
     token_hash = hashlib.sha256(payload.update_token_hex.encode()).hexdigest()
@@ -95,7 +107,7 @@ async def register_live_activity(
     token_id = result.scalar_one()
 
     # Schedule an "end" push at countdown_target.
-    dedupe_key = f"la_end:{payload.activity_id}"
+    dedupe_key = activity_end_key(auth.device_id, payload.activity_id)
     end_job_id = None
     if payload.countdown_target > now:
         end_stmt = (
@@ -107,11 +119,13 @@ async def register_live_activity(
                 channel="schedule",
                 scenario="activityEnd",
                 fire_at=payload.countdown_target,
+                # Snapshot first, routing keys after: a snapshot carrying
+                # one of our keys must not redirect the job.
                 payload={
+                    **payload.snapshot,
                     "kind": "live_activity_end",
                     "activity_id": payload.activity_id,
                     "source_id": payload.source_id,
-                    **payload.snapshot,
                 },
             )
             .on_conflict_do_update(
@@ -129,10 +143,10 @@ async def register_live_activity(
                 set_={
                     "fire_at": payload.countdown_target,
                     "payload": {
+                        **payload.snapshot,
                         "kind": "live_activity_end",
                         "activity_id": payload.activity_id,
                         "source_id": payload.source_id,
-                        **payload.snapshot,
                     },
                     "status": PushJobStatus.pending.value,
                     "updated_at": now,

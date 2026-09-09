@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import structlog
-from fastapi import APIRouter, status
+from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -13,6 +13,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob, PushJobStatus
 from server.auth.schemas import ScheduleSyncV3Request, ScheduleSyncV3Response
 from server.db import SessionDep
+from server.push.dedupe import schedule_key, schedule_prefix
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 logger = structlog.get_logger(__name__)
@@ -20,8 +21,8 @@ logger = structlog.get_logger(__name__)
 CHANNEL = "schedule"
 
 
-def _dedupe_key(source_id: str, scenario: str) -> str:
-    return f"schedule:{source_id}:{scenario}"
+def _activity_id(source_id: str, scenario: str) -> str:
+    return f"{scenario}::{source_id}"
 
 
 @router.post("/sync", response_model=ScheduleSyncV3Response)
@@ -30,12 +31,25 @@ async def sync_schedule(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    if auth.device_id is None:
+        # A schedule is per device — its push-to-start token, its end jobs
+        # — and `/live-activities/register` already refuses a session
+        # without one, so a start it filed could never be ended.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
+        )
     now = datetime.now(UTC)
     incoming_keys = {
-        _dedupe_key(e.source_id, e.scenario.value) for e in payload.events
+        schedule_key(auth.device_id, e.source_id, e.scenario.value)
+        for e in payload.events
     }
 
-    # Cancel pending schedule jobs whose key is no longer in the upload.
+    # Only this device's own schedule jobs are up for replacement. The
+    # channel is shared with the `la_end:{activity_id}` jobs that
+    # `/live-activities/register` files for a running activity's end push;
+    # sweeping the whole channel cancelled those on every sync, so the
+    # activity never received its end and the pipeline's already-running
+    # check could not see it either.
     existing = (
         (
             await session.execute(
@@ -44,6 +58,9 @@ async def sync_schedule(
                     PushJob.user_id == auth.user_id,
                     PushJob.channel == CHANNEL,
                     PushJob.status == PushJobStatus.pending.value,
+                    PushJob.dedupe_key.startswith(
+                        schedule_prefix(auth.device_id), autoescape=True
+                    ),
                 )
                 .with_for_update(skip_locked=True)
             )
@@ -65,7 +82,7 @@ async def sync_schedule(
     # keys are silently skipped).
     values = []
     for event in payload.events:
-        key = _dedupe_key(event.source_id, event.scenario.value)
+        key = schedule_key(auth.device_id, event.source_id, event.scenario.value)
         if key in surviving_keys:
             continue
         if event.fire_at <= now:
@@ -78,11 +95,22 @@ async def sync_schedule(
                 "channel": CHANNEL,
                 "scenario": event.scenario.value,
                 "fire_at": event.fire_at,
+                # The snapshot is spread first: the routing keys are ours,
+                # and a snapshot that happened to carry one must not
+                # redirect the job.
                 "payload": {
+                    **event.snapshot,
                     "kind": "schedule",
                     "scenario": event.scenario.value,
                     "source_id": event.source_id,
-                    **event.snapshot,
+                    # The id the started activity carries in its attributes,
+                    # and so the key its update token is filed under when
+                    # the client registers it — see `composedActivityId` on
+                    # the client's LiveActivitySnapshot, which is
+                    # "{scenario}::{sourceId}". Composed here rather than
+                    # sent by the client so the end job's dedupe key and the
+                    # update token's scope always agree with it.
+                    "activity_id": _activity_id(event.source_id, event.scenario.value),
                 },
             }
         )
@@ -106,6 +134,7 @@ async def cancel_schedule(
     session: SessionDep,
 ):
     now = datetime.now(UTC)
+    prefix = f"{schedule_prefix(auth.device_id)}{source_id}:"
     jobs = (
         (
             await session.execute(
@@ -113,7 +142,7 @@ async def cancel_schedule(
                 .where(
                     PushJob.user_id == auth.user_id,
                     PushJob.channel == CHANNEL,
-                    PushJob.dedupe_key.like(f"schedule:{source_id}:%"),
+                    PushJob.dedupe_key.startswith(prefix, autoescape=True),
                     PushJob.status == PushJobStatus.pending.value,
                 )
                 .with_for_update(skip_locked=True)

@@ -8,7 +8,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from server.auth.models import PushJob, PushJobStatus
+from server.auth.models import PushJob, PushJobStatus, UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 
@@ -113,15 +113,23 @@ async def test_sync_inserts_and_reports_counts(client: AsyncClient):
             .scalars()
             .all()
         )
+        # Filed under the device that posted the schedule: each of the
+        # user's devices keeps its own.
+        device = login["device_id"]
         assert {j.dedupe_key for j in jobs} == {
-            "schedule:slot-1:classPreparing",
-            "schedule:slot-1:inClass",
+            f"schedule:{device}:slot-1:classPreparing",
+            f"schedule:{device}:slot-1:inClass",
         }
         assert all(j.status == PushJobStatus.pending.value for j in jobs)
         prep = next(j for j in jobs if j.scenario == "classPreparing")
         assert prep.payload["kind"] == "schedule"
         assert prep.payload["source_id"] == "slot-1"
         assert prep.payload["title"] == "Intro to CS"
+        # The attribute the start push creates the activity with. Has to be
+        # the client's `composedActivityId` ("{scenario}::{sourceId}"),
+        # because that is the key the client registers the activity's
+        # update token under and the end job is filed by.
+        assert prep.payload["activity_id"] == "classPreparing::slot-1"
 
 
 async def test_sync_replaces_previous_events(client: AsyncClient):
@@ -169,7 +177,7 @@ async def test_resync_does_not_revive_already_sent_push(
 
     login = await _login(client)
     fire = datetime.now(timezone.utc) + timedelta(minutes=5)
-    dedupe_key = "schedule:slot-sent:classPreparing"
+    dedupe_key = f"schedule:{login['device_id']}:slot-sent:classPreparing"
 
     await client.post(
         "/v3/schedule/sync",
@@ -245,3 +253,115 @@ async def test_cancel_by_source_removes_all_scenarios(client: AsyncClient):
     body = final.json()
     assert body["pending"] == 1
     assert body["replaced"] == 0
+
+
+async def test_sync_leaves_the_end_jobs_alone(client: AsyncClient, prepared_engine):
+    """`/live-activities/register` files a running activity's end push on
+    the same channel, under `la_end:{activity_id}`. Sweeping the whole
+    channel cancelled it on every sync, so the activity never ended and the
+    pipeline could not see it running."""
+    login = await _login(client)
+    fire = datetime.now(timezone.utc) + timedelta(minutes=30)
+    factory = build_session_factory(prepared_engine)
+
+    async with factory() as s:
+        device = (
+            await s.execute(
+                select(UserDevice).where(UserDevice.client_device_id == DEVICE_ID)
+            )
+        ).scalar_one()
+        s.add(
+            PushJob(
+                user_id=device.user_id,
+                device_id=device.id,
+                dedupe_key=f"la_end:{device.id}:inClass::slot-1",
+                channel="schedule",
+                scenario="activityEnd",
+                fire_at=fire,
+                payload={"kind": "live_activity_end", "activity_id": "inClass::slot-1"},
+            )
+        )
+        await s.commit()
+
+    response = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-2", "classPreparing", fire, "B")]},
+    )
+    assert response.json() == {"pending": 1, "replaced": 0}
+
+    async with factory() as s:
+        end_job = (
+            await s.execute(
+                select(PushJob).where(PushJob.dedupe_key.like("la_end:%:inClass::slot-1"))
+            )
+        ).scalar_one()
+        assert end_job.status == PushJobStatus.pending.value
+
+
+async def test_each_device_keeps_its_own_schedule(client: AsyncClient):
+    """Two devices on one account post different schedules; neither may
+    cancel or shadow the other's. Keyed per user alone, the second sync
+    collided on the dedupe index and only the first device ever got a
+    start."""
+    fire = datetime.now(timezone.utc) + timedelta(hours=1)
+    phone = await _login(client)
+    client.app.state.moodle_verifier = StaticMoodleVerifier(
+        MoodleVerifyResult(ok=True, username="whatever")
+    )
+    tablet_login = await client.post(
+        "/v3/auth/login",
+        json={
+            "student_id": STUDENT_ID,
+            "password": "pw",
+            "moodle_token": "tok",
+            "device_info": {"client_device_id": "device-tablet", "platform": "ipados"},
+        },
+    )
+    tablet = tablet_login.json()
+
+    first = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(phone),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+    assert first.json() == {"pending": 1, "replaced": 0}
+
+    second = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(tablet),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+    # A job of its own, and nothing of the phone's replaced.
+    assert second.json() == {"pending": 1, "replaced": 0}
+
+    # The response counts alone cannot tell this from the old per-user key,
+    # where the second insert silently collided and reported the same
+    # numbers: there must be two rows, one per device.
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        jobs = (
+            (
+                await s.execute(
+                    select(PushJob).where(
+                        PushJob.channel == "schedule",
+                        PushJob.status == PushJobStatus.pending.value,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(jobs) == 2
+    assert len({j.device_id for j in jobs}) == 2
+    assert {j.dedupe_key.split(":")[1] for j in jobs} == {phone["device_id"], tablet["device_id"]}
+
+    # Cancelling by source on the tablet leaves the phone's job standing.
+    cancel = await client.delete("/v3/schedule/slot-1", headers=_bearer(tablet))
+    assert cancel.json()["cancelled"] == 1
+    phone_again = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(phone),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+    assert phone_again.json() == {"pending": 1, "replaced": 0}

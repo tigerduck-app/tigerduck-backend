@@ -125,7 +125,7 @@ async def test_register_live_activity_token_upserts(client) -> None:
         jobs = (
             await s.execute(
                 select(PushJob).where(
-                    PushJob.dedupe_key == f"la_end:{ACTIVITY_ID}"
+                    PushJob.dedupe_key.like(f"la_end:%:{ACTIVITY_ID}")
                 )
             )
         ).scalars().all()
@@ -156,8 +156,23 @@ async def test_end_job_source_id_comes_from_top_level_field(client) -> None:
         job = (
             await s.execute(
                 select(PushJob).where(
-                    PushJob.dedupe_key == f"la_end:{ACTIVITY_ID}"
+                    PushJob.dedupe_key.like(f"la_end:%:{ACTIVITY_ID}")
                 )
             )
         ).scalar_one()
         assert job.payload["source_id"] == "slot-live"
+
+
+async def test_register_refuses_an_activity_id_that_is_not_the_composed_one(client) -> None:
+    """The pipeline files the start under "{scenario}::{source_id}" and looks
+    the running activity up by the same id; a client that registered under
+    any other could be started twice and never ended."""
+    login = await _login(client)
+    target = datetime.now(timezone.utc) + timedelta(minutes=15)
+    body = _register_body(target, "d" * 128)
+    body["activity_id"] = "classPreparing::somewhere-else"
+    response = await client.post(
+        "/v3/live-activities/register", headers=_bearer(login), json=body
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "activity_id_mismatch"

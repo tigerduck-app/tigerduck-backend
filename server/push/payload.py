@@ -55,6 +55,18 @@ def _to_swift_reference_seconds(value: Any) -> Any:
     return value
 
 
+def _to_unix_seconds(value: Any) -> int | None:
+    """Unix seconds for a snapshot date, or None when there is no date.
+
+    The `aps` dictionary's own date keys (`stale-date`, `dismissal-date`)
+    are Unix seconds, unlike the content-state's Swift reference seconds.
+    """
+    reference = _to_swift_reference_seconds(value)
+    if isinstance(reference, (int, float)):
+        return int(reference + _SWIFT_REFERENCE_EPOCH)
+    return None
+
+
 def _normalize_snapshot_for_apns(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Return a copy of the snapshot with Date fields converted to the
     format Swift's default JSONDecoder expects. Non-destructive."""

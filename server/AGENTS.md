@@ -147,10 +147,36 @@ into the backend container via `docker-compose.yml`.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index.
-- A Live Activity job addresses one running activity, so it is delivered
-  to that activity's own `live_activity_update` token (scoped by
-  `scope_key` = activity id), never to a `push_to_start` token — a PTS
-  token can only start an activity, not update or end one.
+- Two kinds of Live Activity job share the `schedule` channel, told apart
+  by `payload["kind"]`. A start (`schedule`, from `/schedule/sync`) goes to
+  the device's `push_to_start` token as an `event: start` push carrying
+  `attributes-type` + `attributes` + `alert`; an end (`live_activity_end`,
+  from `/live-activities/register`) goes to that activity's own
+  `live_activity_update` token (scoped by `scope_key` = activity id).
+  Neither token can do the other's job. `activity_id` is
+  `"{scenario}::{source_id}"` — the client's `composedActivityId` — and a
+  start is cancelled (`activity_already_running`) while the device's
+  `la_end:{device_id}:{activity_id}` job is still waiting to fire, but only
+  before the job's first delivery row exists (a retry round must not
+  cancel a push that already went out). A push-to-start token's
+  `scope_key` is the `ActivityAttributes` type name the client registered
+  it under, and the start push names it as `attributes-type`.
+- Both Live Activity job keys live in `push/dedupe.py` and are filed per
+  device: `schedule:{device_id}:{source_id}:{scenario}` for a start,
+  `la_end:{device_id}:{activity_id}` for an end. `/schedule/sync`,
+  `/live-activities/register` and a semester-scoped `DELETE
+  /sync/courses` all refuse a session without a device id. Neither key
+  carries an occurrence because the client's `source_id` already does
+  (`{course_no}_{yyyyMMdd}_{period}`); a re-sync of the same occurrence
+  finds its own sent job and leaves it alone.
+- An FCM token is `standard` only; Live Activity token kinds are APNs.
+- Registering a push token retires the device's other active tokens of
+  the same kind (`_retire_superseded_tokens`; scope-narrowed only for
+  Live Activity update tokens); a rotated token must not keep its
+  predecessor delivering.
+- `/sync/full` tags each course tombstone with `deleted_by_reset` and
+  `deleted_by_this_device`; a client ignores a tombstone that is both,
+  the same rule `upload_courses` applies when it releases them.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
