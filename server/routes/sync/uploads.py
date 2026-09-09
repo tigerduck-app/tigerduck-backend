@@ -321,4 +321,13 @@ async def upload_courses(
         if device:
             device.last_seen_at = datetime.now(UTC)
     await session.commit()
-    return {"upserted": upserted, "skipped_tombstoned": skipped, "overrides_applied": overrides_applied}
+    return {
+        "upserted": upserted,
+        "skipped_tombstoned": skipped,
+        "overrides_applied": overrides_applied,
+        # What actually landed. A 200 with `skipped_tombstoned` > 0 is not
+        # "the server has seen these courses", and a client that records
+        # it as such retires a hand-typed course's protection on the
+        # strength of an upload the server refused.
+        "accepted_keys": sorted(uploaded_keys),
+    }

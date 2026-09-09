@@ -124,8 +124,8 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         await snap_session.connection(
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return await _read_full_snapshot(snap_session, auth.user_id)
-async def _read_full_snapshot(session, user_id):
+        return await _read_full_snapshot(snap_session, auth.user_id, auth.device_id)
+async def _read_full_snapshot(session, user_id, device_id):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
 
@@ -198,12 +198,22 @@ async def _read_full_snapshot(session, user_id):
     return {
         "current_revision": state.current_revision if state else 0,
         "courses_reset_at": _iso(user.courses_reset_at) if user else None,
+        # A reset tombstone does not bind the device that wrote it (see
+        # `upload_courses`), and the client applies the same rule: between
+        # its reset's DELETE and the re-upload that releases them, a poll
+        # would otherwise read its own tombstones as "hide everything".
+        # Authorship is resolved here rather than by sending the device id,
+        # so the client needs nothing it does not already have.
         "course_tombstones": [
             {
                 "course_key": t.course_key,
                 "course_no": t.course_no,
                 "semester": t.semester,
                 "deleted_at": _iso(t.deleted_at),
+                "deleted_by_reset": t.deleted_by_reset,
+                "deleted_by_this_device": (
+                    device_id is not None and t.deleted_by_device_id == device_id
+                ),
             }
             for t in tombstones
         ],

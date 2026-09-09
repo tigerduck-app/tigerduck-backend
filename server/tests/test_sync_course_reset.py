@@ -83,7 +83,53 @@ async def test_stale_device_cannot_resurrect_a_reset_semester(client) -> None:
     stale = await _upload(client, android, KEPT + DROPPED)
     assert stale.status_code == 200
     assert stale.json()["skipped_tombstoned"] == len(DROPPED)
+    # The body says what landed, so A can tell the accepted keys apart.
+    assert stale.json()["accepted_keys"] == sorted(f"client:{SEMESTER}:{no}" for no in KEPT)
     assert await _server_course_nos(client, android) == sorted(KEPT)
+
+
+async def test_a_second_reset_keeps_binding_the_other_device(client) -> None:
+    """Two taps on Reset while the first is still refetching. The second
+    finds no rows to delete; it used to clear the term's tombstones and
+    write none, and every other device's next refresh put the pre-reset
+    roster straight back."""
+    android = await _login(client, "android-twice", "android")
+    iphone = await _login(client, "iphone-twice", "ios")
+    assert (await _upload(client, android, KEPT + DROPPED)).status_code == 200
+
+    first = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
+    assert first.json()["deleted"] == len(KEPT) + len(DROPPED)
+    second = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
+    assert second.json()["deleted"] == 0
+
+    stale = await _upload(client, android, KEPT + DROPPED)
+    assert stale.json()["skipped_tombstoned"] == len(KEPT) + len(DROPPED)
+    assert await _server_course_nos(client, android) == []
+
+    # The author is still free to fill the term back in.
+    assert (await _upload(client, iphone, KEPT)).status_code == 200
+    assert await _server_course_nos(client, iphone) == sorted(KEPT)
+
+
+async def test_a_reset_lifts_single_deletes_but_binds_by_reset(client) -> None:
+    """Deleting every course by hand and then resetting must let the portal
+    roster come back on the resetting device (the single-delete tombstones
+    bound it too), while a reset tombstone another device left behind is
+    re-authored rather than dropped."""
+    iphone = await _login(client, "iphone-mixed", "ios")
+    assert (await _upload(client, iphone, KEPT)).status_code == 200
+    for no in KEPT:
+        assert (
+            await client.delete(f"/v3/sync/courses/client:{SEMESTER}:{no}", headers=iphone)
+        ).status_code == 200
+    assert (
+        await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
+    ).status_code == 200
+    # Nothing binds the author any more: the hand deletes were lifted and
+    # there were no rows left to tombstone by reset.
+    assert await _tombstones(client, iphone) == {}
+    assert (await _upload(client, iphone, KEPT)).status_code == 200
+    assert await _server_course_nos(client, iphone) == sorted(KEPT)
 
 
 async def test_explicit_re_add_still_clears_a_reset_tombstone(client) -> None:
@@ -108,3 +154,50 @@ async def test_explicit_re_add_still_clears_a_reset_tombstone(client) -> None:
     assert re_added.status_code == 200
     assert re_added.json()["skipped_tombstoned"] == 0
     assert await _server_course_nos(client, android) == [DROPPED[0]]
+
+
+async def _tombstones(client, headers: dict) -> dict[str, dict]:
+    response = await client.get("/v3/sync/full", headers=headers)
+    assert response.status_code == 200
+    return {
+        row["course_no"]: row
+        for row in response.json()["course_tombstones"]
+        if row["semester"] == SEMESTER
+    }
+
+
+async def test_snapshot_says_who_wrote_each_tombstone(client) -> None:
+    """The client applies the same rule the upload route does: a reset
+    tombstone does not bind its author. Between the reset's DELETE and the
+    re-upload that releases them, the resetting device's own poll would
+    otherwise read them as "hide everything here" -- and the refetch,
+    which filters by what is hidden, would then upload nothing and never
+    release them."""
+    android = await _login(client, "android-who", "android")
+    iphone = await _login(client, "iphone-who", "ios")
+    assert (await _upload(client, android, KEPT + DROPPED)).status_code == 200
+
+    # A single delete from the phone binds everyone, the phone included.
+    single = await client.delete(
+        f"/v3/sync/courses/client:{SEMESTER}:{KEPT[0]}", headers=iphone
+    )
+    assert single.status_code == 200
+    on_phone = await _tombstones(client, iphone)
+    on_android = await _tombstones(client, android)
+    assert on_phone[KEPT[0]]["deleted_by_reset"] is False
+    assert on_phone[KEPT[0]]["deleted_by_this_device"] is True
+    assert on_android[KEPT[0]]["deleted_by_this_device"] is False
+
+    # A reset from the phone binds the tablet, not the phone. (It also
+    # replaces the term's earlier tombstones: the reset is the deletion of
+    # record for everything the term held.)
+    assert (
+        await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=iphone)
+    ).status_code == 200
+    on_phone = await _tombstones(client, iphone)
+    on_android = await _tombstones(client, android)
+    assert KEPT[0] not in on_phone
+    assert on_phone[DROPPED[0]]["deleted_by_reset"] is True
+    assert on_phone[DROPPED[0]]["deleted_by_this_device"] is True
+    assert on_android[DROPPED[0]]["deleted_by_reset"] is True
+    assert on_android[DROPPED[0]]["deleted_by_this_device"] is False
