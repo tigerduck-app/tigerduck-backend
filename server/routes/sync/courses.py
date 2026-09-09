@@ -54,10 +54,41 @@ async def delete_all_courses(
         .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
     )).all()
 
-    # Clear the tombstones in scope so the immediate re-upload isn't blocked.
-    # This runs even when no course row matched: a user who deleted every
-    # course one by one and then resets still needs those tombstones gone.
+    # Replace the tombstones in scope rather than merely clearing them.
+    #
+    # Clearing was enough to unblock this device's immediate re-upload, and
+    # it still is -- a reset tombstone does not bind its own author. What it
+    # was not enough for is every *other* device: with nothing on record, a
+    # phone that had not yet reconciled would push its pre-reset roster back
+    # on its next refresh, `upload_courses` had no reason to refuse it, and
+    # the term the user had just reset filled straight back up.
+    #
+    # The clear runs first and unconditionally so the rewrite also covers a
+    # user who deleted every course one by one and then reset: those older
+    # single-delete tombstones would otherwise keep binding this device.
+    #
+    # Only a semester reset writes them. A full reset already propagates
+    # through `courses_reset_at` below, which tells every device to drop its
+    # course overlay wholesale; tombstoning on top of that would put a
+    # permanent marker on every course of every past term, and no refresh
+    # re-uploads a term the student finished years ago -- their timetables
+    # would stay blank for good, on the resetting device too.
     await session.execute(delete(UserCourseTombstone).where(*tombstone_scope))
+    if rows and semester:
+        await session.execute(
+            pg_insert(UserCourseTombstone).values([
+                {
+                    "user_id": auth.user_id,
+                    "course_key": row.course_key,
+                    "semester": row.semester,
+                    "course_no": row.course_no,
+                    "deleted_at": now,
+                    "deleted_by_device_id": auth.device_id,
+                    "deleted_by_reset": True,
+                }
+                for row in rows
+            ])
+        )
 
     # courses_reset_at tells other devices to wipe their local course
     # overlays wholesale, so only a full reset may set it. A semester reset

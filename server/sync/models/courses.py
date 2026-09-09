@@ -123,6 +123,12 @@ class UserCourseTombstone(Base):
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Whether a semester reset wrote this row rather than a single-course
+    # delete. Only a reset tombstone lets its own author upload the key
+    # again -- see `upload_courses`. Both kinds bind every other device.
+    deleted_by_reset: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false(), default=False
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "course_key"),
