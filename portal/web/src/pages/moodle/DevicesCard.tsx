@@ -30,19 +30,34 @@ export function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { 
 
   const platforms = ["ios", "ipados", "macos", "android"];
 
+  const APPLE_PLATFORMS = ["ios", "ipados", "macos", "watchos"];
+
   const filtered = devices.filter((d) => {
     if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return ["ios", "ipados", "macos", "watchos"].includes(d.platform);
+    if (platformFilter === "apple") return APPLE_PLATFORMS.includes(d.platform);
     return d.platform === platformFilter;
   });
+
+  // The two apps version independently, so an app version only identifies a
+  // release together with the family it shipped from — "2.0.1" is a different
+  // build on each. Counting the bare string merged them into one slice.
+  // Family, not platform: an iPhone and an iPad run the same Apple build.
+  const familyLabel = (p: string) =>
+    APPLE_PLATFORMS.includes(p) ? "Apple"
+      : p === "android" || p === "wearos" ? "Android"
+      : platformLabel(p);
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};
     for (const d of filtered) {
-      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      const v = key === "os_version"
+        ? `${platformLabel(d.platform)} ${d[key] ?? "?"}`
+        : `${familyLabel(d.platform)} ${d[key] ?? "?"}`;
       map[v] = (map[v] ?? 0) + 1;
     }
-    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+    // Label breaks ties so the order is stable between renders and the two
+    // families stay contiguous rather than interleaving at equal counts.
+    return Object.entries(map).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   };
 
   return (
