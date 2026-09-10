@@ -3,6 +3,7 @@
 
 import { Monitor, Tablet, Smartphone } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { PLATFORM_LABELS, platformLabel } from "@/lib/platform";
 import type { SyncDevice } from "./types";
 
 export function fmt(iso: string | null): string {
@@ -57,12 +58,9 @@ export const CHART_COLORS = [
   "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
 ];
 
-export const PLATFORM_LABELS: Record<string, string> = {
-  ios: "iOS", ipados: "iPadOS", macos: "macOS", watchos: "watchOS",
-  android: "Android", wearos: "Wear OS", web: "Web",
-};
-
-export function platformLabel(p: string) { return PLATFORM_LABELS[p] ?? p; }
+// Platform naming is shared with the devices pages — see lib/platform.
+// Re-exported here so the Moodle tabs can keep importing it from this module.
+export { PLATFORM_LABELS, platformLabel };
 
 export const PLATFORM_ORDER: Record<string, number> = {
   android: 0, wearos: 1, ios: 2, ipados: 3, macos: 4, watchos: 5, web: 6,

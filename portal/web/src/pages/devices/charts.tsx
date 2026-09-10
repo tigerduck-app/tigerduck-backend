@@ -10,7 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { DeviceRow } from "@/types/api";
-import { platformLabel } from "./format";
+import { familyLabel, isApplePlatform, platformLabel } from "@/lib/platform";
 
 export const CHART_COLORS = [
   "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
@@ -81,21 +81,11 @@ export function DeviceStats({ items }: { items: DeviceRow[] }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
   const platforms = ["ios", "ipados", "macos", "android"];
-  const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
   const filtered = items.filter((d) => {
     if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
+    if (platformFilter === "apple") return isApplePlatform(d.platform);
     return d.platform === platformFilter;
   });
-
-  // The two apps version independently, so an app version only identifies a
-  // release together with the family it shipped from — "2.0.1" is a different
-  // build on each. Counting the bare string merged them into one slice.
-  // Family, not platform: an iPhone and an iPad run the same Apple build.
-  const familyLabel = (p: string) =>
-    APPLE_PLATFORMS.has(p) ? "Apple"
-      : p === "android" || p === "wearos" ? "Android"
-      : platformLabel(p);
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};

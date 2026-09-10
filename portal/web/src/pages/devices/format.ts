@@ -17,19 +17,8 @@ export const TABS: Array<{
   { key: "android", label: "Android", match: (d) => d.platform === "android" },
 ];
 
-export const PLATFORM_LABELS: Record<string, string> = {
-  ios: "iOS",
-  ipados: "iPadOS",
-  macos: "macOS",
-  watchos: "watchOS",
-  android: "Android",
-  wearos: "Wear OS",
-  web: "Web",
-};
-
-export function platformLabel(p: string) {
-  return PLATFORM_LABELS[p] ?? p;
-}
+// Platform naming is shared with the moodle pages — see lib/platform.
+export { PLATFORM_LABELS, platformLabel } from "@/lib/platform";
 
 export function formatTs(ts: string): string {
   try {
