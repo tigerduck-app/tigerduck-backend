@@ -103,7 +103,7 @@ async def postgres_health(database_url: str, timeout_s: float = 3.0) -> dict[str
         except asyncio.TimeoutError:
             alembic_head = None
         rows: dict[str, int | str] = {}
-        for table in ("device_registrations", "bulletins", "scheduled_pushes"):
+        for table in ("device_registrations", "bulletins", "push_jobs"):
             try:
                 rows[table] = await asyncio.wait_for(
                     conn.fetchval(f"SELECT count(*) FROM {table}"),

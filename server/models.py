@@ -6,10 +6,14 @@ Design notes
   is the Push-to-Start token reported by iOS. `device_token_hex` is the
   standard APNs device token (not used in Checkpoint 1–3; reserved for
   later standard-alert pushes).
-* `ScheduledPush` — future push instructions. `push_id` is deterministic
-  (`{device_id}:{source_id}:{scenario}`) so client sync can UPSERT without
-  creating duplicates. `payload_json` holds the full LiveActivitySnapshot
-  JSON — dispatcher just reads and ships it.
+* `CustomPushSend` — one summary row per operator custom push. Written and
+  read only by the portal (raw SQL); the backend never touches it. The model
+  exists so Alembic can see the table — without it, autogenerate proposes
+  dropping a table the portal depends on.
+
+`ScheduledPush` and `LiveActivityUpdateToken` used to live here. `bfa32fc`
+deleted the v2 push machinery that was their only reader and writer, and the
+migration that drops the two now-unreachable tables follows it.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     func,
@@ -88,6 +93,17 @@ class DeviceRegistration(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        # Partial index the bulletin dispatcher's targeting query rides on.
+        # Declared here so it is part of `Base.metadata`; without it Alembic
+        # reads the database's copy as an index the models no longer want.
+        Index(
+            "ix_devices_class_enabled",
+            "device_class",
+            postgresql_where=sa.text("server_push_enabled = true"),
+        ),
     )
 
 
@@ -204,3 +220,29 @@ class CustomPushDispatch(Base):
             postgresql_where=(status == "pending"),
         ),
     )
+
+
+class CustomPushSend(Base):
+    """One row per operator custom push, powering the portal's "recent sends"
+    list. The portal writes and reads it with raw SQL (see
+    `portal/app/routes/custom_push.py`); nothing in `server/` uses it.
+
+    It is mapped here purely so it exists in `Base.metadata`. Alembic diffs the
+    database against that metadata, so an unmapped table reads as one the
+    models no longer want and autogenerate emits `op.drop_table` for it. Keep
+    this class in sync with `b2e4c6a8f0d1_custom_push_sends.py`."""
+
+    __tablename__ = "custom_push_sends"
+
+    request_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    # 'record' (also stored as a bulletin) or 'popup' (ephemeral).
+    kind: Mapped[str] = mapped_column(String(16))
+    # Comma-joined target classes, e.g. "iphone,android".
+    target_classes: Mapped[str] = mapped_column(String(128))
+    total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_custom_push_sends_created_at", "created_at"),)

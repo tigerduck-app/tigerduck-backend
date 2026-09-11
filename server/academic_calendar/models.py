@@ -27,6 +27,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
@@ -100,6 +101,7 @@ class AcademicHoliday(Base):
 
     __table_args__ = (
         CheckConstraint("end_date >= start_date", name="chk_holiday_range"),
+        Index("ix_academic_holidays_start", "start_date"),
     )
 
 
@@ -110,7 +112,7 @@ class UserHolidayOverride(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
     )
     holiday_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("academic_holidays.id", ondelete="CASCADE")
@@ -130,4 +132,7 @@ class UserHolidayOverride(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "holiday_id", name="ux_user_holiday_override"),
+        # Named explicitly rather than via `index=True`, which would derive
+        # `ix_user_holiday_overrides_user_id` and not match the database.
+        Index("ix_user_holiday_overrides_user", "user_id"),
     )
