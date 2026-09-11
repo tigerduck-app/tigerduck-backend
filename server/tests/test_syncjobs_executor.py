@@ -6,7 +6,7 @@ import base64
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
@@ -473,5 +473,121 @@ async def test_submission_probe_token_invalid_disables_job(
     assert job.last_error == "credential_invalid"
     await db_session.refresh(account)
     assert account.credential_status == "invalid"
+
+
+async def test_submission_probe_rate_limit_reaches_backoff(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A rate limit on the whole probe is not a single assignment's
+    failure -- every remaining probe would fail identically, so it must
+    reach the same backoff `fetch_assignments` already gets, not be
+    swallowed as routine probe noise."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def rate_limited_probe(*, token, assignment_ids, max_concurrency):
+        raise MoodleRateLimited("http_429")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", rate_limited_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "school_rate_limited"
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+
+
+async def test_submission_probe_db_error_does_not_roll_back_assignment_sync(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A genuine database error while refreshing submission status (not a
+    Moodle call) must not roll back the assignment list sync that already
+    succeeded in the same transaction, and must not be recorded as a probe
+    failure."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def poisoning_select(session, *, user_id, now, window_hours):
+        # A real database-level error, not a mocked Python exception --
+        # this proves the savepoint actually protects the session, rather
+        # than merely proving that some exception gets caught somewhere.
+        await session.execute(text("SELECT 1/0"))
+        return []  # pragma: no cover - unreachable, the line above raises
+
+    monkeypatch.setattr(
+        "server.syncjobs.executor.select_assignment_ids", poisoning_select
+    )
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_success_at is not None
+    assert job.last_error is None
+
+    rows = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1  # apply_fetched_assignments's write survived
+
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+
+
+async def test_submission_status_settings_are_threaded_through(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A non-default window/concurrency setting must actually reach
+    select_assignment_ids and the fetcher, not just exist in config."""
+    await _setup_user_job(db_session)
+    seen: dict = {}
+
+    async def recording_probe(*, token, assignment_ids, max_concurrency):
+        seen["assignment_ids"] = list(assignment_ids)
+        seen["max_concurrency"] = max_concurrency
+        return {}
+
+    # Due in 60h: inside a widened 72h window, outside the *default* 48h
+    # window -- proves window_hours actually comes from settings rather
+    # than being hardcoded to the default.
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=60))]
+    )
+    settings = test_settings.model_copy(
+        update={
+            "submission_status_window_hours": 72,
+            "submission_status_max_concurrency": 9,
+        }
+    )
+    worker = _worker(prepared_engine, settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", recording_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert seen["assignment_ids"] == [1]
+    assert seen["max_concurrency"] == 9
 
 

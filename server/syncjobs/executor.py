@@ -55,6 +55,7 @@ from server.syncjobs.models import (
 from server.syncjobs.moodle_client import (
     AssignmentFetcher,
     CourseFetcher,
+    MoodleClientError,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -407,36 +408,75 @@ async def _refresh_submission_status(
 ) -> None:
     """Best-effort probe of assignments about to enter a reminder window.
 
-    Deliberately swallows everything except an invalid token: the assignment
-    list already landed and the run is a success, and a Moodle hiccup here
-    must not roll that back. An invalid token is different: every later
-    call would fail identically, so it propagates bare for the caller to
-    convert into `CredentialInvalid`, the same way every other Moodle call
-    site in `_execute_job` does — so the job ends up disabled rather than
-    silently retried.
+    The database calls run inside a savepoint (`session.begin_nested()`):
+    the assignment list sync already succeeded earlier in this same
+    transaction, and a failed statement in `select_assignment_ids` or
+    `apply_submission_status` — even a plain `SELECT` — would otherwise
+    leave `session` unusable until rolled back, surfacing much later as a
+    misleading `PendingRollbackError` when `_execute_job`'s own commit
+    runs and discarding the assignment sync along with it. The savepoint
+    contains that damage to just this probe's own database work.
+
+    The Moodle fetch and the two database calls are handled differently on
+    purpose — they are not the same kind of failure:
+
+    * `MoodleTokenInvalid` propagates for the caller to convert into
+      `CredentialInvalid`, the same way every other Moodle call site in
+      `_execute_job` does, so the job ends up disabled rather than
+      silently retried.
+    * Batch-level `MoodleRateLimited` / `MoodleUnreachable` propagate too,
+      to the same backoff handling `fetch_assignments` already gets:
+      every remaining probe would fail identically, which is a refusal of
+      the whole probe, not a single assignment's failure, so it is not
+      this function's to swallow. (These come from the HTTP call, not the
+      database, so the savepoint above is incidental to them.)
+    * Anything else the fetch raises is unanticipated — swallowed, logged
+      at `error`, or at `warning` for a residual `MoodleClientError`,
+      matching the probe's own two-tier policy for the same distinction.
+    * A database error from either DB call is not a probe failure and is
+      never logged as one: caught separately, after the savepoint has
+      already undone the damage, under its own log event so it can never
+      be mistaken for routine Moodle noise.
     """
     settings = worker.settings
     try:
-        assignment_ids = await select_assignment_ids(
-            session,
-            user_id=user_id,
-            now=now,
-            window_hours=settings.submission_status_window_hours,
-        )
-        if not assignment_ids:
-            return
-        fetched = await worker.fetcher.fetch_submission_status(
-            token=token,
-            assignment_ids=assignment_ids,
-            max_concurrency=settings.submission_status_max_concurrency,
-        )
-        await apply_submission_status(
-            session, user_id=user_id, fetched=fetched, now=now
-        )
-    except MoodleTokenInvalid:
+        async with session.begin_nested():
+            assignment_ids = await select_assignment_ids(
+                session,
+                user_id=user_id,
+                now=now,
+                window_hours=settings.submission_status_window_hours,
+            )
+            if not assignment_ids:
+                return
+            try:
+                fetched = await worker.fetcher.fetch_submission_status(
+                    token=token,
+                    assignment_ids=assignment_ids,
+                    max_concurrency=settings.submission_status_max_concurrency,
+                )
+            except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
+                raise
+            except MoodleClientError as exc:
+                logger.warning(
+                    "syncjobs.submissions.refresh_failed",
+                    error=type(exc).__name__,
+                )
+                return
+            except Exception as exc:
+                logger.error(
+                    "syncjobs.submissions.refresh_failed",
+                    error=type(exc).__name__,
+                    exc_info=True,
+                )
+                return
+            await apply_submission_status(
+                session, user_id=user_id, fetched=fetched, now=now
+            )
+    except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
     except Exception:
-        logger.warning("syncjobs.submissions.refresh_failed", exc_info=True)
+        logger.error("syncjobs.submissions.refresh_db_error", exc_info=True)
 
 
 async def _handle_moodle_failure(

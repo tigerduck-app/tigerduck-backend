@@ -64,8 +64,10 @@ async def apply_submission_status(
     """Write probe results back. Returns the moodle assignment ids that
     flipped from unsubmitted to submitted in this call.
 
-    A set rather than a count, because the caller cancels reminders and
-    ends Live Activities for exactly these assignments.
+    A set rather than a count, so a future caller can cancel reminders and
+    end Live Activities for exactly these assignments. Today's caller
+    (`executor.py`) does not consume it yet — reminder cancellation is a
+    later plan's work.
 
     Only submissions flip a row. A `is_submitted=False` result is not
     written: the row already says that, and a probe that came back
