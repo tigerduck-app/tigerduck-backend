@@ -13,6 +13,7 @@ from server.auth.models import (
     ExternalAccountCredential,
     PushJob,
     User,
+    UserDevice,
 )
 from server.syncjobs.credentials import (
     CredentialInvalid,
@@ -34,6 +35,18 @@ async def _setup(session, cipher):
     user = User(student_id="b11203058")
     session.add(user)
     await session.flush()
+    # An iPhone with course sync on: without one, `mark_credentials_invalid`
+    # queues no push at all (spec §4.5 — nothing else can repair the
+    # credential). The gate itself is covered in `test_reauth_push.py`;
+    # here the device is only present so the notification path runs.
+    session.add(
+        UserDevice(
+            user_id=user.id,
+            client_device_id="iphone-1",
+            platform="ios",
+            cloud_sync_enabled=True,
+        )
+    )
     account = ExternalAccount(
         user_id=user.id, provider="ntust_sso", external_user_id="b11203058"
     )
@@ -108,6 +121,8 @@ async def test_mark_credentials_invalid_disables_and_notifies(db_session):
     assert push.channel == "system"
     assert push.scenario == "reauth_required"
     assert push.dedupe_key == f"system:account:{account.id}:reauth_required"
+    # Routing only — the copy is resolved per recipient device at send time.
+    assert push.payload["kind"] == "reauth_required"
 
     # Idempotent: second invalidation does not duplicate the push job.
     await mark_credentials_invalid(

@@ -14,6 +14,7 @@ from server.auth.models import (
     ExternalAccountCredential,
     PushJob,
     User,
+    UserDevice,
 )
 from server.db import build_session_factory
 from server.sync.models import UserAssignment, UserChangeLog
@@ -309,6 +310,22 @@ async def test_expired_token_disables_job_and_queues_push(
     queues a push notification. No password-based refresh — the user must
     open the app to send a fresh token via PATCH /auth/credentials."""
     user, account, job = await _setup_user_job(db_session)
+    # The push is queued only when the account has an iPhone or iPad with
+    # course sync on (spec §4.5) — the reauth prompt asks the user to reopen
+    # the app, and nothing else can act on it. Added here rather than in
+    # `_setup_user_job` because this is the only executor test that reaches
+    # the notification path. The gate itself is covered by
+    # `test_reauth_push.py`.
+    db_session.add(
+        UserDevice(
+            user_id=user.id,
+            client_device_id="iphone-1",
+            platform="ios",
+            cloud_sync_enabled=True,
+        )
+    )
+    await db_session.commit()
+
     fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)

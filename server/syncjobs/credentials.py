@@ -12,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,12 +26,37 @@ from server.auth.models import (
     ExternalAccount,
     ExternalAccountCredential,
     PushJob,
+    UserDevice,
 )
+from server.i18n import translate
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
 logger = structlog.get_logger(__name__)
 
 REAUTH_SCENARIO = "reauth_required"
+
+# Platforms that can actually repair the credential: only iOS/iPadOS run the
+# foreground PATCH /v3/auth/credentials that sends a fresh Moodle token. This
+# is the "is there anyone worth telling" gate of spec §4.5, not a platform
+# filter on delivery — macOS stays excluded from every push by the existing
+# `device.platform == "macos"` skip in `push.pipeline._materialize`, which
+# remains the one place that decision is made.
+_REAUTH_CAPABLE_PLATFORMS = ("ios", "ipados")
+
+
+def build_reauth_payload(*, provider: str, locale: str | None) -> dict:
+    """Push payload telling the user their provider credential expired.
+
+    `kind` is what both clients route on; without it the message reaches
+    iOS as an untyped alert and is dropped outright by Android's FCM
+    handler, which keys on the payload shape.
+    """
+    return {
+        "kind": REAUTH_SCENARIO,
+        "provider": provider,
+        "title": translate("notification_reauth_required_title", locale),
+        "body": translate("notification_reauth_required_body", locale),
+    }
 
 
 class CredentialInvalid(Exception):
@@ -103,18 +128,50 @@ async def mark_credentials_invalid(
         )
     )
 
-    await session.execute(
-        pg_insert(PushJob)
-        .values(
-            user_id=user_id,
-            dedupe_key=f"system:account:{account.id}:{REAUTH_SCENARIO}",
-            channel="system",
-            scenario=REAUTH_SCENARIO,
-            fire_at=now,
-            payload={"reason": "credential_invalid", "provider": account.provider},
+    # Spec §4.5: nobody to tell, nothing to queue. The message asks the user
+    # to reopen the app and re-authenticate, which only an iPhone or iPad
+    # with course sync on can act on — a job with no such device would
+    # fan out to zero eligible recipients and settle as `no_active_tokens`,
+    # which reads in the portal as a delivery failure rather than as the
+    # deliberate silence it is.
+    has_eligible_device = (
+        await session.execute(
+            select(UserDevice.id)
+            .where(
+                UserDevice.user_id == user_id,
+                UserDevice.deleted_at.is_(None),
+                UserDevice.cloud_sync_enabled.is_(True),
+                UserDevice.platform.in_(_REAUTH_CAPABLE_PLATFORMS),
+            )
+            .limit(1)
         )
-        .on_conflict_do_nothing()
-    )
+    ).first() is not None
+
+    if has_eligible_device:
+        # Copy is NOT resolved here. One job fans out to every device on the
+        # account, and those devices can be in different languages, so the
+        # title/body are built per recipient in `push.pipeline._send_one`
+        # off that device's `locale`. The payload carries only what is
+        # language-independent.
+        await session.execute(
+            pg_insert(PushJob)
+            .values(
+                user_id=user_id,
+                dedupe_key=f"system:account:{account.id}:{REAUTH_SCENARIO}",
+                channel="system",
+                scenario=REAUTH_SCENARIO,
+                fire_at=now,
+                payload={"kind": REAUTH_SCENARIO, "provider": account.provider},
+            )
+            .on_conflict_do_nothing()
+        )
+    else:
+        logger.info(
+            "syncjobs.credentials.reauth_push_skipped",
+            account_id=account.id,
+            user_id=str(user_id),
+            reason="no_reauth_capable_device",
+        )
     logger.warning(
         "syncjobs.credentials.invalidated",
         account_id=account.id,

@@ -44,6 +44,11 @@ from server.db import session_scope
 from server.push.dedupe import activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.router import PushRouter
+# Not a cycle: `syncjobs.credentials` imports only auth/i18n/syncjobs models,
+# never `server.push`. Kept as a module-level import (unlike the deferred
+# `log_entries` import below) so an accidental future cycle fails loudly at
+# startup rather than on the first reauth delivery.
+from server.syncjobs.credentials import REAUTH_SCENARIO, build_reauth_payload
 
 logger = structlog.get_logger(__name__)
 
@@ -65,6 +70,20 @@ def _is_unregistered(status: str | None, description: str | None) -> bool:
     s = (status or "").lower()
     d = (description or "").lower()
     return s in {"410", "unregistered"} or d in _UNREGISTERED_APNS_DESCRIPTIONS
+
+
+def _has_copy(payload: dict) -> bool:
+    """Whether an alert payload carries text a person could actually read.
+
+    Only asked of server-composed alert copy. Background and Live Activity
+    payloads legitimately have no title/body — a `sync_trigger` is silent by
+    design and a schedule push takes its text from the snapshot — so this is
+    never a blanket precondition of `_send_one`.
+    """
+    return bool(
+        str(payload.get("title") or "").strip()
+        and str(payload.get("body") or "").strip()
+    )
 
 
 async def run_push_tick(worker: PushPipelineWorker) -> int:
@@ -467,10 +486,45 @@ async def _send_one(
         delivery.failure_code = "token_gone"
         return
 
+    payload = job.payload or {}
+    if payload.get("kind") == REAUTH_SCENARIO:
+        # Copy is resolved here, not at enqueue time: one job fans out to
+        # every device on the account and they can be in different
+        # languages, so the only place the right language is known is the
+        # recipient. `session.get` is an identity-map hit — `_materialize`
+        # loaded this device earlier in the same transaction.
+        device = await session.get(UserDevice, delivery.device_id)
+        payload = build_reauth_payload(
+            provider=payload.get("provider", ""),
+            locale=device.locale if device is not None else None,
+        )
+        if not _has_copy(payload):
+            # Sending this would be worse than not sending it. APNs coerces a
+            # missing title to "" and delivers a banner that rings with no
+            # text; Android's FcmService drops a `reauth_required` with no
+            # copy and logs a warning nobody reads. Either way the user is
+            # told nothing, so the failure has to surface here instead —
+            # skipped, not failed, because nothing was attempted and a retry
+            # would resolve the same empty string (same shape as `token_gone`
+            # above). `MISSING_KEY_SENTINEL` deliberately does NOT land here:
+            # `server/i18n.py` returns a visibly broken string precisely so a
+            # missing key becomes a bug report rather than silence.
+            delivery.status = PushDeliveryStatus.skipped.value
+            delivery.failure_code = "empty_copy"
+            logger.error(
+                "push.empty_copy",
+                job_id=job.id,
+                delivery_id=delivery.id,
+                device_id=str(delivery.device_id),
+                locale=device.locale if device is not None else None,
+            )
+            return
+
     delivery.attempts += 1
+
     if delivery.provider == "apns":
         apns_request = build_apns_for_job(
-            payload=job.payload,
+            payload=payload,
             channel=job.channel,
             token_value=token.token_value,
             bundle_id=token.bundle_id or worker.settings.apns_bundle_id,
@@ -486,7 +540,7 @@ async def _send_one(
         result = await worker.router.send_apple(apns_request)
     else:
         fcm_request = build_fcm_for_job(
-            payload=job.payload, channel=job.channel, token_value=token.token_value
+            payload=payload, channel=job.channel, token_value=token.token_value
         )
         result = await worker.router.send_android(fcm_request)
 
