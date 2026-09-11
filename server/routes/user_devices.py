@@ -228,6 +228,11 @@ async def register_device(
         device.app_version = payload.app_version
     if payload.os_version is not None:
         device.os_version = payload.os_version
+    # Reported unconditionally on every register call, same as app_version /
+    # os_version above — never gated behind a preference toggle. See
+    # UserDevice.locale.
+    if payload.locale is not None:
+        device.locale = payload.locale
     if payload.cloud_sync_enabled is not None:
         if not is_new and device.cloud_sync_enabled != payload.cloud_sync_enabled:
             logger.info(
@@ -474,6 +479,10 @@ async def update_device_preferences(
         raise HTTPException(status_code=404, detail="device_not_found")
     if payload.server_push_enabled is not None:
         device.server_push_enabled = payload.server_push_enabled
+    # Lets a device push a system-language change between register calls.
+    # See UserDevice.locale.
+    if payload.locale is not None:
+        device.locale = payload.locale
     if payload.sync_courses is not None:
         device.sync_courses = payload.sync_courses
     if payload.sync_course_colors is not None:

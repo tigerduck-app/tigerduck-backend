@@ -59,6 +59,13 @@ class UserDevice(Base):
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # BCP-47 tag reported by the device at registration. Nullable: rows
+    # predating this column, and clients that have not shipped the field
+    # yet, fall back to English at send time. Never gated on a preference —
+    # gating would leave a window where a device is registered but has no
+    # language, exactly when the first push may need one. A device fact
+    # like `app_version` / `os_version` above, not a user preference.
+    locale: Mapped[str | None] = mapped_column(String(35), nullable=True)
     server_push_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )

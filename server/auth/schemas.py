@@ -125,6 +125,10 @@ class PushTokenIn(BaseModel):
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
     cloud_sync_enabled: bool | None = None
+    # BCP-47 tag, e.g. "zh-Hant-TW". Reported unconditionally on every
+    # registration call (not gated behind a preference toggle) — see
+    # UserDevice.locale for why. Optional so older clients keep working.
+    locale: str | None = None
 
 
 class DeviceRegisterV3Response(BaseModel):
@@ -153,6 +157,9 @@ class DevicePreferencesV3Request(BaseModel):
     sync_course_names: bool | None = None
     sync_assignments: bool | None = None
     cloud_sync_enabled: bool | None = None
+    # Lets the device push a changed system language between register calls
+    # rather than waiting for the next app launch. See UserDevice.locale.
+    locale: str | None = None
 
 
 class DevicePreferencesV3Response(BaseModel):
