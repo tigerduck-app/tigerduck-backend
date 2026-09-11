@@ -18,6 +18,7 @@ hangs off it (security review 1.4):
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -67,11 +68,32 @@ class SsoUnavailable(MoodleClientError):
 
 # The three the executor's retry policy actually branches on
 # (`executor.py::_execute_job`: `MoodleTokenInvalid` is converted to
-# `CredentialInvalid` at each call site, `MoodleRateLimited` at :369,
-# `MoodleUnreachable` at :373). Raised from inside a probe they describe the
-# credential or the endpoint rather than one assignment's data, so every
-# remaining probe is doomed anyway: these escalate out of the TaskGroup and
-# the `except*` router re-raises them unwrapped.
+# `CredentialInvalid` by a wrapper at each Moodle call site, and
+# `_execute_job` has its own `except MoodleRateLimited` and
+# `except MoodleUnreachable` handlers). Raised from inside a probe they
+# describe the credential or the endpoint rather than one assignment's
+# data, so every remaining probe is doomed anyway: these escalate out of
+# the TaskGroup and the `except*` router re-raises them unwrapped.
+#
+# This is an ordered table, not a bare tuple, and the router below is a
+# loop over it rather than three hard-coded branches. That is deliberate:
+# the previous shape hard-coded a branch per type with a fallback that
+# raised `MoodleUnreachable`, so adding a fourth member here -- a one-word
+# edit, in a tuple whose own comment promised the router "re-raises them
+# unwrapped" -- silently converted that fourth type into `MoodleUnreachable`
+# at the caller (task-1-fix-4-rereview.md M1). Adding a member now means
+# adding a `(type, code)` row, which the router handles by construction.
+#
+# Order is priority, highest first, for a batch that hits more than one: a
+# dead token makes everything else moot (we must stop using the credential
+# either way) and only it triggers re-auth, so it wins; a 429 is a specific
+# instruction from the server, so it outranks the generic transient.
+#
+# The code beside each type is what gets re-raised -- a short stable string
+# rather than the original message, same as `MoodleRateLimited("http_429")`
+# always has: `_execute_job`'s `except MoodleUnreachable` handler writes
+# `str(exc)` into `last_error`, and a fixed code there is greppable and
+# cannot carry anything sensitive.
 #
 # Deliberately absent: `SsoAuthFailed` / `SsoUnavailable`, which describe a
 # password login this code path never performs (only `SsoTokenClient` raises
@@ -82,7 +104,17 @@ class SsoUnavailable(MoodleClientError):
 # "credentials rejected, NEVER retried", a verdict a single assignment's
 # probe has no business delivering. They count as unexpected and skip one
 # assignment like anything else unrecognised.
-_PROBE_ESCALATES = (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable)
+_PROBE_ESCALATIONS: tuple[tuple[type[MoodleClientError], str], ...] = (
+    (MoodleTokenInvalid, "invalidtoken"),
+    (MoodleRateLimited, "http_429"),
+    (MoodleUnreachable, "submission_probe_unreachable"),
+)
+
+# Derived, never hand-written: the `except`/`except*` clauses and the
+# router must agree about the membership by construction. Pinned by
+# `test_every_escalation_reaches_the_caller_as_its_own_type`, which
+# parametrizes over the table so a new row is a new case automatically.
+_PROBE_ESCALATES = tuple(kind for kind, _ in _PROBE_ESCALATIONS)
 
 # Ordinary "this one assignment's request or data is broken": skip the
 # assignment, keep the batch. `OverflowError` is *not* a `ValueError` (it
@@ -159,6 +191,73 @@ def _ts(value: object) -> datetime | None:
     if not isinstance(value, (int, float)) or value <= 0:
         return None
     return datetime.fromtimestamp(value, tz=UTC)
+
+
+_REDACTED = "<token-redacted>"
+
+# Any `wstoken=...` still embedded in text, whatever its value. The token we
+# hold is scrubbed by value; this catches a differently-shaped one (a
+# truncation, a stale token from another frame) so the guarantee does not
+# depend on an exact string match.
+_WSTOKEN_IN_TEXT = re.compile(r"(wstoken=)[^&\s'\"]*", re.IGNORECASE)
+
+
+def _scrub(text: str, token: str) -> str:
+    return _WSTOKEN_IN_TEXT.sub(r"\1" + _REDACTED, text.replace(token, _REDACTED))
+
+
+def _without_token(exc: BaseException, token: str) -> BaseException:
+    """Strip `token` out of every message reachable from `exc`, in place.
+
+    Logging with `exc_info` renders a traceback, and a traceback's last
+    line is `<Type>: <str(exc)>` -- plus the same for every exception in
+    the `__cause__`/`__context__` chain, and for any `__notes__`. So
+    `exc_info` is only token-safe as long as no exception *message* on
+    this path ever carries the token. Nothing reachable builds such a
+    message today (`probe` raises only fixed codes, and the httpx
+    exceptions that embed a URL are all `httpx.HTTPError`, i.e.
+    `_PROBE_SKIPS`, which never reach here) -- but that is a margin that
+    depends on a third-party library's message formatting, and the
+    never-log-a-token rule is absolute. This frame is the one place that
+    knows the token's value, so it is closed here rather than assumed.
+
+    Mutating the exception is safe *here specifically*: the residual
+    handler skips the assignment and returns, so `exc` is discarded
+    immediately after and is never re-raised or seen by a caller.
+
+    Frame locals are a separate axis and are not touched -- the
+    production chain renders source lines, not locals, which is what
+    `test_unexpected_probe_error_logs_a_traceback_without_the_token`
+    pins against the real `logging_setup.configure` chain.
+    """
+    if not token:
+        return exc
+    pending: list[BaseException | None] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        try:
+            current.args = tuple(
+                _scrub(a, token) if isinstance(a, str) else a for a in current.args
+            )
+            notes = getattr(current, "__notes__", None)
+            if notes:
+                current.__notes__ = [
+                    _scrub(n, token) if isinstance(n, str) else n for n in notes
+                ]
+            if isinstance(current, BaseExceptionGroup):
+                pending.extend(current.exceptions)
+        except Exception:
+            # Some exceptions build `str()` from attributes rather than
+            # `args` and reject the assignment. Scrub what we can; the
+            # caller's own `except Exception: pass` is the backstop.
+            pass
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+    return exc
 
 
 async def _get_moodle_userid(
@@ -308,9 +407,22 @@ class HttpAssignmentFetcher:
         occurs in a batch, token beats 429 beats unreachable and the
         discarded ones stay reachable through `__cause__`.
 
-        `BaseException` — `CancelledError` above all — is the one thing
-        that still leaves as a group, deliberately: a cancelled task must
-        not be quietly converted into a skipped assignment.
+        `BaseException` is the one thing that still leaves as a group,
+        deliberately: `KeyboardInterrupt`, `SystemExit` and `GeneratorExit`
+        raised inside a probe must tear the batch down rather than be
+        quietly converted into a skipped assignment. Cancelling *this*
+        call while probes are in flight also still raises a plain
+        `CancelledError`, not a group.
+
+        One exception to that, which the code cannot change without
+        weakening cancellation: an `asyncio.CancelledError` raised *inside
+        one probe* is `TaskGroup` semantics — that child is `cancelled()`
+        rather than failed, so the group records no error and the
+        assignment is simply absent from the result, with nothing logged.
+        Nothing in this codebase cancels an individual probe, and the
+        operationally important case (outer cancellation, above) is
+        correct; this is written down because the comments here used to
+        claim a guarantee one step stronger than asyncio delivers.
         """
         if not assignment_ids:
             return {}
@@ -398,20 +510,38 @@ class HttpAssignmentFetcher:
                         # rather than folding into routine probe noise, and
                         # with a traceback: a bare type name cannot tell you
                         # *where* inside `probe` a RuntimeError came from,
-                        # which is the whole point of the signal. A rendered
-                        # traceback shows source lines, not frame locals, so
-                        # it cannot leak the token (verified against all
-                        # three processor chains in logging_setup.py).
+                        # which is the whole point of the signal.
                         #
-                        # `BaseException` is deliberately NOT caught:
-                        # `CancelledError`, `KeyboardInterrupt` and
-                        # `SystemExit` must tear the batch down. A cancelled
-                        # task must never become a skipped assignment.
+                        # Two separate leak axes, both closed, both pinned:
+                        # frame *locals* are never rendered by the chains
+                        # `logging_setup.configure` builds (pinned by
+                        # `test_unexpected_probe_error_logs_a_traceback_without_the_token`,
+                        # which runs the real `configure`), and exception
+                        # *messages* -- which `exc_info` does render, for
+                        # the whole `__cause__`/`__context__` chain -- are
+                        # scrubbed by `_without_token` (pinned by
+                        # `test_a_token_in_the_exception_message_is_not_logged`).
+                        #
+                        # `BaseException` is deliberately NOT caught here:
+                        # `KeyboardInterrupt`, `SystemExit` and
+                        # `GeneratorExit` raised inside a probe tear the
+                        # batch down as a `BaseExceptionGroup`, and
+                        # cancelling `fetch_submission_status` itself still
+                        # propagates a plain `CancelledError`. Note the one
+                        # case this does *not* buy: an
+                        # `asyncio.CancelledError` raised *inside a single
+                        # probe* is `TaskGroup` semantics, not ours -- that
+                        # child counts as cancelled rather than failed, so
+                        # the group never sees an error and the assignment
+                        # is simply absent from the result, silently.
+                        # Nothing in this codebase cancels an individual
+                        # probe; if something ever does, it must not rely on
+                        # this clause to notice.
                         try:
                             logger.error(
                                 "syncjobs.moodle.submission_probe_unexpected_error",
                                 error=type(exc).__name__,
-                                exc_info=exc,
+                                exc_info=_without_token(exc, token),
                             )
                         except Exception:
                             # The last resort must not itself fail the
@@ -435,26 +565,30 @@ class HttpAssignmentFetcher:
                     # matching clause -- a batch with one dead-token probe
                     # and one rate-limited probe fired both and the two
                     # raises were recombined into a bare ExceptionGroup
-                    # that matched nothing downstream. One clause, with an
-                    # explicit priority: a dead token makes everything else
-                    # moot (we must stop using the credential either way)
-                    # and only it triggers re-auth, so it wins; a 429 is a
-                    # specific instruction from the server, so it outranks
-                    # the generic transient. `subgroup()`, not
-                    # `eg.exceptions` -- groups can nest and `.exceptions`
-                    # only sees the top level.
+                    # that matched nothing downstream. So: one clause, and
+                    # one loop over `_PROBE_ESCALATIONS`, which is ordered
+                    # by priority and is the same table `_PROBE_ESCALATES`
+                    # is derived from -- every member that can reach this
+                    # clause therefore has a row here, and cannot be
+                    # silently retyped into whatever the last branch
+                    # happened to raise.
                     #
-                    # Each re-raise carries a short stable code rather than
-                    # the original message, same as `MoodleRateLimited(
-                    # "http_429")` always has: `executor.py:373` writes
-                    # `str(exc)` into `last_error`, and a fixed code there
-                    # is greppable and cannot carry anything sensitive. The
+                    # `subgroup()`, not `eg.exceptions` -- groups can nest
+                    # and `.exceptions` only sees the top level.
+                    #
+                    # The re-raise carries the table's short stable code
+                    # rather than the original message; see the table. The
                     # discarded detail is not lost -- `from eg` keeps the
                     # whole group reachable as `exc.__cause__`.
-                    if eg.subgroup(MoodleTokenInvalid) is not None:
-                        raise MoodleTokenInvalid("invalidtoken") from eg
-                    if eg.subgroup(MoodleRateLimited) is not None:
-                        raise MoodleRateLimited("http_429") from eg
+                    for kind, code in _PROBE_ESCALATIONS:
+                        if eg.subgroup(kind) is not None:
+                            raise kind(code) from eg
+                    # Unreachable: `except*` only matched because some
+                    # member of `_PROBE_ESCALATES` -- i.e. some row above
+                    # -- is in the group. Kept so a future edit that breaks
+                    # that invariant still raises something the executor
+                    # can act on instead of falling through and returning a
+                    # half-filled dict.
                     raise MoodleUnreachable("submission_probe_unreachable") from eg
         except (httpx.HTTPError, ValueError) as exc:
             # Never log the token.

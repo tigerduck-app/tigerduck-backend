@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
+import logging
+import textwrap
 from datetime import UTC, datetime
 
 import httpx
 import pytest
 import structlog
 
+from server.config import Settings
+from server.logging_setup import configure
 from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
@@ -411,13 +417,24 @@ class _UnhashableAssignmentId(int):
     __hash__ = None
 
 
-class _LoggerThatFailsOnWarning:
-    """A `logger` whose `warning` raises, delegating everything else.
+class _LoggerBrokenAtEveryLevel:
+    """A `logger` whose `warning` *and* `error` raise.
 
-    Not synthetic: `logging_setup.py` configures structlog with
-    `PrintLoggerFactory()`, so every line is a plain write to stdout and a
-    broken pipe there raises `OSError` -- an ordinary `Exception`, raised
-    from inside a probe's own `except` clause, where no guard used to reach.
+    Not synthetic, and broken at every level for a reason:
+    `logging_setup.py` configures structlog with `PrintLoggerFactory()`, so
+    every line is a plain write to the same `sys.stdout` and a broken pipe
+    there raises `OSError` for *all* of them at once -- an ordinary
+    `Exception`, raised from inside a probe's own `except` clause, where no
+    guard used to reach.
+
+    Breaking only `warning` (which is what this class did through round 4)
+    exercises the residual `except Exception` clause but stops one step
+    short: its handler's own last-resort `logger.error` still succeeds, so
+    the `except Exception: pass` wrapped around that call -- the single
+    most deletable line in the fix -- could be removed with the whole file
+    still green (task-1-fix-4-rereview.md I1). With `error` raising too,
+    `inside_the_skip_handler` reaches the swallow, and deleting it turns
+    this back into the bare `ExceptionGroup` the clause exists to prevent.
     """
 
     def __init__(self, real):
@@ -425,6 +442,9 @@ class _LoggerThatFailsOnWarning:
 
     def warning(self, *args, **kwargs):
         raise OSError("broken pipe writing the log line")
+
+    def error(self, *args, **kwargs):
+        raise OSError("broken pipe writing the last-resort log line")
 
     def __getattr__(self, name):
         return getattr(self._real, name)
@@ -504,10 +524,15 @@ def _install_probe_injection(site: str, monkeypatch):
         )
 
     if site == "inside_the_skip_handler":
+        # Broken at every level, so the failure walks the whole chain:
+        # `logger.warning` raises inside the skip handler, the residual
+        # clause catches that, and its own last-resort `logger.error`
+        # raises too -- which only the `except Exception: pass` around it
+        # absorbs.
         monkeypatch.setattr(
             moodle_client,
             "logger",
-            _LoggerThatFailsOnWarning(moodle_client.logger),
+            _LoggerBrokenAtEveryLevel(moodle_client.logger),
         )
 
     ids: list[int] = [1, 2, 3]
@@ -588,13 +613,153 @@ def test_skip_tuple_can_never_swallow_an_escalation():
         )
 
 
+def _probe_ast() -> ast.AsyncFunctionDef:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(moodle_client)))
+    probes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "probe"
+    ]
+    assert len(probes) == 1, (
+        f"expected exactly one `probe` in moodle_client.py, found {len(probes)}"
+    )
+    return probes[0]
+
+
+def test_probes_whole_body_is_inside_the_guard():
+    """M4 (task-1-fix-4-rereview.md): close the *location* axis by
+    construction rather than by sampling.
+
+    `test_unexpected_probe_exception_never_escapes_as_a_group` injects at
+    five sites, and those five are an enumeration of the statements `probe`
+    contains *today*. That is exactly the shape of finding that has now
+    recurred three rounds running: a guard that covers every instance
+    anyone thought of, and a sixth statement added tomorrow that nothing
+    covers. Rounds 1-3 lost `results[assignment_id] = parsed` and the
+    handlers' own `logger` calls to precisely that.
+
+    The property is structural, so assert it structurally: `probe`'s body
+    is one `try` and nothing else. Then no statement can be added *outside*
+    the guard without this failing, whether or not anyone remembers to add
+    an injection site for it.
+
+    The inner `try/except Exception: pass` around the last-resort log is
+    pinned here too, for the same reason -- it is the single most deletable
+    line in the fix, its failure mode is silent, and it reads like a lint
+    violation. `_LoggerBrokenAtEveryLevel` pins its behaviour; this pins
+    its existence.
+    """
+    probe = _probe_ast()
+
+    body = probe.body
+    assert len(body) == 1 and isinstance(body[0], ast.Try), (
+        "`probe`'s body must be exactly one `try` that wraps everything: "
+        f"found {[type(node).__name__ for node in body]}. A statement "
+        "outside that guard reaches the TaskGroup and costs the whole batch."
+    )
+    guard = body[0]
+    assert [ast.unparse(h.type) for h in guard.handlers] == [
+        "_PROBE_ESCALATES",
+        "Exception",
+    ], (
+        "`probe`'s guard must catch `_PROBE_ESCALATES` (escalate) then "
+        "`Exception` (skip this assignment only), in that order"
+    )
+    assert not guard.orelse and not guard.finalbody, (
+        "an `else`/`finally` on `probe`'s guard runs *outside* the handlers, "
+        "so anything it raises escapes the probe"
+    )
+
+    residual = guard.handlers[1].body
+    assert len(residual) == 1 and isinstance(residual[0], ast.Try), (
+        "the residual handler's body must be exactly one `try`: its own "
+        "`logger.error` writes to stdout through PrintLoggerFactory and an "
+        "OSError there would hand the caller the ExceptionGroup this "
+        "clause exists to prevent"
+    )
+    swallow = residual[0]
+    assert [ast.unparse(h.type) for h in swallow.handlers] == ["Exception"]
+    assert all(isinstance(node, ast.Pass) for node in swallow.handlers[0].body), (
+        "the last-resort log's guard must swallow and do nothing -- "
+        "anything else in it can fail the same way"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "code"),
+    moodle_client._PROBE_ESCALATIONS,
+    ids=[kind.__name__ for kind, _ in moodle_client._PROBE_ESCALATIONS],
+)
+@pytest.mark.asyncio
+async def test_every_escalation_reaches_the_caller_as_its_own_type(
+    kind, code, monkeypatch
+):
+    """M1 (task-1-fix-4-rereview.md): a member added to the escalation set
+    must not be silently retyped.
+
+    The router used to hard-code one `subgroup()` branch per type with a
+    fallback that raised `MoodleUnreachable`, so a fourth member of
+    `_PROBE_ESCALATES` -- a one-word edit -- escaped the TaskGroup
+    correctly and then arrived at the caller as `MoodleUnreachable`,
+    with `test_skip_tuple_can_never_swallow_an_escalation` still green
+    because it only checks the skip/escalate overlap.
+
+    Two things stop that now. The router is a loop over
+    `_PROBE_ESCALATIONS`, which `_PROBE_ESCALATES` is derived from, so a
+    member without a row cannot exist. And this test is parametrized over
+    that same table, so a new row is a new case the moment it is added:
+    if the router ever stops routing it as itself, this fails rather than
+    a future caller's `except` clause silently never matching.
+    """
+    assert moodle_client._PROBE_ESCALATES == tuple(
+        k for k, _ in moodle_client._PROBE_ESCALATIONS
+    ), "_PROBE_ESCALATES must stay derived from _PROBE_ESCALATIONS"
+
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_escalate(assignment_id: int, body: dict):
+        if assignment_id == 2:
+            raise kind("raised inside one probe")
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(
+        moodle_client, "_parse_submission_status", _parse_or_escalate
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(kind) as excinfo:
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+    assert type(excinfo.value) is kind, (
+        f"{kind.__name__} is in _PROBE_ESCALATES but the caller received "
+        f"{type(excinfo.value).__name__} -- the router must re-raise every "
+        "member as itself, not fall through to a default"
+    )
+    assert not isinstance(excinfo.value, BaseExceptionGroup)
+    # The stable code, never the original message.
+    assert str(excinfo.value) == code
+    assert excinfo.value.__cause__.subgroup(kind) is not None
+
+
 @pytest.mark.asyncio
 async def test_moodle_unreachable_from_a_probe_propagates_unwrapped(monkeypatch):
     """M3 (task-1-fix-3-rereview.md): the broad residual clause must not eat
     this module's own error taxonomy.
 
     `MoodleUnreachable` is one of the three types `executor.py::_execute_job`
-    branches on (`:373` -> retriable backoff). Round 3's `except Exception`
+    branches on (its `except MoodleUnreachable` handler -> retriable
+    backoff). Round 3's `except Exception`
     caught it, logged it as *unexpected*, and skipped the assignment, so it
     never reached that branch. Nothing inside `probe` raises it today --
     Plan C Tasks 2 and 3 wire this function up and will reasonably expect
@@ -707,9 +872,90 @@ async def test_unreachable_loses_to_the_more_specific_escalations(
     assert cause.subgroup(winner) is not None
 
 
+@pytest.fixture
+def production_log_chain(monkeypatch):
+    """Run the probe under the chain `logging_setup.configure` really builds.
+
+    M3 (task-1-fix-4-rereview.md). The previous version of the token test
+    hand-copied `logging_setup.configure`'s processor list into a local
+    `structlog.configure(...)`. That pins `exc_info`'s safety against a
+    *frozen snapshot* of the chain rather than against the chain the
+    process runs: the reviewer swapped `logging_setup.py`'s production
+    branch for a renderer that demonstrably prints the token and the test
+    still reported `1 passed`. So the one test standing between a live
+    Moodle credential and the log file could not see a change to the thing
+    it guards.
+
+    Calling the real `configure` is the whole point of this fixture, and
+    everything else here exists to make that safe and honest:
+
+    * `configure` mutates process-global state -- root/httpx/httpcore
+      logger levels and structlog's global config -- so all of it is saved
+      and restored.
+    * `configure` sets `cache_logger_on_first_use=True`, and
+      `moodle_client.logger` is a lazy proxy that freezes its bound logger
+      on first use. By the time this runs, earlier tests in this file have
+      already bound the default console renderer onto it, so configuring
+      alone would silently do nothing. The proxy is replaced with one
+      created *after* `configure`.
+    * Callers parse the captured line as JSON, so a test that ends up on
+      the wrong chain fails instead of passing for the wrong reason.
+    """
+    names = ("httpx", "httpcore")
+    saved = {n: logging.getLogger(n).level for n in names}
+    root = logging.getLogger().level
+    try:
+        configure(Settings(env="production", log_level="INFO"))
+        monkeypatch.setattr(
+            moodle_client,
+            "logger",
+            structlog.get_logger("server.syncjobs.moodle_client"),
+        )
+        yield
+    finally:
+        structlog.reset_defaults()
+        for n, level in saved.items():
+            logging.getLogger(n).setLevel(level)
+        logging.getLogger().setLevel(root)
+
+
+def _probe_boom_fetcher(monkeypatch, message: str):
+    """A fetcher whose assignment 2 raises `RuntimeError(message)`."""
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_boom(assignment_id: int, body: dict):
+        if assignment_id == 2:
+            raise RuntimeError(message)
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_boom)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    return HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+
+def _unexpected_error_line(stdout: str) -> dict:
+    lines = [
+        line
+        for line in stdout.splitlines()
+        if "submission_probe_unexpected_error" in line
+    ]
+    assert len(lines) == 1, f"expected one unexpected-error line, got {lines}"
+    # Parsing as JSON is the proof that the production chain really rendered
+    # this line -- structlog's default ConsoleRenderer would not produce it.
+    return json.loads(lines[0])
+
+
 @pytest.mark.asyncio
 async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
-    capsys, monkeypatch
+    capsys, monkeypatch, production_log_chain
 ):
     """M4 (task-1-fix-3-rereview.md): `submission_probe_unexpected_error` is
     the one signal that says a new failure mode has appeared inside `probe`.
@@ -719,28 +965,87 @@ async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
     The reason it was omitted is the reason it needs a test: the probe's own
     frame holds the token, in `token` and in the `params` dict, and the
     never-log-a-token rule is absolute. A rendered traceback shows source
-    *lines*, not frame locals, so `exc_info` is safe -- asserted here
-    against the real production processor chain
-    (`logging_setup.configure`'s non-development branch: `format_exc_info`
-    then `JSONRenderer`), not against whatever structlog happens to default
-    to under pytest. The module's `logger` is a lazy proxy that caches its
-    bound logger on first use, and structlog's *default* config sets
-    `cache_logger_on_first_use=True`, so by the time this test runs an
-    earlier test in this file has already frozen the console renderer onto
-    it; configuring alone silently does nothing. The proxy is therefore
-    replaced with one created after `configure`, and the assertions parse
-    the line as JSON so a test running against the wrong chain fails
-    instead of passing for the wrong reason.
+    *lines*, not frame locals, so `exc_info` is safe on that axis -- and
+    this asserts it against the chain `logging_setup.configure` actually
+    builds (see `production_log_chain`), so a future processor that starts
+    rendering locals fails here. Verified non-vacuous by doing exactly
+    that: with `logging_setup.py`'s production branch swapped for
+    `ExceptionRenderer(ExceptionDictTransformer(show_locals=True))` this
+    test fails on the token assertion below.
+
+    The *message* axis is a different one and is covered by
+    `test_a_token_in_the_exception_message_is_not_logged`.
     """
     token = "super-secret-token"
+    fetcher = _probe_boom_fetcher(monkeypatch, "unexpected probe failure")
+
+    result = await fetcher.fetch_submission_status(
+        token=token, assignment_ids=[1, 2, 3], max_concurrency=3
+    )
+
+    assert set(result) == {1, 3}
+    stdout = capsys.readouterr().out
+    # Asserted before anything else, so a chain that starts leaking fails
+    # with *this* message rather than incidentally on the JSON shape.
+    assert token not in stdout, (
+        "the Moodle token reached the log line through the production "
+        "processor chain -- check what logging_setup.configure renders"
+    )
+    assert "wstoken" not in stdout
+
+    payload = _unexpected_error_line(stdout)
+    assert payload["event"] == "syncjobs.moodle.submission_probe_unexpected_error"
+    assert payload["level"] == "error"
+    assert payload["error"] == "RuntimeError"
+    # The traceback is the point: it must name the frame the exception came
+    # from, not merely the exception's type.
+    traceback_text = payload["exception"]
+    assert traceback_text.startswith("Traceback (most recent call last)")
+    assert "_parse_or_boom" in traceback_text
+
+
+@pytest.mark.asyncio
+async def test_a_token_in_the_exception_message_is_not_logged(
+    capsys, monkeypatch, production_log_chain
+):
+    """M2 (task-1-fix-4-rereview.md): the adversarial half of the above.
+
+    `exc_info` renders `str(exc)` -- and the same for every exception in the
+    `__cause__`/`__context__` chain. Round 3 had explicitly verified this
+    log line carried no `str(exc)` at all; round 4 traded that away for a
+    traceback. The reviewer measured the remaining exposure and found it
+    real but unreachable *today*, on a margin that rests on how a
+    third-party library happens to format its messages.
+
+    So this constructs the case the margin depends on: an exception whose
+    own message carries the live token inside a full webservice URL,
+    chained under one that carries it too. The assertion is the flat one --
+    the token does not appear -- which holds because the residual handler
+    scrubs the chain through `_without_token` before handing it to
+    `exc_info`.
+
+    The messages are built outside the raising function on purpose. A
+    traceback also prints each frame's *source line*, so an f-string
+    written at the `raise` would put the literal text `wstoken=` in the
+    output and the test would be asserting against its own source rather
+    than against the rendered message.
+    """
+    token = "tok_adversarial_leak_canary"
+    leaky_url = f"{BASE}/webservice/rest/server.php?wstoken={token}&wsfunction=x"
+    inner_message = f"upstream refused {leaky_url}"
+    outer_message = f"probe blew up handling {leaky_url}"
+
     real_parse = moodle_client._parse_submission_status
 
-    def _parse_or_boom(assignment_id: int, body: dict):
+    def _parse_or_leak(assignment_id: int, body: dict):
         if assignment_id == 2:
-            raise RuntimeError("unexpected probe failure")
+            try:
+                raise ValueError(inner_message)
+            except ValueError:
+                raise RuntimeError(outer_message)
         return real_parse(assignment_id, body)
 
-    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_boom)
+    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_leak)
 
     def handler(request: httpx.Request) -> httpx.Response:
         fn = request.url.params.get("wsfunction")
@@ -752,51 +1057,26 @@ async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
         base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
     )
 
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer(),
-        ],
-        logger_factory=structlog.PrintLoggerFactory(),
-        cache_logger_on_first_use=False,
+    result = await fetcher.fetch_submission_status(
+        token=token, assignment_ids=[1, 2, 3], max_concurrency=3
     )
-    try:
-        monkeypatch.setattr(
-            moodle_client,
-            "logger",
-            structlog.get_logger("server.syncjobs.moodle_client"),
-        )
-        result = await fetcher.fetch_submission_status(
-            token=token, assignment_ids=[1, 2, 3], max_concurrency=3
-        )
-    finally:
-        structlog.reset_defaults()
 
     assert set(result) == {1, 3}
     stdout = capsys.readouterr().out
-    lines = [
-        line
-        for line in stdout.splitlines()
-        if "submission_probe_unexpected_error" in line
-    ]
-    assert len(lines) == 1, f"expected one unexpected-error line, got {lines}"
-    # Parsing as JSON is the proof that the production chain really rendered
-    # this line -- structlog's default ConsoleRenderer would not produce it.
-    payload = json.loads(lines[0])
-    assert payload["event"] == "syncjobs.moodle.submission_probe_unexpected_error"
-    assert payload["level"] == "error"
-    assert payload["error"] == "RuntimeError"
-    # The traceback is the point: it must name the frame the exception came
-    # from, not merely the exception's type.
+    assert token not in stdout, (
+        "an exception whose message carried the Moodle token put it in the "
+        "log line -- exc_info renders str(exc) for the whole "
+        "__cause__/__context__ chain"
+    )
+    assert f"wstoken={token}" not in stdout
+
+    # ...and it is absent because it was scrubbed, not because the line was
+    # dropped, the message was swallowed, or the chain stopped rendering.
+    payload = _unexpected_error_line(stdout)
     traceback_text = payload["exception"]
-    assert traceback_text.startswith("Traceback (most recent call last)")
-    assert "_parse_or_boom" in traceback_text
-    # ... and it must still carry nothing that identifies the credential,
-    # even though the probe frame it walks through holds the token both as a
-    # closure variable and inside its `params` dict.
-    assert token not in stdout
-    assert "wstoken" not in stdout
+    assert "probe blew up handling" in traceback_text
+    assert "upstream refused" in traceback_text, (
+        "the __context__ chain is no longer rendered, so this test would "
+        "pass even if a chained exception did leak"
+    )
+    assert traceback_text.count("wstoken=<token-redacted>") == 2
