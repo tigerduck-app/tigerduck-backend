@@ -308,8 +308,10 @@ class HttpAssignmentFetcher:
                             # C1 -- `_parse_submission_status` used to be
                             # called after this try, so `_ts`'s ValueError/
                             # OverflowError left the TaskGroup as a bare
-                            # ExceptionGroup that matched no except* clause
-                            # below and no except clause at :329).
+                            # ExceptionGroup that matched neither the
+                            # `except*` clause below nor the plain
+                            # `except (httpx.HTTPError, ValueError)` further
+                            # down that wraps this whole method).
                             parsed = _parse_submission_status(assignment_id, body)
                         except (MoodleTokenInvalid, MoodleRateLimited):
                             # Deliberate escalations, not this assignment's
