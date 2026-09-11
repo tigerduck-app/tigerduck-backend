@@ -29,6 +29,10 @@ def schedule_key(device_id: uuid.UUID, source_id: str, scenario: str) -> str:
     return f"{schedule_prefix(device_id)}{source_id}:{scenario}"
 
 
+def activity_end_prefix(device_id: uuid.UUID) -> str:
+    return f"la_end:{device_id}:"
+
+
 def activity_end_key(device_id: uuid.UUID, activity_id: str) -> str:
     """An end job: one per (device, running activity)."""
-    return f"la_end:{device_id}:{activity_id}"
+    return f"{activity_end_prefix(device_id)}{activity_id}"

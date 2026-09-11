@@ -10,7 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { DeviceRow } from "@/types/api";
-import { platformLabel } from "./format";
+import { familyLabel, isApplePlatform, platformLabel } from "@/lib/platform";
 
 export const CHART_COLORS = [
   "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
@@ -81,20 +81,23 @@ export function DeviceStats({ items }: { items: DeviceRow[] }) {
   const [platformFilter, setPlatformFilter] = useState("all");
 
   const platforms = ["ios", "ipados", "macos", "android"];
-  const APPLE_PLATFORMS = new Set(["ios", "ipados", "macos", "watchos"]);
   const filtered = items.filter((d) => {
     if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return APPLE_PLATFORMS.has(d.platform);
+    if (platformFilter === "apple") return isApplePlatform(d.platform);
     return d.platform === platformFilter;
   });
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};
     for (const d of filtered) {
-      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      const v = key === "os_version"
+        ? `${platformLabel(d.platform)} ${d[key] ?? "?"}`
+        : `${familyLabel(d.platform)} ${d[key] ?? "?"}`;
       map[v] = (map[v] ?? 0) + 1;
     }
-    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+    // Label breaks ties so the order is stable between renders and the two
+    // families stay contiguous rather than interleaving at equal counts.
+    return Object.entries(map).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   };
 
   return (

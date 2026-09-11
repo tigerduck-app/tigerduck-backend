@@ -22,7 +22,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatSection } from "./SyncStats";
-import { fmt, platformLabel } from "./format";
+import { fmt } from "./format";
+import { familyLabel, isApplePlatform, platformLabel } from "@/lib/platform";
 import type { PushDeliveryRow, PushJobRow, SyncDevice } from "./types";
 
 export function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { devices: SyncDevice[]; pushJobs?: PushJobRow[]; pushDeliveries?: PushDeliveryRow[]; studentId: string }) {
@@ -32,17 +33,21 @@ export function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { 
 
   const filtered = devices.filter((d) => {
     if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return ["ios", "ipados", "macos", "watchos"].includes(d.platform);
+    if (platformFilter === "apple") return isApplePlatform(d.platform);
     return d.platform === platformFilter;
   });
 
   const countBy = (key: "os_version" | "app_version") => {
     const map: Record<string, number> = {};
     for (const d of filtered) {
-      const v = (key === "os_version" ? `${platformLabel(d.platform)} ${d[key] ?? "?"}` : d[key]) ?? "Unknown";
+      const v = key === "os_version"
+        ? `${platformLabel(d.platform)} ${d[key] ?? "?"}`
+        : `${familyLabel(d.platform)} ${d[key] ?? "?"}`;
       map[v] = (map[v] ?? 0) + 1;
     }
-    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+    // Label breaks ties so the order is stable between renders and the two
+    // families stay contiguous rather than interleaving at equal counts.
+    return Object.entries(map).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   };
 
   return (

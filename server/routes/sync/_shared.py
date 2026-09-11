@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, Query, Request
 from sqlalchemy import delete, func, select, text, update
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
+from server.push.dedupe import activity_end_prefix
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
 
@@ -29,7 +30,7 @@ async def _trigger_push_tick(request: Request) -> None:
         from server.push.pipeline import run_push_tick
         await run_push_tick(worker)
 async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> None:
-    """Cancel ALL pending pushes for *device_id*.
+    """Cancel pending *data-freshness* pushes for *device_id*.
 
     When the device just did a full sync it already has fresh data — no
     need for sync_trigger, schedule, or reminder pushes.
@@ -40,6 +41,16 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
     2. User-scoped jobs (sync_trigger etc. with device_id NULL):
        skip only this device's materialized deliveries so other devices
        still receive the push.
+
+    Live Activity end jobs (`la_end:{device_id}:`, filed by
+    `/live-activities/register`) are exempt. Nothing about this pass
+    applies to them: they exist to dismiss an activity that is on screen
+    right now, and a device holding fresh data is not a reason to leave
+    the Dynamic Island up. Sweeping them cancelled every end within
+    seconds of registration — the app full-syncs on each foreground —
+    so the end push never fired and the island sat on a dead countdown
+    until iOS's own multi-hour cleanup. `/schedule/sync` carries the
+    same exemption for the same reason (see `schedule_v3.sync_schedule`).
     """
     now = datetime.now(UTC)
     device_row = (await session.execute(
@@ -58,6 +69,9 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
             PushJob.user_id == user_id,
             PushJob.device_id == device_row,
             PushJob.status == PushJobStatus.pending.value,
+            ~PushJob.dedupe_key.startswith(
+                activity_end_prefix(device_row), autoescape=True
+            ),
         )
         .values(status=PushJobStatus.cancelled.value, cancelled_at=now)
     )

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from server.auth.models import DevicePushToken, PushJob
+from server.auth.models import DevicePushToken, PushJob, PushJobStatus
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 
@@ -176,3 +176,73 @@ async def test_register_refuses_an_activity_id_that_is_not_the_composed_one(clie
     )
     assert response.status_code == 422
     assert response.json()["detail"] == "activity_id_mismatch"
+
+
+async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
+    """A full sync cancels this device's pending data-freshness pushes, but
+    must leave the Live Activity end job alone.
+
+    The app full-syncs on every foreground, so a sweep that took the end
+    job with it cancelled every end within seconds of registration: the
+    end push never fired and the Dynamic Island sat on an expired
+    countdown showing "—" until iOS's own multi-hour cleanup. Observed in
+    production as six consecutive end jobs, all cancelled, none sent.
+
+    The start job in the same sweep is the control: it still gets
+    cancelled, so this asserts the exemption is narrow rather than a
+    disabled sweep.
+    """
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+
+    # A pending start job for this device — the thing the sweep is for.
+    schedule = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={
+            "events": [
+                {
+                    "source_id": "slot-sweep",
+                    "scenario": "classPreparing",
+                    "fire_at": _iso(now + timedelta(minutes=30)),
+                    "snapshot": _snapshot(now + timedelta(minutes=45)),
+                }
+            ]
+        },
+    )
+    assert schedule.status_code == 200, schedule.text
+
+    # A pending end job for a running activity.
+    target = now + timedelta(minutes=15)
+    register = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "e" * 128),
+    )
+    assert register.status_code == 200, register.text
+    end_job_id = register.json()["end_job_id"]
+    assert end_job_id is not None
+
+    full = await client.get("/v3/sync/full", headers=_bearer(login))
+    assert full.status_code == 200, full.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        end_job = (
+            await s.execute(select(PushJob).where(PushJob.id == end_job_id))
+        ).scalar_one()
+        assert end_job.status == PushJobStatus.pending.value
+        assert end_job.cancelled_at is None
+        assert end_job.fire_at == target
+
+        start_jobs = (
+            await s.execute(
+                select(PushJob).where(
+                    PushJob.dedupe_key.like("schedule:%:slot-sweep:%")
+                )
+            )
+        ).scalars().all()
+        assert start_jobs, "expected the schedule sync to have filed a start job"
+        assert all(
+            j.status == PushJobStatus.cancelled.value for j in start_jobs
+        ), [j.status for j in start_jobs]
