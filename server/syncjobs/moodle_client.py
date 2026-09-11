@@ -56,6 +56,45 @@ class SsoUnavailable(MoodleClientError):
     pass
 
 
+# --- submission-probe failure policy ---------------------------------------
+#
+# `HttpAssignmentFetcher.fetch_submission_status` runs one probe per
+# assignment inside an `asyncio.TaskGroup`, and a TaskGroup cancels every
+# sibling task the moment one member raises. So "may this exception leave a
+# probe?" *is* that function's blast-radius policy, and it is stated once,
+# here, instead of being spread across inline `except` clauses that have
+# drifted apart three times already.
+
+# The three the executor's retry policy actually branches on
+# (`executor.py::_execute_job`: `MoodleTokenInvalid` is converted to
+# `CredentialInvalid` at each call site, `MoodleRateLimited` at :369,
+# `MoodleUnreachable` at :373). Raised from inside a probe they describe the
+# credential or the endpoint rather than one assignment's data, so every
+# remaining probe is doomed anyway: these escalate out of the TaskGroup and
+# the `except*` router re-raises them unwrapped.
+#
+# Deliberately absent: `SsoAuthFailed` / `SsoUnavailable`, which describe a
+# password login this code path never performs (only `SsoTokenClient` raises
+# them, and only `routes/auth.py` handles them), and the bare
+# `MoodleClientError` base. `_execute_job` has no branch for any of the
+# three, so escalating one would cancel the whole batch to report something
+# the caller cannot act on -- and `SsoAuthFailed` specifically means
+# "credentials rejected, NEVER retried", a verdict a single assignment's
+# probe has no business delivering. They count as unexpected and skip one
+# assignment like anything else unrecognised.
+_PROBE_ESCALATES = (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable)
+
+# Ordinary "this one assignment's request or data is broken": skip the
+# assignment, keep the batch. `OverflowError` is *not* a `ValueError` (it
+# descends from `ArithmeticError`), and `_ts` raises it for a `timemodified`
+# too large for the platform's `time_t` -- a size JSON permits.
+#
+# Nothing here may overlap `_PROBE_ESCALATES`, or the skip clause would
+# swallow an escalation before the outer clause ever sees it. Pinned by
+# `test_skip_tuple_can_never_swallow_an_escalation`.
+_PROBE_SKIPS = (httpx.HTTPError, ValueError, OverflowError)
+
+
 @dataclass(frozen=True)
 class FetchedAssignment:
     moodle_course_id: int
@@ -256,12 +295,22 @@ class HttpAssignmentFetcher:
         `warning`, so it doesn't hide behind routine probe noise) — a
         programming error in parsing one assignment's data is still that
         assignment's problem alone, not grounds to fail every other
-        assignment in the batch. An invalid token is the one exception: it
-        means every subsequent call would fail too, so it propagates and
-        lets the executor disable the job. A 429 stops the batch too and
-        propagates as `MoodleRateLimited`, same contract as
+        assignment in the batch.
+
+        `_PROBE_ESCALATES` is the closed list of exceptions that *do* stop
+        the batch, because each describes the credential or the endpoint
+        rather than one assignment: `MoodleTokenInvalid` (every subsequent
+        call would fail too, and the executor must disable the job),
+        `MoodleRateLimited` and `MoodleUnreachable` (same contract as
         `fetch_assignments` — the executor's backoff, not this best-effort
-        probe, decides what happens next.
+        probe, decides what happens next). All three arrive at the caller
+        unwrapped, never inside an `ExceptionGroup`; if more than one kind
+        occurs in a batch, token beats 429 beats unreachable and the
+        discarded ones stay reachable through `__cause__`.
+
+        `BaseException` — `CancelledError` above all — is the one thing
+        that still leaves as a group, deliberately: a cancelled task must
+        not be quietly converted into a skipped assignment.
         """
         if not assignment_ids:
             return {}
@@ -276,107 +325,137 @@ class HttpAssignmentFetcher:
                 userid = await _get_moodle_userid(client, self._base_url, token)
 
                 async def probe(assignment_id: int) -> None:
-                    async with semaphore:
-                        params = {
-                            "wstoken": token,
-                            "wsfunction": "mod_assign_get_submission_status",
-                            "moodlewsrestformat": "json",
-                            "assignid": assignment_id,
-                            "userid": userid,
-                        }
+                    # This `try` wraps `probe`'s *whole body*, not just the
+                    # statements that look like they can raise. A TaskGroup
+                    # cancels every sibling task as soon as one member
+                    # raises, so anything leaving this function costs the
+                    # entire batch and reaches the caller as a bare
+                    # `ExceptionGroup` matching no `except*` clause below.
+                    # Guarding only "the parts that can raise" is exactly
+                    # what let that shape survive three fix rounds: the
+                    # result store sat after the inner guard, and the
+                    # handlers' own `logger` calls sat inside it. Only two
+                    # exits are permitted from here -- a normal return, or
+                    # one of `_PROBE_ESCALATES`. See task-1-fix-4-report.md.
+                    try:
+                        async with semaphore:
+                            params = {
+                                "wstoken": token,
+                                "wsfunction": "mod_assign_get_submission_status",
+                                "moodlewsrestformat": "json",
+                                "assignid": assignment_id,
+                                "userid": userid,
+                            }
+                            try:
+                                response = await client.get(
+                                    f"{self._base_url}{_WS_PATH}", params=params
+                                )
+                                if response.status_code == 429:
+                                    raise MoodleRateLimited("http_429")
+                                if response.status_code >= 400:
+                                    return
+                                body = response.json()
+                                if not isinstance(body, dict):
+                                    return
+                                if "exception" in body:
+                                    if str(body.get("errorcode", "")) == "invalidtoken":
+                                        raise MoodleTokenInvalid("invalidtoken")
+                                    return
+                                # Parsing is part of the same guarded region
+                                # as the request: a malformed `timemodified`
+                                # is exactly "this assignment's data is bad",
+                                # the same failure class as a transport error
+                                # (task-1-fix-3-brief.md C1 -- this call used
+                                # to sit after the guard, so `_ts`'s
+                                # ValueError/OverflowError escaped `probe`).
+                                parsed = _parse_submission_status(assignment_id, body)
+                            except _PROBE_SKIPS as exc:
+                                # One assignment's failure is that
+                                # assignment's alone -- never the token, so
+                                # only the type name is logged. The two
+                                # escalations raised just above are not in
+                                # this tuple and cannot be (pinned by
+                                # `test_skip_tuple_can_never_swallow_an_escalation`),
+                                # so they fall through to the outer clause.
+                                logger.warning(
+                                    "syncjobs.moodle.submission_probe_failed",
+                                    error=type(exc).__name__,
+                                )
+                                return
+                            if parsed is not None:
+                                results[assignment_id] = parsed
+                    except _PROBE_ESCALATES:
+                        # The credential or the endpoint is the problem, not
+                        # this assignment: every sibling probe would fail the
+                        # same way, so let it reach the `except*` router.
+                        raise
+                    except Exception as exc:
+                        # The residual. Whatever a probe raises that no
+                        # clause named is still one assignment's problem, so
+                        # it skips that assignment instead of cancelling its
+                        # siblings -- but it is not a shape anyone
+                        # anticipated either, so it is logged at `error`
+                        # rather than folding into routine probe noise, and
+                        # with a traceback: a bare type name cannot tell you
+                        # *where* inside `probe` a RuntimeError came from,
+                        # which is the whole point of the signal. A rendered
+                        # traceback shows source lines, not frame locals, so
+                        # it cannot leak the token (verified against all
+                        # three processor chains in logging_setup.py).
+                        #
+                        # `BaseException` is deliberately NOT caught:
+                        # `CancelledError`, `KeyboardInterrupt` and
+                        # `SystemExit` must tear the batch down. A cancelled
+                        # task must never become a skipped assignment.
                         try:
-                            response = await client.get(
-                                f"{self._base_url}{_WS_PATH}", params=params
-                            )
-                            if response.status_code == 429:
-                                raise MoodleRateLimited("http_429")
-                            if response.status_code >= 400:
-                                return
-                            body = response.json()
-                            if not isinstance(body, dict):
-                                return
-                            if "exception" in body:
-                                if str(body.get("errorcode", "")) == "invalidtoken":
-                                    raise MoodleTokenInvalid("invalidtoken")
-                                return
-                            # Parsing is part of the same guarded region as
-                            # the request: a malformed `timemodified` is
-                            # exactly "this assignment's data is bad", the
-                            # same failure class as a transport error, and
-                            # must be handled here rather than left to
-                            # escape `probe` unmatched (task-1-fix-3-brief.md
-                            # C1 -- `_parse_submission_status` used to be
-                            # called after this try, so `_ts`'s ValueError/
-                            # OverflowError left the TaskGroup as a bare
-                            # ExceptionGroup that matched neither the
-                            # `except*` clause below nor the plain
-                            # `except (httpx.HTTPError, ValueError)` further
-                            # down that wraps this whole method).
-                            parsed = _parse_submission_status(assignment_id, body)
-                        except (MoodleTokenInvalid, MoodleRateLimited):
-                            # Deliberate escalations, not this assignment's
-                            # problem alone -- let them reach the TaskGroup
-                            # and the `except*` routing below, unlike
-                            # everything caught by the two clauses after
-                            # this one.
-                            raise
-                        except (httpx.HTTPError, ValueError, OverflowError) as exc:
-                            # One assignment's failure is that assignment's
-                            # alone -- never the token. OverflowError is
-                            # *not* a ValueError (it descends from
-                            # ArithmeticError, not ValueError), and `_ts`
-                            # raises it for a `timemodified` too large for
-                            # the platform's time_t -- an ordinary malformed
-                            # value, not a contrived one, since JSON places
-                            # no ceiling on integer size.
-                            logger.warning(
-                                "syncjobs.moodle.submission_probe_failed",
-                                error=type(exc).__name__,
-                            )
-                            return
-                        except Exception as exc:
-                            # Anything else is still just this assignment's
-                            # data or handling -- not grounds to fail the
-                            # batch (the same contract as every branch
-                            # above) -- but it is *not* a shape anticipated
-                            # by the two clauses above either, so it is
-                            # logged louder (error, not warning) instead of
-                            # folding into routine probe noise. This is the
-                            # deliberate close of the class of bug fixed
-                            # piecemeal across three rounds: whatever a
-                            # probe raises that no clause names must never
-                            # reach the caller as a bare ExceptionGroup, and
-                            # must not silently look identical to an
-                            # expected, understood failure either. See
-                            # task-1-fix-3-report.md for the reasoning.
                             logger.error(
                                 "syncjobs.moodle.submission_probe_unexpected_error",
                                 error=type(exc).__name__,
+                                exc_info=exc,
                             )
-                            return
-                        if parsed is not None:
-                            results[assignment_id] = parsed
+                        except Exception:
+                            # The last resort must not itself fail the
+                            # batch. structlog writes through
+                            # `PrintLoggerFactory` (logging_setup.py), i.e.
+                            # a plain write to stdout, and an `OSError` on a
+                            # broken pipe here would hand the caller back
+                            # the very ExceptionGroup this clause exists to
+                            # prevent. Losing one log line beats losing
+                            # every other assignment in the batch.
+                            pass
 
                 try:
                     async with asyncio.TaskGroup() as tg:
                         for assignment_id in assignment_ids:
                             tg.create_task(probe(assignment_id))
-                except* (MoodleTokenInvalid, MoodleRateLimited) as eg:
+                except* _PROBE_ESCALATES as eg:
                     # Unwrapped: the executor matches on the exception
-                    # itself, not an ExceptionGroup. Both clauses used to
-                    # be separate `except*` arms, but `except*` runs every
+                    # itself, not an ExceptionGroup. These used to be
+                    # separate `except*` arms, but `except*` runs every
                     # matching clause -- a batch with one dead-token probe
                     # and one rate-limited probe fired both and the two
                     # raises were recombined into a bare ExceptionGroup
                     # that matched nothing downstream. One clause, with an
-                    # explicit priority: a dead token makes the rate limit
+                    # explicit priority: a dead token makes everything else
                     # moot (we must stop using the credential either way)
-                    # and only the token error triggers re-auth, so it
-                    # wins. `subgroup()`, not `eg.exceptions` -- groups
-                    # can nest and `.exceptions` only sees the top level.
+                    # and only it triggers re-auth, so it wins; a 429 is a
+                    # specific instruction from the server, so it outranks
+                    # the generic transient. `subgroup()`, not
+                    # `eg.exceptions` -- groups can nest and `.exceptions`
+                    # only sees the top level.
+                    #
+                    # Each re-raise carries a short stable code rather than
+                    # the original message, same as `MoodleRateLimited(
+                    # "http_429")` always has: `executor.py:373` writes
+                    # `str(exc)` into `last_error`, and a fixed code there
+                    # is greppable and cannot carry anything sensitive. The
+                    # discarded detail is not lost -- `from eg` keeps the
+                    # whole group reachable as `exc.__cause__`.
                     if eg.subgroup(MoodleTokenInvalid) is not None:
                         raise MoodleTokenInvalid("invalidtoken") from eg
-                    raise MoodleRateLimited("http_429") from eg
+                    if eg.subgroup(MoodleRateLimited) is not None:
+                        raise MoodleRateLimited("http_429") from eg
+                    raise MoodleUnreachable("submission_probe_unreachable") from eg
         except (httpx.HTTPError, ValueError) as exc:
             # Never log the token.
             logger.warning(

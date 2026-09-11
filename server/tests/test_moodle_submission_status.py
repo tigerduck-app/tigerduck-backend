@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 
 import httpx
 import pytest
+import structlog
 
 from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
+    MoodleUnreachable,
 )
 
 BASE = "https://moodle.example.test"
@@ -395,41 +398,153 @@ async def test_malformed_timestamp_does_not_lose_the_batch():
     assert set(result) == {1, 3}
 
 
-@pytest.mark.asyncio
-async def test_unexpected_probe_exception_never_escapes_as_a_group(monkeypatch):
-    """C1 (task-1-fix-2-rereview.md), generalized: round 1 fixed exactly two
-    named exception types recombining into a bare `ExceptionGroup`
-    (`test_mixed_token_and_rate_limit_batch_picks_token`). Fix round 3 fixed
-    a third, the malformed-timestamp `OverflowError`/`ValueError` pair above.
-    Neither closes the shape: `except*` runs every matching clause and lets
-    anything unmatched escape as a residual group. This is the third time
-    that shape has bitten this branch, so this test does not name a fourth
-    exception type -- it pins the invariant that makes the *type* irrelevant:
+class _UnhashableAssignmentId(int):
+    """An `int` a dict will not accept as a key.
 
-        an arbitrary exception raised from inside a probe never reaches the
-        caller as a BaseExceptionGroup.
-
-    `RuntimeError` is injected via monkeypatch, not a crafted Moodle
-    payload, because the point is the guard around `probe` itself, not any
-    one bad response shape -- that is what the malformed-timestamp test
-    above already covers. This test must keep passing no matter what future
-    code runs inside `probe` or what it raises.
+    Stand-in for "some statement in `probe` that is not inside the inner
+    guard raises". It is a genuine `int`, so it satisfies the
+    `assignment_ids: list[int]` annotation and formats into the request
+    params like any other id; the single thing it changes is that
+    `results[assignment_id] = parsed` raises `TypeError`.
     """
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    __hash__ = None
+
+
+class _LoggerThatFailsOnWarning:
+    """A `logger` whose `warning` raises, delegating everything else.
+
+    Not synthetic: `logging_setup.py` configures structlog with
+    `PrintLoggerFactory()`, so every line is a plain write to stdout and a
+    broken pipe there raises `OSError` -- an ordinary `Exception`, raised
+    from inside a probe's own `except` clause, where no guard used to reach.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def warning(self, *args, **kwargs):
+        raise OSError("broken pipe writing the log line")
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+# Every entry is a *different statement inside `probe`*, walking its whole
+# body: the request, the response read, the parse, the result store after
+# the inner guard, and the inner guard's own handler.
+_PROBE_INJECTION_SITES = (
+    "before_the_request",
+    "during_the_response_read",
+    "inside_the_parse",
+    "at_the_result_store",
+    "inside_the_skip_handler",
+)
+
+_INJECTED_MESSAGE = "nobody wrote an except* clause for this"
+
+# Assignments 1 and 3 answer slowly so they are demonstrably *still in
+# flight* when assignment 2 fails. Without this the stub transport answers
+# every probe in microseconds, all three finish before anything can be
+# cancelled, and the `set(result) == {1, 3}` half of the invariant holds
+# even for a fix that lets the exception reach the TaskGroup -- measured:
+# a residual `except* Exception` arm at the group passes the whole
+# parametrization with an instant transport and returns `{}` with this
+# delay, because a TaskGroup aborts its siblings. A sleeping task cannot
+# finish early, so a loaded machine cannot turn this into a false failure.
+_SIBLING_DELAY_SECONDS = 0.05
+
+
+def _install_probe_injection(site: str, monkeypatch):
+    """Arrange for assignment 2's probe to fail at `site`.
+
+    Returns the `(handler, assignment_ids)` to drive the fetcher with.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
         fn = request.url.params.get("wsfunction")
         if fn == "core_webservice_get_site_info":
             return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid != 2:
+            await asyncio.sleep(_SIBLING_DELAY_SECONDS)
+        if assignid == 2 and site == "before_the_request":
+            # MockTransport calls this handler from inside `client.get`, so
+            # an arbitrary exception here surfaces exactly where a transport
+            # would raise one.
+            raise RuntimeError(_INJECTED_MESSAGE)
+        if assignid == 2 and site == "inside_the_skip_handler":
+            # A `timemodified` that overflows `time_t` routes probe 2 into
+            # the skip handler, whose own `logger.warning` then raises.
+            return httpx.Response(200, json=_status(True, 10**20))
         return httpx.Response(200, json=_status(True, 1_757_000_000))
 
-    real_parse = moodle_client._parse_submission_status
+    if site == "during_the_response_read":
+        real_json = httpx.Response.json
 
-    def _parse_or_boom(assignment_id: int, body: dict):
-        if assignment_id == 2:
-            raise RuntimeError("nobody wrote an except* clause for this")
-        return real_parse(assignment_id, body)
+        def _json_or_boom(self, **kwargs):
+            # Only the probe requests carry `assignid`; site-info still
+            # parses normally, so the batch gets as far as `probe`.
+            if self.request.url.params.get("assignid") == "2":
+                raise RuntimeError(_INJECTED_MESSAGE)
+            return real_json(self, **kwargs)
 
-    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_boom)
+        monkeypatch.setattr(httpx.Response, "json", _json_or_boom)
+
+    if site == "inside_the_parse":
+        real_parse = moodle_client._parse_submission_status
+
+        def _parse_or_boom(assignment_id: int, body: dict):
+            if assignment_id == 2:
+                raise RuntimeError(_INJECTED_MESSAGE)
+            return real_parse(assignment_id, body)
+
+        monkeypatch.setattr(
+            moodle_client, "_parse_submission_status", _parse_or_boom
+        )
+
+    if site == "inside_the_skip_handler":
+        monkeypatch.setattr(
+            moodle_client,
+            "logger",
+            _LoggerThatFailsOnWarning(moodle_client.logger),
+        )
+
+    ids: list[int] = [1, 2, 3]
+    if site == "at_the_result_store":
+        ids = [1, _UnhashableAssignmentId(2), 3]
+    return handler, ids
+
+
+@pytest.mark.parametrize("site", _PROBE_INJECTION_SITES)
+@pytest.mark.asyncio
+async def test_unexpected_probe_exception_never_escapes_as_a_group(
+    site, monkeypatch
+):
+    """M1+M2 (task-1-fix-3-rereview.md): the invariant, generalized over
+    *location* as well as type.
+
+        an arbitrary exception raised anywhere inside a probe never reaches
+        the caller as a BaseExceptionGroup, and never costs its siblings
+
+    Rounds 1 and 2 each fixed one *exception type* that recombined into a
+    bare `ExceptionGroup`; round 3 closed the type axis by injecting an
+    arbitrary `RuntimeError` -- but at exactly one call site, inside the
+    guarded `try`. Two statements in `probe` sat outside that guard
+    (`results[assignment_id] = parsed`, and the `logger` calls in the
+    handlers themselves) and still escaped as groups while that test stayed
+    green. A test that generalizes on one axis and not the other looks like
+    a class-level test and is not one, so this one parametrizes over the
+    body of `probe`: fail if *any* statement in it can escape.
+
+    Not just "no group escaped": a TaskGroup cancels every sibling the
+    moment one member raises, so an escape also silently costs assignments
+    1 and 3. Both halves are asserted.
+
+    `BaseException` is out of scope on purpose -- `CancelledError` must
+    keep escaping as a group rather than becoming a skipped assignment.
+    """
+    handler, ids = _install_probe_injection(site, monkeypatch)
 
     fetcher = HttpAssignmentFetcher(
         base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
@@ -437,22 +552,251 @@ async def test_unexpected_probe_exception_never_escapes_as_a_group(monkeypatch):
 
     try:
         result = await fetcher.fetch_submission_status(
-            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+            token="tok", assignment_ids=ids, max_concurrency=3
         )
     except BaseException as exc:
-        # Whatever the decision (task-1-fix-3-report.md), reaching here as
-        # a bare group is never it: it means `except*` matched nothing,
-        # discarded no information on purpose, and let a residual group
-        # through unrouted.
         assert not isinstance(exc, BaseExceptionGroup), (
-            f"an unmatched probe exception escaped as {exc!r} instead of "
-            "being handled inside the probe"
+            f"a probe exception injected {site} escaped as {exc!r} instead "
+            "of being handled inside the probe"
         )
         raise
 
-    # Chosen contract: an exception no clause names is this assignment's
-    # problem alone, same as every other single-probe failure -- skipped,
-    # not escalated (see task-1-fix-3-report.md for why). Assert the batch
-    # actually completed instead of merely "no exception happened to
-    # propagate".
+    # The failing probe is skipped, and only it. Assignments 1 and 3 are
+    # still awaiting their response when 2 fails, so if the exception had
+    # reached the TaskGroup they would have been cancelled and lost -- this
+    # is the half that "handled somewhere, no group escaped" does not cover.
+    assert set(result) == {1, 3}, (
+        f"an exception injected {site} did not stay confined to its own "
+        f"assignment: expected {{1, 3}}, got {set(result)}"
+    )
+
+
+def test_skip_tuple_can_never_swallow_an_escalation():
+    """M1 (task-1-fix-3-rereview.md), structural half.
+
+    Consolidating `probe`'s guards left one ordering hazard: the inner
+    `except _PROBE_SKIPS` clause runs before the outer `except
+    _PROBE_ESCALATES`, so if any escalating type were ever a subclass of a
+    skippable one it would be logged as routine probe noise and the
+    assignment silently skipped instead of the batch stopping. Nothing
+    enforces that at the two `except` sites, so it is enforced here.
+    """
+    for escalating in moodle_client._PROBE_ESCALATES:
+        assert not issubclass(escalating, moodle_client._PROBE_SKIPS), (
+            f"{escalating.__name__} is in _PROBE_ESCALATES but would be "
+            "caught by the skip clause first and never escalate"
+        )
+
+
+@pytest.mark.asyncio
+async def test_moodle_unreachable_from_a_probe_propagates_unwrapped(monkeypatch):
+    """M3 (task-1-fix-3-rereview.md): the broad residual clause must not eat
+    this module's own error taxonomy.
+
+    `MoodleUnreachable` is one of the three types `executor.py::_execute_job`
+    branches on (`:373` -> retriable backoff). Round 3's `except Exception`
+    caught it, logged it as *unexpected*, and skipped the assignment, so it
+    never reached that branch. Nothing inside `probe` raises it today --
+    Plan C Tasks 2 and 3 wire this function up and will reasonably expect
+    this module's own types to behave here the way they do everywhere else
+    in the file.
+
+    It must arrive plain, never inside a group, with the group still
+    reachable through `__cause__`.
+    """
+
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_unreachable(assignment_id: int, body: dict):
+        if assignment_id == 2:
+            raise MoodleUnreachable("probe_backend_down")
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(
+        moodle_client, "_parse_submission_status", _parse_or_unreachable
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(MoodleUnreachable) as excinfo:
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+    assert not isinstance(excinfo.value, BaseExceptionGroup)
+    # The discarded detail is not lost: `from eg` keeps the original group.
+    assert isinstance(excinfo.value.__cause__, BaseExceptionGroup)
+    assert excinfo.value.__cause__.subgroup(MoodleUnreachable) is not None
+
+
+@pytest.mark.parametrize(
+    ("winner", "loser_payload"),
+    [
+        (MoodleTokenInvalid, "invalidtoken"),
+        (MoodleRateLimited, "http_429"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_unreachable_loses_to_the_more_specific_escalations(
+    winner, loser_payload, monkeypatch
+):
+    """M3, priority half: adding `MoodleUnreachable` to the escalation set
+    gives the `except*` router three types to choose between, and `except*`
+    hands it all of them at once.
+
+    A dead token makes everything else moot (only it triggers re-auth) and a
+    429 is a specific instruction from the server, so both outrank the
+    generic transient. Getting this wrong would file a dead credential as
+    `sync_failed:submission_probe_unreachable` and never disable the job.
+
+    Both probes are held at a barrier so they are past their last suspension
+    point before either raises -- otherwise the TaskGroup would cancel the
+    second one and the batch would only ever contain one escalation.
+    """
+    barrier = asyncio.Barrier(2)
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_escalate(assignment_id: int, body: dict):
+        if assignment_id == 1:
+            raise MoodleUnreachable("probe_backend_down")
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(
+        moodle_client, "_parse_submission_status", _parse_or_escalate
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid in (1, 2):
+            await barrier.wait()
+        if assignid == 2:
+            if loser_payload == "http_429":
+                return httpx.Response(429, text="slow down")
+            return httpx.Response(
+                200,
+                json={"exception": "moodle_exception", "errorcode": loser_payload},
+            )
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(winner) as excinfo:
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+    assert not isinstance(excinfo.value, BaseExceptionGroup)
+    # Both really were in the group -- otherwise this asserts nothing about
+    # priority, only that the surviving one was routed.
+    cause = excinfo.value.__cause__
+    assert isinstance(cause, BaseExceptionGroup)
+    assert cause.subgroup(MoodleUnreachable) is not None
+    assert cause.subgroup(winner) is not None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
+    capsys, monkeypatch
+):
+    """M4 (task-1-fix-3-rereview.md): `submission_probe_unexpected_error` is
+    the one signal that says a new failure mode has appeared inside `probe`.
+    With only `type(exc).__name__` it says a `RuntimeError` happened
+    somewhere in the probe and nothing more, which is not enough to act on.
+
+    The reason it was omitted is the reason it needs a test: the probe's own
+    frame holds the token, in `token` and in the `params` dict, and the
+    never-log-a-token rule is absolute. A rendered traceback shows source
+    *lines*, not frame locals, so `exc_info` is safe -- asserted here
+    against the real production processor chain
+    (`logging_setup.configure`'s non-development branch: `format_exc_info`
+    then `JSONRenderer`), not against whatever structlog happens to default
+    to under pytest. The module's `logger` is a lazy proxy that caches its
+    bound logger on first use, and structlog's *default* config sets
+    `cache_logger_on_first_use=True`, so by the time this test runs an
+    earlier test in this file has already frozen the console renderer onto
+    it; configuring alone silently does nothing. The proxy is therefore
+    replaced with one created after `configure`, and the assertions parse
+    the line as JSON so a test running against the wrong chain fails
+    instead of passing for the wrong reason.
+    """
+    token = "super-secret-token"
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_boom(assignment_id: int, body: dict):
+        if assignment_id == 2:
+            raise RuntimeError("unexpected probe failure")
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_boom)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        logger_factory=structlog.PrintLoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+    try:
+        monkeypatch.setattr(
+            moodle_client,
+            "logger",
+            structlog.get_logger("server.syncjobs.moodle_client"),
+        )
+        result = await fetcher.fetch_submission_status(
+            token=token, assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+    finally:
+        structlog.reset_defaults()
+
     assert set(result) == {1, 3}
+    stdout = capsys.readouterr().out
+    lines = [
+        line
+        for line in stdout.splitlines()
+        if "submission_probe_unexpected_error" in line
+    ]
+    assert len(lines) == 1, f"expected one unexpected-error line, got {lines}"
+    # Parsing as JSON is the proof that the production chain really rendered
+    # this line -- structlog's default ConsoleRenderer would not produce it.
+    payload = json.loads(lines[0])
+    assert payload["event"] == "syncjobs.moodle.submission_probe_unexpected_error"
+    assert payload["level"] == "error"
+    assert payload["error"] == "RuntimeError"
+    # The traceback is the point: it must name the frame the exception came
+    # from, not merely the exception's type.
+    traceback_text = payload["exception"]
+    assert traceback_text.startswith("Traceback (most recent call last)")
+    assert "_parse_or_boom" in traceback_text
+    # ... and it must still carry nothing that identifies the credential,
+    # even though the probe frame it walks through holds the token both as a
+    # closure variable and inside its `params` dict.
+    assert token not in stdout
+    assert "wstoken" not in stdout
