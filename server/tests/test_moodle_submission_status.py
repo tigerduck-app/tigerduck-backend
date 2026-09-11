@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
     MoodleRateLimited,
@@ -351,3 +352,107 @@ async def test_token_never_appears_in_logs(capsys, caplog):
     stdout = capsys.readouterr().out
     assert token not in stdout
     assert token not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_malformed_timestamp_does_not_lose_the_batch():
+    """C1 (task-1-fix-2-rereview.md): `_parse_submission_status` used to be
+    called *outside* `probe`'s guarded `try`, so a bogus `timemodified` --
+    ordinary malformed data, not a contrived input -- raised straight out of
+    `probe` unmatched by any `except*` clause and escaped
+    `fetch_submission_status` as a bare `ExceptionGroup`, taking the whole
+    batch down with it.
+
+    A `timemodified` this large overflows `datetime.fromtimestamp`'s
+    platform `time_t`: `OverflowError`, not `ValueError` -- it descends from
+    `ArithmeticError`, so widening `except ValueError` alone would still
+    miss it. `json.loads` (what `httpx.Response.json()` uses) accepts a
+    Python int of any size, so Moodle sending this is not far-fetched.
+
+    The malformed row must be skipped like every other broken probe, not
+    lose the rest of the batch.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid == 2:
+            return httpx.Response(200, json=_status(True, 10**20))
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    result = await fetcher.fetch_submission_status(
+        token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+    )
+
+    # The malformed one is simply absent -- same contract as every other
+    # broken probe.
+    assert set(result) == {1, 3}
+
+
+@pytest.mark.asyncio
+async def test_unexpected_probe_exception_never_escapes_as_a_group(monkeypatch):
+    """C1 (task-1-fix-2-rereview.md), generalized: round 1 fixed exactly two
+    named exception types recombining into a bare `ExceptionGroup`
+    (`test_mixed_token_and_rate_limit_batch_picks_token`). Fix round 3 fixed
+    a third, the malformed-timestamp `OverflowError`/`ValueError` pair above.
+    Neither closes the shape: `except*` runs every matching clause and lets
+    anything unmatched escape as a residual group. This is the third time
+    that shape has bitten this branch, so this test does not name a fourth
+    exception type -- it pins the invariant that makes the *type* irrelevant:
+
+        an arbitrary exception raised from inside a probe never reaches the
+        caller as a BaseExceptionGroup.
+
+    `RuntimeError` is injected via monkeypatch, not a crafted Moodle
+    payload, because the point is the guard around `probe` itself, not any
+    one bad response shape -- that is what the malformed-timestamp test
+    above already covers. This test must keep passing no matter what future
+    code runs inside `probe` or what it raises.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    real_parse = moodle_client._parse_submission_status
+
+    def _parse_or_boom(assignment_id: int, body: dict):
+        if assignment_id == 2:
+            raise RuntimeError("nobody wrote an except* clause for this")
+        return real_parse(assignment_id, body)
+
+    monkeypatch.setattr(moodle_client, "_parse_submission_status", _parse_or_boom)
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    try:
+        result = await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+    except BaseException as exc:
+        # Whatever the decision (task-1-fix-3-report.md), reaching here as
+        # a bare group is never it: it means `except*` matched nothing,
+        # discarded no information on purpose, and let a residual group
+        # through unrouted.
+        assert not isinstance(exc, BaseExceptionGroup), (
+            f"an unmatched probe exception escaped as {exc!r} instead of "
+            "being handled inside the probe"
+        )
+        raise
+
+    # Chosen contract: an exception no clause names is this assignment's
+    # problem alone, same as every other single-probe failure -- skipped,
+    # not escalated (see task-1-fix-3-report.md for why). Assert the batch
+    # actually completed instead of merely "no exception happened to
+    # propagate".
+    assert set(result) == {1, 3}

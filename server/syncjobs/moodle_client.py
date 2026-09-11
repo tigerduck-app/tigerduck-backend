@@ -251,10 +251,15 @@ class HttpAssignmentFetcher:
         narrow list — see `submissions.select_assignment_ids`.
 
         Assignments whose probe fails are simply absent from the result;
-        the caller leaves those rows as they were. An invalid token is the
-        one exception: it means every subsequent call would fail too, so it
-        propagates and lets the executor disable the job. A 429 stops the
-        batch too and propagates as `MoodleRateLimited`, same contract as
+        the caller leaves those rows as they were. That holds even for a
+        probe failure of a kind nobody anticipated (logged at `error`, not
+        `warning`, so it doesn't hide behind routine probe noise) — a
+        programming error in parsing one assignment's data is still that
+        assignment's problem alone, not grounds to fail every other
+        assignment in the batch. An invalid token is the one exception: it
+        means every subsequent call would fail too, so it propagates and
+        lets the executor disable the job. A 429 stops the batch too and
+        propagates as `MoodleRateLimited`, same contract as
         `fetch_assignments` — the executor's backoff, not this best-effort
         probe, decides what happens next.
         """
@@ -288,21 +293,65 @@ class HttpAssignmentFetcher:
                             if response.status_code >= 400:
                                 return
                             body = response.json()
-                        except (httpx.HTTPError, ValueError) as exc:
+                            if not isinstance(body, dict):
+                                return
+                            if "exception" in body:
+                                if str(body.get("errorcode", "")) == "invalidtoken":
+                                    raise MoodleTokenInvalid("invalidtoken")
+                                return
+                            # Parsing is part of the same guarded region as
+                            # the request: a malformed `timemodified` is
+                            # exactly "this assignment's data is bad", the
+                            # same failure class as a transport error, and
+                            # must be handled here rather than left to
+                            # escape `probe` unmatched (task-1-fix-3-brief.md
+                            # C1 -- `_parse_submission_status` used to be
+                            # called after this try, so `_ts`'s ValueError/
+                            # OverflowError left the TaskGroup as a bare
+                            # ExceptionGroup that matched no except* clause
+                            # below and no except clause at :329).
+                            parsed = _parse_submission_status(assignment_id, body)
+                        except (MoodleTokenInvalid, MoodleRateLimited):
+                            # Deliberate escalations, not this assignment's
+                            # problem alone -- let them reach the TaskGroup
+                            # and the `except*` routing below, unlike
+                            # everything caught by the two clauses after
+                            # this one.
+                            raise
+                        except (httpx.HTTPError, ValueError, OverflowError) as exc:
                             # One assignment's failure is that assignment's
-                            # alone -- never the token.
+                            # alone -- never the token. OverflowError is
+                            # *not* a ValueError (it descends from
+                            # ArithmeticError, not ValueError), and `_ts`
+                            # raises it for a `timemodified` too large for
+                            # the platform's time_t -- an ordinary malformed
+                            # value, not a contrived one, since JSON places
+                            # no ceiling on integer size.
                             logger.warning(
                                 "syncjobs.moodle.submission_probe_failed",
                                 error=type(exc).__name__,
                             )
                             return
-                        if not isinstance(body, dict):
+                        except Exception as exc:
+                            # Anything else is still just this assignment's
+                            # data or handling -- not grounds to fail the
+                            # batch (the same contract as every branch
+                            # above) -- but it is *not* a shape anticipated
+                            # by the two clauses above either, so it is
+                            # logged louder (error, not warning) instead of
+                            # folding into routine probe noise. This is the
+                            # deliberate close of the class of bug fixed
+                            # piecemeal across three rounds: whatever a
+                            # probe raises that no clause names must never
+                            # reach the caller as a bare ExceptionGroup, and
+                            # must not silently look identical to an
+                            # expected, understood failure either. See
+                            # task-1-fix-3-report.md for the reasoning.
+                            logger.error(
+                                "syncjobs.moodle.submission_probe_unexpected_error",
+                                error=type(exc).__name__,
+                            )
                             return
-                        if "exception" in body:
-                            if str(body.get("errorcode", "")) == "invalidtoken":
-                                raise MoodleTokenInvalid("invalidtoken")
-                            return
-                        parsed = _parse_submission_status(assignment_id, body)
                         if parsed is not None:
                             results[assignment_id] = parsed
 
