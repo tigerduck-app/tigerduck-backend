@@ -407,12 +407,17 @@ class HttpAssignmentFetcher:
         occurs in a batch, token beats 429 beats unreachable and the
         discarded ones stay reachable through `__cause__`.
 
-        `BaseException` is the one thing that still leaves as a group,
+        `BaseException` is the one thing that still leaves uncaught,
         deliberately: `KeyboardInterrupt`, `SystemExit` and `GeneratorExit`
         raised inside a probe must tear the batch down rather than be
-        quietly converted into a skipped assignment. Cancelling *this*
-        call while probes are in flight also still raises a plain
-        `CancelledError`, not a group.
+        quietly converted into a skipped assignment. They do not all arrive
+        the same way, though, and an earlier version of this docstring said
+        they did: `asyncio.TaskGroup` re-raises `SystemExit` and
+        `KeyboardInterrupt` *bare* (`_is_base_error` covers exactly those
+        two, and `raise self._base_error` bypasses the group), while
+        `GeneratorExit` comes out inside a `BaseExceptionGroup` like
+        anything else. Cancelling *this* call while probes are in flight
+        also still raises a plain `CancelledError`, not a group.
 
         One exception to that, which the code cannot change without
         weakening cancellation: an `asyncio.CancelledError` raised *inside
@@ -525,8 +530,11 @@ class HttpAssignmentFetcher:
                         # `BaseException` is deliberately NOT caught here:
                         # `KeyboardInterrupt`, `SystemExit` and
                         # `GeneratorExit` raised inside a probe tear the
-                        # batch down as a `BaseExceptionGroup`, and
-                        # cancelling `fetch_submission_status` itself still
+                        # batch down rather than become a skipped
+                        # assignment. Only `GeneratorExit` arrives as a
+                        # `BaseExceptionGroup`; `asyncio.TaskGroup`
+                        # re-raises the other two bare. Cancelling
+                        # `fetch_submission_status` itself still
                         # propagates a plain `CancelledError`. Note the one
                         # case this does *not* buy: an
                         # `asyncio.CancelledError` raised *inside a single
