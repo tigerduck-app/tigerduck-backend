@@ -130,13 +130,13 @@ async def _setup_user_job(
     return user, account, job
 
 
-def _fa(aid: int) -> FetchedAssignment:
+def _fa(aid: int, *, due_at: datetime | None = None) -> FetchedAssignment:
     return FetchedAssignment(
         moodle_course_id=7001,
         moodle_assignment_id=aid,
         course_name="資料結構",
         title=f"HW{aid}",
-        due_at=datetime.now(UTC) + timedelta(days=7),
+        due_at=due_at if due_at is not None else datetime.now(UTC) + timedelta(days=7),
         cutoff_at=None,
         allow_from_at=None,
         moodle_url=None,
@@ -383,5 +383,95 @@ async def test_rate_limited_records_school_rate_limited(
     await db_session.refresh(job)
     assert job.status == "pending"
     assert job.last_error == "school_rate_limited"
+
+
+async def test_assignment_sync_probes_submission_status(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """After the assignment list lands, the narrow window gets probed."""
+    await _setup_user_job(db_session)
+    probed: list[list[int]] = []
+
+    async def fake_probe(*, token, assignment_ids, max_concurrency):
+        probed.append(list(assignment_ids))
+        return {}
+
+    # Due inside the default 48h probe window, unsubmitted — in scope for
+    # select_assignment_ids so the probe actually has something to fetch.
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", fake_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert probed, "submission status was never probed"
+    assert probed == [[1]]
+
+
+async def test_probe_failure_does_not_fail_the_run(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A dead probe must not take the assignment sync down with it."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def exploding_probe(*, token, assignment_ids, max_concurrency):
+        raise RuntimeError("moodle is having a day")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", exploding_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    # The run still succeeds — assert against the SyncRun row the same way
+    # the existing success-path tests in this file do.
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.attempts == 0
+    assert job.last_success_at is not None
+    assert job.last_error is None
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+
+
+async def test_submission_probe_token_invalid_disables_job(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """An invalid token discovered while probing submissions must still
+    disable the job, the same outcome as an invalid token surfacing from
+    the assignment fetch itself — every subsequent Moodle call would fail
+    identically either way."""
+    _, account, job = await _setup_user_job(db_session)
+
+    async def dead_token_probe(*, token, assignment_ids, max_concurrency):
+        raise MoodleTokenInvalid("invalidtoken")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", dead_token_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "disabled"
+    assert job.last_error == "credential_invalid"
+    await db_session.refresh(account)
+    assert account.credential_status == "invalid"
 
 

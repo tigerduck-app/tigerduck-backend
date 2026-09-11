@@ -59,6 +59,7 @@ from server.syncjobs.moodle_client import (
     MoodleTokenInvalid,
     MoodleUnreachable,
 )
+from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
 
 from server.auth.models import PushJob
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -326,6 +327,16 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 stats = await apply_fetched_assignments(
                     session, user_id=job.user_id, fetched=fetched, now=now
                 )
+                try:
+                    await _refresh_submission_status(
+                        session,
+                        worker=worker,
+                        user_id=job.user_id,
+                        token=token,
+                        now=now,
+                    )
+                except MoodleTokenInvalid:
+                    raise CredentialInvalid("moodle_token_invalid")
 
             if run is not None:
                 run.status = SyncRunStatus.succeeded.value
@@ -384,6 +395,48 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{type(exc).__name__}",
         )
+
+
+async def _refresh_submission_status(
+    session: AsyncSession,
+    *,
+    worker: SyncWorker,
+    user_id,
+    token: str,
+    now: datetime,
+) -> None:
+    """Best-effort probe of assignments about to enter a reminder window.
+
+    Deliberately swallows everything except an invalid token: the assignment
+    list already landed and the run is a success, and a Moodle hiccup here
+    must not roll that back. An invalid token is different: every later
+    call would fail identically, so it propagates bare for the caller to
+    convert into `CredentialInvalid`, the same way every other Moodle call
+    site in `_execute_job` does — so the job ends up disabled rather than
+    silently retried.
+    """
+    settings = worker.settings
+    try:
+        assignment_ids = await select_assignment_ids(
+            session,
+            user_id=user_id,
+            now=now,
+            window_hours=settings.submission_status_window_hours,
+        )
+        if not assignment_ids:
+            return
+        fetched = await worker.fetcher.fetch_submission_status(
+            token=token,
+            assignment_ids=assignment_ids,
+            max_concurrency=settings.submission_status_max_concurrency,
+        )
+        await apply_submission_status(
+            session, user_id=user_id, fetched=fetched, now=now
+        )
+    except MoodleTokenInvalid:
+        raise
+    except Exception:
+        logger.warning("syncjobs.submissions.refresh_failed", exc_info=True)
 
 
 async def _handle_moodle_failure(
