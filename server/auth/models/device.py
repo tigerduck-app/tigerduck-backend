@@ -84,6 +84,16 @@ class UserDevice(Base):
     cloud_sync_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )
+    # Device-level "does this device push THIS category to the cloud".
+    # Separate from the user-level values in the `notification` settings
+    # document: the document says how long before a deadline to remind,
+    # these say whether this particular device takes part at all.
+    sync_assignment_reminders: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_live_activity: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

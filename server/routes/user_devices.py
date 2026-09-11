@@ -493,6 +493,10 @@ async def update_device_preferences(
         device.sync_assignments = payload.sync_assignments
     if payload.cloud_sync_enabled is not None:
         device.cloud_sync_enabled = payload.cloud_sync_enabled
+    if payload.sync_assignment_reminders is not None:
+        device.sync_assignment_reminders = payload.sync_assignment_reminders
+    if payload.sync_live_activity is not None:
+        device.sync_live_activity = payload.sync_live_activity
 
     await session.flush()
     await _cleanup_orphaned_sync_data(session, auth.user_id)
@@ -505,6 +509,8 @@ async def update_device_preferences(
         sync_course_names=device.sync_course_names,
         sync_assignments=device.sync_assignments,
         cloud_sync_enabled=device.cloud_sync_enabled,
+        sync_assignment_reminders=device.sync_assignment_reminders,
+        sync_live_activity=device.sync_live_activity,
     )
 
 

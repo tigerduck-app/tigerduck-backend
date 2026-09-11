@@ -87,6 +87,8 @@ async def test_patch_preferences_flips_server_push_enabled(client: AsyncClient):
         "sync_course_names": True,
         "sync_assignments": True,
         "cloud_sync_enabled": True,
+        "sync_assignment_reminders": True,
+        "sync_live_activity": True,
     }
 
 

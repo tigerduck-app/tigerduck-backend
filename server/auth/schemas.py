@@ -158,6 +158,8 @@ class DevicePreferencesV3Request(BaseModel):
     sync_course_names: bool | None = None
     sync_assignments: bool | None = None
     cloud_sync_enabled: bool | None = None
+    sync_assignment_reminders: bool | None = None
+    sync_live_activity: bool | None = None
     # Lets the device push a changed system language between register calls
     # rather than waiting for the next app launch. See UserDevice.locale.
     # max_length mirrors UserDevice.locale's String(35) column.
@@ -172,6 +174,8 @@ class DevicePreferencesV3Response(BaseModel):
     sync_course_names: bool
     sync_assignments: bool
     cloud_sync_enabled: bool
+    sync_assignment_reminders: bool
+    sync_live_activity: bool
 
 
 class ScheduleScenario(str, Enum):
