@@ -310,16 +310,22 @@ class HttpAssignmentFetcher:
                     async with asyncio.TaskGroup() as tg:
                         for assignment_id in assignment_ids:
                             tg.create_task(probe(assignment_id))
-                except* MoodleTokenInvalid:
+                except* (MoodleTokenInvalid, MoodleRateLimited) as eg:
                     # Unwrapped: the executor matches on the exception
-                    # itself, not an ExceptionGroup.
-                    raise MoodleTokenInvalid("invalidtoken") from None
-                except* MoodleRateLimited:
-                    raise MoodleRateLimited("http_429") from None
-        except MoodleTokenInvalid:
-            raise
-        except MoodleRateLimited:
-            raise
+                    # itself, not an ExceptionGroup. Both clauses used to
+                    # be separate `except*` arms, but `except*` runs every
+                    # matching clause -- a batch with one dead-token probe
+                    # and one rate-limited probe fired both and the two
+                    # raises were recombined into a bare ExceptionGroup
+                    # that matched nothing downstream. One clause, with an
+                    # explicit priority: a dead token makes the rate limit
+                    # moot (we must stop using the credential either way)
+                    # and only the token error triggers re-auth, so it
+                    # wins. `subgroup()`, not `eg.exceptions` -- groups
+                    # can nest and `.exceptions` only sees the top level.
+                    if eg.subgroup(MoodleTokenInvalid) is not None:
+                        raise MoodleTokenInvalid("invalidtoken") from eg
+                    raise MoodleRateLimited("http_429") from eg
         except (httpx.HTTPError, ValueError) as exc:
             # Never log the token.
             logger.warning(

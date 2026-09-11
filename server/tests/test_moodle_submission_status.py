@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import httpx
@@ -103,19 +104,29 @@ async def test_one_timing_out_assignment_does_not_lose_the_others():
     """Regression for I1 (task-1-review.md): a transport failure -- not
     just a >= 400 status -- on one probe must not abort the batch.
 
-    Before the fix, `probe` only guarded the `>= 400` case; an
-    `httpx.ReadTimeout` (or a non-JSON body) propagated straight out of
-    `asyncio.gather(..., return_exceptions=False)`. The reviewer measured
-    this by hand: with ids [1, 2, 3] and a timeout on one of them, the
-    committed code returned only the assignment requested *before* the
-    timeout -- the request after it was never even sent.
+    This needs a semaphore narrower than the batch (so later ids are
+    still queued, not yet dispatched, when the timeout fires) and a
+    handler that genuinely yields (`await asyncio.sleep(0)`, as real
+    network I/O always does). With only 3 ids and a synchronous handler,
+    every probe races to completion inside one scheduling step before the
+    `ReadTimeout` propagates, so the pre-fix code already holds the same
+    result the fix would produce and the test cannot tell them apart --
+    that was N2 (task-1-fix-1-rereview.md): this test previously used
+    those parameters and passed against the unfixed client too.
+
+    Measured with 6 ids, `max_concurrency=2` and this async handler: the
+    pre-fix client returns only `{1, 3, 4}` -- ids 5 and 6 are still
+    waiting on the semaphore when the `ReadTimeout` on id 2 aborts
+    `asyncio.gather`, so their requests are never even sent. The fix must
+    return every surviving id.
     """
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx.Request) -> httpx.Response:
         fn = request.url.params.get("wsfunction")
         if fn == "core_webservice_get_site_info":
             return httpx.Response(200, json=_site_info())
         assignid = int(request.url.params["assignid"])
+        await asyncio.sleep(0)
         if assignid == 2:
             raise httpx.ReadTimeout("timed out")
         return httpx.Response(200, json=_status(True, 1_757_000_000))
@@ -125,11 +136,12 @@ async def test_one_timing_out_assignment_does_not_lose_the_others():
     )
 
     result = await fetcher.fetch_submission_status(
-        token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        token="tok", assignment_ids=[1, 2, 3, 4, 5, 6], max_concurrency=2
     )
 
-    # The timed-out probe is simply absent -- the others must still land.
-    assert set(result) == {1, 3}
+    # The timed-out probe is simply absent -- every other id, including
+    # the ones still queued behind the narrow semaphore, must land.
+    assert set(result) == {1, 3, 4, 5, 6}
 
 
 @pytest.mark.asyncio
@@ -147,6 +159,86 @@ async def test_invalid_token_propagates():
         await fetcher.fetch_submission_status(
             token="tok", assignment_ids=[1], max_concurrency=1
         )
+
+
+@pytest.mark.asyncio
+async def test_invalid_token_from_a_probe_propagates_unwrapped():
+    """N3 (task-1-fix-1-rereview.md): `test_invalid_token_propagates`
+    above only exercises the token check inside `_get_moodle_userid`,
+    which raises *before* the `TaskGroup` is even entered. It never
+    touches the `except* MoodleTokenInvalid` unwrap that the batch relies
+    on. Here the token dies on a probe, inside the group, so a regression
+    that let the bare `ExceptionGroup` escape instead of unwrapping it
+    would actually be caught.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid == 2:
+            return httpx.Response(
+                200,
+                json={"exception": "moodle_exception", "errorcode": "invalidtoken"},
+            )
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(MoodleTokenInvalid) as excinfo:
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+    assert not isinstance(excinfo.value, BaseExceptionGroup)
+
+
+@pytest.mark.asyncio
+async def test_mixed_token_and_rate_limit_batch_picks_token():
+    """N1 (task-1-fix-1-rereview.md): `except*` runs *every* matching
+    clause, so a batch with one dead-token probe and one rate-limited
+    probe used to fire both clauses and recombine their raises into a
+    bare `ExceptionGroup` that matched neither this module's own outer
+    `except MoodleTokenInvalid` / `except MoodleRateLimited` arms nor the
+    executor's -- it fell into the catch-all and was filed as
+    `sync_failed:ExceptionGroup`, silently skipping both re-auth and
+    rate-limit backoff.
+
+    The fix picks one error deliberately instead of letting the group
+    through: a dead token makes the rate limit moot (we must stop using
+    the credential either way) and only the token error triggers
+    re-auth, so `MoodleTokenInvalid` wins. This must hold as a plain
+    exception, not a group.
+    """
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        await asyncio.sleep(0)
+        if assignid == 1:
+            return httpx.Response(
+                200,
+                json={"exception": "moodle_exception", "errorcode": "invalidtoken"},
+            )
+        if assignid == 2:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(MoodleTokenInvalid) as excinfo:
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+    assert not isinstance(excinfo.value, BaseExceptionGroup)
 
 
 @pytest.mark.asyncio
