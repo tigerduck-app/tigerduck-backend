@@ -17,6 +17,7 @@ hangs off it (security review 1.4):
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -83,8 +84,25 @@ class FetchedCourse:
     enrolled_user_count: int | None
 
 
+@dataclass(frozen=True)
+class FetchedSubmission:
+    moodle_assignment_id: int
+    is_submitted: bool
+    submitted_at: datetime | None
+
+
 class AssignmentFetcher(Protocol):
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]: ...
+
+    async def fetch_submission_status(
+        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+    ) -> dict[int, FetchedSubmission]: ...
+
+
+class SubmissionStatusFetcher(Protocol):
+    async def fetch_submission_status(
+        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+    ) -> dict[int, FetchedSubmission]: ...
 
 
 class CourseFetcher(Protocol):
@@ -102,6 +120,49 @@ def _ts(value: object) -> datetime | None:
     if not isinstance(value, (int, float)) or value <= 0:
         return None
     return datetime.fromtimestamp(value, tz=UTC)
+
+
+async def _get_moodle_userid(
+    client: httpx.AsyncClient, base_url: str, token: str
+) -> int:
+    params = {
+        "wstoken": token,
+        "wsfunction": "core_webservice_get_site_info",
+        "moodlewsrestformat": "json",
+    }
+    response = await client.get(f"{base_url}{_WS_PATH}", params=params)
+    body = response.json()
+    if isinstance(body, dict) and "exception" in body:
+        errorcode = str(body.get("errorcode", ""))
+        if errorcode == "invalidtoken":
+            raise MoodleTokenInvalid(errorcode)
+        raise MoodleUnreachable(errorcode or "moodle_exception")
+    if not isinstance(body, dict) or "userid" not in body:
+        raise MoodleUnreachable("missing_userid_in_site_info")
+    return int(body["userid"])
+
+
+def _parse_submission_status(
+    assignment_id: int, body: dict
+) -> FetchedSubmission | None:
+    """Read `lastattempt.submission` into a FetchedSubmission.
+
+    Moodle omits `lastattempt` entirely for an assignment the user cannot
+    submit to; that is not the same as "not submitted", so it yields None
+    and the caller leaves the row alone.
+    """
+    last = body.get("lastattempt")
+    if not isinstance(last, dict):
+        return None
+    submission = last.get("submission")
+    if not isinstance(submission, dict):
+        return None
+    submitted = str(submission.get("status") or "") == "submitted"
+    return FetchedSubmission(
+        moodle_assignment_id=assignment_id,
+        is_submitted=submitted,
+        submitted_at=_ts(submission.get("timemodified")) if submitted else None,
+    )
 
 
 class HttpAssignmentFetcher:
@@ -178,6 +239,71 @@ class HttpAssignmentFetcher:
                 )
         return fetched
 
+    async def fetch_submission_status(
+        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+    ) -> dict[int, FetchedSubmission]:
+        """Submission state for the given assignments, keyed by assignment id.
+
+        Moodle exposes this one assignment at a time, so this is N requests
+        behind a semaphore rather than a single call. Callers must pass a
+        narrow list — see `submissions.select_assignment_ids`.
+
+        Assignments whose probe fails are simply absent from the result;
+        the caller leaves those rows as they were. An invalid token is the
+        one exception: it means every subsequent call would fail too, so it
+        propagates and lets the executor disable the job.
+        """
+        if not assignment_ids:
+            return {}
+
+        results: dict[int, FetchedSubmission] = {}
+        semaphore = asyncio.Semaphore(max(1, max_concurrency))
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout, transport=self._transport
+            ) as client:
+                userid = await _get_moodle_userid(client, self._base_url, token)
+
+                async def probe(assignment_id: int) -> None:
+                    async with semaphore:
+                        params = {
+                            "wstoken": token,
+                            "wsfunction": "mod_assign_get_submission_status",
+                            "moodlewsrestformat": "json",
+                            "assignid": assignment_id,
+                            "userid": userid,
+                        }
+                        response = await client.get(
+                            f"{self._base_url}{_WS_PATH}", params=params
+                        )
+                        if response.status_code >= 400:
+                            return
+                        body = response.json()
+                        if not isinstance(body, dict):
+                            return
+                        if "exception" in body:
+                            if str(body.get("errorcode", "")) == "invalidtoken":
+                                raise MoodleTokenInvalid("invalidtoken")
+                            return
+                        parsed = _parse_submission_status(assignment_id, body)
+                        if parsed is not None:
+                            results[assignment_id] = parsed
+
+                await asyncio.gather(
+                    *(probe(a) for a in assignment_ids), return_exceptions=False
+                )
+        except MoodleTokenInvalid:
+            raise
+        except (httpx.HTTPError, ValueError) as exc:
+            # Never log the token.
+            logger.warning(
+                "syncjobs.moodle.submission_status_failed", error=str(exc)[:200]
+            )
+            return results
+
+        return results
+
 
 class HttpCourseFetcher:
     def __init__(
@@ -190,29 +316,12 @@ class HttpCourseFetcher:
         self._timeout = timeout_seconds
         self._transport = transport
 
-    async def _get_moodle_userid(self, client: httpx.AsyncClient, token: str) -> int:
-        params = {
-            "wstoken": token,
-            "wsfunction": "core_webservice_get_site_info",
-            "moodlewsrestformat": "json",
-        }
-        response = await client.get(f"{self._base_url}{_WS_PATH}", params=params)
-        body = response.json()
-        if isinstance(body, dict) and "exception" in body:
-            errorcode = str(body.get("errorcode", ""))
-            if errorcode == "invalidtoken":
-                raise MoodleTokenInvalid(errorcode)
-            raise MoodleUnreachable(errorcode or "moodle_exception")
-        if not isinstance(body, dict) or "userid" not in body:
-            raise MoodleUnreachable("missing_userid_in_site_info")
-        return int(body["userid"])
-
     async def fetch_courses(self, *, token: str) -> list[FetchedCourse]:
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                userid = await self._get_moodle_userid(client, token)
+                userid = await _get_moodle_userid(client, self._base_url, token)
                 params = {
                     "wstoken": token,
                     "wsfunction": "core_enrol_get_users_courses",
