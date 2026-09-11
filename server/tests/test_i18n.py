@@ -19,6 +19,8 @@ from server.i18n import MISSING_KEY_SENTINEL, resolve_locale, translate
         ("en", "en"),
         ("en-GB", "en-GB"),
         ("EN-gb", "en-GB"),
+        ("pt", "pt-PT"),
+        ("en-AU", "en-GB"),
         ("xx", "en"),
         ("", "en"),
         (None, "en"),
