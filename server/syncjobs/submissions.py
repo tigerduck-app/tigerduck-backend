@@ -34,9 +34,9 @@ async def select_assignment_ids(
 ) -> list[int]:
     """Moodle assignment ids worth probing.
 
-    Excludes rows already marked submitted (Moodle never un-submits), rows
-    already past due (their reminder window has closed), and rows with no
-    due date at all (nothing to remind about).
+    Excludes soft-deleted rows, rows already marked submitted (Moodle never
+    un-submits), rows already past due (their reminder window has closed),
+    and rows with no due date at all (nothing to remind about).
     """
     horizon = now + timedelta(hours=window_hours)
     rows = (
@@ -100,15 +100,13 @@ async def apply_submission_status(
         changed.add(row.moodle_assignment_id)
 
     if changed:
-        # `Session.refresh()` expires an instance's attributes *before*
-        # autoflushing (SQLAlchemy organizes it this way deliberately, to
-        # flush against pre-expire primary keys) -- so a caller that
-        # refreshes a row we just mutated, without an intervening flush,
-        # would silently lose the write: expire discards the pending
-        # in-memory value before autoflush ever sees it as dirty. Flushing
-        # here, synchronously with the mutation, makes the write visible
-        # to any read in this transaction regardless of what the caller
-        # does next.
+        # `Session.refresh()` expires an instance's attributes *before* it
+        # autoflushes -- so a caller that refreshes a row we just mutated,
+        # without an intervening flush, would silently lose the write:
+        # expire discards the pending in-memory value before autoflush ever
+        # sees it as dirty. Flushing here, synchronously with the mutation,
+        # makes the write visible to any read in this transaction
+        # regardless of what the caller does next.
         await session.flush()
         logger.info("syncjobs.submissions.applied", changed=len(changed))
     return changed
