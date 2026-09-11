@@ -61,6 +61,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnreachable,
 )
 from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
+from server.push.submission_cancel import cancel_for_submitted
 
 from server.auth.models import PushJob
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -408,14 +409,25 @@ async def _refresh_submission_status(
 ) -> None:
     """Best-effort probe of assignments about to enter a reminder window.
 
+    An assignment the probe finds newly submitted has its still-pending
+    reminder cancelled and any Live Activity counting down toward it
+    ended (`cancel_for_submitted`) — reactions to the same fact, run in
+    the same savepoint, for the same reason: "marked submitted, but the
+    reminder was never cancelled" is the broken state this whole probe
+    exists to prevent, so the status write and the cancellation must
+    stand or fall together rather than risk landing on either side of a
+    partial failure.
+
     The database calls run inside a savepoint (`session.begin_nested()`):
     the assignment list sync already succeeded earlier in this same
-    transaction, and a failed statement in `select_assignment_ids` or
-    `apply_submission_status` — even a plain `SELECT` — would otherwise
-    leave `session` unusable until rolled back, surfacing much later as a
-    misleading `PendingRollbackError` when `_execute_job`'s own commit
-    runs and discarding the assignment sync along with it. The savepoint
-    contains that damage to just this probe's own database work.
+    transaction, and a failed statement in `select_assignment_ids`,
+    `apply_submission_status`, or `cancel_for_submitted` — even a plain
+    `SELECT` — would otherwise leave `session` unusable until rolled
+    back, surfacing much later as a misleading `PendingRollbackError`
+    when `_execute_job`'s own commit runs and discarding the assignment
+    sync along with it. The savepoint contains that damage to just this
+    probe's own database work; if it rolls back, the next sync simply
+    re-probes and retries.
 
     The Moodle fetch and the two database calls are handled differently on
     purpose — they are not the same kind of failure:
@@ -470,9 +482,17 @@ async def _refresh_submission_status(
                     exc_info=True,
                 )
                 return
-            await apply_submission_status(
+            changed_ids = await apply_submission_status(
                 session, user_id=user_id, fetched=fetched, now=now
             )
+            if changed_ids:
+                # Still inside the savepoint -- see the docstring above.
+                await cancel_for_submitted(
+                    session,
+                    user_id=user_id,
+                    moodle_assignment_ids=changed_ids,
+                    now=now,
+                )
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
     except Exception:
