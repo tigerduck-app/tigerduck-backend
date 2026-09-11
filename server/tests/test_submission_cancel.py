@@ -24,6 +24,7 @@ from server.push.dedupe import activity_end_key
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key
 from server.push.submission_cancel import cancel_for_submitted
+from server.sync.models import UserAssignment
 
 # Every other db_session-based test module in this suite pins the test's
 # own event loop to the session-scoped one via this module-level mark --
@@ -91,6 +92,50 @@ async def _running_activity(
     )
     await session.flush()
     return device
+
+
+def _assignment_row(
+    user: User,
+    moodle_assignment_id: int,
+    *,
+    title: str = "Untitled",
+    course_name: str | None = None,
+    due_at: datetime | None = None,
+) -> UserAssignment:
+    """What the fresh-insert end-job payload is built from -- title,
+    course_name and due_at are the only fields it reads."""
+    return UserAssignment(
+        user_id=user.id,
+        moodle_course_id=7001,
+        moodle_assignment_id=moodle_assignment_id,
+        title=title,
+        course_name=course_name,
+        due_at=due_at,
+    )
+
+
+def _end_job_row(
+    device: UserDevice,
+    moodle_assignment_id: int,
+    *,
+    status: str,
+    fire_at: datetime,
+    payload: dict,
+) -> PushJob:
+    """A `live_activity_end` job as `/live-activities/register` would have
+    filed it -- a full client snapshot already in `payload`, unlike this
+    module's own fresh-insert path."""
+    activity_id = f"{ACTIVITY_SCENARIO}::{moodle_assignment_id}"
+    return PushJob(
+        user_id=device.user_id,
+        device_id=device.id,
+        dedupe_key=activity_end_key(device.id, activity_id),
+        channel="schedule",
+        scenario="activityEnd",
+        fire_at=fire_at,
+        payload=payload,
+        status=status,
+    )
 
 
 def _end_job_key(device_id, moodle_assignment_id: int) -> str:
@@ -177,6 +222,12 @@ async def test_pending_job_for_a_different_assignment_survives(db_session):
 async def test_running_live_activity_gets_an_end_job(db_session):
     user = await _make_user(db_session)
     device = await _running_activity(db_session, user, 42)
+    db_session.add(
+        _assignment_row(
+            user, 42, title="Essay 3", course_name="Algorithms",
+            due_at=NOW + timedelta(hours=5),
+        )
+    )
     await db_session.commit()
 
     cancelled, created = await cancel_for_submitted(
@@ -194,6 +245,17 @@ async def test_running_live_activity_gets_an_end_job(db_session):
     assert job.payload["kind"] == "live_activity_end"
     assert job.payload["activity_id"] == f"{ACTIVITY_SCENARIO}::42"
     assert job.payload["source_id"] == "42"
+    # A push the client can actually decode: LiveActivitySnapshot has five
+    # non-optional fields (scenario, title, subtitle, accentHex, sourceId),
+    # and the pipeline forwards everything but the three routing keys
+    # above straight through as the content-state -- so all five must be
+    # present or ActivityKit discards the push and the activity is never
+    # dismissed.
+    assert job.payload["scenario"] == ACTIVITY_SCENARIO
+    assert job.payload["title"] == "Essay 3"
+    assert job.payload["subtitle"] == "Algorithms"
+    assert isinstance(job.payload["accentHex"], int)
+    assert job.payload["sourceId"] == "42"
 
 
 # 5. calling it twice is idempotent -- the second call creates no new end
@@ -203,6 +265,7 @@ async def test_calling_twice_is_idempotent(db_session):
     reminder = _reminder_job(user, 42)
     db_session.add(reminder)
     device = await _running_activity(db_session, user, 42)
+    db_session.add(_assignment_row(user, 42, due_at=NOW + timedelta(hours=5)))
     await db_session.commit()
 
     first = await cancel_for_submitted(
@@ -243,9 +306,9 @@ async def test_empty_id_set_is_a_no_op(db_session):
 
 # --- Supplementary cross-user isolation coverage ------------------------
 #
-# Not in the brief's list of six, but every query this module writes opens
-# with a `user_id ==` filter, and Plan C's own submissions tests hold
-# themselves to proving that predicate rather than assuming it (see
+# Beyond the six cases above, but every query this module writes opens
+# with a `user_id ==` filter, and `test_syncjobs_submissions.py` holds
+# itself to proving that predicate rather than assuming it (see
 # test_apply_does_not_touch_another_users_matching_assignment_id there).
 # Matching that bar here rather than only testing it incidentally.
 
@@ -276,6 +339,7 @@ async def test_running_activity_for_a_different_user_is_not_touched(db_session):
     their_device = await _running_activity(
         db_session, theirs, 42, client_device_id="theirs"
     )
+    db_session.add(_assignment_row(mine, 42, due_at=NOW + timedelta(hours=5)))
     await db_session.commit()
 
     cancelled, created = await cancel_for_submitted(
@@ -285,3 +349,107 @@ async def test_running_activity_for_a_different_user_is_not_touched(db_session):
     assert (cancelled, created) == (0, 1)
     assert len(await _end_jobs(db_session, my_device.id, 42)) == 1
     assert await _end_jobs(db_session, their_device.id, 42) == []
+
+
+# --- Supplementary end-job conflict coverage -----------------------------
+#
+# The upsert has two behaviours neither of the six tests above exercises:
+# a job that already fired must not be resurrected (the end-job mirror of
+# test 2's reminder guard), and a still-pending job being accelerated must
+# keep the client's real snapshot rather than gain this module's own
+# minimal one.
+
+
+async def test_sent_end_job_is_not_resurrected(db_session):
+    """An end job that already fired must be left alone. The same trap as
+    test 2, on the other job kind: resetting a sent job to pending would
+    re-fire a push that already reached the device and rewrite delivery
+    history to boot."""
+    user = await _make_user(db_session)
+    device = await _running_activity(db_session, user, 42)
+    original_payload = {
+        "kind": "live_activity_end",
+        "activity_id": f"{ACTIVITY_SCENARIO}::42",
+        "source_id": "42",
+        "scenario": ACTIVITY_SCENARIO,
+        "title": "Already dismissed",
+        "subtitle": "",
+        "accentHex": 999,
+        "sourceId": "42",
+    }
+    sent_job = _end_job_row(
+        device,
+        42,
+        status=PushJobStatus.sent.value,
+        fire_at=NOW - timedelta(hours=1),
+        payload=original_payload,
+    )
+    db_session.add(sent_job)
+    await db_session.commit()
+
+    cancelled, created = await cancel_for_submitted(
+        db_session, user_id=user.id, moodle_assignment_ids={42}, now=NOW
+    )
+
+    await db_session.refresh(sent_job)
+    assert created == 0
+    assert sent_job.status == PushJobStatus.sent.value
+    assert sent_job.fire_at == NOW - timedelta(hours=1)
+    assert sent_job.payload == original_payload
+
+
+async def test_accelerating_a_pending_end_job_preserves_its_payload(db_session):
+    """A pending end job already filed for the original due date must have
+    its fire time moved to now, and must keep the real snapshot the client
+    uploaded at registration rather than being overwritten with this
+    module's own minimal fresh-insert payload."""
+    user = await _make_user(db_session)
+    device = await _running_activity(db_session, user, 42)
+    original_target = NOW + timedelta(hours=6)
+    rich_payload = {
+        "kind": "live_activity_end",
+        "activity_id": f"{ACTIVITY_SCENARIO}::42",
+        "source_id": "42",
+        "scenario": ACTIVITY_SCENARIO,
+        "title": "Real client title",
+        "subtitle": "Real client subtitle",
+        "accentHex": 0x4A90E2,
+        "sourceId": "42",
+        "countdownTarget": original_target.isoformat(),
+    }
+    pending_job = _end_job_row(
+        device,
+        42,
+        status=PushJobStatus.pending.value,
+        fire_at=original_target,
+        payload=rich_payload,
+    )
+    db_session.add(pending_job)
+    await db_session.commit()
+
+    cancelled, created = await cancel_for_submitted(
+        db_session, user_id=user.id, moodle_assignment_ids={42}, now=NOW
+    )
+
+    await db_session.refresh(pending_job)
+    assert created == 0
+    assert pending_job.status == PushJobStatus.pending.value
+    assert pending_job.fire_at == NOW
+    assert pending_job.payload == rich_payload
+
+
+async def test_missing_assignment_row_does_not_file_an_undeliverable_job(db_session):
+    """No prior end job to accelerate, and no assignment row to build a
+    fresh snapshot from -- filing one anyway would only ever produce a
+    push the client cannot decode. Nothing is created, and nothing raises."""
+    user = await _make_user(db_session)
+    device = await _running_activity(db_session, user, 42)
+    await db_session.commit()
+    # Deliberately no assignment row for id 42.
+
+    cancelled, created = await cancel_for_submitted(
+        db_session, user_id=user.id, moodle_assignment_ids={42}, now=NOW
+    )
+
+    assert (cancelled, created) == (0, 0)
+    assert await _end_jobs(db_session, device.id, 42) == []

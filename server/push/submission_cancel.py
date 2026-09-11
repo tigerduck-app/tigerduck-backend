@@ -20,6 +20,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+import structlog
 from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,13 +33,23 @@ from server.auth.models import (
     UserDevice,
 )
 from server.auth.schemas import ScheduleScenario
+from server.push.dedupe import SCHEDULE_CHANNEL as ACTIVITY_CHANNEL
 from server.push.dedupe import activity_end_key
+from server.push.dedupe import activity_id as _activity_id
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key
-from server.routes.schedule_v3 import CHANNEL as ACTIVITY_CHANNEL
-from server.routes.schedule_v3 import _activity_id
+from server.sync.models import UserAssignment
+
+logger = structlog.get_logger(__name__)
 
 _LIVE_ACTIVITY_TOKEN_KIND = "live_activity_update"
+
+# The user's in-app accent-color preference is client-only state, never
+# uploaded to the backend, so it cannot be reconstructed at cancel time.
+# Harmless for an end push specifically: the activity is being dismissed,
+# not re-rendered, so the exact color has no user-visible effect. Named
+# rather than a bare literal so the reason travels with the value.
+_FALLBACK_ACCENT_HEX = 0
 
 # Matches `ux_push_jobs_dedupe_active`'s partial-index predicate -- the
 # statuses under which a (user_id, dedupe_key) pair is still "taken".
@@ -67,14 +78,46 @@ def _reminder_key_prefix(moodle_assignment_id: int) -> str:
 def _activity_id_for_assignment(moodle_assignment_id: int) -> str:
     """The same `{scenario}::{source_id}` id the client composes for an
     assignment's Live Activity (`composedActivityId`) and the backend
-    composes for a schedule-driven start (`schedule_v3._activity_id`).
-    The assignment's source_id is its Moodle id as a string -- the client
+    composes for a schedule-driven start (`dedupe.activity_id`). The
+    assignment's source_id is its Moodle id as a string -- the client
     resolver sets `sourceId: assignment.assignmentId`, which is
     `String(record.assignId)`.
     """
     return _activity_id(
         str(moodle_assignment_id), ScheduleScenario.assignment_urgent.value
     )
+
+
+def _fresh_end_payload(
+    assignment: UserAssignment, activity_id: str, moodle_assignment_id: int
+) -> dict:
+    """A decodable `LiveActivitySnapshot` content-state for an end job with
+    no prior row to accelerate.
+
+    `job_payloads.py` strips only the three routing keys (`kind`,
+    `activity_id`, `source_id`) and forwards everything else as the
+    content-state, so every non-optional `LiveActivitySnapshot` field --
+    `scenario`, `title`, `subtitle`, `accentHex`, `sourceId` -- must be
+    present here, or ActivityKit discards the push outright and the
+    activity is never dismissed: exactly the failure this module exists to
+    prevent. `countdownTarget` is optional on the client but cheap and
+    accurate from the assignment row, so it rides along too; the rest
+    (`locationText`, `instructor`, `progressStart`, `deepLink`) are left
+    out and decode as `nil`.
+    """
+    return {
+        "kind": "live_activity_end",
+        "activity_id": activity_id,
+        "source_id": str(moodle_assignment_id),
+        "scenario": ScheduleScenario.assignment_urgent.value,
+        "title": assignment.title,
+        "subtitle": assignment.course_name or "",
+        "accentHex": _FALLBACK_ACCENT_HEX,
+        "sourceId": str(moodle_assignment_id),
+        "countdownTarget": (
+            assignment.due_at.isoformat() if assignment.due_at else None
+        ),
+    }
 
 
 async def cancel_for_submitted(
@@ -228,9 +271,71 @@ async def _end_running_activities(
         .all()
     )
 
+    # A key with no active row is a fresh insert, and only a fresh insert
+    # needs a real snapshot -- the accelerate path (an active row already
+    # exists) leaves `payload` untouched via `set_` below, preserving
+    # whatever `register_live_activity` originally stored. Fetched once,
+    # outside the loop, and only for the ids that actually need it.
+    fresh_assignment_ids = {
+        assignment_by_activity_id[activity_id]
+        for _, activity_id, dedupe_key in targets
+        if dedupe_key not in existing_keys
+    }
+    assignments_by_id: dict[int, UserAssignment] = {}
+    if fresh_assignment_ids:
+        assignment_rows = (
+            (
+                await session.execute(
+                    select(UserAssignment).where(
+                        UserAssignment.user_id == user_id,
+                        UserAssignment.moodle_assignment_id.in_(
+                            fresh_assignment_ids
+                        ),
+                        UserAssignment.deleted_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assignments_by_id = {
+            row.moodle_assignment_id: row for row in assignment_rows
+        }
+
     created = 0
     for device_id, activity_id, dedupe_key in targets:
         moodle_assignment_id = assignment_by_activity_id[activity_id]
+        is_fresh = dedupe_key not in existing_keys
+        counts_as_created = False
+
+        if is_fresh:
+            assignment = assignments_by_id.get(moodle_assignment_id)
+            if assignment is None:
+                # No prior row to accelerate and nothing to build a
+                # decodable snapshot from -- inserting anyway would only
+                # ever produce a push ActivityKit discards on arrival
+                # (job_payloads.py forwards everything but the three
+                # routing keys as the content-state). Skipping is the
+                # correct outcome here, not a silent one: logged so a
+                # cancellation that quietly did nothing in the field
+                # leaves a trace.
+                logger.warning(
+                    "push.submission_cancel.assignment_row_missing",
+                    moodle_assignment_id=moodle_assignment_id,
+                )
+                continue
+            payload = _fresh_end_payload(assignment, activity_id, moodle_assignment_id)
+            counts_as_created = True
+        else:
+            # Discarded by Postgres on the conflict path below (`set_`
+            # excludes `payload`) -- kept minimal rather than repeating
+            # `_fresh_end_payload`'s lookup for a value that is never used.
+            payload = {
+                "kind": "live_activity_end",
+                "activity_id": activity_id,
+                "source_id": str(moodle_assignment_id),
+            }
+
         stmt = (
             pg_insert(PushJob)
             .values(
@@ -240,11 +345,7 @@ async def _end_running_activities(
                 channel=ACTIVITY_CHANNEL,
                 scenario="activityEnd",
                 fire_at=now,
-                payload={
-                    "kind": "live_activity_end",
-                    "activity_id": activity_id,
-                    "source_id": str(moodle_assignment_id),
-                },
+                payload=payload,
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "dedupe_key"],
@@ -259,14 +360,15 @@ async def _end_running_activities(
                 },
                 # A job that already fired (sent/partial_failed) is left
                 # alone rather than resurrected -- only accelerate one
-                # still waiting to go out.
+                # still waiting to go out. `payload` is deliberately absent
+                # from this SET: the client's original snapshot survives.
                 where=PushJob.status.in_(
                     [PushJobStatus.pending.value, PushJobStatus.processing.value]
                 ),
             )
         )
         await session.execute(stmt)
-        if dedupe_key not in existing_keys:
+        if counts_as_created:
             created += 1
 
     return created

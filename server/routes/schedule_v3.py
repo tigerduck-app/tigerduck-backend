@@ -13,16 +13,12 @@ from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob, PushJobStatus
 from server.auth.schemas import ScheduleSyncV3Request, ScheduleSyncV3Response
 from server.db import SessionDep
+from server.push.dedupe import SCHEDULE_CHANNEL as CHANNEL
+from server.push.dedupe import activity_id as _activity_id
 from server.push.dedupe import schedule_key, schedule_prefix
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 logger = structlog.get_logger(__name__)
-
-CHANNEL = "schedule"
-
-
-def _activity_id(source_id: str, scenario: str) -> str:
-    return f"{scenario}::{source_id}"
 
 
 @router.post("/sync", response_model=ScheduleSyncV3Response)
