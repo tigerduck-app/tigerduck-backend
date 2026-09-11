@@ -21,7 +21,7 @@ from server.auth.schemas import (
     LiveActivityRegisterV3Response,
 )
 from server.db import SessionDep
-from server.push.dedupe import activity_end_key
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 
 router = APIRouter(prefix="/live-activities", tags=["live-activities"])
 logger = structlog.get_logger(__name__)
@@ -116,7 +116,7 @@ async def register_live_activity(
                 user_id=auth.user_id,
                 device_id=auth.device_id,
                 dedupe_key=dedupe_key,
-                channel="schedule",
+                channel=SCHEDULE_CHANNEL,
                 scenario="activityEnd",
                 fire_at=payload.countdown_target,
                 # Snapshot first, routing keys after: a snapshot carrying
