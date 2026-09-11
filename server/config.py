@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     push_job_retention_days: int = 7
     push_job_retention_interval_hours: int = 24
 
+    # --- Submission status probe (v2.1.0) ---
+    # Only assignments due inside this window get probed. The Moodle API is
+    # one request per assignment, so a full sweep would multiply load by the
+    # user's whole assignment count on every sync tick; only assignments
+    # about to enter a reminder window need an accurate answer.
+    submission_status_window_hours: int = 48
+    submission_status_max_concurrency: int = 4
+
     # --- Assignment reminders (Phase 4a) ---
     assignment_reminder_scan_interval_seconds: int = 300
     # Server-side default when a user has no `notification` settings

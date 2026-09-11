@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import os
 import re
+import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -15,9 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from server.auth.models import User
 from server.config import Settings
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
+from server.sync.models import UserAssignment
 from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
@@ -158,3 +162,49 @@ async def db_session(
     factory = build_session_factory(prepared_engine)
     async with factory() as s:
         yield s
+
+
+@pytest_asyncio.fixture
+async def make_assignment(db_session: AsyncSession):
+    """Factory fixture for a minimal `UserAssignment` row.
+
+    Field defaults mirror the existing ad hoc `UserAssignment(...)`
+    construction in `test_syncjobs_assignments.py`. Calls that omit
+    `user_id` share one lazily-created default `User` for the whole test,
+    so assignments built across several calls in one test genuinely
+    belong to the same user unless the test passes `user_id` explicitly
+    to set up a second one.
+    """
+    default_user_id: dict[str, uuid.UUID] = {}
+
+    async def _make(
+        *,
+        moodle_assignment_id: int,
+        due_at: datetime | None = None,
+        provider_is_submitted: bool = False,
+        deleted_at: datetime | None = None,
+        user_id: uuid.UUID | None = None,
+        moodle_course_id: int = 7001,
+        title: str | None = None,
+    ) -> UserAssignment:
+        if user_id is None:
+            if "id" not in default_user_id:
+                user = User()
+                db_session.add(user)
+                await db_session.flush()
+                default_user_id["id"] = user.id
+            user_id = default_user_id["id"]
+        row = UserAssignment(
+            user_id=user_id,
+            moodle_course_id=moodle_course_id,
+            moodle_assignment_id=moodle_assignment_id,
+            title=title or f"Assignment {moodle_assignment_id}",
+            due_at=due_at,
+            provider_is_submitted=provider_is_submitted,
+            deleted_at=deleted_at,
+        )
+        db_session.add(row)
+        await db_session.flush()
+        return row
+
+    return _make
