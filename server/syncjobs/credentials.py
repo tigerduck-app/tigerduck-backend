@@ -35,12 +35,25 @@ logger = structlog.get_logger(__name__)
 
 REAUTH_SCENARIO = "reauth_required"
 
-# Platforms that can actually repair the credential: only iOS/iPadOS run the
-# foreground PATCH /v3/auth/credentials that sends a fresh Moodle token. This
-# is the "is there anyone worth telling" gate of spec §4.5, not a platform
-# filter on delivery — macOS stays excluded from every push by the existing
+# Devices this job targets today: iOS/iPadOS, per spec §4.5. This is the
+# "is there anyone worth telling" gate, not a platform filter on delivery —
+# macOS stays excluded from every push by the existing
 # `device.platform == "macos"` skip in `push.pipeline._materialize`, which
 # remains the one place that decision is made.
+#
+# Two things follow, and the second is a known gap:
+#
+# 1. Delivery is deliberately broader than this gate. Once a job exists it
+#    reaches every non-macOS device on the account, Android included. Spec
+#    §4.5 said Apple-only, but argued it from a capability claim that is
+#    false -- shipped 2.0.2 Android re-sends a fresh Moodle token on every
+#    foreground PATCH /v3/auth/credentials, verified at c04f4705 -- so the
+#    broader delivery stands and the spec's restriction does not.
+# 2. The gate itself is still Apple-only, so an account holding ONLY Android
+#    devices never gets this push at all, even though those devices could
+#    act on it. Widening the tuple is the entire fix, but it changes who
+#    gets notified, so it wants its own decision rather than riding along
+#    with a comment correction.
 _REAUTH_CAPABLE_PLATFORMS = ("ios", "ipados")
 
 

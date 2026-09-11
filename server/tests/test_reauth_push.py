@@ -316,6 +316,84 @@ async def test_copy_is_resolved_from_each_recipient_device_locale(
 
 
 @asyncio_session
+async def test_portal_built_job_still_gets_real_copy(
+    db_session, prepared_engine, test_settings
+):
+    """I1 regression: a job built the way the portal builds one must still
+    get real, localized copy.
+
+    The portal's operator "retry + notify" endpoints
+    (`portal/app/routes/moodle/jobs.py:33-38`, and the identical insert at
+    `:67-73`) create reauth jobs with raw SQL, in the pre-v2.1.0 payload
+    shape: `scenario` set, no `kind`, no title/body. `_send_one` used to key
+    the copy rebuild on `payload.get("kind") == REAUTH_SCENARIO`, so a job
+    built this way skipped the rebuild entirely and shipped the portal's
+    bare `{"reason", "provider"}` payload as-is — an empty banner that still
+    rang on iOS, and a message Android's FcmService silently dropped. Keying
+    on `job.scenario` instead (`server/push/pipeline.py`) fixes it no matter
+    who created the job or what shape its payload is in.
+    """
+    user, _, _ = await _account_with_devices(
+        db_session,
+        [
+            {
+                "client_device_id": "iphone-tw",
+                "platform": "ios",
+                "locale": "zh-Hant-TW",
+                "with_token": "apns",
+            },
+            {
+                "client_device_id": "pixel-jp",
+                "platform": "android",
+                "locale": "ja-JP",
+                "with_token": "fcm",
+            },
+        ],
+    )
+    # Exact shape of the portal's insert: `scenario` set, no `kind`, no
+    # title/body — see the docstring above for the two call sites.
+    db_session.add(
+        PushJob(
+            user_id=user.id,
+            dedupe_key=f"system:moodle_expired:{user.id}",
+            channel="system",
+            scenario=REAUTH_SCENARIO,
+            fire_at=datetime.now(UTC),
+            payload={"reason": "operator_retry", "provider": "ntust_sso"},
+        )
+    )
+    await db_session.commit()
+
+    apple, android = await _run_tick(
+        db_session, user, prepared_engine, test_settings
+    )
+
+    title_key = "notification_reauth_required_title"
+    body_key = "notification_reauth_required_body"
+    assert len(apple.requests) == 1
+    apns_alert = apple.requests[0].message["aps"]["alert"]
+    assert apns_alert["title"] == translate(title_key, "zh-Hant")
+    assert apns_alert["body"] == translate(body_key, "zh-Hant")
+
+    assert len(android.requests) == 1
+    assert android.requests[0].title == translate(title_key, "ja")
+    assert android.requests[0].body == translate(body_key, "ja")
+
+    # Both deliveries actually went out — not skipped as empty, and not
+    # silently dropped by falling back to the portal's copy-free payload.
+    deliveries = (
+        (
+            await db_session.execute(
+                select(PushDelivery).where(PushDelivery.user_id == user.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {d.status for d in deliveries} == {"sent"}
+
+
+@asyncio_session
 async def test_empty_copy_is_skipped_loudly_instead_of_sent(
     db_session, prepared_engine, test_settings, monkeypatch
 ):

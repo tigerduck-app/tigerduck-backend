@@ -487,7 +487,15 @@ async def _send_one(
         return
 
     payload = job.payload or {}
-    if payload.get("kind") == REAUTH_SCENARIO:
+    if job.scenario == REAUTH_SCENARIO:
+        # Keyed on the job's scenario, not payload["kind"]: the portal's
+        # operator "retry + notify" endpoints (portal/app/routes/moodle/
+        # jobs.py) insert reauth_required jobs directly via SQL in the
+        # pre-v2.1.0 payload shape (no `kind`), and always will — the portal
+        # is a separate package that talks raw SQL and does not import this
+        # module. Keying on `kind` let those jobs skip copy rebuild entirely
+        # and ship the empty-banner bug this branch exists to fix.
+        #
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
         # languages, so the only place the right language is known is the
