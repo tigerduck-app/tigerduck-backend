@@ -128,7 +128,8 @@ class DeviceRegisterV3Request(DeviceInfo):
     # BCP-47 tag, e.g. "zh-Hant-TW". Reported unconditionally on every
     # registration call (not gated behind a preference toggle) — see
     # UserDevice.locale for why. Optional so older clients keep working.
-    locale: str | None = None
+    # max_length mirrors UserDevice.locale's String(35) column.
+    locale: str | None = Field(default=None, max_length=35)
 
 
 class DeviceRegisterV3Response(BaseModel):
@@ -159,7 +160,8 @@ class DevicePreferencesV3Request(BaseModel):
     cloud_sync_enabled: bool | None = None
     # Lets the device push a changed system language between register calls
     # rather than waiting for the next app launch. See UserDevice.locale.
-    locale: str | None = None
+    # max_length mirrors UserDevice.locale's String(35) column.
+    locale: str | None = Field(default=None, max_length=35)
 
 
 class DevicePreferencesV3Response(BaseModel):

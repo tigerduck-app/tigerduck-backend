@@ -135,6 +135,60 @@ async def test_preferences_update_sets_locale(client) -> None:
     assert await _device_locale(client, "iphone-pref") == "ja-JP"
 
 
+@asyncio_session
+async def test_register_rejects_over_long_locale(client) -> None:
+    """36 characters overflows UserDevice.locale's String(35) column — this
+    must come back as a 422 from request validation, not a 500 from a
+    Postgres DataError leaking out of the register route."""
+    login = await do_login(client, device="iphone-toolong")
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-toolong",
+            "platform": "ios",
+            "locale": "x" * 36,
+        },
+    )
+    assert response.status_code == 422, response.text
+
+
+@asyncio_session
+async def test_preferences_rejects_over_long_locale(client) -> None:
+    """Same over-long-locale guard, via the preferences PATCH route."""
+    login = await do_login(client, device="iphone-preflong")
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-preflong", "platform": "ios"},
+    )
+    response = await client.patch(
+        "/v3/devices/iphone-preflong/preferences",
+        headers=bearer(login),
+        json={"locale": "x" * 36},
+    )
+    assert response.status_code == 422, response.text
+
+
+@asyncio_session
+async def test_register_accepts_locale_at_max_length(client) -> None:
+    """35 characters is exactly the column width — the boundary, proving the
+    limit isn't off by one."""
+    login = await do_login(client, device="iphone-maxlen")
+    locale = "x" * 35
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-maxlen",
+            "platform": "ios",
+            "locale": locale,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert await _device_locale(client, "iphone-maxlen") == locale
+
+
 def test_model_has_nullable_locale_column() -> None:
     column = UserDevice.__table__.c.locale
     assert column.nullable is True
