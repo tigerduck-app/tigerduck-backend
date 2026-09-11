@@ -131,6 +131,8 @@ async def _get_moodle_userid(
         "moodlewsrestformat": "json",
     }
     response = await client.get(f"{base_url}{_WS_PATH}", params=params)
+    if response.status_code == 429:
+        raise MoodleRateLimited("http_429")
     body = response.json()
     if isinstance(body, dict) and "exception" in body:
         errorcode = str(body.get("errorcode", ""))
@@ -251,7 +253,10 @@ class HttpAssignmentFetcher:
         Assignments whose probe fails are simply absent from the result;
         the caller leaves those rows as they were. An invalid token is the
         one exception: it means every subsequent call would fail too, so it
-        propagates and lets the executor disable the job.
+        propagates and lets the executor disable the job. A 429 stops the
+        batch too and propagates as `MoodleRateLimited`, same contract as
+        `fetch_assignments` — the executor's backoff, not this best-effort
+        probe, decides what happens next.
         """
         if not assignment_ids:
             return {}
@@ -274,12 +279,23 @@ class HttpAssignmentFetcher:
                             "assignid": assignment_id,
                             "userid": userid,
                         }
-                        response = await client.get(
-                            f"{self._base_url}{_WS_PATH}", params=params
-                        )
-                        if response.status_code >= 400:
+                        try:
+                            response = await client.get(
+                                f"{self._base_url}{_WS_PATH}", params=params
+                            )
+                            if response.status_code == 429:
+                                raise MoodleRateLimited("http_429")
+                            if response.status_code >= 400:
+                                return
+                            body = response.json()
+                        except (httpx.HTTPError, ValueError) as exc:
+                            # One assignment's failure is that assignment's
+                            # alone -- never the token.
+                            logger.warning(
+                                "syncjobs.moodle.submission_probe_failed",
+                                error=type(exc).__name__,
+                            )
                             return
-                        body = response.json()
                         if not isinstance(body, dict):
                             return
                         if "exception" in body:
@@ -290,10 +306,19 @@ class HttpAssignmentFetcher:
                         if parsed is not None:
                             results[assignment_id] = parsed
 
-                await asyncio.gather(
-                    *(probe(a) for a in assignment_ids), return_exceptions=False
-                )
+                try:
+                    async with asyncio.TaskGroup() as tg:
+                        for assignment_id in assignment_ids:
+                            tg.create_task(probe(assignment_id))
+                except* MoodleTokenInvalid:
+                    # Unwrapped: the executor matches on the exception
+                    # itself, not an ExceptionGroup.
+                    raise MoodleTokenInvalid("invalidtoken") from None
+                except* MoodleRateLimited:
+                    raise MoodleRateLimited("http_429") from None
         except MoodleTokenInvalid:
+            raise
+        except MoodleRateLimited:
             raise
         except (httpx.HTTPError, ValueError) as exc:
             # Never log the token.

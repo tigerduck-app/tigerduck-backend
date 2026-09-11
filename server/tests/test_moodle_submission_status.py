@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 
 import httpx
@@ -10,6 +9,7 @@ import pytest
 
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
+    MoodleRateLimited,
     MoodleTokenInvalid,
 )
 
@@ -99,6 +99,40 @@ async def test_one_failing_assignment_does_not_lose_the_others():
 
 
 @pytest.mark.asyncio
+async def test_one_timing_out_assignment_does_not_lose_the_others():
+    """Regression for I1 (task-1-review.md): a transport failure -- not
+    just a >= 400 status -- on one probe must not abort the batch.
+
+    Before the fix, `probe` only guarded the `>= 400` case; an
+    `httpx.ReadTimeout` (or a non-JSON body) propagated straight out of
+    `asyncio.gather(..., return_exceptions=False)`. The reviewer measured
+    this by hand: with ids [1, 2, 3] and a timeout on one of them, the
+    committed code returned only the assignment requested *before* the
+    timeout -- the request after it was never even sent.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid == 2:
+            raise httpx.ReadTimeout("timed out")
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    result = await fetcher.fetch_submission_status(
+        token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+    )
+
+    # The timed-out probe is simply absent -- the others must still land.
+    assert set(result) == {1, 3}
+
+
+@pytest.mark.asyncio
 async def test_invalid_token_propagates():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -110,6 +144,50 @@ async def test_invalid_token_propagates():
     )
 
     with pytest.raises(MoodleTokenInvalid):
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1], max_concurrency=1
+        )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_probe_raises():
+    """I3 (task-1-review.md): a 429 on a per-assignment probe must become
+    `MoodleRateLimited`, the same contract `fetch_assignments` follows --
+    not be folded into the generic >= 400 skip-and-continue path, which
+    left the batch silently returning `{}` while still hammering Moodle.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        return httpx.Response(429, text="slow down")
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(MoodleRateLimited):
+        await fetcher.fetch_submission_status(
+            token="tok", assignment_ids=[1, 2, 3], max_concurrency=3
+        )
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_site_info_raises():
+    """I3: the site-info call (`_get_moodle_userid`) obeys the same 429
+    contract -- previously it checked no status code at all, so a 429
+    with a non-JSON body surfaced as a swallowed `JSONDecodeError`.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="slow down")
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(MoodleRateLimited):
         await fetcher.fetch_submission_status(
             token="tok", assignment_ids=[1], max_concurrency=1
         )
@@ -137,18 +215,47 @@ async def test_empty_input_makes_no_requests():
 
 
 @pytest.mark.asyncio
-async def test_token_never_appears_in_logs(caplog):
+async def test_token_never_appears_in_logs(capsys, caplog):
+    """I2 (task-1-review.md): the client logs through structlog's
+    `PrintLoggerFactory`, which writes to stdout via a bare `print()` --
+    it never becomes a stdlib `LogRecord`, so `caplog` cannot see it. The
+    previous version of this test asserted only on `caplog.text`, which
+    was already empty before the call, so a logger that actively leaked
+    the token still passed it (verified by hand: wrapping the client's
+    logger to attach the token to the warning left this assertion green).
+
+    Capture what the code actually writes with `capsys`, and exercise the
+    paths that could plausibly leak -- a transport error and a non-2xx
+    status -- alongside a successful probe, not just the happy path.
+    `caplog` is still asserted too, as cheap insurance against a future
+    path that logs through the stdlib `logging` module instead.
+    """
+    token = "super-secret-token"
+
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
+        fn = request.url.params.get("wsfunction")
+        if fn == "core_webservice_get_site_info":
+            return httpx.Response(200, json=_site_info())
+        assignid = int(request.url.params["assignid"])
+        if assignid == 1:
+            raise httpx.ConnectError("refused")
+        if assignid == 2:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, json=_status(True, 1_757_000_000))
 
     fetcher = HttpAssignmentFetcher(
         base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
     )
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("DEBUG"):
         result = await fetcher.fetch_submission_status(
-            token="super-secret-token", assignment_ids=[1], max_concurrency=1
+            token=token, assignment_ids=[1, 2, 3], max_concurrency=3
         )
 
-    assert result == {}
-    assert "super-secret-token" not in caplog.text
+    # Sanity check that the scenario actually drove all three paths: the
+    # transport error (1) and the 500 (2) are absent, the success (3) lands.
+    assert set(result) == {3}
+
+    stdout = capsys.readouterr().out
+    assert token not in stdout
+    assert token not in caplog.text
