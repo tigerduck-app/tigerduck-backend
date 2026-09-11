@@ -41,8 +41,10 @@ from server.auth.models import (
 )
 from server.config import Settings
 from server.db import session_scope
+from server.push.client_versions import schedules_reminders_locally
 from server.push.dedupe import activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 # Not a cycle: `syncjobs.credentials` imports only auth/i18n/syncjobs models,
 # never `server.push`. Kept as a module-level import (unlike the deferred
@@ -301,12 +303,34 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
         token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
         source_device_id = (job.payload or {}).get("source_device_id")
 
+    is_assignment_reminder = job.channel == REMINDER_CHANNEL
+    if is_assignment_reminder:
+        # iPhone and iPad only. Android schedules these locally (spec 4.2)
+        # and macOS takes no notifications at all, so a delivery row for
+        # either is a duplicate at best. Both device switches must be on:
+        # the parent one because a user who turned sync off has no
+        # expectation of server-driven reminders, and the child one
+        # because that is the row the settings screen actually renders.
+        token_query = token_query.where(
+            UserDevice.cloud_sync_enabled.is_(True),
+            UserDevice.sync_assignment_reminders.is_(True),
+            UserDevice.platform.in_(("ios", "ipados")),
+        )
+
     rows = (await session.execute(token_query)).all()
     if not rows:
         return True
     values = []
     for token, device in rows:
         if device.platform == "macos":
+            continue
+        if is_assignment_reminder and schedules_reminders_locally(
+            device.platform, device.app_version
+        ):
+            # A client that still has its own scheduler would show this
+            # reminder twice. Version comparison cannot go in the query
+            # above: app_version is VARCHAR, and "2.10.0" sorts below
+            # "2.9.0" as a string.
             continue
         if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
             continue
