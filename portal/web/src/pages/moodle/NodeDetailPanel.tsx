@@ -29,8 +29,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { RunStatusBadge, deviceLabel, fmt, platformIcon, platformLabel, relativeTime } from "./format";
-import type { SyncCoursesResponse, SyncDevice, SyncEventsResponse, TopologyNode } from "./types";
+import { RunStatusBadge, deviceLabel, fmt, platformIcon, platformLabel, relativeTime, timeUntil } from "./format";
+import type { QueuedJob, SyncCoursesResponse, SyncDevice, SyncEventsResponse, TopologyNode } from "./types";
 
 /**
  * Split rows into one section per NTUST term, newest first. Rows whose term
@@ -408,6 +408,9 @@ export function NodeDetailPanel({
   const devicePushJobs = (data.push_jobs ?? []).filter(
     (pj) => pj.source_device_id === device.id
   );
+  const deviceQueue = (data.queued_jobs ?? []).filter((j) =>
+    j.recipients.some((r) => r.device_id === device.id)
+  );
 
   const allOverrides = data.overrides ?? [];
 
@@ -436,6 +439,9 @@ export function NodeDetailPanel({
             <TabsTrigger value="push">
               Push{deviceDeliveries.length > 0 ? ` (${deviceDeliveries.length})` : ""}
             </TabsTrigger>
+            <TabsTrigger value="queued">
+              Queued Jobs{deviceQueue.length > 0 ? ` (${deviceQueue.length})` : ""}
+            </TabsTrigger>
             <TabsTrigger value="source-push">
               Source Jobs{devicePushJobs.length > 0 ? ` (${devicePushJobs.length})` : ""}
             </TabsTrigger>
@@ -448,7 +454,7 @@ export function NodeDetailPanel({
                 <div className="min-w-0">
                   <div className="text-sm font-medium">Course sync is off on this device</div>
                   <div className="text-xs text-muted-foreground">
-                    What follows is the account's data from its other devices; this one keeps its own copy locally. Bulletins still sync here — they are essential info.
+                    What follows is the account's data from its other devices; this one keeps its own copy locally.
                   </div>
                 </div>
               </div>
@@ -952,6 +958,9 @@ export function NodeDetailPanel({
               </div>
             )}
           </TabsContent>
+          <TabsContent value="queued">
+            <QueuedJobs jobs={deviceQueue} deviceId={device.id} />
+          </TabsContent>
           <TabsContent value="source-push">
             {devicePushJobs.length === 0 ? (
               <div className="py-4 text-sm text-muted-foreground">No push jobs sourced from this device.</div>
@@ -1033,8 +1042,8 @@ export function NodeDetailPanel({
                     <TableCell className="text-xs">{device.device_class || "—"}</TableCell>
                   </TableRow>
                   <TableRow>
-                    <TableCell className="font-medium text-xs">Device Name</TableCell>
-                    <TableCell className="text-xs">{device.device_name ?? "—"}</TableCell>
+                    <TableCell className="font-medium text-xs">Model</TableCell>
+                    <TableCell className="text-xs">{device.device_model ?? device.device_name ?? "—"}</TableCell>
                   </TableRow>
                   <TableRow>
                     <TableCell className="font-medium text-xs">Locale</TableCell>
@@ -1070,6 +1079,104 @@ export function NodeDetailPanel({
   );
 }
 
+// ── Queued Jobs ─────────────────────────────────────────────────────────
+
+/** What the job is, in the words the apps use. */
+function queuedJobLabel(j: QueuedJob): string {
+  const offset = /^reminder_(\d+(?:\.\d+)?)(m|h)$/.exec(j.scenario);
+  const lead = offset ? ` · ${offset[1]} ${offset[2] === "m" ? "min" : "h"} before` : "";
+  switch (j.channel) {
+    case "schedule": {
+      if (j.kind === "live_activity_end") return "Live Activity end";
+      const scenarios: Record<string, string> = {
+        classPreparing: "class preparing",
+        inClass: "in class",
+        assignmentUrgent: "assignment due",
+      };
+      return `Live Activity start · ${scenarios[j.scenario] ?? j.scenario}`;
+    }
+    case "course":
+      return `Class reminder${lead}`;
+    case "assignment":
+      return `Assignment due reminder${lead}`;
+    case "bulletin":
+      return "Bulletin";
+    case "system":
+      if (j.scenario === "sync_trigger") return "Silent sync trigger";
+      if (j.scenario === "reauth_required") return "Sign-in expired notice";
+      return `System · ${j.scenario}`;
+    case "custom":
+      return "Custom push";
+    default:
+      return `${j.channel} · ${j.scenario}`;
+  }
+}
+
+/** The token a job's push needs, for the "will not arrive" note. */
+function queuedJobToken(j: QueuedJob): string {
+  if (j.channel !== "schedule") return "push";
+  return j.kind === "live_activity_end" ? "Live Activity update" : "push-to-start";
+}
+
+/**
+ * Everything the server has queued that it will push to this device,
+ * soonest first. The backend resolves recipients with the push pipeline's
+ * own rules, so a job is listed only if this device would receive it. A
+ * device missing the token the push needs still lists the job, flagged:
+ * it is planned for the device but will not arrive.
+ */
+function QueuedJobs({ jobs, deviceId }: { jobs: QueuedJob[]; deviceId: string }) {
+  if (jobs.length === 0) {
+    return <div className="py-4 text-sm text-muted-foreground">Nothing queued for this device.</div>;
+  }
+  return (
+    <div className="space-y-2 py-2">
+      <p className="text-xs text-muted-foreground">
+        Pending jobs addressed to this device, soonest first. Only jobs the server has already created appear — Live Activity starts come from the device's own 48-hour upload and class reminders are created 48 hours ahead — so later ones show up as their time approaches.
+      </p>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="text-xs">When</TableHead>
+              <TableHead className="text-xs">What</TableHead>
+              <TableHead className="text-xs">Content</TableHead>
+              <TableHead className="text-xs">Status</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {jobs.map((j) => {
+              const ready = j.recipients.find((r) => r.device_id === deviceId)?.token_ready ?? false;
+              return (
+                <TableRow key={j.id} className={ready ? "" : "opacity-60"}>
+                  <TableCell className="text-xs whitespace-nowrap">
+                    <div>{timeUntil(j.fire_at)}</div>
+                    <div className="text-muted-foreground">{fmt(j.fire_at)}</div>
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    <div className="font-medium">{queuedJobLabel(j)}</div>
+                    <div className="font-mono text-[10px] text-muted-foreground">#{j.id}</div>
+                  </TableCell>
+                  <TableCell className="text-xs max-w-[260px]">
+                    <div className="truncate" title={j.title}>{j.title || "—"}</div>
+                    {j.body && <div className="truncate text-muted-foreground" title={j.body}>{j.body}</div>}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    <Badge variant={j.status === "processing" ? "default" : "secondary"} className="text-[10px]">{j.status}</Badge>
+                    {j.attempts > 0 && <div className="text-muted-foreground mt-1">{j.attempts}/{j.max_attempts} attempts</div>}
+                    {!ready && <div className="text-orange-500 mt-1">No {queuedJobToken(j)} token · will not arrive</div>}
+                    {j.last_error && <div className="text-destructive mt-1">{j.last_error}</div>}
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 // ── Synced List ─────────────────────────────────────────────────────────
 
 type SyncedRow = {
@@ -1085,17 +1192,16 @@ type SyncedRow = {
 
 /**
  * What this device takes part in, row for row with the apps' TigerSync
- * screen (spec §4.6's toggle-to-column table): essential info, which is
- * always on; 同步課程資訊, the master every 同步內容 row sits under; and
- * the two push channels, which are independent of it. A row switched off
+ * screen (spec §4.6's toggle-to-column table): 同步課程資訊, the master
+ * every 同步內容 row sits under, and the two push channels, which are
+ * independent of it. Bulletin subscriptions are not here: they belong to
+ * one device and are never synced, and Data › Bulletins lists them. A row switched off
  * here still says what the account holds, because other devices keep
  * syncing it.
  */
 function SyncedList({ device, coursesData }: { device: SyncDevice; coursesData?: SyncCoursesResponse }) {
   const courses = coursesData?.courses ?? [];
   const assignments = coursesData?.assignments ?? [];
-  const subs = (coursesData?.bulletin_subscriptions ?? []).filter((s) => s.device_id === device.id);
-  const counts = coursesData?.bulletin_state_counts;
   const notification = (coursesData?.settings_documents ?? [])
     .find((d) => d.namespace === "notification")?.document;
   const colorCount = courses.filter((c) => c.color_hex).length;
@@ -1103,17 +1209,6 @@ function SyncedList({ device, coursesData }: { device: SyncDevice; coursesData?:
   const master = device.cloud_sync_enabled !== false;
 
   const groups: { title: string; rows: SyncedRow[] }[] = [
-    {
-      title: "Essential info (always on)",
-      rows: [
-        {
-          label: "Bulletins",
-          enabled: true,
-          hasData: subs.length > 0,
-          detail: `${subs.length} subscription${subs.length === 1 ? "" : "s"} on this device (never synced) · ${counts?.read ?? 0} read · ${counts?.starred ?? 0} starred · ${counts?.hidden ?? 0} hidden`,
-        },
-      ],
-    },
     {
       title: "同步課程資訊 (sync course information)",
       rows: [

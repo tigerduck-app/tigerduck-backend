@@ -216,12 +216,16 @@ export type SyncDevice = {
   platform: string;
   device_class: string | null;
   device_name: string | null;
+  /** Hardware model: "Google Pixel 8", or Apple's machine identifier ("iPhone17,3"). */
+  device_model: string | null;
   app_version: string | null;
   os_version: string | null;
   locale: string | null;
   last_seen_at: string | null;
   last_login_at: string | null;
   created_at: string | null;
+  /** Set once the device signed out; it then receives nothing. */
+  deleted_at: string | null;
   /** 同步課程資訊 — the master every 同步內容 flag below sits under. */
   cloud_sync_enabled: boolean | null;
   sync_courses: boolean | null;
@@ -264,6 +268,29 @@ export type PushDeliveryRow = {
   created_at: string;
 };
 
+/** One device a queued job is addressed to. */
+export type QueuedJobRecipient = {
+  device_id: string;
+  /** Whether the device holds the token this push needs; false means it will not arrive. */
+  token_ready: boolean;
+};
+
+/** A pending push job, with the devices the push pipeline would send it to. */
+export type QueuedJob = {
+  id: number;
+  channel: string;
+  scenario: string;
+  kind: string | null;
+  status: string;
+  fire_at: string;
+  attempts: number;
+  max_attempts: number;
+  last_error: string | null;
+  title: string;
+  body: string;
+  recipients: QueuedJobRecipient[];
+};
+
 export type SyncEventsResponse = {
   student_id: string;
   found: boolean;
@@ -273,6 +300,7 @@ export type SyncEventsResponse = {
   devices?: SyncDevice[];
   push_jobs?: PushJobRow[];
   push_deliveries?: PushDeliveryRow[];
+  queued_jobs?: QueuedJob[];
   topology?: {
     revision: number;
     course_count: number;

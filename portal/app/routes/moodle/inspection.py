@@ -12,6 +12,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Query, Request
 from ...db import get_pool
+from ._push_queue import payload_of, recipients, summary
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
@@ -104,11 +105,11 @@ async def sync_events(
         )
 
         devices = await conn.fetch(
-            "SELECT id, client_device_id, platform, device_class, device_name, "
+            "SELECT id, client_device_id, platform, device_class, device_name, device_model, "
             "app_version, os_version, locale, last_seen_at, last_login_at, created_at, "
             "cloud_sync_enabled, sync_courses, sync_course_colors, sync_course_names, "
             "sync_assignments, sync_assignment_reminders, sync_live_activity, "
-            "server_push_enabled, bulletin_push_enabled "
+            "server_push_enabled, bulletin_push_enabled, deleted_at "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
             uid,
@@ -137,6 +138,26 @@ async def sync_events(
                 pj_ids,
             )
 
+        # Everything still due to go out, soonest first, plus every usable
+        # token on the account, so each device panel can say what the server
+        # has planned for it. _push_queue holds the recipient rules.
+        queued_rows = await conn.fetch(
+            "SELECT pj.id, pj.channel, pj.scenario, pj.status, pj.device_id, "
+            "pj.fire_at, pj.attempts, pj.max_attempts, pj.last_error, pj.payload "
+            "FROM push_jobs pj "
+            "WHERE pj.user_id = $1 AND pj.status IN ('pending', 'processing') "
+            "ORDER BY pj.fire_at, pj.id LIMIT 300",
+            uid,
+        )
+        tokens = await conn.fetch(
+            "SELECT t.device_id, t.token_kind, t.scope_key "
+            "FROM device_push_tokens t "
+            "JOIN user_devices d ON d.id = t.device_id "
+            "WHERE d.user_id = $1 AND t.status = 'active' "
+            "AND (t.expires_at IS NULL OR t.expires_at > now())",
+            uid,
+        )
+
         topology = await conn.fetchrow(
             "SELECT "
             "  (SELECT current_revision FROM user_sync_state WHERE user_id = $1) AS revision, "
@@ -155,6 +176,26 @@ async def sync_events(
     except ImportError:
         pass
 
+    device_rows = [dict(d) for d in devices]
+    token_rows = [dict(t) for t in tokens]
+    queued_jobs = []
+    for row in queued_rows:
+        job = dict(row)
+        job["payload"] = payload_of(job["payload"])
+        queued_jobs.append({
+            "id": job["id"],
+            "channel": job["channel"],
+            "scenario": job["scenario"],
+            "kind": job["payload"].get("kind"),
+            "status": job["status"],
+            "fire_at": job["fire_at"],
+            "attempts": job["attempts"],
+            "max_attempts": job["max_attempts"],
+            "last_error": job["last_error"],
+            **summary(job),
+            "recipients": recipients(job, device_rows, token_rows),
+        })
+
     return {
         "student_id": student_id,
         "found": True,
@@ -168,9 +209,10 @@ async def sync_events(
         "jobs": [dict(j) for j in jobs],
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],
-        "devices": [dict(d) for d in devices],
+        "devices": device_rows,
         "push_jobs": [dict(p) for p in push_jobs],
         "push_deliveries": [dict(d) for d in push_deliveries],
+        "queued_jobs": queued_jobs,
     }
 COURSE_PALETTE_LIGHT = [
     "#FF6B6B", "#4ECDC4", "#45B7D1", "#F39C12", "#DDA0DD",
