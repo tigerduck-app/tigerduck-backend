@@ -21,6 +21,8 @@ from server.auth.models import (
 )
 from server.config import Settings
 from server.db import build_session_factory
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
+from server.push.reminders import _dedupe_key
 from server.logging_setup import configure
 from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
 from server.syncjobs import executor as executor_module
@@ -28,6 +30,7 @@ from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
+    FetchedSubmission,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -855,3 +858,55 @@ async def test_an_unexpected_probe_failure_is_logged_without_the_token(
     assert "probe blew up handling" in traceback_text
     assert "upstream refused" in traceback_text
     assert traceback_text.count("wstoken=<token-redacted>") == 2
+
+
+async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """Through the whole executor: the probe reports an assignment
+    submitted, the row is marked submitted, and the reminder still waiting
+    for it is cancelled. Every other probe test here returns `{}` or
+    raises, so without this nothing notices if the executor stops handing
+    the probe's result to `apply_submission_status`, or that answer on to
+    `cancel_for_submitted`."""
+    user, _, _ = await _setup_user_job(db_session)
+    due_at = datetime.now(UTC) + timedelta(hours=10)
+    reminder = PushJob(
+        user_id=user.id,
+        dedupe_key=_dedupe_key(1, 2.0, int(due_at.timestamp())),
+        channel=REMINDER_CHANNEL,
+        scenario="reminder_2h",
+        fire_at=due_at - timedelta(hours=2),
+        payload={"kind": "assignment_reminder", "moodle_assignment_id": 1},
+    )
+    db_session.add(reminder)
+    await db_session.commit()
+    submitted_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+        return {
+            aid: FetchedSubmission(
+                moodle_assignment_id=aid, is_submitted=True, submitted_at=submitted_at
+            )
+            for aid in assignment_ids
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", submitted_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    row = (
+        await db_session.execute(
+            select(UserAssignment)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.provider_is_submitted is True
+    assert row.provider_submitted_at == submitted_at
+    await db_session.refresh(reminder)
+    assert reminder.status == "cancelled"

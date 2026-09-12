@@ -74,19 +74,29 @@ def test_httpx_never_logs_the_request_url(log_level, caplog, _restore_log_levels
 def test_httpx_warnings_still_reach_the_log(caplog, _restore_log_levels):
     """The fix must silence the request line, not the whole library.
 
-    Pinning httpx to WARNING is only acceptable while genuine httpx
-    problems still surface; if someone later raises this to ERROR or
+    Pinning httpx and httpcore to WARNING is only acceptable while genuine
+    problems still surface; if someone later raises either to ERROR or
     disables the logger, this fails.
 
-    Asserted through `caplog` rather than captured stdout: pytest's
-    logging plugin installs its own root handler, so a propagated record
-    is visible there and never reaches the stream handler `configure`
-    set up. That makes this a check that the record is emitted and
-    propagates at WARNING, which is the part worth pinning.
+    The level `configure` leaves on each logger is asserted directly,
+    outside any `caplog.at_level`: that context manager sets the named
+    logger's own level, so a check run inside it would see its level
+    rather than the one `configure` chose, and pass with the pin at ERROR.
+
+    Then a warning is emitted with only the root capture level lowered, so
+    the httpx logger's own level still decides whether it is emitted, and
+    it is seen through `caplog` only if it propagates. `caplog` rather than
+    captured stdout: pytest's logging plugin installs its own root handler,
+    so a propagated record is visible there and never reaches the stream
+    handler `configure` set up.
     """
     configure(Settings(log_level="INFO", env="development"))
 
-    with caplog.at_level(logging.WARNING, logger="httpx"):
-        logging.getLogger("httpx").warning("connection pool is full")
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).getEffectiveLevel() == logging.WARNING, name
+
+    caplog.set_level(0)
+    caplog.clear()
+    logging.getLogger("httpx").warning("connection pool is full")
 
     assert "connection pool is full" in caplog.text

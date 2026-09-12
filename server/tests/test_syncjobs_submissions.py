@@ -302,3 +302,31 @@ async def test_apply_does_not_touch_another_users_matching_assignment_id(
     assert changed == {1}
     assert mine.provider_is_submitted is True
     assert theirs.provider_is_submitted is False
+
+
+async def test_a_submission_without_a_timestamp_is_stamped_with_now(
+    db_session, make_assignment
+):
+    """Moodle reports some submissions with `timemodified` 0 or absent, which
+    `_ts` turns into None. The row still flips to submitted, and is stamped
+    with the probe's own time rather than left without one."""
+    row = await make_assignment(
+        moodle_assignment_id=9, due_at=NOW + timedelta(hours=10)
+    )
+    await db_session.flush()
+
+    changed = await apply_submission_status(
+        db_session,
+        user_id=row.user_id,
+        fetched={
+            9: FetchedSubmission(
+                moodle_assignment_id=9, is_submitted=True, submitted_at=None
+            )
+        },
+        now=NOW,
+    )
+
+    await db_session.refresh(row)
+    assert changed == {9}
+    assert row.provider_is_submitted is True
+    assert row.provider_submitted_at == NOW
