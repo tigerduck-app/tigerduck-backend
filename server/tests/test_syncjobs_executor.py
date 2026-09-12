@@ -832,7 +832,16 @@ def executor_logs_through_the_production_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        configure(Settings(env="production", log_level="INFO"))
+        # Production settings refuse to load without a shared secret. Name
+        # one here rather than leave it to a local `.env`, which neither a
+        # clean checkout nor CI has.
+        configure(
+            Settings(
+                env="production",
+                log_level="INFO",
+                api_shared_secret="test-shared-secret",
+            )
+        )
         monkeypatch.setattr(
             executor_module,
             "logger",
