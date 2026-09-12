@@ -69,6 +69,15 @@ class UserDevice(Base):
     server_push_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )
+    # Gates ONLY the bulletin channel, in push/pipeline.py::_materialize.
+    # Separate from `server_push_enabled` above, which today reaches
+    # nothing but operator custom-push targeting
+    # (custom_push_targeting.py, portal/routes/custom_push.py) -- bulletins
+    # are part of the always-on essential-info sync (spec §6), and this is
+    # the per-device control the bulletins page itself owns.
+    bulletin_push_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
     sync_courses: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )

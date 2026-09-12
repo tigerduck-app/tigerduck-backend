@@ -41,6 +41,7 @@ from server.auth.models import (
     UserDevice,
     UserDevicePlatform,
 )
+from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
@@ -318,6 +319,16 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
             UserDevice.sync_assignment_reminders.is_(True),
             UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
         )
+
+    if job.channel == BULLETIN_CHANNEL:
+        # The only gate a bulletin job gets. Per-device, not per-user:
+        # matching (server/bulletins/user_dispatch.py Pass A) and the
+        # push_jobs it writes (Pass B) never look at this column, so an
+        # opted-out device still gets its bulletin_user_matches row
+        # stamped and does not receive a backlog replay the day it opts
+        # back in. Deliberately independent of server_push_enabled, which
+        # this job never consults.
+        token_query = token_query.where(UserDevice.bulletin_push_enabled.is_(True))
 
     rows = (await session.execute(token_query)).all()
     if not rows:

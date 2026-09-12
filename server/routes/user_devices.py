@@ -242,6 +242,8 @@ async def register_device(
                 new=payload.cloud_sync_enabled,
             )
         device.cloud_sync_enabled = payload.cloud_sync_enabled
+    if payload.bulletin_push_enabled is not None:
+        device.bulletin_push_enabled = payload.bulletin_push_enabled
     device.deleted_at = None
     device.last_seen_at = now
     await session.flush()
@@ -479,6 +481,8 @@ async def update_device_preferences(
         raise HTTPException(status_code=404, detail="device_not_found")
     if payload.server_push_enabled is not None:
         device.server_push_enabled = payload.server_push_enabled
+    if payload.bulletin_push_enabled is not None:
+        device.bulletin_push_enabled = payload.bulletin_push_enabled
     # Lets a device push a system-language change between register calls.
     # See UserDevice.locale.
     if payload.locale is not None:
@@ -504,6 +508,7 @@ async def update_device_preferences(
     return DevicePreferencesV3Response(
         device_id=device.client_device_id,
         server_push_enabled=device.server_push_enabled,
+        bulletin_push_enabled=device.bulletin_push_enabled,
         sync_courses=device.sync_courses,
         sync_course_colors=device.sync_course_colors,
         sync_course_names=device.sync_course_names,

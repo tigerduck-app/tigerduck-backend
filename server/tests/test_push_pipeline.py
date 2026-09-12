@@ -18,6 +18,7 @@ from server.db import build_session_factory
 from server.push.apns_client import SendResult
 from server.push.dedupe import activity_end_key, schedule_key
 from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -870,3 +871,119 @@ async def test_start_job_is_not_cancelled_on_a_retry_round(
     assert [r.device_token for r in apple.requests] == ["pts-tok"]
     await db_session.refresh(job)
     assert job.status == "sent"
+
+
+# UserDevice.bulletin_push_enabled gates ONLY the bulletin channel. It is
+# read in exactly one place -- the token_query built above, when
+# job.channel == "bulletin" -- so a device that opted out of bulletins
+# must keep every other channel exactly as it was, and a device that
+# never touched the flag (or explicitly turned it back on) must keep
+# receiving bulletins.
+
+
+async def _bulletin_flag_device(
+    db_session,
+    *,
+    bulletin_push_enabled: bool | None = None,
+    client_device_id: str = "dev-bulletin-flag",
+    app_version: str = "2.1.0",
+):
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    device_kwargs = dict(
+        user_id=user.id,
+        client_device_id=client_device_id,
+        platform="ios",
+        app_version=app_version,
+    )
+    # Omitting the kwarg entirely (rather than passing False/True) is what
+    # stands in for "a device that never sent this field" -- the column's
+    # own default applies, exactly as it would for a pre-migration row.
+    if bulletin_push_enabled is not None:
+        device_kwargs["bulletin_push_enabled"] = bulletin_push_enabled
+    device = UserDevice(**device_kwargs)
+    db_session.add(device)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash=f"hash-{client_device_id}",
+            token_value=f"tok-{client_device_id}",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    db_session.add(_push_to_start_token(device, token_value=f"pts-{client_device_id}"))
+    await db_session.flush()
+    return user, device
+
+
+async def _delivered_device_ids_for_job(session, job_id) -> set:
+    rows = (
+        await session.execute(
+            select(PushDelivery.device_id).where(PushDelivery.push_job_id == job_id)
+        )
+    ).scalars().all()
+    return set(rows)
+
+
+async def test_bulletin_flag_false_blocks_only_the_bulletin_channel(
+    db_session, prepared_engine, test_settings
+):
+    """One opted-out device, three jobs: the bulletin is withheld, and an
+    assignment reminder and a server-started Live Activity still land."""
+    user, device = await _bulletin_flag_device(db_session, bulletin_push_enabled=False)
+
+    bulletin_job = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:flag-false",
+    )
+    reminder_job = _job(
+        user,
+        channel=REMINDER_CHANNEL,
+        scenario="reminder_24h",
+        dedupe_key="assignment:test:flag-false",
+    )
+    activity_job = _start_job(user, device)
+    db_session.add_all([bulletin_job, reminder_job, activity_job])
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert await _delivered_device_ids_for_job(db_session, bulletin_job.id) == set()
+    assert device.id in await _delivered_device_ids_for_job(db_session, reminder_job.id)
+    assert device.id in await _delivered_device_ids_for_job(db_session, activity_job.id)
+
+
+@pytest.mark.parametrize("bulletin_push_enabled", [True, None], ids=["true", "unset"])
+async def test_bulletin_flag_true_or_unset_receives_bulletin(
+    db_session, prepared_engine, test_settings, bulletin_push_enabled
+):
+    """True (explicitly re-enabled) and unset (a device that predates the
+    column, or a pre-2.1.0 client that never sends the field) both resolve
+    to "deliver" -- only an explicit false withholds the bulletin."""
+    user, device = await _bulletin_flag_device(
+        db_session,
+        bulletin_push_enabled=bulletin_push_enabled,
+        client_device_id=f"dev-bulletin-{bulletin_push_enabled}",
+    )
+    assert device.bulletin_push_enabled is True
+
+    job = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key=f"bulletin:test:flag-{bulletin_push_enabled}",
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert device.id in await _delivered_device_ids_for_job(db_session, job.id)

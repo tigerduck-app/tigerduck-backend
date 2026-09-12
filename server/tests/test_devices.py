@@ -82,6 +82,7 @@ async def test_patch_preferences_flips_server_push_enabled(client: AsyncClient):
     assert resp.json() == {
         "device_id": "iphone-d2",
         "server_push_enabled": False,
+        "bulletin_push_enabled": True,
         "sync_courses": True,
         "sync_course_colors": True,
         "sync_course_names": True,

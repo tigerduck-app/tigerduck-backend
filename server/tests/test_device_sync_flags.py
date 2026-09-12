@@ -1,7 +1,10 @@
-"""The two device-level reminder switches added in v2.1.0.
+"""Device-level preference switches added in v2.1.0: the two reminder
+toggles, and bulletin_push_enabled (which gates only the bulletin channel
+in the push pipeline, not reminders).
 
-Both default to true: an upgrading user who has never seen the new
-settings row must not silently lose reminders because a column appeared.
+All three default to true: an upgrading user who has never seen the new
+settings row must not silently lose reminders, or bulletins, because a
+column appeared.
 
 Fixture note: this suite follows `test_user_devices_v3.py` / `test_device_locale.py`
 (the real /v3 device test files — there is no `test_user_devices.py` and no
@@ -67,6 +70,19 @@ async def _device_flags(client, client_device_id: str) -> tuple[bool, bool]:
         return device.sync_assignment_reminders, device.sync_live_activity
 
 
+async def _bulletin_push_enabled(client, client_device_id: str) -> bool:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = (
+            await session.execute(
+                select(UserDevice).where(
+                    UserDevice.client_device_id == client_device_id
+                )
+            )
+        ).scalar_one()
+        return device.bulletin_push_enabled
+
+
 @asyncio_session
 async def test_new_flags_default_to_true(client) -> None:
     login = await do_login(client)
@@ -127,13 +143,117 @@ async def test_omitting_a_flag_leaves_the_other_unchanged(client) -> None:
     assert body["sync_live_activity"] is True
 
 
+@asyncio_session
+async def test_bulletin_push_enabled_defaults_to_true(client) -> None:
+    login = await do_login(client, device="iphone-bulletin-default")
+    response = await client.patch(
+        "/v3/devices/iphone-bulletin-default/preferences",
+        headers=bearer(login),
+        json={},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["bulletin_push_enabled"] is True
+    assert await _bulletin_push_enabled(client, "iphone-bulletin-default") is True
+
+
+@asyncio_session
+async def test_bulletin_push_enabled_round_trips_through_preferences_patch(
+    client,
+) -> None:
+    login = await do_login(client, device="iphone-bulletin-flag")
+    response = await client.patch(
+        "/v3/devices/iphone-bulletin-flag/preferences",
+        headers=bearer(login),
+        json={"bulletin_push_enabled": False},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["bulletin_push_enabled"] is False
+
+    # No GET route: re-read via an empty-body PATCH.
+    again = await client.patch(
+        "/v3/devices/iphone-bulletin-flag/preferences",
+        headers=bearer(login),
+        json={},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["bulletin_push_enabled"] is False
+    assert await _bulletin_push_enabled(client, "iphone-bulletin-flag") is False
+
+
+@asyncio_session
+async def test_omitting_bulletin_push_enabled_leaves_it_unchanged(client) -> None:
+    login = await do_login(client, device="iphone-bulletin-partial")
+    await client.patch(
+        "/v3/devices/iphone-bulletin-partial/preferences",
+        headers=bearer(login),
+        json={"bulletin_push_enabled": False},
+    )
+    # A PATCH that mentions only an unrelated field must not reset this
+    # one back to its default -- a 2.0.x client's preferences PATCH never
+    # sends this field at all.
+    body = (
+        await client.patch(
+            "/v3/devices/iphone-bulletin-partial/preferences",
+            headers=bearer(login),
+            json={"sync_courses": False},
+        )
+    ).json()
+    assert body["bulletin_push_enabled"] is False
+
+
+@asyncio_session
+async def test_register_accepts_bulletin_push_enabled(client) -> None:
+    login = await do_login(client, device="iphone-bulletin-register")
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-bulletin-register",
+            "platform": "ios",
+            "bulletin_push_enabled": False,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert await _bulletin_push_enabled(client, "iphone-bulletin-register") is False
+
+
+@asyncio_session
+async def test_register_omitting_bulletin_push_enabled_leaves_it_unchanged(
+    client,
+) -> None:
+    """A device that opted out and later re-registers without the field --
+    a 2.0.x client's register call, or any client that simply has nothing
+    new to report -- must not have bulletins silently switched back on."""
+    login = await do_login(client, device="iphone-bulletin-reregister")
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-bulletin-reregister",
+            "platform": "ios",
+            "bulletin_push_enabled": False,
+        },
+    )
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-bulletin-reregister", "platform": "ios"},
+    )
+    assert response.status_code == 200, response.text
+    assert await _bulletin_push_enabled(client, "iphone-bulletin-reregister") is False
+
+
 def test_model_columns_are_nonnull_with_true_default() -> None:
     """Backward-compatibility guard: both columns must be NOT NULL with a
     `server_default` of true, so a pre-migration row — or a PATCH body from
     an old client that never sends these fields — resolves to True, never
     NULL."""
     table = UserDevice.__table__
-    for name in ("sync_assignment_reminders", "sync_live_activity"):
+    for name in (
+        "sync_assignment_reminders",
+        "sync_live_activity",
+        "bulletin_push_enabled",
+    ):
         column = table.c[name]
         assert column.nullable is False, name
         assert column.server_default is not None, name

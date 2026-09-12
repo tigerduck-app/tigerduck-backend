@@ -125,6 +125,12 @@ class PushTokenIn(BaseModel):
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
     cloud_sync_enabled: bool | None = None
+    # None means "not reported" and leaves the stored value untouched --
+    # same convention as cloud_sync_enabled above. Lets a client carry the
+    # bulletin opt-out on every register call, self-healing the flag onto
+    # a device that dropped and re-registered, without a 2.0.x client
+    # (which never sends this field) ever resetting it.
+    bulletin_push_enabled: bool | None = None
     # BCP-47 tag, e.g. "zh-Hant-TW". Reported unconditionally on every
     # registration call (not gated behind a preference toggle) — see
     # UserDevice.locale for why. Optional so older clients keep working.
@@ -153,6 +159,10 @@ class DeviceListV3Response(BaseModel):
 
 class DevicePreferencesV3Request(BaseModel):
     server_push_enabled: bool | None = None
+    # None leaves the stored value unchanged, same as every other switch
+    # on this request -- an old client that has never heard of this field
+    # must not reset it back to true on every PATCH.
+    bulletin_push_enabled: bool | None = None
     sync_courses: bool | None = None
     sync_course_colors: bool | None = None
     sync_course_names: bool | None = None
@@ -169,6 +179,7 @@ class DevicePreferencesV3Request(BaseModel):
 class DevicePreferencesV3Response(BaseModel):
     device_id: str
     server_push_enabled: bool
+    bulletin_push_enabled: bool
     sync_courses: bool
     sync_course_colors: bool
     sync_course_names: bool
