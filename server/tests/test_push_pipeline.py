@@ -15,6 +15,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.db import build_session_factory
+from server.push import pipeline as pipeline_module
 from server.push.apns_client import SendResult
 from server.push.dedupe import activity_end_key, schedule_key
 from server.push.pipeline import PushPipelineWorker, run_push_tick
@@ -131,6 +132,45 @@ async def test_due_job_claimed_and_sent(
     ).scalar_one()
     assert delivery.status == "sent"
     assert delivery.provider == "apns"
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_delivery_made_this_tick_goes_out_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """A tick materializes a job's deliveries, then sends each one whose
+    `next_retry_at` has come by the pipeline's own clock. A delivery made
+    moments earlier in the same tick must qualify. Stamped instead by the
+    database's clock, one running even a few milliseconds ahead (a Docker
+    VM's clock drifts against its host's) leaves every fresh delivery
+    waiting out a retry round while the job spends an attempt sending
+    nothing.
+
+    Pinned by running the pipeline on a clock that lags the database's and
+    on one that leads it: the push goes out on the first tick either way."""
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    real_datetime = pipeline_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(pipeline_module, "datetime", SkewedDatetime)
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+
+    assert len(apple.requests) == 1
+    await db_session.refresh(job)
+    assert job.status == "sent"
 
 
 async def test_future_or_unavailable_jobs_not_claimed(

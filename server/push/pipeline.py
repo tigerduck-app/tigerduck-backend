@@ -357,6 +357,11 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
                 "token_kind": token.token_kind,
                 "token_hash": token.token_hash,
                 "scope_key": token.scope_key,
+                # Due now by the clock `_deliver_round` reads: this host's.
+                # Left to its server default, the database clock's now(), a
+                # database clock even a few milliseconds ahead makes every
+                # delivery this tick creates wait out a retry round.
+                "next_retry_at": now,
             }
         )
     if not values:
