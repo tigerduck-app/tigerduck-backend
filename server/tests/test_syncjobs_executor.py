@@ -127,11 +127,20 @@ async def _setup_user_job(
             aad=blob.aad,
         )
     )
+    # Already due by the clock the executor claims with: this host's. Left
+    # to its server default, `run_after` would be the database clock's
+    # `now()`, and a database clock running even a few milliseconds ahead of
+    # this host's leaves the job not yet due when the tick claims (pinned by
+    # `test_a_job_set_up_here_is_due_whichever_way_the_clocks_disagree`).
+    fields = {
+        "run_after": datetime.now(UTC) - timedelta(minutes=1),
+        **(job_kwargs or {}),
+    }
     job = SyncJob(
         user_id=user.id,
         external_account_id=account.id,
         job_type="moodle_assignments",
-        **(job_kwargs or {}),
+        **fields,
     )
     session.add(job)
     await ensure_default_policies(session)
@@ -151,6 +160,42 @@ def _fa(aid: int, *, due_at: datetime | None = None) -> FetchedAssignment:
         moodle_url=None,
         intro_html=None,
     )
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_job_set_up_here_is_due_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """Every test in this file that expects a claim relies on
+    `_setup_user_job` handing it a job that is already due, and the
+    executor decides that with this host's clock. So the job must not take
+    its `run_after` from the database's clock: a Docker VM's clock drifts
+    against its host's, and one running even a few milliseconds ahead
+    leaves a job made just before the tick not yet due -- the tick claims
+    nothing, and every assertion after it sees a sync that never ran.
+
+    Pinned by running the executor on a clock that lags the database's, as
+    that drift does, and on one that leads it: the job is claimed either
+    way."""
+    await _setup_user_job(db_session)
+
+    real_datetime = executor_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(executor_module, "datetime", SkewedDatetime)
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
 
 
 async def test_stale_running_job_recovered(
