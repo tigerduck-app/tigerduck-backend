@@ -168,8 +168,10 @@ export type SyncSettingsDocument = {
   updated_at: string | null;
 };
 
+/** Belongs to one device and never syncs; the panel shows it under that device. */
 export type SyncBulletinSubscription = {
   id: number;
+  device_id: string;
   name: string | null;
   orgs: string[];
   tags: string[];

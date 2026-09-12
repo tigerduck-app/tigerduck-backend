@@ -467,7 +467,7 @@ export function NodeDetailPanel({
                     <TabsTrigger value="holiday-overrides">Holiday Overrides ({(coursesData.holiday_overrides ?? []).length})</TabsTrigger>
                     <TabsTrigger value="skipped-dates">Skipped Dates ({(coursesData.course_skipped_dates ?? []).length})</TabsTrigger>
                     <TabsTrigger value="settings">Settings ({(coursesData.settings_documents ?? []).length})</TabsTrigger>
-                    <TabsTrigger value="bulletins">Bulletins ({(coursesData.bulletin_subscriptions ?? []).length})</TabsTrigger>
+                    <TabsTrigger value="bulletins">Bulletins ({(coursesData.bulletin_subscriptions ?? []).filter((s) => s.device_id === device.id).length})</TabsTrigger>
                   </TabsList>
                   <Select value={semesterFilter} onValueChange={setSemesterFilter}>
                     <SelectTrigger className="w-40 h-7 text-xs shrink-0">
@@ -771,13 +771,15 @@ export function NodeDetailPanel({
 
                 <TabsContent value="bulletins">
                   {(() => {
-                    const subs = coursesData.bulletin_subscriptions ?? [];
+                    // Rules belong to one device and never sync, so only this
+                    // device's are shown here.
+                    const subs = (coursesData.bulletin_subscriptions ?? []).filter((s) => s.device_id === device.id);
                     const counts = coursesData.bulletin_state_counts;
                     const marked = coursesData.bulletin_states ?? [];
                     return (
                       <div className="space-y-4">
                         {subs.length === 0 ? (
-                          <p className="text-sm text-muted-foreground py-2">No bulletin subscriptions synced.</p>
+                          <p className="text-sm text-muted-foreground py-2">No bulletin subscriptions on this device.</p>
                         ) : (
                           <div className="overflow-x-auto">
                             <Table>
@@ -1092,7 +1094,7 @@ type SyncedRow = {
 function SyncedList({ device, coursesData }: { device: SyncDevice; coursesData?: SyncCoursesResponse }) {
   const courses = coursesData?.courses ?? [];
   const assignments = coursesData?.assignments ?? [];
-  const subs = coursesData?.bulletin_subscriptions ?? [];
+  const subs = (coursesData?.bulletin_subscriptions ?? []).filter((s) => s.device_id === device.id);
   const counts = coursesData?.bulletin_state_counts;
   const notification = (coursesData?.settings_documents ?? [])
     .find((d) => d.namespace === "notification")?.document;
@@ -1108,7 +1110,7 @@ function SyncedList({ device, coursesData }: { device: SyncDevice; coursesData?:
           label: "Bulletins",
           enabled: true,
           hasData: subs.length > 0,
-          detail: `${subs.length} subscription${subs.length === 1 ? "" : "s"} · ${counts?.read ?? 0} read · ${counts?.starred ?? 0} starred · ${counts?.hidden ?? 0} hidden`,
+          detail: `${subs.length} subscription${subs.length === 1 ? "" : "s"} on this device (never synced) · ${counts?.read ?? 0} read · ${counts?.starred ?? 0} starred · ${counts?.hidden ?? 0} hidden`,
         },
       ],
     },

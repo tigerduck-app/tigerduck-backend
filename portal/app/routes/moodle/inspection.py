@@ -371,7 +371,8 @@ async def sync_courses(
 
         # The rest of what `/v3/sync/full` hands a client, so the panel can
         # show every section a device syncs, not only courses and
-        # assignments.
+        # assignments -- plus bulletin subscriptions, which are per device
+        # and outside TigerSync; the panel files each under its device.
         settings_rows = await conn.fetch(
             "SELECT namespace, schema_version, revision, document, "
             "updated_by_device_id, updated_at "
@@ -382,7 +383,7 @@ async def sync_courses(
         )
 
         subscriptions = await conn.fetch(
-            "SELECT id, name, orgs, tags, mode, enabled, revision, "
+            "SELECT id, device_id, name, orgs, tags, mode, enabled, revision, "
             "updated_by_device_id, updated_at "
             "FROM user_bulletin_subscriptions "
             "WHERE user_id = $1 AND deleted_at IS NULL "
