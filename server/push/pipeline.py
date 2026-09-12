@@ -21,6 +21,8 @@ FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
 from __future__ import annotations
 
+import uuid
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -321,14 +323,21 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
         )
 
     if job.channel == BULLETIN_CHANNEL:
-        # The only gate a bulletin job gets. Per-device, not per-user:
-        # matching (server/bulletins/user_dispatch.py Pass A) and the
-        # push_jobs it writes (Pass B) never look at this column, so an
-        # opted-out device still gets its bulletin_user_matches row
-        # stamped and does not receive a backlog replay the day it opts
-        # back in. Deliberately independent of server_push_enabled, which
-        # this job never consults.
+        # The bulletin opt-out. Per-device, not per-user: matching
+        # (server/bulletins/user_dispatch.py Pass A) and the push_jobs it
+        # writes (Pass B) never look at this column, so an opted-out device
+        # still gets its bulletin_user_matches row stamped and does not
+        # receive a backlog replay the day it opts back in. Deliberately
+        # independent of server_push_enabled, which this job never consults.
         token_query = token_query.where(UserDevice.bulletin_push_enabled.is_(True))
+        # Subscriptions are per device, so the job names the devices whose
+        # own rules matched. A job written before that names none and goes
+        # to every device, as it always did.
+        target_device_ids = payload.get("target_device_ids")
+        if target_device_ids is not None:
+            token_query = token_query.where(
+                UserDevice.id.in_([uuid.UUID(d) for d in target_device_ids])
+            )
 
     rows = (await session.execute(token_query)).all()
     if not rows:

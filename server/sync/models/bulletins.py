@@ -1,5 +1,5 @@
-"""Bulletin subscriptions, per-user read state, and the matcher runs
-that decide which bulletins reach which user."""
+"""Per-device bulletin subscriptions, per-user read state, and the matcher
+runs that decide which bulletins reach which user."""
 
 from __future__ import annotations
 import uuid
@@ -33,6 +33,13 @@ class UserBulletinSubscription(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
+    # The device these rules belong to. Subscriptions are per device and
+    # not part of TigerSync: each device keeps its own rules, and a matched
+    # bulletin is pushed only to the devices whose rules hit it
+    # (server/bulletins/user_dispatch.py).
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_devices.id", ondelete="CASCADE")
     )
     name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     orgs: Mapped[list[str]] = mapped_column(
@@ -75,6 +82,11 @@ class UserBulletinSubscription(Base):
             "idx_bulletin_subs_user_active",
             "user_id",
             postgresql_where=sa.text("enabled = true AND deleted_at IS NULL"),
+        ),
+        Index(
+            "idx_bulletin_subs_device_active",
+            "device_id",
+            postgresql_where=sa.text("deleted_at IS NULL"),
         ),
     )
 class UserBulletinState(Base):

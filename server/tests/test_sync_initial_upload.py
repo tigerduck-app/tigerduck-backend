@@ -78,6 +78,8 @@ UPLOAD_BODY = {
     "settings_documents": [
         {"namespace": "appearance", "document": {"theme": "dark"}}
     ],
+    # Sent by clients that predate per-device subscriptions; bulletins are
+    # not part of TigerSync, so the upload must ignore it.
     "bulletin_subscriptions": [
         {"name": "教務處", "orgs": ["教務處"], "tags": [], "mode": "AND"}
     ],
@@ -107,7 +109,7 @@ async def test_initial_upload_creates_everything(client) -> None:
     assert body["counts"]["courses"] == 2
     assert body["counts"]["assignments"] == 1
     assert body["counts"]["settings_documents"] == 1
-    assert body["counts"]["bulletin_subscriptions"] == 1
+    assert "bulletin_subscriptions" not in body["counts"]
     assert body["current_revision"] > 0
 
     factory = build_session_factory(client.app.state.engine)
@@ -131,8 +133,8 @@ async def test_initial_upload_creates_everything(client) -> None:
             )
         ).scalar_one()
         # courses(2) + override(1) + skipped(1) + assignment(1) +
-        # assignment_override(1) + settings(1) + subscription(1) = 8
-        assert changelog_count == 8
+        # assignment_override(1) + settings(1) = 7
+        assert changelog_count == 7
 
 
 async def test_initial_upload_is_idempotent(client) -> None:
@@ -162,7 +164,7 @@ async def test_initial_upload_is_idempotent(client) -> None:
             await session.execute(
                 select(func.count()).select_from(UserBulletinSubscription)
             )
-        ).scalar_one() == 1
+        ).scalar_one() == 0
         assert (
             await session.execute(
                 select(func.count()).select_from(UserSettingsDocument)

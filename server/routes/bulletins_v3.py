@@ -1,5 +1,10 @@
-"""/v3 user-level bulletin subscriptions (per-rule CRUD with revision
-optimistic concurrency) and read/starred/hidden states (per-field merge).
+"""/v3 bulletin subscriptions (per-rule CRUD with revision optimistic
+concurrency) and read/starred/hidden states (per-field merge).
+
+Subscriptions belong to the calling device, not the account: each device
+keeps its own rules, and a rule is only ever read or changed by the device
+that owns it. Neither subscriptions nor states are part of TigerSync -- no
+change-log entries, nothing in /sync/full.
 
 Anonymous devices keep using /v2/devices/{id}/subscriptions; this router is
 for logged-in users only.
@@ -7,6 +12,7 @@ for logged-in users only.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -21,7 +27,6 @@ from server.auth.dependencies import CurrentAuthDep
 from server.bulletins.models import Bulletin
 from server.db import SessionDep
 from server.sync import serializers
-from server.sync.changelog import append_change
 from server.sync.merge import clamp_ts
 from server.sync.models import UserBulletinState, UserBulletinSubscription
 
@@ -60,14 +65,25 @@ class BulletinStatePut(BaseModel):
     hidden_updated_at: datetime | None = None
 
 
+def _device_id(auth) -> uuid.UUID:
+    """Rules belong to a device; a session without one has none to read
+    or write."""
+    if auth.device_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
+        )
+    return auth.device_id
+
+
 async def _get_owned_subscription(
-    session, user_id, subscription_id: int
+    session, auth, subscription_id: int
 ) -> UserBulletinSubscription:
     row = (
         await session.execute(
             select(UserBulletinSubscription).where(
                 UserBulletinSubscription.id == subscription_id,
-                UserBulletinSubscription.user_id == user_id,
+                UserBulletinSubscription.user_id == auth.user_id,
+                UserBulletinSubscription.device_id == _device_id(auth),
                 UserBulletinSubscription.deleted_at.is_(None),
             )
         )
@@ -85,6 +101,7 @@ async def list_subscriptions(auth: CurrentAuthDep, session: SessionDep):
                 select(UserBulletinSubscription)
                 .where(
                     UserBulletinSubscription.user_id == auth.user_id,
+                    UserBulletinSubscription.device_id == _device_id(auth),
                     UserBulletinSubscription.deleted_at.is_(None),
                 )
                 .order_by(UserBulletinSubscription.id)
@@ -104,12 +121,15 @@ class SubscriptionsPutBody(BaseModel):
 async def replace_subscriptions(
     payload: SubscriptionsPutBody, auth: CurrentAuthDep, session: SessionDep
 ):
-    """Snapshot-style replacement: soft-delete all existing, then insert."""
+    """Snapshot-style replacement of this device's rules: soft-delete all
+    existing, then insert."""
+    device_id = _device_id(auth)
     existing = (
         (
             await session.execute(
                 select(UserBulletinSubscription).where(
                     UserBulletinSubscription.user_id == auth.user_id,
+                    UserBulletinSubscription.device_id == device_id,
                     UserBulletinSubscription.deleted_at.is_(None),
                 )
             )
@@ -125,6 +145,7 @@ async def replace_subscriptions(
     for rule in payload.rules:
         s = UserBulletinSubscription(
             user_id=auth.user_id,
+            device_id=device_id,
             name=rule.name,
             orgs=rule.orgs,
             tags=rule.tags,
@@ -145,6 +166,7 @@ async def create_subscription(
 ):
     subscription = UserBulletinSubscription(
         user_id=auth.user_id,
+        device_id=_device_id(auth),
         name=payload.name,
         orgs=payload.orgs,
         tags=payload.tags,
@@ -155,14 +177,6 @@ async def create_subscription(
     )
     session.add(subscription)
     await session.flush()
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type="bulletin_subscription",
-        entity_id=str(subscription.id),
-        operation="upsert",
-        device_id=auth.device_id,
-    )
     return serializers.subscription_to_dict(subscription)
 
 
@@ -197,6 +211,7 @@ async def patch_subscription(
         .where(
             UserBulletinSubscription.id == subscription_id,
             UserBulletinSubscription.user_id == auth.user_id,
+            UserBulletinSubscription.device_id == _device_id(auth),
             UserBulletinSubscription.deleted_at.is_(None),
             UserBulletinSubscription.revision == payload.base_revision,
         )
@@ -204,7 +219,7 @@ async def patch_subscription(
     )
     if result.rowcount == 0:
         subscription = await _get_owned_subscription(
-            session, auth.user_id, subscription_id
+            session, auth, subscription_id
         )
         # Row exists but revision didn't match — conflict.
         return JSONResponse(
@@ -215,17 +230,9 @@ async def patch_subscription(
             },
         )
 
-    # Re-read updated row for the response and changelog.
+    # Re-read updated row for the response.
     subscription = await _get_owned_subscription(
-        session, auth.user_id, subscription_id
-    )
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type="bulletin_subscription",
-        entity_id=str(subscription.id),
-        operation="upsert",
-        device_id=auth.device_id,
+        session, auth, subscription_id
     )
     return serializers.subscription_to_dict(subscription)
 
@@ -240,7 +247,7 @@ async def delete_subscription(
     base_revision: int | None = Query(default=None),
 ):
     subscription = await _get_owned_subscription(
-        session, auth.user_id, subscription_id
+        session, auth, subscription_id
     )
     # Spec classifies subscriptions as independent entities (delete wins,
     # natural merge), so base_revision stays OPTIONAL — but a client that
@@ -256,14 +263,6 @@ async def delete_subscription(
         )
     subscription.deleted_at = datetime.now(UTC)
     subscription.updated_by_device_id = auth.device_id
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type="bulletin_subscription",
-        entity_id=str(subscription.id),
-        operation="delete",
-        device_id=auth.device_id,
-    )
 
 
 @states_router.get("")
@@ -328,7 +327,6 @@ async def put_state(
     ).scalar_one()
 
     now = datetime.now(UTC)
-    changed_fields = []
     for field_name, merge_field, value, ts in (
         ("is_read", "read", payload.is_read, payload.read_updated_at),
         ("is_starred", "starred", payload.is_starred, payload.starred_updated_at),
@@ -343,27 +341,12 @@ async def put_state(
             )
         # Column triplet is (is_read, read_updated_at, read_device_id) — the
         # merge helper needs the timestamp/device prefix, not the bool name.
-        # Changelog keys off "merge applied", not "value flipped": even a
-        # same-value win advances the field's merge metadata, and other
-        # devices must learn about it or later equal-timestamp edits resolve
-        # differently on different devices.
-        if apply_field_boolean(
+        apply_field_boolean(
             state, field_name, merge_field, value, ts, auth.device_id, now
-        ):
-            changed_fields.append(field_name)
+        )
         if field_name == "is_read" and state.is_read and state.first_read_at is None:
             state.first_read_at = now
 
-    if changed_fields:
-        await append_change(
-            session,
-            user_id=auth.user_id,
-            entity_type="bulletin_state",
-            entity_id=str(bulletin_id),
-            operation="upsert",
-            payload={"fields": changed_fields},
-            device_id=auth.device_id,
-        )
     return serializers.bulletin_state_to_dict(state)
 
 

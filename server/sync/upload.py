@@ -1,7 +1,7 @@
 """Initial upload: first-login import of a device's local data.
 
 Everything is idempotent on natural keys (semester+course_key, moodle ids,
-namespace, subscription content) so a client that crashes mid-upload can
+namespace) so a client that crashes mid-upload can
 simply re-send the whole body. Server-resident data wins ties: an entity
 that already exists is left untouched (another device uploaded first; this
 device should pull via /v3/sync instead).
@@ -27,7 +27,6 @@ from server.sync.merge import apply_field
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
-    UserBulletinSubscription,
     UserCourse,
     UserCourseOverride,
     UserCourseSkippedDate,
@@ -119,14 +118,6 @@ class UploadSettingsDocument(BaseModel):
     document: dict
 
 
-class UploadSubscription(BaseModel):
-    name: str | None = Field(default=None, max_length=128)
-    orgs: list[str] = Field(default_factory=list)
-    tags: list[str] = Field(default_factory=list)
-    mode: Literal["AND", "OR"] = "AND"
-    enabled: bool = True
-
-
 class InitialUploadRequest(BaseModel):
     # Bounded lists: the upload runs inside the per-user FOR UPDATE sync
     # lock with a flush per entity — an unbounded body would let one JWT
@@ -148,9 +139,9 @@ class InitialUploadRequest(BaseModel):
     settings_documents: list[UploadSettingsDocument] = Field(
         default_factory=list, max_length=50
     )
-    bulletin_subscriptions: list[UploadSubscription] = Field(
-        default_factory=list, max_length=200
-    )
+    # `bulletin_subscriptions`, still sent by clients that predate
+    # per-device subscriptions, is ignored as an unknown field: bulletins
+    # are not part of TigerSync.
 
 
 @dataclass
@@ -174,7 +165,6 @@ async def process_initial_upload(
         "assignments": 0,
         "assignment_overrides": 0,
         "settings_documents": 0,
-        "bulletin_subscriptions": 0,
     }
 
     # Lock the user's sync-state row once for the whole upload — appending
@@ -409,43 +399,6 @@ async def process_initial_upload(
         await session.flush()
         counts["settings_documents"] += 1
         await log("settings_document", item.namespace, {"revision": doc.revision})
-
-    # --- Bulletin subscriptions (content-deduped) ---
-    existing_subs = (
-        (
-            await session.execute(
-                select(UserBulletinSubscription).where(
-                    UserBulletinSubscription.user_id == user_id,
-                    UserBulletinSubscription.deleted_at.is_(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-    existing_rules = {
-        (tuple(sorted(s.orgs or [])), tuple(sorted(s.tags or [])), s.mode)
-        for s in existing_subs
-    }
-    for item in payload.bulletin_subscriptions:
-        rule = (tuple(sorted(item.orgs)), tuple(sorted(item.tags)), item.mode)
-        if rule in existing_rules:
-            continue
-        sub = UserBulletinSubscription(
-            user_id=user_id,
-            name=item.name,
-            orgs=item.orgs,
-            tags=item.tags,
-            mode=item.mode,
-            enabled=item.enabled,
-            created_by_device_id=device_id,
-            updated_by_device_id=device_id,
-        )
-        session.add(sub)
-        await session.flush()
-        existing_rules.add(rule)
-        counts["bulletin_subscriptions"] += 1
-        await log("bulletin_subscription", str(sub.id))
 
     current_revision = locked_state.current_revision
     logger.info(

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
-from server.auth.models import PushJob, User
+from server.auth.models import PushJob, User, UserDevice
 from server.bulletins.models import Bulletin
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 from server.db import build_session_factory
@@ -41,11 +41,21 @@ def _bulletin(external_id="b-1", **kwargs):
     return Bulletin(**defaults)
 
 
+async def _device(session, user, client_device_id="dev-1", **kwargs):
+    device = UserDevice(
+        user_id=user.id, client_device_id=client_device_id, platform="ios", **kwargs
+    )
+    session.add(device)
+    await session.flush()
+    return device
+
+
 async def _user_with_sub(session, student_id="b11203058", **sub_kwargs):
     user = User(student_id=student_id)
     session.add(user)
     await session.flush()
-    sub_defaults = dict(user_id=user.id, orgs=[], tags=[TAG], mode="AND")
+    device = await _device(session, user, client_device_id=f"dev-{student_id}")
+    sub_defaults = dict(user_id=user.id, device_id=device.id, orgs=[], tags=[TAG], mode="AND")
     sub_defaults.update(sub_kwargs)
     sub = UserBulletinSubscription(**sub_defaults)
     session.add(sub)
@@ -185,3 +195,40 @@ async def test_dedupe_conflict_still_stamps_match(
     ).scalar_one()
     assert match.push_job_id == existing.id
     assert match.pushed_at is not None
+
+
+async def test_push_job_targets_only_the_matching_devices(
+    db_session, prepared_engine, test_settings
+):
+    """Rules belong to a device, so a hit on the phone's rule must not
+    reach the iPad, whose own rule does not match."""
+    user, phone_sub = await _user_with_sub(db_session)
+    ipad = await _device(db_session, user, client_device_id="ipad-1", )
+    db_session.add(
+        UserBulletinSubscription(
+            user_id=user.id, device_id=ipad.id, orgs=[], tags=["scholarship"], mode="AND"
+        )
+    )
+    db_session.add(_bulletin())
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    assert await dispatch_user_bulletins(factory, test_settings) == 1
+
+    match = (await db_session.execute(select(BulletinUserMatch))).scalar_one()
+    job = await db_session.get(PushJob, match.push_job_id)
+    assert job.payload["target_device_ids"] == [str(phone_sub.device_id)]
+
+
+async def test_signed_out_device_rules_are_not_matched(
+    db_session, prepared_engine, test_settings
+):
+    user, sub = await _user_with_sub(db_session)
+    device = await db_session.get(UserDevice, sub.device_id)
+    device.deleted_at = datetime.now(UTC)
+    db_session.add(_bulletin())
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    assert await dispatch_user_bulletins(factory, test_settings) == 0
+    assert (await db_session.execute(select(BulletinUserMatch))).scalars().all() == []

@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from server.auth.models import User
+from server.auth.models import User, UserDevice
 from server.bulletins.models import Bulletin
 from server.sync.models import (
     BulletinUserMatch,
@@ -76,10 +76,13 @@ async def test_settings_document_round_trip_and_unique(db_session) -> None:
 async def test_bulletin_subscription_and_state_round_trip(db_session) -> None:
     user = await make_user(db_session)
     bulletin = await make_bulletin(db_session)
+    device = UserDevice(user_id=user.id, client_device_id="dev-1", platform="ios")
+    db_session.add(device)
+    await db_session.flush()
 
     db_session.add(
         UserBulletinSubscription(
-            user_id=user.id, name="教務處", orgs=["教務處"], tags=["修課"]
+            user_id=user.id, device_id=device.id, name="教務處", orgs=["教務處"], tags=["修課"]
         )
     )
     db_session.add(

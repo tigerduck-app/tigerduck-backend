@@ -1076,3 +1076,53 @@ async def test_bulletin_flag_true_or_unset_receives_bulletin(
     await run_push_tick(worker)
 
     assert device.id in await _delivered_device_ids_for_job(db_session, job.id)
+
+
+async def test_bulletin_job_reaches_only_its_target_devices(
+    db_session, prepared_engine, test_settings
+):
+    """Subscriptions belong to a device, so a bulletin job names the devices
+    whose rules matched and lands on those alone. A job written before that
+    names none and still goes to every device with bulletin push on."""
+    user, phone = await _bulletin_flag_device(
+        db_session, client_device_id="dev-target-phone"
+    )
+    ipad = UserDevice(
+        user_id=user.id,
+        client_device_id="dev-target-ipad",
+        platform="ipados",
+        app_version="2.1.0",
+    )
+    db_session.add(ipad)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=ipad.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-dev-target-ipad",
+            token_value="tok-dev-target-ipad",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    targeted = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:targeted",
+        payload={"title": "t", "body": "b", "target_device_ids": [str(phone.id)]},
+    )
+    legacy = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:legacy",
+    )
+    db_session.add_all([targeted, legacy])
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert await _delivered_device_ids_for_job(db_session, targeted.id) == {phone.id}
+    assert await _delivered_device_ids_for_job(db_session, legacy.id) == {phone.id, ipad.id}
