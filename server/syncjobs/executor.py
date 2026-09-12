@@ -4,8 +4,10 @@ Claim/execute split: one short transaction recovers stale locks, another
 claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
 joined to an enabled+in-window policy, global running-count cap), then
 each job executes in its own transaction so one failure can't poison the
-batch. Jobs run sequentially within a tick — deliberate politeness toward
-the school APIs behind our single egress IP.
+batch; an assignments job then probes submission status in transactions
+of its own (`_refresh_submission_status`). Jobs run sequentially within a
+tick — deliberate politeness toward the school APIs behind our single
+egress IP.
 
 Failure taxonomy → outcome:
 * `CredentialInvalid`            → account invalidated, ALL user jobs
@@ -267,6 +269,7 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
 
 async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
     try:
+        probe_submissions = False
         async with session_scope(worker.session_factory) as session:
             job = (
                 await session.execute(
@@ -329,49 +332,36 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 stats = await apply_fetched_assignments(
                     session, user_id=job.user_id, fetched=fetched, now=now
                 )
-                try:
-                    await _refresh_submission_status(
-                        session,
-                        worker=worker,
-                        user_id=job.user_id,
-                        token=token,
-                        now=now,
-                    )
-                except MoodleTokenInvalid:
-                    raise CredentialInvalid("moodle_token_invalid")
+                probe_submissions = True
 
             if run is not None:
-                run.status = SyncRunStatus.succeeded.value
-                run.finished_at = now
                 run.fetched_count = stats.fetched_count
                 run.changed_count = stats.changed_count
-
-            await log_sync(session, user_id=job.user_id, source="executor",
-                           message=f"Job succeeded: {job.job_type} — fetched={stats.fetched_count} changed={stats.changed_count}",
-                           detail={"fetched": stats.fetched_count, "changed": stats.changed_count})
 
             if stats.changed_count > 0:
                 await _enqueue_sync_trigger(session, job.user_id)
 
-            interval = (
-                policy.default_interval_seconds
-                if policy
-                else _DEFAULT_INTERVAL_SECONDS
-            )
-            job.status = SyncJobStatus.pending.value
-            job.run_after = now + timedelta(seconds=interval)
-            job.attempts = 0
-            job.priority = policy.priority if policy else _DEFAULT_PRIORITY
-            job.locked_by = None
-            job.locked_at = None
-            job.last_success_at = now
-            job.last_error = None
-            logger.info(
-                "syncjobs.run_succeeded",
-                job_id=job_id,
-                user_id=str(job.user_id),
-                fetched=stats.fetched_count,
-                changed=stats.changed_count,
+            user_id = job.user_id
+            if not probe_submissions:
+                await _mark_succeeded(
+                    session, job=job, run=run, policy=policy, stats=stats, now=now
+                )
+
+        if probe_submissions:
+            # Only once the list sync above has committed; see
+            # `_refresh_submission_status`. The run stays `running` until the
+            # probe is done, so an escalation from it fails the run and backs
+            # the job off through the handlers below exactly as a failed list
+            # fetch would -- but the synced rows and their changelog entries
+            # are already safe.
+            try:
+                await _refresh_submission_status(
+                    worker, user_id=user_id, token=token, now=now
+                )
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+            await _finish_after_probe(
+                worker, job_id=job_id, run_id=run_id, stats=stats, now=now
             )
     except CredentialInvalid as exc:
         await _handle_moodle_failure(
@@ -399,94 +389,165 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         )
 
 
-async def _refresh_submission_status(
+async def _mark_succeeded(
     session: AsyncSession,
     *,
+    job: SyncJob,
+    run: SyncRun | None,
+    policy: SyncPolicy | None,
+    stats,
+    now: datetime,
+) -> None:
+    """Close a run that succeeded and put its job back on its schedule."""
+    from .log_entries import log_sync
+
+    if run is not None:
+        run.status = SyncRunStatus.succeeded.value
+        run.finished_at = now
+
+    await log_sync(session, user_id=job.user_id, source="executor",
+                   message=f"Job succeeded: {job.job_type} — fetched={stats.fetched_count} changed={stats.changed_count}",
+                   detail={"fetched": stats.fetched_count, "changed": stats.changed_count})
+
+    interval = (
+        policy.default_interval_seconds
+        if policy
+        else _DEFAULT_INTERVAL_SECONDS
+    )
+    job.status = SyncJobStatus.pending.value
+    job.run_after = now + timedelta(seconds=interval)
+    job.attempts = 0
+    job.priority = policy.priority if policy else _DEFAULT_PRIORITY
+    job.locked_by = None
+    job.locked_at = None
+    job.last_success_at = now
+    job.last_error = None
+    logger.info(
+        "syncjobs.run_succeeded",
+        job_id=job.id,
+        user_id=str(job.user_id),
+        fetched=stats.fetched_count,
+        changed=stats.changed_count,
+    )
+
+
+async def _finish_after_probe(
+    worker: SyncWorker, *, job_id: int, run_id: int, stats, now: datetime
+) -> None:
+    """Record the success of an assignments run once its probe is done.
+
+    A fresh transaction, so the job is re-read and re-checked: its row lock
+    went with the list sync's commit, and if stale-lock recovery took the
+    job back while the probe ran, whoever holds it now owns its
+    bookkeeping.
+    """
+    async with session_scope(worker.session_factory) as session:
+        job = (
+            await session.execute(
+                select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            job is None
+            or job.status != SyncJobStatus.running.value
+            or job.locked_by != worker.worker_id
+        ):
+            logger.warning(
+                "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
+            )
+            return
+        run = await session.get(SyncRun, run_id)
+        policy = (
+            await session.execute(
+                select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
+            )
+        ).scalar_one_or_none()
+        await _mark_succeeded(
+            session, job=job, run=run, policy=policy, stats=stats, now=now
+        )
+
+
+async def _refresh_submission_status(
     worker: SyncWorker,
+    *,
     user_id,
     token: str,
     now: datetime,
 ) -> None:
     """Best-effort probe of assignments about to enter a reminder window.
 
+    Runs only after the assignment list sync has committed, in transactions
+    of its own, so nothing it does can undo that sync. No transaction is
+    open while it waits on Moodle -- a site-info call, then one request per
+    assignment, `submission_status_max_concurrency` at a time, each allowed
+    the full fetch timeout -- and in particular not the list sync's, which
+    holds the user's `user_sync_state` row lock that every client writer for
+    that user queues behind (`sync.changelog.lock_sync_state`).
+
     An assignment the probe finds newly submitted has its still-pending
-    reminder cancelled and any Live Activity counting down toward it
-    ended (`cancel_for_submitted`) — reactions to the same fact, run in
-    the same savepoint, for the same reason: "marked submitted, but the
-    reminder was never cancelled" is the broken state this whole probe
-    exists to prevent, so the status write and the cancellation must
-    stand or fall together rather than risk landing on either side of a
-    partial failure.
+    reminder cancelled and any Live Activity counting down toward it ended
+    (`cancel_for_submitted`) in the same transaction as the status write:
+    "marked submitted, but the reminder was never cancelled" is the broken
+    state this probe exists to prevent, so the two stand or fall together.
 
-    The database calls run inside a savepoint (`session.begin_nested()`):
-    the assignment list sync already succeeded earlier in this same
-    transaction, and a failed statement in `select_assignment_ids`,
-    `apply_submission_status`, or `cancel_for_submitted` — even a plain
-    `SELECT` — would otherwise leave `session` unusable until rolled
-    back, surfacing much later as a misleading `PendingRollbackError`
-    when `_execute_job`'s own commit runs and discarding the assignment
-    sync along with it. The savepoint contains that damage to just this
-    probe's own database work; if it rolls back, the next sync simply
-    re-probes and retries.
-
-    The Moodle fetch and the two database calls are handled differently on
-    purpose — they are not the same kind of failure:
+    Failures are handled by kind:
 
     * `MoodleTokenInvalid` propagates for the caller to convert into
       `CredentialInvalid`, the same way every other Moodle call site in
       `_execute_job` does, so the job ends up disabled rather than
       silently retried.
     * Batch-level `MoodleRateLimited` / `MoodleUnreachable` propagate too,
-      to the same backoff handling `fetch_assignments` already gets:
-      every remaining probe would fail identically, which is a refusal of
-      the whole probe, not a single assignment's failure, so it is not
-      this function's to swallow. (These come from the HTTP call, not the
-      database, so the savepoint above is incidental to them.)
-    * Anything else the fetch raises is unanticipated — swallowed, logged
+      to the same backoff handling `fetch_assignments` gets: every
+      remaining probe would fail identically, which is a refusal of the
+      whole probe, not a single assignment's failure, so it is not this
+      function's to swallow.
+    * Anything else the fetch raises is unanticipated -- swallowed, logged
       at `error`, or at `warning` for a residual `MoodleClientError`,
       matching the probe's own two-tier policy for the same distinction.
-    * A database error from either DB call is not a probe failure and is
-      never logged as one: caught separately, after the savepoint has
-      already undone the damage, under its own log event so it can never
-      be mistaken for routine Moodle noise.
+    * A database error from any of the three database calls
+      (`select_assignment_ids`, `apply_submission_status`,
+      `cancel_for_submitted`) is not a probe failure and is never logged as
+      one. Its own transaction rolls back, and it is logged under a separate
+      event so it cannot be mistaken for routine Moodle noise; the next sync
+      re-probes.
     """
     settings = worker.settings
     try:
-        async with session.begin_nested():
+        async with session_scope(worker.session_factory) as session:
             assignment_ids = await select_assignment_ids(
                 session,
                 user_id=user_id,
                 now=now,
                 window_hours=settings.submission_status_window_hours,
             )
-            if not assignment_ids:
-                return
-            try:
-                fetched = await worker.fetcher.fetch_submission_status(
-                    token=token,
-                    assignment_ids=assignment_ids,
-                    max_concurrency=settings.submission_status_max_concurrency,
-                )
-            except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
-                raise
-            except MoodleClientError as exc:
-                logger.warning(
-                    "syncjobs.submissions.refresh_failed",
-                    error=type(exc).__name__,
-                )
-                return
-            except Exception as exc:
-                logger.error(
-                    "syncjobs.submissions.refresh_failed",
-                    error=type(exc).__name__,
-                    exc_info=True,
-                )
-                return
+        if not assignment_ids:
+            return
+        try:
+            fetched = await worker.fetcher.fetch_submission_status(
+                token=token,
+                assignment_ids=assignment_ids,
+                max_concurrency=settings.submission_status_max_concurrency,
+            )
+        except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
+            raise
+        except MoodleClientError as exc:
+            logger.warning(
+                "syncjobs.submissions.refresh_failed",
+                error=type(exc).__name__,
+            )
+            return
+        except Exception as exc:
+            logger.error(
+                "syncjobs.submissions.refresh_failed",
+                error=type(exc).__name__,
+                exc_info=True,
+            )
+            return
+        async with session_scope(worker.session_factory) as session:
             changed_ids = await apply_submission_status(
                 session, user_id=user_id, fetched=fetched, now=now
             )
             if changed_ids:
-                # Still inside the savepoint -- see the docstring above.
                 await cancel_for_submitted(
                     session,
                     user_id=user_id,

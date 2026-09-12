@@ -17,7 +17,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.db import build_session_factory
-from server.sync.models import UserAssignment, UserChangeLog
+from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
@@ -512,15 +512,15 @@ async def test_submission_probe_db_error_does_not_roll_back_assignment_sync(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
     """A genuine database error while refreshing submission status (not a
-    Moodle call) must not roll back the assignment list sync that already
-    succeeded in the same transaction, and must not be recorded as a probe
-    failure."""
+    Moodle call) must not undo the assignment list sync, which has already
+    committed by then, must not fail the run, and must not be recorded as a
+    probe failure."""
     user, _, job = await _setup_user_job(db_session)
 
     async def poisoning_select(session, *, user_id, now, window_hours):
-        # A real database-level error, not a mocked Python exception --
-        # this proves the savepoint actually protects the session, rather
-        # than merely proving that some exception gets caught somewhere.
+        # A real database-level error, not a mocked Python exception -- so
+        # this proves the probe's failed transaction is contained, rather
+        # than merely that some exception gets caught somewhere.
         await session.execute(text("SELECT 1/0"))
         return []  # pragma: no cover - unreachable, the line above raises
 
@@ -591,3 +591,173 @@ async def test_submission_status_settings_are_threaded_through(
     assert seen["max_concurrency"] == 9
 
 
+
+
+@pytest.mark.parametrize(
+    ("escalation", "last_error"),
+    [
+        (MoodleRateLimited("http_429"), "school_rate_limited"),
+        (
+            MoodleUnreachable("submission_probe_unreachable"),
+            "sync_failed:submission_probe_unreachable",
+        ),
+    ],
+    ids=["rate-limited", "unreachable"],
+)
+async def test_a_probe_escalation_keeps_the_committed_list_sync(
+    db_session, prepared_engine, test_settings, monkeypatch, escalation, last_error
+):
+    """An escalation from the submission probe backs the job off exactly as
+    before -- the run fails, the job waits with the error -- but the
+    assignment list sync already committed, so its rows and changelog
+    entries stay. Probing inside the list sync's transaction let one 429
+    on the probe roll back a list sync that had succeeded."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def escalating_probe(*, token, assignment_ids, max_concurrency):
+        raise escalation
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", escalating_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == last_error
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+
+    rows = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalars().all()
+    assert [r.moodle_assignment_id for r in rows] == [1]
+    changes = (
+        await db_session.execute(
+            select(UserChangeLog).where(UserChangeLog.user_id == user.id)
+        )
+    ).scalars().all()
+    assert [(c.entity_type, c.entity_id, c.operation) for c in changes] == [
+        ("assignment", str(rows[0].id), "upsert")
+    ]
+
+
+async def test_the_probe_waits_on_moodle_without_the_sync_state_lock(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """Every client write for a user queues behind that user's
+    `user_sync_state` row lock (`sync.changelog.lock_sync_state`), and the
+    assignment list sync takes it. By the time the probe waits on Moodle --
+    a site-info call plus a request per assignment, each allowed the full
+    fetch timeout -- that lock must be released and the list sync
+    committed.
+
+    Checked from a second connection inside the stubbed Moodle call: it
+    takes the lock with NOWAIT, sees the synced row, and finds no other
+    connection idle inside a transaction. The sync-state row exists before
+    the run, as it does for anyone who has synced before, so a lock still
+    held would show up as a conflict rather than as a missing row."""
+    user, _, _ = await _setup_user_job(db_session)
+    db_session.add(UserSyncState(user_id=user.id))
+    await db_session.commit()
+    seen: dict = {}
+
+    async def observing_probe(*, token, assignment_ids, max_concurrency):
+        async with prepared_engine.connect() as conn:
+            try:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT user_id FROM user_sync_state "
+                            "WHERE user_id = :u FOR UPDATE NOWAIT"
+                        ),
+                        {"u": user.id},
+                    )
+                ).first()
+                seen["lock"] = "acquired" if row is not None else "no row"
+            except Exception as exc:  # lock_not_available while it is held
+                seen["lock"] = f"blocked: {type(exc).__name__}"
+            await conn.rollback()
+            seen["rows"] = (
+                await conn.execute(
+                    text("SELECT count(*) FROM user_assignments WHERE user_id = :u"),
+                    {"u": user.id},
+                )
+            ).scalar_one()
+            seen["idle_in_transaction"] = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND state LIKE 'idle in transaction%' "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            ).scalar_one()
+            await conn.rollback()
+        return {}
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", observing_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert seen == {"lock": "acquired", "rows": 1, "idle_in_transaction": 0}
+
+
+async def test_a_job_taken_back_while_the_probe_ran_is_left_to_its_new_owner(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The run's success is recorded in a transaction of its own after the
+    probe, so it re-checks that the job is still this worker's: stale-lock
+    recovery may have taken it back while the probe waited on Moodle, and
+    then the recovery's bookkeeping must stand."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def probe_while_the_job_is_recovered(
+        *, token, assignment_ids, max_concurrency
+    ):
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE sync_jobs SET status = 'pending', locked_by = NULL, "
+                    "locked_at = NULL, last_error = 'sync_failed:stale_lock' "
+                    "WHERE id = :id"
+                ),
+                {"id": job.id},
+            )
+        return {}
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher,
+        "fetch_submission_status",
+        probe_while_the_job_is_recovered,
+        raising=False,
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "sync_failed:stale_lock"
+    assert job.last_success_at is None
