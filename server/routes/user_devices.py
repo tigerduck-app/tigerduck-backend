@@ -228,6 +228,8 @@ async def register_device(
         device.app_version = payload.app_version
     if payload.os_version is not None:
         device.os_version = payload.os_version
+    if payload.device_model is not None:
+        device.device_model = payload.device_model
     # Reported unconditionally on every register call, same as app_version /
     # os_version above — never gated behind a preference toggle. See
     # UserDevice.locale.

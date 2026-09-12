@@ -53,6 +53,10 @@ class DeviceInfo(BaseModel):
     device_class: DeviceClass | None = None
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
+    # Hardware model, see UserDevice.device_model. Optional: absent leaves
+    # the stored value alone, so a client that predates the field never
+    # blanks it.
+    device_model: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def device_class_fits_platform(self) -> "DeviceInfo":

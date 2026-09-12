@@ -57,6 +57,10 @@ class UserDevice(Base):
         String(16), default="", server_default=""
     )
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Hardware model as the device reports it: "Google Pixel 8" on Android,
+    # the machine identifier ("iPhone17,3", "Mac15,3") on Apple. For support
+    # work in the portal only; nothing targets or gates on it.
+    device_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # BCP-47 tag reported by the device at registration. Nullable: rows
