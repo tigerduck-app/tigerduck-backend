@@ -6,6 +6,7 @@ course numbers repeatedly while someone clicks around."""
 
 from __future__ import annotations
 import asyncio
+import json
 import re
 import time
 from datetime import UTC, datetime, timedelta
@@ -103,10 +104,11 @@ async def sync_events(
         )
 
         devices = await conn.fetch(
-            "SELECT id, client_device_id, platform, "
-            "app_version, os_version, last_seen_at, last_login_at, created_at, "
-            "sync_courses, sync_course_colors, sync_course_names, sync_assignments, "
-            "cloud_sync_enabled "
+            "SELECT id, client_device_id, platform, device_class, device_name, "
+            "app_version, os_version, locale, last_seen_at, last_login_at, created_at, "
+            "cloud_sync_enabled, sync_courses, sync_course_colors, sync_course_names, "
+            "sync_assignments, sync_assignment_reminders, sync_live_activity, "
+            "server_push_enabled, bulletin_push_enabled "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
             uid,
@@ -311,7 +313,12 @@ async def sync_courses(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
         if not user:
-            return {"courses": [], "semesters": [], "holiday_overrides": []}
+            return {
+                "courses": [], "semesters": [], "holiday_overrides": [],
+                "settings_documents": [], "bulletin_subscriptions": [],
+                "bulletin_state_counts": {"total": 0, "read": 0, "starred": 0, "hidden": 0},
+                "bulletin_states": [], "course_skipped_dates": [],
+            }
 
         uid = user["id"]
 
@@ -359,6 +366,58 @@ async def sync_courses(
             "FROM user_assignments a "
             "WHERE a.user_id = $1 AND a.deleted_at IS NULL "
             "ORDER BY a.due_at DESC NULLS LAST LIMIT 500",
+            uid,
+        )
+
+        # The rest of what `/v3/sync/full` hands a client, so the panel can
+        # show every section a device syncs, not only courses and
+        # assignments.
+        settings_rows = await conn.fetch(
+            "SELECT namespace, schema_version, revision, document, "
+            "updated_by_device_id, updated_at "
+            "FROM user_settings_documents "
+            "WHERE user_id = $1 AND deleted_at IS NULL "
+            "ORDER BY namespace",
+            uid,
+        )
+
+        subscriptions = await conn.fetch(
+            "SELECT id, name, orgs, tags, mode, enabled, revision, "
+            "updated_by_device_id, updated_at "
+            "FROM user_bulletin_subscriptions "
+            "WHERE user_id = $1 AND deleted_at IS NULL "
+            "ORDER BY id",
+            uid,
+        )
+
+        # A read-state row exists for nearly every bulletin the user has
+        # opened, so read state is counted rather than listed; starred and
+        # hidden are the deliberate choices worth reading row by row.
+        state_counts = await conn.fetchrow(
+            "SELECT count(*) AS total, "
+            "count(*) FILTER (WHERE is_read) AS read, "
+            "count(*) FILTER (WHERE is_starred) AS starred, "
+            "count(*) FILTER (WHERE is_hidden) AS hidden "
+            "FROM user_bulletin_states WHERE user_id = $1",
+            uid,
+        )
+        marked_states = await conn.fetch(
+            "SELECT s.bulletin_id, b.title, s.is_read, s.is_starred, "
+            "s.is_hidden, s.updated_at "
+            "FROM user_bulletin_states s "
+            "JOIN bulletins b ON b.id = s.bulletin_id "
+            "WHERE s.user_id = $1 AND (s.is_starred OR s.is_hidden) "
+            "ORDER BY s.updated_at DESC LIMIT 200",
+            uid,
+        )
+
+        skipped_dates = await conn.fetch(
+            "SELECT d.id, d.skipped_on, d.reason, d.created_by_device_id, "
+            "d.created_at, c.course_no, c.course_name, c.semester "
+            "FROM user_course_skipped_dates d "
+            "JOIN user_courses c ON c.id = d.user_course_id "
+            "WHERE d.user_id = $1 AND d.deleted_at IS NULL "
+            "ORDER BY d.skipped_on DESC",
             uid,
         )
 
@@ -442,6 +501,23 @@ async def sync_courses(
         "palette_dark": COURSE_PALETTE_DARK,
         "courses": courses,
         "tombstones": [dict(t) for t in tombstones],
+        "settings_documents": [
+            {
+                **dict(d),
+                # No JSONB codec is registered on this pool, so asyncpg
+                # hands the document back as text.
+                "document": (
+                    json.loads(d["document"])
+                    if isinstance(d["document"], str)
+                    else d["document"]
+                ),
+            }
+            for d in settings_rows
+        ],
+        "bulletin_subscriptions": [dict(s) for s in subscriptions],
+        "bulletin_state_counts": dict(state_counts),
+        "bulletin_states": [dict(s) for s in marked_states],
+        "course_skipped_dates": [dict(d) for d in skipped_dates],
         "assignments": [
             {
                 **dict(a),

@@ -30,7 +30,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { RunStatusBadge, deviceLabel, fmt, platformIcon, platformLabel, relativeTime } from "./format";
-import type { SyncCoursesResponse, SyncEventsResponse, TopologyNode } from "./types";
+import type { SyncCoursesResponse, SyncDevice, SyncEventsResponse, TopologyNode } from "./types";
 
 /**
  * Split rows into one section per NTUST term, newest first. Rows whose term
@@ -409,8 +409,6 @@ export function NodeDetailPanel({
     (pj) => pj.source_device_id === device.id
   );
 
-  const allCourses = coursesData?.courses ?? [];
-  const allAssignments = coursesData?.assignments ?? [];
   const allOverrides = data.overrides ?? [];
 
   return (
@@ -444,26 +442,32 @@ export function NodeDetailPanel({
             <TabsTrigger value="info">Info</TabsTrigger>
           </TabsList>
           <TabsContent value="data">
-            {device.cloud_sync_enabled === false ? (
-              <div className="flex items-center gap-3 rounded-md border border-border p-4 my-2">
+            {device.cloud_sync_enabled === false && (
+              <div className="flex items-center gap-3 rounded-md border border-border p-3 my-2">
                 <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
                 <div className="min-w-0">
-                  <div className="text-sm font-medium">Device only</div>
-                  <div className="text-xs text-muted-foreground">Cloud Sync is off — data on this device is not tracked by the server</div>
+                  <div className="text-sm font-medium">Course sync is off on this device</div>
+                  <div className="text-xs text-muted-foreground">
+                    What follows is the account's data from its other devices; this one keeps its own copy locally. Bulletins still sync here — they are essential info.
+                  </div>
                 </div>
               </div>
-            ) : !coursesData ? (
+            )}
+            {!coursesData ? (
               <div className="flex items-center justify-center py-6 text-muted-foreground">
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading...
               </div>
             ) : (
               <Tabs defaultValue="courses">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <TabsList>
+                  <TabsList className="flex-wrap h-auto">
                     <TabsTrigger value="courses">Courses ({visibleCourses.length})</TabsTrigger>
                     <TabsTrigger value="custom-names">Custom Names ({visibleCourses.filter((c) => { const n = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names; return n && typeof n === "object" && Object.keys(n).length > 0; }).length})</TabsTrigger>
                     <TabsTrigger value="assignments">Assignments ({visibleAssignments.length})</TabsTrigger>
                     <TabsTrigger value="holiday-overrides">Holiday Overrides ({(coursesData.holiday_overrides ?? []).length})</TabsTrigger>
+                    <TabsTrigger value="skipped-dates">Skipped Dates ({(coursesData.course_skipped_dates ?? []).length})</TabsTrigger>
+                    <TabsTrigger value="settings">Settings ({(coursesData.settings_documents ?? []).length})</TabsTrigger>
+                    <TabsTrigger value="bulletins">Bulletins ({(coursesData.bulletin_subscriptions ?? []).length})</TabsTrigger>
                   </TabsList>
                   <Select value={semesterFilter} onValueChange={setSemesterFilter}>
                     <SelectTrigger className="w-40 h-7 text-xs shrink-0">
@@ -707,48 +711,138 @@ export function NodeDetailPanel({
                   )}
                 </TabsContent>
 
+                <TabsContent value="skipped-dates">
+                  {(() => {
+                    const rows = coursesData.course_skipped_dates ?? [];
+                    return rows.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4">No skipped class dates synced.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead className="text-xs">Date</TableHead>
+                              <TableHead className="text-xs">Course</TableHead>
+                              <TableHead className="text-xs">Reason</TableHead>
+                              <TableHead className="text-xs">Set by</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {rows.map((r) => (
+                              <TableRow key={r.id}>
+                                <TableCell className="text-xs whitespace-nowrap">{r.skipped_on}</TableCell>
+                                <TableCell className="text-xs">
+                                  <span className="font-mono">{r.course_no || "—"}</span>
+                                  {r.semester && <span className="text-muted-foreground"> · {r.semester}</span>}
+                                </TableCell>
+                                <TableCell className="text-xs">{r.reason ?? "—"}</TableCell>
+                                <TableCell className="text-xs text-muted-foreground">{deviceLabel(r.created_by_device_id, data.devices ?? [])}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
+                <TabsContent value="settings">
+                  {(() => {
+                    const docs = coursesData.settings_documents ?? [];
+                    return docs.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-4">No settings documents synced.</p>
+                    ) : (
+                      <div className="space-y-3">
+                        {docs.map((doc) => (
+                          <div key={doc.namespace} className="rounded-md border p-3 space-y-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Badge variant="outline" className="font-mono text-[10px]">{doc.namespace}</Badge>
+                              <span className="text-xs text-muted-foreground ml-auto">
+                                rev {doc.revision} &middot; schema v{doc.schema_version} &middot; {fmt(doc.updated_at)} &middot; by {deviceLabel(doc.updated_by_device_id, data.devices ?? [])}
+                              </span>
+                            </div>
+                            <pre className="rounded bg-muted/40 p-2 text-[11px] leading-4 overflow-x-auto">{JSON.stringify(doc.document, null, 2)}</pre>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
+                <TabsContent value="bulletins">
+                  {(() => {
+                    const subs = coursesData.bulletin_subscriptions ?? [];
+                    const counts = coursesData.bulletin_state_counts;
+                    const marked = coursesData.bulletin_states ?? [];
+                    return (
+                      <div className="space-y-4">
+                        {subs.length === 0 ? (
+                          <p className="text-sm text-muted-foreground py-2">No bulletin subscriptions synced.</p>
+                        ) : (
+                          <div className="overflow-x-auto">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="text-xs">Subscription</TableHead>
+                                  <TableHead className="text-xs">Orgs</TableHead>
+                                  <TableHead className="text-xs">Tags</TableHead>
+                                  <TableHead className="text-xs">Mode</TableHead>
+                                  <TableHead className="text-xs">Enabled</TableHead>
+                                  <TableHead className="text-xs">Updated</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {subs.map((s) => (
+                                  <TableRow key={s.id}>
+                                    <TableCell className="text-xs">{s.name || <span className="text-muted-foreground">#{s.id}</span>}</TableCell>
+                                    <TableCell className="text-xs">{s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</TableCell>
+                                    <TableCell className="text-xs">{s.tags.length > 0 ? s.tags.join(", ") : "—"}</TableCell>
+                                    <TableCell className="font-mono text-xs">{s.mode}</TableCell>
+                                    <TableCell className="text-xs">{s.enabled ? "On" : "Off"}</TableCell>
+                                    <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{fmt(s.updated_at)}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        )}
+                        <p className="text-xs text-muted-foreground">
+                          Bulletin state: {counts?.read ?? 0} read &middot; {counts?.starred ?? 0} starred &middot; {counts?.hidden ?? 0} hidden
+                        </p>
+                        {marked.length > 0 && (
+                          <div className="overflow-x-auto">
+                            <Table>
+                              <TableHeader>
+                                <TableRow>
+                                  <TableHead className="text-xs">Bulletin</TableHead>
+                                  <TableHead className="text-xs">State</TableHead>
+                                  <TableHead className="text-xs">Updated</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {marked.map((b) => (
+                                  <TableRow key={b.bulletin_id}>
+                                    <TableCell className="text-xs max-w-[260px] truncate" title={b.title}>{b.title}</TableCell>
+                                    <TableCell className="text-xs">
+                                      {[b.is_starred && "starred", b.is_hidden && "hidden", b.is_read && "read"].filter(Boolean).join(", ")}
+                                    </TableCell>
+                                    <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{fmt(b.updated_at)}</TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </TabsContent>
+
               </Tabs>
             )}
           </TabsContent>
           <TabsContent value="synced-list">
-            <div className="space-y-2 py-2">
-              {device.cloud_sync_enabled === false ? (
-                <div className="flex items-center gap-3 rounded-md border border-border p-3">
-                  <div className="h-2.5 w-2.5 rounded-full shrink-0 bg-muted-foreground/30" />
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">Device local only</div>
-                    <div className="text-xs text-muted-foreground">Cloud Sync is off — this device is not participating in cross-device sync</div>
-                  </div>
-                </div>
-              ) : (() => {
-                const colorCount = allCourses.filter((c) => c.color_hex).length;
-                const customNameCount = allCourses.filter((c) => {
-                  const names = typeof c.custom_names === "string" ? JSON.parse(c.custom_names || "{}") : c.custom_names;
-                  return names && typeof names === "object" && Object.keys(names).length > 0;
-                }).length;
-                const categories = [
-                  { label: "Courses", count: allCourses.length, enabled: device.sync_courses !== false, detail: `${allCourses.length} courses in backend` },
-                  { label: "Course colours", count: colorCount, enabled: device.sync_course_colors !== false, detail: colorCount > 0 ? `${colorCount} of ${allCourses.length} have synced colours` : `All using auto-assigned colours` },
-                  { label: "Custom course names", count: customNameCount, enabled: device.sync_course_names !== false, detail: customNameCount > 0 ? `${customNameCount} of ${allCourses.length} have custom names` : `All using default names` },
-                  { label: "Assignments", count: allAssignments.length, enabled: device.sync_assignments !== false, detail: `${allAssignments.length} assignments in backend` },
-                ];
-                return categories.map((cat) => {
-                  const dotColor = cat.enabled
-                    ? "bg-green-500"
-                    : cat.count > 0 ? "bg-orange-400" : "bg-muted-foreground/30";
-                  const statusNote = !cat.enabled && cat.count > 0 ? " · sync to other devices off" : "";
-                  return (
-                  <div key={cat.label} className="flex items-center gap-3 rounded-md border border-border p-3">
-                    <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${dotColor}`} />
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">{cat.label}</div>
-                      <div className="text-xs text-muted-foreground">{cat.detail}{statusNote}</div>
-                    </div>
-                  </div>
-                  );
-                });
-              })()}
-            </div>
+            <SyncedList device={device} coursesData={coursesData} />
           </TabsContent>
           <TabsContent value="push">
             <div className="mb-4 flex flex-wrap gap-2">
@@ -933,6 +1027,18 @@ export function NodeDetailPanel({
                     <TableCell className="text-xs">{platformLabel(device.platform)}</TableCell>
                   </TableRow>
                   <TableRow>
+                    <TableCell className="font-medium text-xs">Device Class</TableCell>
+                    <TableCell className="text-xs">{device.device_class || "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Device Name</TableCell>
+                    <TableCell className="text-xs">{device.device_name ?? "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
+                    <TableCell className="font-medium text-xs">Locale</TableCell>
+                    <TableCell className="text-xs">{device.locale ?? "—"}</TableCell>
+                  </TableRow>
+                  <TableRow>
                     <TableCell className="font-medium text-xs">App Version</TableCell>
                     <TableCell className="text-xs">{device.app_version ?? "—"}</TableCell>
                   </TableRow>
@@ -960,4 +1066,200 @@ export function NodeDetailPanel({
       </CardContent>
     </Card>
   );
+}
+
+// ── Synced List ─────────────────────────────────────────────────────────
+
+type SyncedRow = {
+  label: string;
+  /** This device's own flag for the row. */
+  enabled: boolean;
+  /** The account holds data for it, whether or not this device syncs it. */
+  hasData: boolean;
+  detail: string;
+  /** A 同步內容 row, which only applies while the master is on. */
+  child?: boolean;
+};
+
+/**
+ * What this device takes part in, row for row with the apps' TigerSync
+ * screen (spec §4.6's toggle-to-column table): essential info, which is
+ * always on; 同步課程資訊, the master every 同步內容 row sits under; and
+ * the two push channels, which are independent of it. A row switched off
+ * here still says what the account holds, because other devices keep
+ * syncing it.
+ */
+function SyncedList({ device, coursesData }: { device: SyncDevice; coursesData?: SyncCoursesResponse }) {
+  const courses = coursesData?.courses ?? [];
+  const assignments = coursesData?.assignments ?? [];
+  const subs = coursesData?.bulletin_subscriptions ?? [];
+  const counts = coursesData?.bulletin_state_counts;
+  const notification = (coursesData?.settings_documents ?? [])
+    .find((d) => d.namespace === "notification")?.document;
+  const colorCount = courses.filter((c) => c.color_hex).length;
+  const customNameCount = courses.filter((c) => Object.keys(parseNames(c.custom_names)).length > 0).length;
+  const master = device.cloud_sync_enabled !== false;
+
+  const groups: { title: string; rows: SyncedRow[] }[] = [
+    {
+      title: "Essential info (always on)",
+      rows: [
+        {
+          label: "Bulletins",
+          enabled: true,
+          hasData: subs.length > 0,
+          detail: `${subs.length} subscription${subs.length === 1 ? "" : "s"} · ${counts?.read ?? 0} read · ${counts?.starred ?? 0} starred · ${counts?.hidden ?? 0} hidden`,
+        },
+      ],
+    },
+    {
+      title: "同步課程資訊 (sync course information)",
+      rows: [
+        {
+          label: "同步課程資訊",
+          enabled: master,
+          hasData: courses.length > 0 || assignments.length > 0,
+          detail: master ? "On — the rows below apply" : "Off — this device keeps its course data locally",
+        },
+        {
+          label: "Assignment status",
+          enabled: device.sync_assignments !== false,
+          hasData: assignments.length > 0,
+          detail: `${assignments.length} assignments in backend`,
+          child: true,
+        },
+        {
+          label: "Assignment due reminders",
+          enabled: device.sync_assignment_reminders !== false,
+          hasData: !!asRecord(notification?.assignments),
+          detail: reminderDetail(asRecord(notification?.assignments)),
+          child: true,
+        },
+        {
+          label: "Live Activity / Live Updates",
+          enabled: device.sync_live_activity !== false,
+          hasData: !!asRecord(notification?.live_activity),
+          detail: liveActivityDetail(asRecord(notification?.live_activity)),
+          child: true,
+        },
+        {
+          label: "Class table – all courses",
+          enabled: device.sync_courses !== false,
+          hasData: courses.length > 0,
+          detail: `${courses.length} courses in backend`,
+          child: true,
+        },
+        {
+          label: "Course colours",
+          enabled: device.sync_course_colors !== false,
+          hasData: colorCount > 0,
+          detail: colorCount > 0 ? `${colorCount} of ${courses.length} have synced colours` : "All using auto-assigned colours",
+          child: true,
+        },
+        {
+          label: "Custom course names",
+          enabled: device.sync_course_names !== false,
+          hasData: customNameCount > 0,
+          detail: customNameCount > 0 ? `${customNameCount} of ${courses.length} have custom names` : "All using default names",
+          child: true,
+        },
+      ],
+    },
+    {
+      title: "Push",
+      rows: [
+        {
+          label: "接收額外伺服器推播 (extra server pushes)",
+          enabled: device.server_push_enabled !== false,
+          hasData: false,
+          detail: "Operator custom pushes",
+        },
+        {
+          label: "Bulletin pushes",
+          enabled: device.bulletin_push_enabled !== false,
+          hasData: false,
+          detail: "New bulletins matching a subscription",
+        },
+      ],
+    },
+  ];
+
+  return (
+    <div className="space-y-4 py-2">
+      {groups.map((g) => (
+        <div key={g.title} className="space-y-2">
+          <div className="text-xs font-medium text-muted-foreground">{g.title}</div>
+          {g.rows.map((row) => (
+            <SyncedRowView key={row.label} row={row} masterOff={!!row.child && !master} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SyncedRowView({ row, masterOff }: { row: SyncedRow; masterOff: boolean }) {
+  const dotColor = masterOff
+    ? "bg-muted-foreground/30"
+    : row.enabled ? "bg-green-500" : row.hasData ? "bg-orange-400" : "bg-muted-foreground/30";
+  const note = masterOff ? " · 同步課程資訊 off" : !row.enabled ? " · off on this device" : "";
+  return (
+    <div className={`flex items-center gap-3 rounded-md border border-border p-3 ${row.child ? "ml-5" : ""} ${masterOff ? "opacity-60" : ""}`}>
+      <div className={`h-2.5 w-2.5 rounded-full shrink-0 ${dotColor}`} />
+      <div className="min-w-0">
+        <div className="text-sm font-medium">{row.label}</div>
+        <div className="text-xs text-muted-foreground">{row.detail}{note}</div>
+      </div>
+    </div>
+  );
+}
+
+function parseNames(v: unknown): Record<string, string> {
+  const parsed = typeof v === "string" ? JSON.parse(v || "{}") : v;
+  return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+}
+
+function asRecord(v: unknown): Record<string, unknown> | undefined {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
+}
+
+function numberList(v: unknown): number[] {
+  return Array.isArray(v) ? v.filter((n): n is number => typeof n === "number") : [];
+}
+
+/**
+ * "24h, 30m before", read the way the reminder scanner reads it
+ * (`server/push/reminders.py::_offsets_hours`): a minutes list is the whole
+ * answer whenever it is present, empty included; the hours list, all a
+ * pre-2.1.0 app writes, only counts when it is not.
+ */
+function formatOffsets(section: Record<string, unknown>): string {
+  const values = Array.isArray(section.reminder_offsets_minutes)
+    ? numberList(section.reminder_offsets_minutes)
+    : Array.isArray(section.reminder_offsets_hours)
+      ? numberList(section.reminder_offsets_hours).map((h) => h * 60)
+      : null;
+  if (values === null) return "default offsets";
+  if (values.length === 0) return "every offset off";
+  return [...values]
+    .sort((a, b) => b - a)
+    .map((m) => (m % 60 === 0 ? `${m / 60}h` : `${m}m`))
+    .join(", ") + " before";
+}
+
+/** A missing `enabled` counts as on, as it does for the scanner. */
+function reminderDetail(section: Record<string, unknown> | undefined): string {
+  if (!section) return "No account setting synced yet";
+  if (section.enabled === false) return "Account setting: off";
+  return `Account setting: on · ${formatOffsets(section)}`;
+}
+
+function liveActivityDetail(section: Record<string, unknown> | undefined): string {
+  if (!section) return "No account setting synced yet";
+  const shown = [
+    section.show_class_preparing !== false && "class preparing",
+    section.show_in_class !== false && "in class",
+    section.show_assignment !== false && "assignments",
+  ].filter(Boolean);
+  return shown.length > 0 ? `Account setting: shows ${shown.join(", ")}` : "Account setting: every kind hidden";
 }

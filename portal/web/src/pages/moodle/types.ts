@@ -129,6 +129,11 @@ export type SyncCoursesResponse = {
   tombstones?: SyncTombstone[];
   assignments?: SyncAssignment[];
   holiday_overrides?: SyncHolidayOverride[];
+  settings_documents?: SyncSettingsDocument[];
+  bulletin_subscriptions?: SyncBulletinSubscription[];
+  bulletin_state_counts?: SyncBulletinStateCounts;
+  bulletin_states?: SyncBulletinState[];
+  course_skipped_dates?: SyncSkippedDate[];
 };
 
 /**
@@ -149,20 +154,84 @@ export type SyncHolidayOverride = {
   updated_at: string | null;
 };
 
+/**
+ * One settings document per namespace, shared by every device on the
+ * account. `notification` carries the reminder offsets and the
+ * `live_activity` choices the 同步內容 rows refer to.
+ */
+export type SyncSettingsDocument = {
+  namespace: string;
+  schema_version: number;
+  revision: number;
+  document: Record<string, unknown>;
+  updated_by_device_id: string | null;
+  updated_at: string | null;
+};
+
+export type SyncBulletinSubscription = {
+  id: number;
+  name: string | null;
+  orgs: string[];
+  tags: string[];
+  mode: string;
+  enabled: boolean;
+  revision: number;
+  updated_by_device_id: string | null;
+  updated_at: string | null;
+};
+
+export type SyncBulletinStateCounts = {
+  total: number;
+  read: number;
+  starred: number;
+  hidden: number;
+};
+
+/** A starred or hidden bulletin. Plain read state is only counted. */
+export type SyncBulletinState = {
+  bulletin_id: number;
+  title: string;
+  is_read: boolean;
+  is_starred: boolean;
+  is_hidden: boolean;
+  updated_at: string | null;
+};
+
+export type SyncSkippedDate = {
+  id: number;
+  skipped_on: string;
+  reason: string | null;
+  created_by_device_id: string | null;
+  created_at: string | null;
+  course_no: string | null;
+  course_name: string | null;
+  semester: string | null;
+};
+
 export type SyncDevice = {
   id: string;
   client_device_id: string;
   platform: string;
+  device_class: string | null;
+  device_name: string | null;
   app_version: string | null;
   os_version: string | null;
+  locale: string | null;
   last_seen_at: string | null;
   last_login_at: string | null;
   created_at: string | null;
+  /** 同步課程資訊 — the master every 同步內容 flag below sits under. */
+  cloud_sync_enabled: boolean | null;
   sync_courses: boolean | null;
   sync_course_colors: boolean | null;
   sync_course_names: boolean | null;
   sync_assignments: boolean | null;
-  cloud_sync_enabled: boolean | null;
+  sync_assignment_reminders: boolean | null;
+  sync_live_activity: boolean | null;
+  /** 接收額外伺服器推播 — operator custom pushes. Independent of the master. */
+  server_push_enabled: boolean | null;
+  /** The bulletin push channel. Independent of the master. */
+  bulletin_push_enabled: boolean | null;
 };
 
 export type PushJobRow = {
