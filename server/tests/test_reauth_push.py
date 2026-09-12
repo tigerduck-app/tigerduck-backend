@@ -316,7 +316,7 @@ async def test_copy_is_resolved_from_each_recipient_device_locale(
 async def test_portal_built_job_still_gets_real_copy(
     db_session, prepared_engine, test_settings
 ):
-    """I1 regression: a job built the way the portal builds one must still
+    """Regression: a job built the way the portal builds one must still
     get real, localized copy.
 
     The portal's operator "retry + notify" endpoints

@@ -196,7 +196,7 @@ async def test_login_rate_limited_after_max_attempts(client) -> None:
 
 
 async def test_login_reactivates_soft_deleted_user(client) -> None:
-    # Pre-seed a soft-deleted user owning the external account (review 1.7).
+    # Pre-seed a soft-deleted user owning the external account.
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         user = User(student_id=None, deleted_at=datetime.now(UTC))

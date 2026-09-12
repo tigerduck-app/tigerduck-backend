@@ -96,7 +96,7 @@ class PushJob(Base):
         CheckConstraint(
             "attempts >= 0 AND max_attempts > 0", name="chk_push_job_attempts"
         ),
-        # Security-review fix 1.2: the spec's original partial index only
+        # The spec's original partial index only
         # covered pending/processing, which let the next 8-hour sync round
         # re-create an already-sent reminder. Covering delivered states too
         # makes the dedupe key durable; "notify again because content

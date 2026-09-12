@@ -5,7 +5,7 @@ triplets: `<field>`, `<field>_updated_at`, `<field>_device_id`. A client
 edit wins iff its (clamped) timestamp is strictly newer than the stored
 one — so two devices editing different fields never clobber each other.
 
-Clock-skew rule (security review 1.9): client timestamps are clamped to
+Clock-skew rule: client timestamps are clamped to
 `min(client_ts, server_now)`. Past timestamps are kept (offline edits
 merge correctly); future timestamps are pulled back to now, so a device
 with a broken clock can't write a value that permanently outranks every

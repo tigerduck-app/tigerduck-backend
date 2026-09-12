@@ -189,7 +189,7 @@ async def refresh(
 ) -> RefreshResult:
     """Rotate a refresh token.
 
-    Reuse semantics (security review 1.5): a token revoked by rotation can
+    Reuse semantics: a token revoked by rotation can
     be redeemed again within `auth_refresh_reuse_grace_seconds` IF its
     successor was never used — that's a client retrying after losing the
     rotation response. The lost successor is revoked and a fresh session is
@@ -403,7 +403,7 @@ async def _find_or_create_user(
             status_code=status.HTTP_403_FORBIDDEN, detail="account_suspended"
         )
     if user.deleted_at is not None:
-        # Security review 1.7: the external account uniquely owns this
+        # The external account uniquely owns this
         # student id, so a re-login after account deletion reactivates the
         # soft-deleted user (data comes back) instead of failing on the
         # (provider, external_user_id) unique constraint.

@@ -154,9 +154,9 @@ async def test_apply_reports_each_flip_once(db_session, make_assignment):
 
 # --- Supplementary boundary/delta coverage -----------------------------
 #
-# The tests above are the brief's, verbatim. The ones below close gaps the
-# task's testing-discipline mandate calls out by name: `deleted_at` is part
-# of the selection rule but no brief test constructs a soft-deleted row,
+# The tests above verify the selection rule as originally specified. The
+# ones below close gaps in that coverage: `deleted_at` is part
+# of the selection rule but nothing above constructs a soft-deleted row,
 # and the window's upper edge is only exercised 52 hours away from the
 # boundary (100h due date vs. a 48h window) -- comfortably not "the
 # boundary itself". Each test below differs from a row that WOULD be

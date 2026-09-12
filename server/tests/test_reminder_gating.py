@@ -17,7 +17,7 @@ clients do, and a 2.0.2 iPhone still runs AssignmentReminderScheduler.
 # 4. an iPhone on 2.1.0 with cloud_sync_enabled=False receives NOTHING
 # 5. an iPhone on 2.1.0 with sync_assignment_reminders=False receives NOTHING
 #
-# backward compatibility -- the reason this task has a version gate at all
+# backward compatibility -- the reason there's a version gate at all
 # 6. an iPhone on 2.0.2 receives NOTHING (it schedules its own)
 # 7. an iPhone with app_version NULL receives NOTHING (fail closed)
 # 8. an iPhone on 2.2.0 DOES receive it (the gate is >=, not ==)

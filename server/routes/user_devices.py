@@ -252,8 +252,8 @@ async def register_device(
             session, device=device, token=payload.push_token, now=now
         )
 
-    # Phase 4c (review 1.8): if this physical device also has an anonymous
-    # v2 registration (same client device id), mark it as linked so the
+    # Phase 4c: if this physical device also has an anonymous v2
+    # registration (same client device id), mark it as linked so the
     # anonymous bulletin fan-out stops double-pushing to it.
     await session.execute(
         update(DeviceRegistration)
@@ -391,8 +391,8 @@ async def delete_device(
     device_id: str, auth: CurrentAuthDep, session: SessionDep
 ) -> None:
     """Soft-delete a device and cut its access: revoke its auth sessions
-    and invalidate its push tokens (security review — a removed device must
-    not keep working tokens).
+    and invalidate its push tokens — a removed device must not keep
+    working tokens.
 
     `device_id` is the client-owned `client_device_id` (the app's persistent
     UUID) — the identifier the clients hold — scoped to the authed user, not

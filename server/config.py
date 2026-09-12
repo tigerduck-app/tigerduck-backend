@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     sync_maintenance_window: str = ""
     # Cap on `status='running'` rows ACROSS all workers — counted before
     # claiming so multiple instances can't collectively hammer the school
-    # APIs from our single egress IP (security review suggestion).
+    # APIs from our single egress IP.
     sync_job_global_concurrency: int = 5
     sync_job_stale_lock_minutes: int = 10
     # Retriable-failure backoff: base * 2^(attempts-1), capped.

@@ -470,9 +470,9 @@ async def test_exhausted_delivery_keeps_last_transport_error(
 async def test_zero_work_round_does_not_burn_final_attempt(
     db_session, prepared_engine, test_settings
 ):
-    """Final review (phase 4 M2): a round where every pending delivery's
-    next_retry_at is still in the future must not consume the job's last
-    attempt and force-fail deliveries that never used theirs."""
+    """A round where every pending delivery's next_retry_at is still in
+    the future must not consume the job's last attempt and force-fail
+    deliveries that never used theirs."""
     user, _, _ = await _setup_user_device_token(db_session)
     job = _job(user, attempts=2, max_attempts=3)
     db_session.add(job)

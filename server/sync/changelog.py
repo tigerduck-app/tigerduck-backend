@@ -1,6 +1,6 @@
 """Change log append/read service.
 
-THE ordering rule (security review 1.1): `user_change_log.revision` is a
+THE ordering rule: `user_change_log.revision` is a
 global BIGSERIAL, and sequence numbers are handed out at INSERT time — NOT
 in commit order. Naively, a reader could observe revision N+1 committed
 while N is still in flight, store `since_revision = N+1`, and permanently

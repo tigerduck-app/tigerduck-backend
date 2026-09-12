@@ -66,9 +66,9 @@ def test_apply_field_older_loses() -> None:
 
 
 def test_future_timestamp_cannot_poison_merge() -> None:
-    # Review 1.9: a device with a clock a year ahead writes a value; its
-    # timestamp gets clamped to "now", so other devices' future edits with
-    # honest timestamps still win.
+    # A device with a clock a year ahead writes a value; its timestamp
+    # gets clamped to "now", so other devices' future edits with honest
+    # timestamps still win.
     entity = FakeOverride()
     apply_field(
         entity,

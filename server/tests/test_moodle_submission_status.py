@@ -111,8 +111,8 @@ async def test_one_failing_assignment_does_not_lose_the_others():
 
 @pytest.mark.asyncio
 async def test_one_timing_out_assignment_does_not_lose_the_others():
-    """Regression for I1 (task-1-review.md): a transport failure -- not
-    just a >= 400 status -- on one probe must not abort the batch.
+    """A transport failure -- not just a >= 400 status -- on one probe
+    must not abort the batch.
 
     This needs a semaphore narrower than the batch (so later ids are
     still queued, not yet dispatched, when the timeout fires) and a
@@ -121,8 +121,8 @@ async def test_one_timing_out_assignment_does_not_lose_the_others():
     every probe races to completion inside one scheduling step before the
     `ReadTimeout` propagates, so the pre-fix code already holds the same
     result the fix would produce and the test cannot tell them apart --
-    that was N2 (task-1-fix-1-rereview.md): this test previously used
-    those parameters and passed against the unfixed client too.
+    this test previously used those parameters and passed against the
+    unfixed client too.
 
     Measured with 6 ids, `max_concurrency=2` and this async handler: the
     pre-fix client returns only `{1, 3, 4}` -- ids 5 and 6 are still
@@ -173,8 +173,8 @@ async def test_invalid_token_propagates():
 
 @pytest.mark.asyncio
 async def test_invalid_token_from_a_probe_propagates_unwrapped():
-    """N3 (task-1-fix-1-rereview.md): `test_invalid_token_propagates`
-    above only exercises the token check inside `_get_moodle_userid`,
+    """`test_invalid_token_propagates` above only exercises the token
+    check inside `_get_moodle_userid`,
     which raises *before* the `TaskGroup` is even entered. It never
     touches the `except* MoodleTokenInvalid` unwrap that the batch relies
     on. Here the token dies on a probe, inside the group, so a regression
@@ -208,7 +208,7 @@ async def test_invalid_token_from_a_probe_propagates_unwrapped():
 
 @pytest.mark.asyncio
 async def test_mixed_token_and_rate_limit_batch_picks_token():
-    """N1 (task-1-fix-1-rereview.md): `except*` runs *every* matching
+    """`except*` runs *every* matching
     clause, so a batch with one dead-token probe and one rate-limited
     probe used to fire both clauses and recombine their raises into a
     bare `ExceptionGroup` that matched neither this module's own outer
@@ -253,7 +253,7 @@ async def test_mixed_token_and_rate_limit_batch_picks_token():
 
 @pytest.mark.asyncio
 async def test_rate_limited_probe_raises():
-    """I3 (task-1-review.md): a 429 on a per-assignment probe must become
+    """A 429 on a per-assignment probe must become
     `MoodleRateLimited`, the same contract `fetch_assignments` follows --
     not be folded into the generic >= 400 skip-and-continue path, which
     left the batch silently returning `{}` while still hammering Moodle.
@@ -277,7 +277,7 @@ async def test_rate_limited_probe_raises():
 
 @pytest.mark.asyncio
 async def test_rate_limited_site_info_raises():
-    """I3: the site-info call (`_get_moodle_userid`) obeys the same 429
+    """The site-info call (`_get_moodle_userid`) obeys the same 429
     contract -- previously it checked no status code at all, so a 429
     with a non-JSON body surfaced as a swallowed `JSONDecodeError`.
     """
@@ -318,7 +318,7 @@ async def test_empty_input_makes_no_requests():
 
 @pytest.mark.asyncio
 async def test_token_never_appears_in_logs(capsys, caplog):
-    """I2 (task-1-review.md): the client logs through structlog's
+    """The client logs through structlog's
     `PrintLoggerFactory`, which writes to stdout via a bare `print()` --
     it never becomes a stdlib `LogRecord`, so `caplog` cannot see it. The
     previous version of this test asserted only on `caplog.text`, which
@@ -365,7 +365,7 @@ async def test_token_never_appears_in_logs(capsys, caplog):
 
 @pytest.mark.asyncio
 async def test_malformed_timestamp_does_not_lose_the_batch():
-    """C1 (task-1-fix-2-rereview.md): `_parse_submission_status` used to be
+    """`_parse_submission_status` used to be
     called *outside* `probe`'s guarded `try`, so a bogus `timemodified` --
     ordinary malformed data, not a contrived input -- raised straight out of
     `probe` unmatched by any `except*` clause and escaped
@@ -427,12 +427,12 @@ class _LoggerBrokenAtEveryLevel:
     `Exception`, raised from inside a probe's own `except` clause, where no
     guard used to reach.
 
-    Breaking only `warning` (which is what this class did through round 4)
-    exercises the residual `except Exception` clause but stops one step
-    short: its handler's own last-resort `logger.error` still succeeds, so
-    the `except Exception: pass` wrapped around that call -- the single
-    most deletable line in the fix -- could be removed with the whole file
-    still green (task-1-fix-4-rereview.md I1). With `error` raising too,
+    Breaking only `warning` (which is what an earlier version of this
+    class did) exercises the residual `except Exception` clause but stops
+    one step short: its handler's own last-resort `logger.error` still
+    succeeds, so the `except Exception: pass` wrapped around that call --
+    the single most deletable line in the fix -- could be removed with
+    the whole file still green. With `error` raising too,
     `inside_the_skip_handler` reaches the swallow, and deleting it turns
     this back into the bare `ExceptionGroup` the clause exists to prevent.
     """
@@ -546,15 +546,14 @@ def _install_probe_injection(site: str, monkeypatch):
 async def test_unexpected_probe_exception_never_escapes_as_a_group(
     site, monkeypatch
 ):
-    """M1+M2 (task-1-fix-3-rereview.md): the invariant, generalized over
-    *location* as well as type.
+    """The invariant, generalized over *location* as well as type.
 
         an arbitrary exception raised anywhere inside a probe never reaches
         the caller as a BaseExceptionGroup, and never costs its siblings
 
-    Rounds 1 and 2 each fixed one *exception type* that recombined into a
-    bare `ExceptionGroup`; round 3 closed the type axis by injecting an
-    arbitrary `RuntimeError` -- but at exactly one call site, inside the
+    Earlier versions of this test each fixed one *exception type* that
+    recombined into a bare `ExceptionGroup`, then closed the type axis by
+    injecting an arbitrary `RuntimeError` -- but at exactly one call site, inside the
     guarded `try`. Two statements in `probe` sat outside that guard
     (`results[assignment_id] = parsed`, and the `logger` calls in the
     handlers themselves) and still escaped as groups while that test stayed
@@ -597,7 +596,9 @@ async def test_unexpected_probe_exception_never_escapes_as_a_group(
 
 
 def test_skip_tuple_can_never_swallow_an_escalation():
-    """M1 (task-1-fix-3-rereview.md), structural half.
+    """The structural half of the invariant that
+    `test_every_escalation_reaches_the_caller_as_its_own_type` checks
+    behaviorally.
 
     Consolidating `probe`'s guards left one ordering hazard: the inner
     `except _PROBE_SKIPS` clause runs before the outer `except
@@ -627,15 +628,14 @@ def _probe_ast() -> ast.AsyncFunctionDef:
 
 
 def test_probes_whole_body_is_inside_the_guard():
-    """M4 (task-1-fix-4-rereview.md): close the *location* axis by
-    construction rather than by sampling.
+    """Close the *location* axis by construction rather than by sampling.
 
     `test_unexpected_probe_exception_never_escapes_as_a_group` injects at
     five sites, and those five are an enumeration of the statements `probe`
-    contains *today*. That is exactly the shape of finding that has now
-    recurred three rounds running: a guard that covers every instance
-    anyone thought of, and a sixth statement added tomorrow that nothing
-    covers. Rounds 1-3 lost `results[assignment_id] = parsed` and the
+    contains *today*. That is exactly the shape of finding that has
+    recurred repeatedly: a guard that covers every instance anyone
+    thought of, and a sixth statement added tomorrow that nothing covers.
+    Earlier fixes each lost `results[assignment_id] = parsed` and the
     handlers' own `logger` calls to precisely that.
 
     The property is structural, so assert it structurally: `probe`'s body
@@ -694,8 +694,8 @@ def test_probes_whole_body_is_inside_the_guard():
 async def test_every_escalation_reaches_the_caller_as_its_own_type(
     kind, code, monkeypatch
 ):
-    """M1 (task-1-fix-4-rereview.md): a member added to the escalation set
-    must not be silently retyped.
+    """A member added to the escalation set must not be silently
+    retyped.
 
     The router used to hard-code one `subgroup()` branch per type with a
     fallback that raised `MoodleUnreachable`, so a fourth member of
@@ -754,17 +754,16 @@ async def test_every_escalation_reaches_the_caller_as_its_own_type(
 
 @pytest.mark.asyncio
 async def test_moodle_unreachable_from_a_probe_propagates_unwrapped(monkeypatch):
-    """M3 (task-1-fix-3-rereview.md): the broad residual clause must not eat
-    this module's own error taxonomy.
+    """The broad residual clause must not eat this module's own error
+    taxonomy.
 
     `MoodleUnreachable` is one of the three types `executor.py::_execute_job`
     branches on (its `except MoodleUnreachable` handler -> retriable
-    backoff). Round 3's `except Exception`
-    caught it, logged it as *unexpected*, and skipped the assignment, so it
-    never reached that branch. Nothing inside `probe` raises it today --
-    Plan C Tasks 2 and 3 wire this function up and will reasonably expect
-    this module's own types to behave here the way they do everywhere else
-    in the file.
+    backoff). A prior version's broad `except Exception` caught it, logged
+    it as *unexpected*, and skipped the assignment, so it never reached
+    that branch. Nothing inside `probe` raises it today -- future callers
+    that wire this function up will reasonably expect this module's own
+    types to behave here the way they do everywhere else in the file.
 
     It must arrive plain, never inside a group, with the group still
     reachable through `__cause__`.
@@ -813,7 +812,7 @@ async def test_moodle_unreachable_from_a_probe_propagates_unwrapped(monkeypatch)
 async def test_unreachable_loses_to_the_more_specific_escalations(
     winner, loser_payload, monkeypatch
 ):
-    """M3, priority half: adding `MoodleUnreachable` to the escalation set
+    """Priority half: adding `MoodleUnreachable` to the escalation set
     gives the `except*` router three types to choose between, and `except*`
     hands it all of them at once.
 
@@ -876,13 +875,13 @@ async def test_unreachable_loses_to_the_more_specific_escalations(
 def production_log_chain(monkeypatch):
     """Run the probe under the chain `logging_setup.configure` really builds.
 
-    M3 (task-1-fix-4-rereview.md). The previous version of the token test
+    The previous version of the token test
     hand-copied `logging_setup.configure`'s processor list into a local
     `structlog.configure(...)`. That pins `exc_info`'s safety against a
     *frozen snapshot* of the chain rather than against the chain the
-    process runs: the reviewer swapped `logging_setup.py`'s production
-    branch for a renderer that demonstrably prints the token and the test
-    still reported `1 passed`. So the one test standing between a live
+    process runs: swapping `logging_setup.py`'s production
+    branch for a renderer that demonstrably prints the token still leaves
+    the test reporting `1 passed`. So the one test standing between a live
     Moodle credential and the log file could not see a change to the thing
     it guards.
 
@@ -957,7 +956,7 @@ def _unexpected_error_line(stdout: str) -> dict:
 async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
     capsys, monkeypatch, production_log_chain
 ):
-    """M4 (task-1-fix-3-rereview.md): `submission_probe_unexpected_error` is
+    """`submission_probe_unexpected_error` is
     the one signal that says a new failure mode has appeared inside `probe`.
     With only `type(exc).__name__` it says a `RuntimeError` happened
     somewhere in the probe and nothing more, which is not enough to act on.
@@ -1008,13 +1007,13 @@ async def test_unexpected_probe_error_logs_a_traceback_without_the_token(
 async def test_a_token_in_the_exception_message_is_not_logged(
     capsys, monkeypatch, production_log_chain
 ):
-    """M2 (task-1-fix-4-rereview.md): the adversarial half of the above.
+    """The adversarial half of the above.
 
     `exc_info` renders `str(exc)` -- and the same for every exception in the
-    `__cause__`/`__context__` chain. Round 3 had explicitly verified this
-    log line carried no `str(exc)` at all; round 4 traded that away for a
-    traceback. The reviewer measured the remaining exposure and found it
-    real but unreachable *today*, on a margin that rests on how a
+    `__cause__`/`__context__` chain. An earlier version of this log line
+    had explicitly verified it carried no `str(exc)` at all; that guarantee
+    was later traded away for a traceback. The remaining exposure is real
+    but unreachable *today*, on a margin that rests on how a
     third-party library happens to format its messages.
 
     So this constructs the case the margin depends on: an exception whose

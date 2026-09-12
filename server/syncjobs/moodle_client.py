@@ -5,7 +5,7 @@ implementations with an injectable `httpx` transport so tests stay
 offline via MockTransport.
 
 Error taxonomy is the load-bearing part — the executor's retry policy
-hangs off it (security review 1.4):
+hangs off it:
 
 * `MoodleTokenInvalid`  → cached token died; try ONE SSO re-obtain.
 * `SsoAuthFailed`       → auth-class: credentials rejected. NEVER retried.
@@ -81,8 +81,8 @@ class SsoUnavailable(MoodleClientError):
 # raised `MoodleUnreachable`, so adding a fourth member here -- a one-word
 # edit, in a tuple whose own comment promised the router "re-raises them
 # unwrapped" -- silently converted that fourth type into `MoodleUnreachable`
-# at the caller (task-1-fix-4-rereview.md M1). Adding a member now means
-# adding a `(type, code)` row, which the router handles by construction.
+# at the caller. Adding a member now means adding a `(type, code)` row,
+# which the router handles by construction.
 #
 # Order is priority, highest first, for a batch that hits more than one: a
 # dead token makes everything else moot (we must stop using the credential
@@ -445,11 +445,10 @@ class HttpAssignmentFetcher:
                     # entire batch and reaches the caller as a bare
                     # `ExceptionGroup` matching no `except*` clause below.
                     # Guarding only "the parts that can raise" is exactly
-                    # what let that shape survive three fix rounds: the
-                    # result store sat after the inner guard, and the
-                    # handlers' own `logger` calls sat inside it. Only two
-                    # exits are permitted from here -- a normal return, or
-                    # one of `_PROBE_ESCALATES`. See task-1-fix-4-report.md.
+                    # the mistake this avoids: the result store sat after
+                    # the inner guard, and the handlers' own `logger` calls
+                    # sat inside it. Only two exits are permitted from here
+                    # -- a normal return, or one of `_PROBE_ESCALATES`.
                     try:
                         async with semaphore:
                             params = {
@@ -478,9 +477,9 @@ class HttpAssignmentFetcher:
                                 # as the request: a malformed `timemodified`
                                 # is exactly "this assignment's data is bad",
                                 # the same failure class as a transport error
-                                # (task-1-fix-3-brief.md C1 -- this call used
-                                # to sit after the guard, so `_ts`'s
-                                # ValueError/OverflowError escaped `probe`).
+                                # (this call used to sit after the guard, so
+                                # `_ts`'s ValueError/OverflowError escaped
+                                # `probe`).
                                 parsed = _parse_submission_status(assignment_id, body)
                             except _PROBE_SKIPS as exc:
                                 # One assignment's failure is that

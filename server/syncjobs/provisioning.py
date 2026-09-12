@@ -1,5 +1,5 @@
-"""Create sync_jobs at login (migration plan Phase 3, handoff decision:
-login-time upsert, not backfill).
+"""Create sync_jobs at login (migration plan Phase 3): login-time upsert,
+not backfill.
 
 Jobs are created for every job type the executor can actually run
 (`HANDLED_JOB_TYPES`); the executor filters by policy enabled/active

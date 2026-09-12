@@ -167,9 +167,9 @@ async def test_run_now_requires_auth(client):
 async def test_run_now_no_job_and_invalid_credentials_409_without_provisioning(
     client,
 ):
-    """Final review F1 (phase 3): with no sync_jobs row and an invalid
-    account credential, run-now must 409 instead of provisioning a fresh
-    pending job the executor would only re-disable next tick."""
+    """With no sync_jobs row and an invalid account credential, run-now
+    must 409 instead of provisioning a fresh pending job the executor
+    would only re-disable next tick."""
     from server.auth.models import ExternalAccount
     from server.sync.models import UserCourse  # noqa: F401 — model registry
 

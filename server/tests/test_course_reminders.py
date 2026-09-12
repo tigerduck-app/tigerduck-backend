@@ -255,7 +255,7 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
     local, schedule = _occurrence_in(26)
     # Insert the user_added row FIRST: with no ORDER BY it tends to come
     # back first, which is exactly the ordering that broke the original
-    # single-pass portal-first guard (final review, phase 4).
+    # single-pass portal-first guard.
     weird = _course(
         user,
         course_key="CUSTOM1",
