@@ -244,6 +244,8 @@ async def register_device(
         device.cloud_sync_enabled = payload.cloud_sync_enabled
     if payload.bulletin_push_enabled is not None:
         device.bulletin_push_enabled = payload.bulletin_push_enabled
+    if payload.server_push_enabled is not None:
+        device.server_push_enabled = payload.server_push_enabled
     device.deleted_at = None
     device.last_seen_at = now
     await session.flush()

@@ -131,6 +131,11 @@ class DeviceRegisterV3Request(DeviceInfo):
     # a device that dropped and re-registered, without a 2.0.x client
     # (which never sends this field) ever resetting it.
     bulletin_push_enabled: bool | None = None
+    # None means "not reported" and leaves the stored value untouched --
+    # same convention as cloud_sync_enabled and bulletin_push_enabled above.
+    # Lets a client carry the global push opt-out on every register call,
+    # so a 2.0.x client that never sends this field can never reset it.
+    server_push_enabled: bool | None = None
     # BCP-47 tag, e.g. "zh-Hant-TW". Reported unconditionally on every
     # registration call (not gated behind a preference toggle) — see
     # UserDevice.locale for why. Optional so older clients keep working.

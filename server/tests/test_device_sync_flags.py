@@ -83,6 +83,19 @@ async def _bulletin_push_enabled(client, client_device_id: str) -> bool:
         return device.bulletin_push_enabled
 
 
+async def _server_push_enabled(client, client_device_id: str) -> bool:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = (
+            await session.execute(
+                select(UserDevice).where(
+                    UserDevice.client_device_id == client_device_id
+                )
+            )
+        ).scalar_one()
+        return device.server_push_enabled
+
+
 @asyncio_session
 async def test_new_flags_default_to_true(client) -> None:
     login = await do_login(client)
@@ -241,6 +254,80 @@ async def test_register_omitting_bulletin_push_enabled_leaves_it_unchanged(
     )
     assert response.status_code == 200, response.text
     assert await _bulletin_push_enabled(client, "iphone-bulletin-reregister") is False
+
+
+@asyncio_session
+async def test_register_server_push_enabled_round_trips(client) -> None:
+    login_off = await do_login(client, device="iphone-server-push-off")
+    response_off = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login_off),
+        json={
+            "client_device_id": "iphone-server-push-off",
+            "platform": "ios",
+            "server_push_enabled": False,
+        },
+    )
+    assert response_off.status_code == 200, response_off.text
+    assert await _server_push_enabled(client, "iphone-server-push-off") is False
+
+    login_on = await do_login(client, device="iphone-server-push-on")
+    response_on = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login_on),
+        json={
+            "client_device_id": "iphone-server-push-on",
+            "platform": "ios",
+            "server_push_enabled": True,
+        },
+    )
+    assert response_on.status_code == 200, response_on.text
+    assert await _server_push_enabled(client, "iphone-server-push-on") is True
+
+
+@asyncio_session
+async def test_register_new_device_without_server_push_enabled_gets_todays_default(
+    client,
+) -> None:
+    login = await do_login(client, device="iphone-server-push-new")
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-server-push-new", "platform": "ios"},
+    )
+    assert response.status_code == 200, response.text
+    assert await _server_push_enabled(client, "iphone-server-push-new") is True
+
+
+@asyncio_session
+async def test_register_omitting_server_push_enabled_leaves_it_unchanged(
+    client,
+) -> None:
+    """A device that opted all server push off and later re-registers
+    without the field -- a 2.0.x client's register call, which has never
+    heard of this field -- must not have it silently switched back on."""
+    login = await do_login(client, device="iphone-server-push-reregister")
+    await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-server-push-reregister",
+            "platform": "ios",
+            "server_push_enabled": False,
+        },
+    )
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={
+            "client_device_id": "iphone-server-push-reregister",
+            "platform": "ios",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert (
+        await _server_push_enabled(client, "iphone-server-push-reregister") is False
+    )
 
 
 def test_model_columns_are_nonnull_with_true_default() -> None:
