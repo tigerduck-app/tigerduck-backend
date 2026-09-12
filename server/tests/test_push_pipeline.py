@@ -14,6 +14,7 @@ from server.auth.models import (
     User,
     UserDevice,
 )
+from server.auth.models import push as push_models_module
 from server.db import build_session_factory
 from server.push import pipeline as pipeline_module
 from server.push.apns_client import SendResult
@@ -171,6 +172,54 @@ async def test_a_delivery_made_this_tick_goes_out_whichever_way_the_clocks_disag
     assert len(apple.requests) == 1
     await db_session.refresh(job)
     assert job.status == "sent"
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """Every `pg_insert(PushJob)` call site in product code omits
+    `available_at` and takes the column's default. Left to the database's
+    `now()`, a database clock even a few milliseconds ahead of the app
+    host's (a Docker VM's drifts against its host's) stamps it later than
+    the claim's own `now`, and `_trigger_push_tick` firing immediately
+    after the job is queued (as it does from `_enqueue_sync_trigger`) can
+    miss the job for a whole retry round.
+
+    Pinned by constructing the job on a clock that lags the claim's and on
+    one that leads it: the job is claimed on its very first tick either
+    way, because the default and the claim read the same clock."""
+    real_datetime = pipeline_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(pipeline_module, "datetime", SkewedDatetime)
+    monkeypatch.setattr(push_models_module, "datetime", SkewedDatetime)
+
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = PushJob(
+        user_id=user.id,
+        dedupe_key="system:test:no-available-at",
+        channel="system",
+        scenario="reauth_required",
+        fire_at=datetime.now(UTC) - timedelta(minutes=5),
+        payload={"title": "t", "body": "b"},
+        # available_at deliberately omitted -- exercises the column default.
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+
+    assert len(apple.requests) == 1
 
 
 async def test_future_or_unavailable_jobs_not_claimed(

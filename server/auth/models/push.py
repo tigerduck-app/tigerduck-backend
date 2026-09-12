@@ -3,7 +3,7 @@ row per device it was actually sent to."""
 
 from __future__ import annotations
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
@@ -55,8 +55,16 @@ class PushJob(Base):
     channel: Mapped[str] = mapped_column(String(32))
     scenario: Mapped[str] = mapped_column(String(64))
     fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Client-side default, not just server_default: the claim in
+    # push/pipeline.py compares this column against datetime.now(UTC), so
+    # a value stamped by the database's own now() can read as not-yet-
+    # available when the database clock leads the app host's -- the same
+    # clock the claim later uses. server_default stays as a floor for any
+    # row written outside SQLAlchemy's insert path.
     available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )
     priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
     payload: Mapped[dict] = mapped_column(JSONB)
