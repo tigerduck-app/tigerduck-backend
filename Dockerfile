@@ -23,6 +23,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # 2. Source — busts whenever code changes but deps don't rebuild.
 COPY server ./server
+# String bundles for server-composed push copy. `server/i18n.py` reads them
+# from `app-translation/generated/backend` beside `server/`, and the app
+# refuses to start without the fallback one. They come from the
+# app-translation submodule, so the checkout this is built from must have it
+# (`git submodule update --init`); without it this COPY fails the build
+# instead of shipping an image that cannot compose a single push.
+COPY app-translation/generated/backend ./app-translation/generated/backend
 COPY scripts ./scripts
 COPY alembic.ini ./
 COPY entrypoint.sh ./

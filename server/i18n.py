@@ -88,6 +88,18 @@ def load_bundle(locale: str) -> dict[str, str]:
         return json.load(f)
 
 
+def require_fallback_bundle() -> None:
+    """Load the canonical bundle, or raise `load_bundle`'s actionable error.
+
+    Called once at startup. Every lookup falls back to `CANONICAL_LOCALE`,
+    so without this bundle it is not one language that breaks but every
+    server-composed push: each delivery raises at send time and the
+    pipeline retries it into `failed/pipeline_crash`, while the server
+    otherwise looks healthy. Failing here instead stops the process.
+    """
+    load_bundle(CANONICAL_LOCALE)
+
+
 def translate(key: str, locale: str | None) -> str:
     """Localized string for `key`, or `MISSING_KEY_SENTINEL` if absent."""
     resolved = resolve_locale(locale)

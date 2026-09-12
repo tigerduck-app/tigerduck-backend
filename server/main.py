@@ -24,6 +24,7 @@ from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
+from server.i18n import require_fallback_bundle
 from server.logging_setup import configure as configure_logging
 from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
 # noqa: F401 — imported for the side effect of registering the tables with
@@ -115,6 +116,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         apns_env=settings.apns_env,
         apns_topic=settings.apns_topic_live_activity,
     )
+
+    # Before anything slow. Server-composed push copy resolves through the
+    # fallback string bundle, so an image without it would otherwise boot
+    # fine and then crash on every such push it sends. The push pipeline
+    # and the sync worker both run in this process (the scheduler below),
+    # so this one check covers every sender.
+    require_fallback_bundle()
 
     if settings.skip_llm_probe:
         logger.info("llm.skipped", base_url=settings.llm_base_url)
