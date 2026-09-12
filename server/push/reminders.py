@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from server.auth.models import PushJob, PushJobStatus
 from server.config import Settings
 from server.db import session_scope
+from server.push.notification_copy import has_reminder_copy_inputs
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -75,14 +76,33 @@ async def _notification_prefs(
     for doc in docs:
         section = (doc.document or {}).get("assignments") or {}
         enabled = bool(section.get("enabled", True))
-        raw = section.get("reminder_offsets_hours")
-        offsets = (
-            [float(value) for value in raw if isinstance(value, (int, float))]
-            if isinstance(raw, list)
-            else default[1]
-        )
-        prefs[doc.user_id] = (enabled, offsets)
+        prefs[doc.user_id] = (enabled, _offsets_hours(section, default[1]))
     return prefs
+
+
+def _offsets_hours(section: dict, default: list[float]) -> list[float]:
+    """The section's reminder offsets, in hours.
+
+    Spec §4.6: `reminder_offsets_minutes` is the complete, authoritative
+    set -- sub-hour offsets included -- whenever the document carries it,
+    and an empty list there means the user turned every offset off.
+    `reminder_offsets_hours` (whole hours only) is read only when it does
+    not, which is all a client older than 2.1.0 writes. A value that is not
+    a list counts as not carrying the field; for `null` that is also what
+    the iOS reader (`NotificationSettingsSync.resolveOffsets`) does. Both
+    lists drop elements that are not numbers.
+    """
+    minutes = section.get("reminder_offsets_minutes")
+    if isinstance(minutes, list):
+        return [value / 60 for value in _numbers(minutes)]
+    hours = section.get("reminder_offsets_hours")
+    if isinstance(hours, list):
+        return _numbers(hours)
+    return default
+
+
+def _numbers(raw: list) -> list[float]:
+    return [float(value) for value in raw if isinstance(value, (int, float))]
 
 
 async def scan_assignment_reminders(
@@ -94,6 +114,7 @@ async def scan_assignment_reminders(
     window_end = now + timedelta(hours=settings.assignment_reminder_window_hours)
     created = 0
     cancelled = 0
+    upgraded = 0
 
     async with session_scope(session_factory) as session:
         rows = (
@@ -178,11 +199,11 @@ async def scan_assignment_reminders(
                         "fire_at": fire_at,
                         "payload": {
                             "kind": "assignment_reminder",
-                            "title": f"作業提醒：{assignment.title}",
-                            "body": (
-                                f"{assignment.course_name + ' · ' if assignment.course_name else ''}"
-                                f"剩 {_fmt_offset(offset)} 小時"
-                            ),
+                            # Copy inputs, not copy: the title and body are
+                            # written per recipient at send time, in each
+                            # device's language (`push/notification_copy.py`).
+                            "assignment_title": assignment.title,
+                            "course_name": assignment.course_name,
                             "moodle_assignment_id": assignment.moodle_assignment_id,
                             "moodle_course_id": assignment.moodle_course_id,
                             "due_at": assignment.due_at.isoformat(),
@@ -201,13 +222,33 @@ async def scan_assignment_reminders(
             )
             created = result.rowcount or 0
 
+        # A job filed before copy moved to send time holds a finished
+        # Chinese title and body instead of the copy inputs, and the insert
+        # above leaves it alone (same key). Each one still waiting gets the
+        # payload it would be filed with today, so it too goes out in its
+        # recipient's language. One already due has no entry here and goes
+        # out as filed.
+        fresh_payloads = {
+            (value["user_id"], value["dedupe_key"]): value["payload"]
+            for value in values
+        }
         for job in pending_jobs:
-            if (job.user_id, job.dedupe_key) in valid_keys:
-                continue
-            job.status = PushJobStatus.cancelled.value
-            job.cancelled_at = now
-            cancelled += 1
+            key = (job.user_id, job.dedupe_key)
+            if key not in valid_keys:
+                job.status = PushJobStatus.cancelled.value
+                job.cancelled_at = now
+                cancelled += 1
+            elif key in fresh_payloads and not has_reminder_copy_inputs(
+                job.payload or {}
+            ):
+                job.payload = dict(fresh_payloads[key])
+                upgraded += 1
 
-    if created or cancelled:
-        logger.info("push.reminders.scan", created=created, cancelled=cancelled)
+    if created or cancelled or upgraded:
+        logger.info(
+            "push.reminders.scan",
+            created=created,
+            cancelled=cancelled,
+            upgraded=upgraded,
+        )
     return created

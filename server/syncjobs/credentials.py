@@ -28,12 +28,10 @@ from server.auth.models import (
     PushJob,
     UserDevice,
 )
-from server.i18n import translate
+from server.push.notification_copy import REAUTH_SCENARIO
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
 logger = structlog.get_logger(__name__)
-
-REAUTH_SCENARIO = "reauth_required"
 
 # Devices this job targets today: iOS/iPadOS, per spec §4.5. This is the
 # "is there anyone worth telling" gate, not a platform filter on delivery —
@@ -55,21 +53,6 @@ REAUTH_SCENARIO = "reauth_required"
 #    gets notified, so it wants its own decision rather than riding along
 #    with a comment correction.
 _REAUTH_CAPABLE_PLATFORMS = ("ios", "ipados")
-
-
-def build_reauth_payload(*, provider: str, locale: str | None) -> dict:
-    """Push payload telling the user their provider credential expired.
-
-    `kind` is what both clients route on; without it the message reaches
-    iOS as an untyped alert and is dropped outright by Android's FCM
-    handler, which keys on the payload shape.
-    """
-    return {
-        "kind": REAUTH_SCENARIO,
-        "provider": provider,
-        "title": translate("notification_reauth_required_title", locale),
-        "body": translate("notification_reauth_required_body", locale),
-    }
 
 
 class CredentialInvalid(Exception):

@@ -44,13 +44,13 @@ from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.dedupe import activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
+from server.push.notification_copy import (
+    REAUTH_SCENARIO,
+    build_assignment_reminder_payload,
+    build_reauth_payload,
+)
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
-# Not a cycle: `syncjobs.credentials` imports only auth/i18n/syncjobs models,
-# never `server.push`. Kept as a module-level import (unlike the deferred
-# `log_entries` import below) so an accidental future cycle fails loudly at
-# startup rather than on the first reauth delivery.
-from server.syncjobs.credentials import REAUTH_SCENARIO, build_reauth_payload
 
 logger = structlog.get_logger(__name__)
 
@@ -511,25 +511,30 @@ async def _send_one(
         return
 
     payload = job.payload or {}
-    if job.scenario == REAUTH_SCENARIO:
-        # Keyed on the job's scenario, not payload["kind"]: the portal's
-        # operator "retry + notify" endpoints (portal/app/routes/moodle/
-        # jobs.py) insert reauth_required jobs directly via SQL in the
-        # pre-v2.1.0 payload shape (no `kind`), and always will — the portal
-        # is a separate package that talks raw SQL and does not import this
-        # module. Keying on `kind` let those jobs skip copy rebuild entirely
-        # and ship the empty-banner bug this branch exists to fix.
-        #
+    is_reauth = job.scenario == REAUTH_SCENARIO
+    if is_reauth or job.channel == REMINDER_CHANNEL:
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
         # languages, so the only place the right language is known is the
         # recipient. `session.get` is an identity-map hit — `_materialize`
         # loaded this device earlier in the same transaction.
+        #
+        # Reauth is keyed on the job's scenario, not payload["kind"]: the
+        # portal's operator "retry + notify" endpoints (portal/app/routes/
+        # moodle/jobs.py) insert reauth_required jobs directly via SQL in
+        # the pre-v2.1.0 payload shape (no `kind`), and always will — the
+        # portal is a separate package that talks raw SQL and does not
+        # import this module. Keying on `kind` let those jobs skip copy
+        # rebuild entirely and ship the empty-banner bug this branch exists
+        # to fix.
         device = await session.get(UserDevice, delivery.device_id)
-        payload = build_reauth_payload(
-            provider=payload.get("provider", ""),
-            locale=device.locale if device is not None else None,
-        )
+        locale = device.locale if device is not None else None
+        if is_reauth:
+            payload = build_reauth_payload(
+                provider=payload.get("provider", ""), locale=locale
+            )
+        else:
+            payload = build_assignment_reminder_payload(payload, locale=locale)
         if not _has_copy(payload):
             # Sending this would be worse than not sending it. APNs coerces a
             # missing title to "" and delivers a banner that rings with no

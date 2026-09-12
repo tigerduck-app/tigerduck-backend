@@ -75,7 +75,12 @@ async def test_creates_jobs_for_default_offsets(
     assert jobs[1].scenario == "reminder_2h"
     due_epoch = int(jobs[0].payload["due_epoch"])
     assert jobs[0].dedupe_key == f"assignment:moodle:1:reminder_24h:{due_epoch}"
-    assert jobs[0].payload["title"]
+    # Copy inputs, not finished copy: the pipeline writes the title and
+    # body per recipient, in each device's language.
+    assert jobs[0].payload["assignment_title"] == "HW1"
+    assert jobs[0].payload["course_name"] == "資料結構"
+    assert "title" not in jobs[0].payload
+    assert "body" not in jobs[0].payload
     # idempotent re-scan
     created = await scan_assignment_reminders(
         build_session_factory(prepared_engine), test_settings

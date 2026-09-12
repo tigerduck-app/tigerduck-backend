@@ -32,13 +32,10 @@ from server.db import build_session_factory
 from server.i18n import MISSING_KEY_SENTINEL, translate
 from server.push.apns_client import SendResult
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
+from server.push.notification_copy import REAUTH_SCENARIO, build_reauth_payload
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.router import PushRouter
-from server.syncjobs.credentials import (
-    REAUTH_SCENARIO,
-    build_reauth_payload,
-    mark_credentials_invalid,
-)
+from server.syncjobs.credentials import mark_credentials_invalid
 
 # Applied per-function below rather than as a module-level `pytestmark`:
 # the copy tests are plain sync functions that touch no fixture and need no
