@@ -218,12 +218,14 @@ def _without_token(exc: BaseException, token: str) -> BaseException:
     exceptions that embed a URL are all `httpx.HTTPError`, i.e.
     `_PROBE_SKIPS`, which never reach here) -- but that is a margin that
     depends on a third-party library's message formatting, and the
-    never-log-a-token rule is absolute. This frame is the one place that
-    knows the token's value, so it is closed here rather than assumed.
+    never-log-a-token rule is absolute. The frames that log these
+    exceptions are the ones that know the token's value -- the residual
+    handler in `probe`, and the executor's handler around the whole
+    fetch -- so it is closed there rather than assumed.
 
-    Mutating the exception is safe *here specifically*: the residual
-    handler skips the assignment and returns, so `exc` is discarded
-    immediately after and is never re-raised or seen by a caller.
+    Mutating the exception is safe *there specifically*: both handlers log
+    and return, so `exc` is discarded immediately after and is never
+    re-raised or seen by a caller.
 
     Frame locals are a separate axis and are not touched -- the
     production chain renders source lines, not locals, which is what

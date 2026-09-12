@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import structlog
 from sqlalchemy import select, text
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
@@ -16,8 +19,11 @@ from server.auth.models import (
     User,
     UserDevice,
 )
+from server.config import Settings
 from server.db import build_session_factory
+from server.logging_setup import configure
 from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
+from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
@@ -761,3 +767,91 @@ async def test_a_job_taken_back_while_the_probe_ran_is_left_to_its_new_owner(
     assert job.status == "pending"
     assert job.last_error == "sync_failed:stale_lock"
     assert job.last_success_at is None
+
+
+@pytest.fixture
+def executor_logs_through_the_production_chain(monkeypatch):
+    """Log through the chain `logging_setup.configure` builds in production.
+
+    The same approach as `production_log_chain` in
+    test_moodle_submission_status.py: call the real `configure`, save and
+    restore the process-global logger state it changes, and replace the
+    module's logger proxy -- which froze its bound logger on first use,
+    under whatever an earlier test configured -- with one created after
+    `configure`.
+    """
+    names = ("httpx", "httpcore")
+    saved = {n: logging.getLogger(n).level for n in names}
+    root = logging.getLogger().level
+    try:
+        configure(Settings(env="production", log_level="INFO"))
+        monkeypatch.setattr(
+            executor_module,
+            "logger",
+            structlog.get_logger("server.syncjobs.executor"),
+        )
+        yield
+    finally:
+        structlog.reset_defaults()
+        for n, level in saved.items():
+            logging.getLogger(n).setLevel(level)
+        logging.getLogger().setLevel(root)
+
+
+async def test_an_unexpected_probe_failure_is_logged_without_the_token(
+    db_session,
+    prepared_engine,
+    test_settings,
+    monkeypatch,
+    capsys,
+    executor_logs_through_the_production_chain,
+):
+    """The executor's handler around the whole submission fetch logs an
+    unanticipated exception with its traceback, from a frame that holds the
+    Moodle token, and `exc_info` renders the message of every exception in
+    the `__cause__`/`__context__` chain. So an exception whose message
+    carries the token -- inside a full webservice URL, chained under another
+    that carries it too -- must come out scrubbed.
+
+    The messages are built outside the raising function: a traceback also
+    prints each frame's source line, and an f-string at the `raise` would
+    put `wstoken=` in the output from this test's own source.
+    """
+    token = "tok_executor_leak_canary"
+    await _setup_user_job(db_session, token=token)
+    leaky_url = (
+        "https://moodle.example.test/webservice/rest/server.php"
+        f"?wstoken={token}&wsfunction=x"
+    )
+    inner_message = f"upstream refused {leaky_url}"
+    outer_message = f"probe blew up handling {leaky_url}"
+
+    async def leaky_probe(*, token, assignment_ids, max_concurrency):
+        try:
+            raise ValueError(inner_message)
+        except ValueError:
+            raise RuntimeError(outer_message)
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", leaky_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    stdout = capsys.readouterr().out
+    assert token not in stdout, "the Moodle token reached the log output"
+    lines = [
+        line for line in stdout.splitlines() if "submissions.refresh_failed" in line
+    ]
+    assert len(lines) == 1, lines
+    payload = json.loads(lines[0])
+    assert payload["error"] == "RuntimeError"
+    traceback_text = payload["exception"]
+    # Scrubbed, not dropped: both messages are still rendered.
+    assert "probe blew up handling" in traceback_text
+    assert "upstream refused" in traceback_text
+    assert traceback_text.count("wstoken=<token-redacted>") == 2

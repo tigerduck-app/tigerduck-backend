@@ -61,6 +61,7 @@ from server.syncjobs.moodle_client import (
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
+    _without_token,
 )
 from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
 from server.push.submission_cancel import cancel_for_submitted
@@ -537,10 +538,13 @@ async def _refresh_submission_status(
             )
             return
         except Exception as exc:
+            # This frame holds the token, and `exc_info` renders the message
+            # of every exception in the chain, so the chain is scrubbed
+            # first -- the same guard as the probe's own residual handler.
             logger.error(
                 "syncjobs.submissions.refresh_failed",
                 error=type(exc).__name__,
-                exc_info=True,
+                exc_info=_without_token(exc, token),
             )
             return
         async with session_scope(worker.session_factory) as session:
