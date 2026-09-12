@@ -24,6 +24,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from server.db import Base
 from .enums import PushDeliveryStatus, PushJobStatus
 
+#: The statuses under which a push job's `(user_id, dedupe_key)` is taken:
+#: the predicate of `ux_push_jobs_dedupe_active` below. An `ON CONFLICT`
+#: aimed at that partial index has to repeat it as `index_where`, or
+#: Postgres cannot match the index.
+PUSH_JOB_DEDUPE_ACTIVE_STATUSES: tuple[str, ...] = (
+    PushJobStatus.pending.value,
+    PushJobStatus.processing.value,
+    PushJobStatus.sent.value,
+    PushJobStatus.partial_failed.value,
+)
+
 
 class PushJob(Base):
     """One logical notification to a user (fan-out happens in

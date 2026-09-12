@@ -45,10 +45,23 @@ def _fmt_offset(hours: float) -> str:
     return f"{hours:g}"
 
 
+def reminder_key_prefix(moodle_assignment_id: int) -> str:
+    """What every reminder dedupe key for this assignment starts with,
+    whatever its offset and due date.
+
+    `push/submission_cancel.py` cancels an assignment's pending reminders
+    by this prefix once it is submitted, and `_dedupe_key` is built on it,
+    so the two cannot drift apart. It ends after `reminder_`, past the
+    delimiter that closes the id, so assignment 12's prefix never matches
+    a key of assignment 123.
+    """
+    return f"assignment:moodle:{moodle_assignment_id}:reminder_"
+
+
 def _dedupe_key(moodle_assignment_id: int, offset: float, due_epoch: int) -> str:
     return (
-        f"assignment:moodle:{moodle_assignment_id}:"
-        f"reminder_{_fmt_offset(offset)}h:{due_epoch}"
+        f"{reminder_key_prefix(moodle_assignment_id)}"
+        f"{_fmt_offset(offset)}h:{due_epoch}"
     )
 
 

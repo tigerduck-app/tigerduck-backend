@@ -7,15 +7,20 @@ F-Droid -- a 2.0.2 device would receive every reminder twice: once from
 its own UNUserNotificationCenter, once from us.
 
 So delivery is gated on the reported app version, and the gate fails
-CLOSED. The two errors are not symmetric: skipping a device that turned
-out to be new costs one reminder the user still gets locally, while
-sending to a device that turned out to be old costs a duplicate
-notification the user will read as a bug.
+CLOSED. Neither mistake is free. Skipping a device that is in fact 2.1.0
+or later loses that reminder outright: 2.1.0 removed the local
+scheduler, so nothing else will show it. Sending to one that is in fact
+older shows the reminder twice, which the user will read as a bug. The
+gate errs toward skipping because a device it cannot place has not yet
+reported a 2.1.0+ version, and it becomes eligible as soon as its
+registration does.
 """
 
 from __future__ import annotations
 
 import re
+
+from server.auth.models import APPLE_HANDHELD_PLATFORMS
 
 #: The release that removed the iOS local scheduler and started relying
 #: on backend delivery. Keep in step with `MARKETING_VERSION` in
@@ -26,13 +31,6 @@ BACKEND_REMINDERS_MIN_VERSION: tuple[int, ...] = (2, 1, 0)
 #: flavor's "-fdroid", a "+build" tag -- is ignored, and anything that
 #: does not start with a digit does not parse at all.
 _VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)")
-
-#: The only platforms the backend delivers assignment reminders to.
-#: Everything else either schedules them locally (Android, Wear OS; spec
-#: 4.2) or takes no notifications at all (macOS). Listing what IS allowed
-#: rather than what is not makes a platform added later fail closed.
-_BACKEND_REMINDER_PLATFORMS = frozenset({"ios", "ipados"})
-
 
 def parse_app_version(raw: str | None) -> tuple[int, ...] | None:
     if not raw:
@@ -48,7 +46,9 @@ def schedules_reminders_locally(platform: str, app_version: str | None) -> bool:
     reminder: it schedules its own (Android, Wear OS, iOS before 2.1.0),
     takes no notifications (macOS), or cannot be shown to be a 2.1.0+
     iPhone or iPad."""
-    if platform not in _BACKEND_REMINDER_PLATFORMS:
+    if platform not in APPLE_HANDHELD_PLATFORMS:
+        # Everything else schedules these locally (Android, Wear OS; spec
+        # 4.2) or takes no notifications at all (macOS).
         return True
     parsed = parse_app_version(app_version)
     if parsed is None:

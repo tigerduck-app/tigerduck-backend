@@ -2,8 +2,10 @@
 
 Adds two device-level toggles gating spec §4.6's "Sync content" switches:
 UserDevice.sync_assignment_reminders and UserDevice.sync_live_activity.
-Later work gates assignment-reminder / Live Activity push delivery on
-these; this migration only adds the columns.
+This migration only adds the columns. The push pipeline gates
+assignment-reminder delivery on sync_assignment_reminders (together with
+cloud_sync_enabled); sync_live_activity is stored and returned to the
+clients, which enforce it, and nothing on the server reads it.
 
 Both are NOT NULL with server_default true and need no backfill: an
 existing row, and a preferences PATCH from a pre-v2.1.0 client that never

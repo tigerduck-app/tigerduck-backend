@@ -22,6 +22,7 @@ from server.auth.crypto import (
     EncryptedBlob,
 )
 from server.auth.models import (
+    APPLE_HANDHELD_PLATFORMS,
     CredentialStatus,
     ExternalAccount,
     ExternalAccountCredential,
@@ -35,9 +36,11 @@ logger = structlog.get_logger(__name__)
 
 # Devices this job targets today: iOS/iPadOS, per spec §4.5. This is the
 # "is there anyone worth telling" gate, not a platform filter on delivery —
-# macOS stays excluded from every push by the existing
-# `device.platform == "macos"` skip in `push.pipeline._materialize`, which
-# remains the one place that decision is made.
+# macOS is kept out of every `push_jobs` delivery, this one included, by
+# the macOS skip in `push.pipeline._materialize`, the one place that
+# pipeline makes the decision. (The legacy bulletin and custom-push
+# dispatchers, which serve devices not linked to an account, never pass
+# through it.)
 #
 # Two things follow, and the second is a known gap:
 #
@@ -49,10 +52,10 @@ logger = structlog.get_logger(__name__)
 #    broader delivery stands and the spec's restriction does not.
 # 2. The gate itself is still Apple-only, so an account holding ONLY Android
 #    devices never gets this push at all, even though those devices could
-#    act on it. Widening the tuple is the entire fix, but it changes who
-#    gets notified, so it wants its own decision rather than riding along
-#    with a comment correction.
-_REAUTH_CAPABLE_PLATFORMS = ("ios", "ipados")
+#    act on it. Pointing this at a wider set is the entire fix, but it
+#    changes who gets notified, so it wants its own decision rather than
+#    riding along with a comment correction.
+_REAUTH_CAPABLE_PLATFORMS = APPLE_HANDHELD_PLATFORMS
 
 
 class CredentialInvalid(Exception):

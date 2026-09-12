@@ -6,6 +6,7 @@ resolve unchanged, and importing this package still registers every table
 on `Base.metadata` for Alembic autogenerate.
 """
 from .enums import (
+    APPLE_HANDHELD_PLATFORMS,
     CredentialStatus,
     PushDeliveryStatus,
     PushJobStatus,
@@ -27,11 +28,13 @@ from .device import (
     UserDevice,
 )
 from .push import (
+    PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
     PushDelivery,
     PushJob,
 )
 
 __all__ = [
+    "APPLE_HANDHELD_PLATFORMS",
     "AuthSession",
     "CredentialStatus",
     "DevicePushToken",
@@ -39,6 +42,7 @@ __all__ = [
     "ExternalAccountCredential",
     "PushDelivery",
     "PushDeliveryStatus",
+    "PUSH_JOB_DEDUPE_ACTIVE_STATUSES",
     "PushJob",
     "PushJobStatus",
     "PushTokenKind",

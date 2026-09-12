@@ -1,4 +1,4 @@
-"""Retire the v2 push tables and the leftover user_courses.deleted_at.
+"""Retire the v2 push tables and user_courses.deleted_at; make system_settings.updated_at NOT NULL.
 
 Three schema objects outlived the code that used them. Each was left behind by
 a commit that removed its last reader and writer but shipped no migration, so
@@ -19,9 +19,15 @@ every run since -- mixed in with whatever change the author actually wanted.
   `user_course_overrides.is_hidden*` columns; this column was missed. Soft
   deletion moved to the `user_course_tombstones` table.
 
-Irreversible in practice: `downgrade()` restores the structures but not their
-contents. Rows written before each feature was retired go away here. To see
-what that costs before deploying:
+It also makes `system_settings.updated_at` NOT NULL, which is not one of the
+retirements: the model has declared the column non-optional since the table
+was introduced, but the migration that created the table left it nullable.
+Any NULL is backfilled with `now()` first, and `downgrade()` makes the column
+nullable again.
+
+The retirements are irreversible in practice: `downgrade()` restores the
+structures but not their contents. Rows written before each feature was
+retired go away here. To see what that costs before deploying:
 
     SELECT count(*) FROM scheduled_pushes;
     SELECT count(*) FROM live_activity_update_tokens;

@@ -15,7 +15,13 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.models import DevicePushToken, PushJob, PushJobStatus, PushTokenStatus
+from server.auth.models import (
+    PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
+    DevicePushToken,
+    PushJob,
+    PushJobStatus,
+    PushTokenStatus,
+)
 from server.auth.schemas import (
     LiveActivityRegisterV3Request,
     LiveActivityRegisterV3Response,
@@ -132,14 +138,7 @@ async def register_live_activity(
                 index_elements=["user_id", "dedupe_key"],
                 # ux_push_jobs_dedupe_active is partial (active statuses);
                 # repeat its predicate so ON CONFLICT matches the index.
-                index_where=PushJob.status.in_(
-                    [
-                        PushJobStatus.pending.value,
-                        PushJobStatus.processing.value,
-                        PushJobStatus.sent.value,
-                        PushJobStatus.partial_failed.value,
-                    ]
-                ),
+                index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": payload.countdown_target,
                     "payload": {

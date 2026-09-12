@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import uuid
 
-# The channel both routes below file their jobs on, and the one
-# `push/pipeline.py` keys its start/end split off (`job.channel ==
-# "schedule"`). Named `SCHEDULE_CHANNEL` here rather than the bare
+# The channel both routes below file their jobs on. `push/pipeline.py`
+# splits start from end on it, `push/job_payloads.py` builds Live Activity
+# pushes for it and `push/submission_cancel.py` files end jobs on it, all
+# through this name. Named `SCHEDULE_CHANNEL` here rather than the bare
 # `CHANNEL` its original home used, since this module is a shared home for
 # more than one channel's worth of key shapes.
 SCHEDULE_CHANNEL = "schedule"

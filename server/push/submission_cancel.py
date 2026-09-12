@@ -26,23 +26,23 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import (
+    PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
     DevicePushToken,
     PushJob,
     PushJobStatus,
+    PushTokenKind,
     PushTokenStatus,
     UserDevice,
 )
 from server.auth.schemas import ScheduleScenario
-from server.push.dedupe import SCHEDULE_CHANNEL as ACTIVITY_CHANNEL
+from server.push.dedupe import SCHEDULE_CHANNEL
 from server.push.dedupe import activity_end_key
 from server.push.dedupe import activity_id as _activity_id
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
-from server.push.reminders import _dedupe_key
+from server.push.reminders import reminder_key_prefix
 from server.sync.models import UserAssignment
 
 logger = structlog.get_logger(__name__)
-
-_LIVE_ACTIVITY_TOKEN_KIND = "live_activity_update"
 
 # The user's in-app accent-color preference is client-only state, never
 # uploaded to the backend, so it cannot be reconstructed at cancel time.
@@ -50,29 +50,6 @@ _LIVE_ACTIVITY_TOKEN_KIND = "live_activity_update"
 # not re-rendered, so the exact color has no user-visible effect. Named
 # rather than a bare literal so the reason travels with the value.
 _FALLBACK_ACCENT_HEX = 0
-
-# Matches `ux_push_jobs_dedupe_active`'s partial-index predicate -- the
-# statuses under which a (user_id, dedupe_key) pair is still "taken".
-_DEDUPE_ACTIVE_STATUSES = (
-    PushJobStatus.pending.value,
-    PushJobStatus.processing.value,
-    PushJobStatus.sent.value,
-    PushJobStatus.partial_failed.value,
-)
-
-
-def _reminder_key_prefix(moodle_assignment_id: int) -> str:
-    """The portion of `_dedupe_key`'s output before offset/due_epoch, which
-    are unknown at cancel time.
-
-    Formats a placeholder key with `_dedupe_key` itself and truncates it,
-    rather than retyping the literal `"assignment:moodle:{id}:reminder_"`
-    format here -- a future change to that format then cannot silently
-    desync the producer and this consumer.
-    """
-    probe = _dedupe_key(moodle_assignment_id, offset=0, due_epoch=0)
-    marker = "reminder_"
-    return probe[: probe.index(marker) + len(marker)]
 
 
 def _activity_id_for_assignment(moodle_assignment_id: int) -> str:
@@ -171,7 +148,7 @@ async def _cancel_pending_reminders(
     an already-sent job to cancelled would make the delivery record
     disagree with what actually happened.
     """
-    prefixes = [_reminder_key_prefix(aid) for aid in moodle_assignment_ids]
+    prefixes = [reminder_key_prefix(aid) for aid in moodle_assignment_ids]
     jobs = (
         (
             await session.execute(
@@ -232,7 +209,7 @@ async def _end_running_activities(
             .where(
                 UserDevice.user_id == user_id,
                 UserDevice.deleted_at.is_(None),
-                DevicePushToken.token_kind == _LIVE_ACTIVITY_TOKEN_KIND,
+                DevicePushToken.token_kind == PushTokenKind.live_activity_update.value,
                 DevicePushToken.status == PushTokenStatus.active.value,
                 DevicePushToken.scope_key.in_(
                     list(assignment_by_activity_id.keys())
@@ -263,7 +240,7 @@ async def _end_running_activities(
                 select(PushJob.dedupe_key).where(
                     PushJob.user_id == user_id,
                     PushJob.dedupe_key.in_([key for _, _, key in targets]),
-                    PushJob.status.in_(_DEDUPE_ACTIVE_STATUSES),
+                    PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 )
             )
         )
@@ -342,7 +319,7 @@ async def _end_running_activities(
                 user_id=user_id,
                 device_id=device_id,
                 dedupe_key=dedupe_key,
-                channel=ACTIVITY_CHANNEL,
+                channel=SCHEDULE_CHANNEL,
                 scenario="activityEnd",
                 fire_at=now,
                 payload=payload,
@@ -352,7 +329,7 @@ async def _end_running_activities(
                 # ux_push_jobs_dedupe_active is partial (active statuses);
                 # repeat its predicate so ON CONFLICT matches the index --
                 # same pattern as `live_activities_v3.register_live_activity`.
-                index_where=PushJob.status.in_(_DEDUPE_ACTIVE_STATUSES),
+                index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": now,
                     "status": PushJobStatus.pending.value,

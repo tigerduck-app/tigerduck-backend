@@ -170,12 +170,6 @@ class AssignmentFetcher(Protocol):
     ) -> dict[int, FetchedSubmission]: ...
 
 
-class SubmissionStatusFetcher(Protocol):
-    async def fetch_submission_status(
-        self, *, token: str, assignment_ids: list[int], max_concurrency: int
-    ) -> dict[int, FetchedSubmission]: ...
-
-
 class CourseFetcher(Protocol):
     async def fetch_courses(self, *, token: str) -> list[FetchedCourse]: ...
 

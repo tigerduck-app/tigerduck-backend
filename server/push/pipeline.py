@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.models import (
+    APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
     PushDelivery,
     PushDeliveryStatus,
@@ -38,11 +39,12 @@ from server.auth.models import (
     PushTokenKind,
     PushTokenStatus,
     UserDevice,
+    UserDevicePlatform,
 )
 from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
-from server.push.dedupe import activity_end_key
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
@@ -229,7 +231,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
 
     now = datetime.now(UTC)
     payload = job.payload or {}
-    is_activity_job = job.channel == "schedule"
+    is_activity_job = job.channel == SCHEDULE_CHANNEL
     is_activity_end = is_activity_job and payload.get("kind") == "live_activity_end"
     if is_activity_end:
         target_token_kind = "live_activity_update"
@@ -314,7 +316,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
         token_query = token_query.where(
             UserDevice.cloud_sync_enabled.is_(True),
             UserDevice.sync_assignment_reminders.is_(True),
-            UserDevice.platform.in_(("ios", "ipados")),
+            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
         )
 
     rows = (await session.execute(token_query)).all()
@@ -322,7 +324,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
         return True
     values = []
     for token, device in rows:
-        if device.platform == "macos":
+        if device.platform == UserDevicePlatform.macos.value:
             continue
         if is_assignment_reminder and schedules_reminders_locally(
             device.platform, device.app_version
