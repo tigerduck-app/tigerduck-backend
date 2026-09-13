@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/table";
 import { RunStatusBadge, deviceLabel, fmt, platformIcon, platformLabel, relativeTime, timeUntil } from "./format";
 import type { QueuedJob, SyncCoursesResponse, SyncDevice, SyncEventsResponse, TopologyNode } from "./types";
+import { BackendTests, EndNowButton, LiveActivityTest } from "./TestsPanels";
 
 /**
  * Split rows into one section per NTUST term, newest first. Rows whose term
@@ -167,6 +168,7 @@ export function NodeDetailPanel({
               <TabsTrigger value="overrides">
                 Overrides{data.overrides ? ` (${data.overrides.length})` : ""}
               </TabsTrigger>
+              <TabsTrigger value="tests">Tests</TabsTrigger>
             </TabsList>
             <TabsContent value="courses">
               {!coursesData ? (
@@ -394,6 +396,9 @@ export function NodeDetailPanel({
                 <div className="py-6 text-center text-muted-foreground">No overrides</div>
               )}
             </TabsContent>
+            <TabsContent value="tests">
+              <BackendTests studentId={studentId} />
+            </TabsContent>
           </Tabs>
         </CardContent>
       </Card>
@@ -413,6 +418,8 @@ export function NodeDetailPanel({
   );
 
   const allOverrides = data.overrides ?? [];
+  // Live Activities, and so the Tests tab that starts one, exist only on an iPhone or iPad.
+  const liveActivityCapable = device.platform === "ios" || device.platform === "ipados";
 
   return (
     <Card>
@@ -446,6 +453,7 @@ export function NodeDetailPanel({
               Source Jobs{devicePushJobs.length > 0 ? ` (${devicePushJobs.length})` : ""}
             </TabsTrigger>
             <TabsTrigger value="info">Info</TabsTrigger>
+            {liveActivityCapable && <TabsTrigger value="tests">Tests</TabsTrigger>}
           </TabsList>
           <TabsContent value="data">
             {device.cloud_sync_enabled === false && (
@@ -959,7 +967,7 @@ export function NodeDetailPanel({
             )}
           </TabsContent>
           <TabsContent value="queued">
-            <QueuedJobs jobs={deviceQueue} deviceId={device.id} />
+            <QueuedJobs jobs={deviceQueue} deviceId={device.id} studentId={studentId} />
           </TabsContent>
           <TabsContent value="source-push">
             {devicePushJobs.length === 0 ? (
@@ -1073,6 +1081,11 @@ export function NodeDetailPanel({
               </Table>
             </div>
           </TabsContent>
+          {liveActivityCapable && (
+            <TabsContent value="tests">
+              <LiveActivityTest studentId={studentId} device={device} />
+            </TabsContent>
+          )}
         </Tabs>
       </CardContent>
     </Card>
@@ -1125,14 +1138,14 @@ function queuedJobToken(j: QueuedJob): string {
  * device missing the token the push needs still lists the job, flagged:
  * it is planned for the device but will not arrive.
  */
-function QueuedJobs({ jobs, deviceId }: { jobs: QueuedJob[]; deviceId: string }) {
+function QueuedJobs({ jobs, deviceId, studentId }: { jobs: QueuedJob[]; deviceId: string; studentId: string }) {
   if (jobs.length === 0) {
     return <div className="py-4 text-sm text-muted-foreground">Nothing queued for this device.</div>;
   }
   return (
     <div className="space-y-2 py-2">
       <p className="text-xs text-muted-foreground">
-        Pending jobs addressed to this device, soonest first. Only jobs the server has already created appear — Live Activity starts come from the device's own 48-hour upload and class reminders are created 48 hours ahead — so later ones show up as their time approaches.
+        Pending jobs addressed to this device, soonest first. Only jobs the server has already created appear — Live Activity starts come from the device's own 48-hour upload and class reminders are created 48 hours ahead — so later ones show up as their time approaches. A Live Activity end can be fired early with End now.
       </p>
       <div className="overflow-x-auto">
         <Table>
@@ -1166,6 +1179,9 @@ function QueuedJobs({ jobs, deviceId }: { jobs: QueuedJob[]; deviceId: string })
                     {j.attempts > 0 && <div className="text-muted-foreground mt-1">{j.attempts}/{j.max_attempts} attempts</div>}
                     {!ready && <div className="text-orange-500 mt-1">No {queuedJobToken(j)} token · will not arrive</div>}
                     {j.last_error && <div className="text-destructive mt-1">{j.last_error}</div>}
+                    {j.channel === "schedule" && j.kind === "live_activity_end" && j.status === "pending" && (
+                      <EndNowButton studentId={studentId} jobId={j.id} />
+                    )}
                   </TableCell>
                 </TableRow>
               );

@@ -30,6 +30,31 @@ def _internal_headers(request: Request | None) -> dict[str, str]:
     return {"X-Push-Token": token} if token else {}
 
 
+async def run_pipeline_now(request: Request | None, *, what: str) -> None:
+    """Run a push tick now, for a job the caller has just written.
+
+    Logged rather than swallowed: the job row is already written, so a
+    refused tick means the push sits queued until the next scheduled run —
+    which looks to an operator like the send silently did nothing. `what`
+    names the send in that log line.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            tick = await client.post(
+                f"{BACKEND_INTERNAL_URL}/push-tick",
+                headers=_internal_headers(request),
+            )
+        if tick.status_code >= 400:
+            logger.warning(
+                "%s follow-up tick refused: HTTP %s %s",
+                what,
+                tick.status_code,
+                tick.text[:200],
+            )
+    except Exception:
+        logger.exception("%s follow-up tick failed", what)
+
+
 @router.post("/push-tick")
 async def force_push_tick(request: Request) -> JSONResponse:
     """Proxy to the main API server's /push-tick endpoint.
@@ -105,24 +130,7 @@ async def force_sync_trigger(
         job_id = row["id"] if row else None
 
     if job_id:
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                tick = await client.post(
-                    f"{BACKEND_INTERNAL_URL}/push-tick",
-                    headers=_internal_headers(request),
-                )
-            # Logged rather than swallowed: the job row is already written,
-            # so a refused tick means the push sits queued until the next
-            # scheduled run — which looks to an operator like the trigger
-            # silently did nothing.
-            if tick.status_code >= 400:
-                logger.warning(
-                    "sync-trigger follow-up tick refused: HTTP %s %s",
-                    tick.status_code,
-                    tick.text[:200],
-                )
-        except Exception:
-            logger.exception("sync-trigger follow-up tick failed")
+        await run_pipeline_now(request, what="sync-trigger")
 
     return JSONResponse({
         "ok": True,
