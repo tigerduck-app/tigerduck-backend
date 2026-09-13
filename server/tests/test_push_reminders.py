@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
-from server.auth.models import PushJob, User
+from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
 from server.push.reminders import (
     _dedupe_key,
@@ -23,11 +24,39 @@ from server.sync.models import (
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-async def _make_user(session, student_id="b11203058"):
+async def _make_user(session, student_id="b11203058", *, with_device=True):
     user = User(student_id=student_id)
     session.add(user)
     await session.flush()
+    if with_device:
+        await _add_device(session, user)
     return user
+
+
+async def _add_device(
+    session, user, *, platform="ios", app_version="2.1.0", token=True, **columns
+):
+    """A device of `user`; by default one the pipeline sends reminders to."""
+    device = UserDevice(
+        user_id=user.id,
+        client_device_id=str(uuid.uuid4()),
+        platform=platform,
+        app_version=app_version,
+        **columns,
+    )
+    session.add(device)
+    await session.flush()
+    if token:
+        session.add(
+            DevicePushToken(
+                device_id=device.id,
+                provider="apns",
+                token_kind="standard",
+                token_hash=f"hash-{device.id}",
+                token_value=f"tok-{device.id}",
+            )
+        )
+    return device
 
 
 def _assignment(user, aid=1, due_in_hours=30.0, **kwargs):
@@ -283,3 +312,85 @@ async def test_the_reminder_key_prefix_scopes_to_exactly_one_assignment():
     assert _dedupe_key(12, 24.0, due_epoch).startswith(reminder_key_prefix(12))
     assert _dedupe_key(12, 0.5, due_epoch).startswith(reminder_key_prefix(12))
     assert not _dedupe_key(123, 24.0, due_epoch).startswith(reminder_key_prefix(12))
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        None,
+        dict(platform="android"),
+        dict(platform="macos"),
+        dict(app_version="2.0.2"),
+        dict(app_version=None),
+        dict(sync_assignment_reminders=False),
+        dict(cloud_sync_enabled=False),
+        dict(token=False),
+        dict(deleted_at=datetime.now(UTC)),
+    ],
+    ids=[
+        "no-device",
+        "android",
+        "macos",
+        "ios-2.0.2",
+        "no-version",
+        "reminders-off",
+        "sync-off",
+        "no-token",
+        "deleted",
+    ],
+)
+async def test_no_jobs_for_a_user_no_device_can_receive_them_on(
+    db_session, prepared_engine, test_settings, device
+):
+    """Filed anyway, each would settle as failed/no_active_tokens once due."""
+    user = await _make_user(db_session, with_device=False)
+    if device is not None:
+        await _add_device(db_session, user, **device)
+    db_session.add(_assignment(user, due_in_hours=30))
+    await db_session.commit()
+
+    created = await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert created == 0
+    assert await _jobs(db_session, user.id) == []
+
+
+async def test_one_device_that_can_receive_them_is_enough(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session, with_device=False)
+    await _add_device(db_session, user, platform="android")
+    await _add_device(db_session, user, platform="ipados")
+    db_session.add(_assignment(user, due_in_hours=30))
+    await db_session.commit()
+
+    created = await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert created == 2
+
+
+async def test_pending_jobs_cancelled_once_no_device_can_receive_them(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session, with_device=False)
+    device = await _add_device(db_session, user)
+    db_session.add(_assignment(user, due_in_hours=30))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    await scan_assignment_reminders(factory, test_settings)
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["pending"] * 2
+
+    device.sync_assignment_reminders = False
+    await db_session.commit()
+    await scan_assignment_reminders(factory, test_settings)
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["cancelled"] * 2
+
+    # Back on: the same reminders are filed again.
+    device.sync_assignment_reminders = True
+    await db_session.commit()
+    assert await scan_assignment_reminders(factory, test_settings) == 2

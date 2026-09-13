@@ -2,13 +2,15 @@
 
 Scan-based (default every 300s): eligible = not deleted, not submitted,
 local_status not in (locally_completed/ignored/archived), due within the
-scan window, and the user's `notification` settings document has
+scan window, the user's `notification` settings document has
 assignments enabled (no document → enabled with the server default
-offsets). One push_job per (assignment, offset) with the due-date epoch
-embedded in the dedupe key — `ux_push_jobs_dedupe_active` also covers
-sent states (security fix 1.2), so a due-date change must mint a NEW key;
-the scan cancels pending jobs whose key is no longer valid (due changed,
-assignment completed/ignored/deleted, or reminders disabled).
+offsets), and the user has a device the pipeline would deliver the
+reminder to (`_users_with_a_recipient`). One push_job per (assignment,
+offset) with the due-date epoch embedded in the dedupe key —
+`ux_push_jobs_dedupe_active` also covers sent states (security fix 1.2),
+so a due-date change must mint a NEW key; the scan cancels pending jobs
+whose key is no longer valid (due changed, assignment completed/ignored/
+deleted, reminders disabled, or no device left to receive them).
 
 A key stays valid even after its fire time has passed (the pipeline is
 about to deliver it) — only keys that no longer correspond to an
@@ -25,9 +27,18 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from server.auth.models import PushJob, PushJobStatus
+from server.auth.models import (
+    APPLE_HANDHELD_PLATFORMS,
+    DevicePushToken,
+    PushJob,
+    PushJobStatus,
+    PushTokenKind,
+    PushTokenStatus,
+    UserDevice,
+)
 from server.config import Settings
 from server.db import session_scope
+from server.push.client_versions import schedules_reminders_locally
 from server.push.notification_copy import has_reminder_copy_inputs
 from server.sync.models import (
     UserAssignment,
@@ -118,6 +129,50 @@ def _numbers(raw: list) -> list[float]:
     return [float(value) for value in raw if isinstance(value, (int, float))]
 
 
+async def _users_with_a_recipient(
+    session: AsyncSession, user_ids: set[uuid.UUID], now: datetime
+) -> set[uuid.UUID]:
+    """The users among `user_ids` with at least one device the pipeline
+    would deliver an assignment reminder to.
+
+    The conditions `push.pipeline._materialize` applies on this channel: an
+    iPhone or iPad with both sync switches on, an app new enough not to
+    schedule its own reminders, and an active standard token. The pipeline
+    checks them again at send time and stays the authority, since a device
+    can change before the fire time; this only keeps the scan from filing
+    jobs nothing could receive. Every Android-only account is one (Android
+    arms these reminders itself), as is every iPhone still on a build that
+    schedules its own. Filed anyway, each reminder would settle as
+    `failed`/`no_active_tokens` once due, a failed row per reminder.
+    """
+    if not user_ids:
+        return set()
+    rows = (
+        await session.execute(
+            select(UserDevice.user_id, UserDevice.platform, UserDevice.app_version)
+            .join(DevicePushToken, DevicePushToken.device_id == UserDevice.id)
+            .where(
+                UserDevice.user_id.in_(user_ids),
+                UserDevice.deleted_at.is_(None),
+                UserDevice.cloud_sync_enabled.is_(True),
+                UserDevice.sync_assignment_reminders.is_(True),
+                UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+                DevicePushToken.token_kind == PushTokenKind.standard.value,
+                DevicePushToken.status == PushTokenStatus.active.value,
+                (DevicePushToken.expires_at.is_(None))
+                | (DevicePushToken.expires_at > now),
+            )
+        )
+    ).all()
+    # The version gate stays in Python, as in the pipeline: app_version is
+    # VARCHAR, and "2.10.0" sorts below "2.9.0" as a string.
+    return {
+        user_id
+        for user_id, platform, app_version in rows
+        if not schedules_reminders_locally(platform, app_version)
+    }
+
+
 async def scan_assignment_reminders(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -181,6 +236,9 @@ async def scan_assignment_reminders(
             return 0
 
         prefs = await _notification_prefs(session, user_ids, settings)
+        reachable = await _users_with_a_recipient(
+            session, {a.user_id for a in eligible}, now
+        )
 
         # Scoped by user: dedupe_key alone is NOT globally unique (the
         # push_jobs index is (user_id, dedupe_key)) — two users sharing a
@@ -190,7 +248,10 @@ async def scan_assignment_reminders(
         values: list[dict] = []
         for assignment in eligible:
             enabled, offsets = prefs[assignment.user_id]
-            if not enabled:
+            # No device could receive it. Its pending jobs drop out of
+            # valid_keys and are cancelled below, as when reminders are
+            # switched off, and are filed again once a device can.
+            if not enabled or assignment.user_id not in reachable:
                 continue
             due_epoch = int(assignment.due_at.timestamp())
             for offset in offsets:

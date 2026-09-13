@@ -222,10 +222,15 @@ async def _iphone(session, user, client_device_id, locale, platform="ios"):
     return device
 
 
-async def _user_with_assignment(session, *, due_in_hours=30.0, document=None):
+async def _user_with_assignment(
+    session, *, due_in_hours=30.0, document=None, with_iphone=True
+):
     user = User(student_id="b11203058")
     session.add(user)
     await session.flush()
+    if with_iphone:
+        # The scan files reminders only for a user something can receive.
+        await _iphone(session, user, "iphone-default", "zh-Hant-TW")
     assignment = UserAssignment(
         user_id=user.id,
         moodle_course_id=7001,
@@ -264,7 +269,7 @@ async def _jobs(session, user_id):
 async def test_each_device_gets_the_reminder_in_its_own_language(
     db_session, prepared_engine, test_settings
 ):
-    user, _ = await _user_with_assignment(db_session)
+    user, _ = await _user_with_assignment(db_session, with_iphone=False)
     await _iphone(db_session, user, "iphone-tw", "zh-Hant-TW")
     await _iphone(db_session, user, "ipad-jp", "ja-JP", platform="ipados")
     await db_session.commit()
