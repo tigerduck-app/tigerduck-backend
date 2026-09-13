@@ -21,3 +21,6 @@ docker-compose.override.yml
 
 # JetBrains IDE project directory (per-machine settings, not portable).
 .idea/
+
+# SDD scratch workspace
+.superpowers/

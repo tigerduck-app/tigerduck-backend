@@ -194,3 +194,40 @@ class SyncRun(Base):
         Index("idx_sync_runs_job", "sync_job_id", sa.text("started_at DESC")),
         Index("idx_sync_runs_user_recent", "user_id", sa.text("started_at DESC")),
     )
+
+
+class SyncLogEntry(Base):
+    """Per-user sync event log. Written by `server/syncjobs/log_entries.py`
+    and read by the portal's Moodle logs page, both with raw SQL -- writes are
+    best-effort and must never fail a sync, so they bypass the ORM.
+
+    The table is created by `4e6c604ad58c` with `CREATE TABLE IF NOT EXISTS`
+    rather than `op.create_table`, which means Alembic's autogenerate never
+    learned about it from the migration either. Mapping it here is what stops
+    autogenerate proposing `op.drop_table("sync_log_entries")` -- it diffs the
+    database against `Base.metadata`, and a table absent from the metadata
+    reads as one the models want gone.
+
+    Deliberately un-modelled details, kept as-is so the mapping matches the
+    live schema: `user_id` carries no foreign key (a log outlives the rows it
+    describes), and the retention sweep in `portal/app/routes/deregister.py`
+    deletes by `user_id` directly."""
+
+    __tablename__ = "sync_log_entries"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    level: Mapped[str] = mapped_column(String(8), default="INFO", server_default="INFO")
+    source: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(Text)
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    __table_args__ = (
+        Index("idx_sync_log_entries_user", "user_id", sa.text("ts DESC")),
+    )

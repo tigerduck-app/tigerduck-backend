@@ -3,7 +3,7 @@ row per device it was actually sent to."""
 
 from __future__ import annotations
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
@@ -23,6 +23,17 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from server.db import Base
 from .enums import PushDeliveryStatus, PushJobStatus
+
+#: The statuses under which a push job's `(user_id, dedupe_key)` is taken:
+#: the predicate of `ux_push_jobs_dedupe_active` below. An `ON CONFLICT`
+#: aimed at that partial index has to repeat it as `index_where`, or
+#: Postgres cannot match the index.
+PUSH_JOB_DEDUPE_ACTIVE_STATUSES: tuple[str, ...] = (
+    PushJobStatus.pending.value,
+    PushJobStatus.processing.value,
+    PushJobStatus.sent.value,
+    PushJobStatus.partial_failed.value,
+)
 
 
 class PushJob(Base):
@@ -44,8 +55,16 @@ class PushJob(Base):
     channel: Mapped[str] = mapped_column(String(32))
     scenario: Mapped[str] = mapped_column(String(64))
     fire_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Client-side default, not just server_default: the claim in
+    # push/pipeline.py compares this column against datetime.now(UTC), so
+    # a value stamped by the database's own now() can read as not-yet-
+    # available when the database clock leads the app host's -- the same
+    # clock the claim later uses. server_default stays as a floor for any
+    # row written outside SQLAlchemy's insert path.
     available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )
     priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
     payload: Mapped[dict] = mapped_column(JSONB)
@@ -85,7 +104,7 @@ class PushJob(Base):
         CheckConstraint(
             "attempts >= 0 AND max_attempts > 0", name="chk_push_job_attempts"
         ),
-        # Security-review fix 1.2: the spec's original partial index only
+        # The spec's original partial index only
         # covered pending/processing, which let the next 8-hour sync round
         # re-create an already-sent reminder. Covering delivered states too
         # makes the dedupe key durable; "notify again because content

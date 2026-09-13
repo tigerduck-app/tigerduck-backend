@@ -9,7 +9,11 @@ from sqlalchemy import select
 
 from server.auth.models import PushJob, User
 from server.db import build_session_factory
-from server.push.reminders import scan_assignment_reminders
+from server.push.reminders import (
+    _dedupe_key,
+    reminder_key_prefix,
+    scan_assignment_reminders,
+)
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -75,7 +79,12 @@ async def test_creates_jobs_for_default_offsets(
     assert jobs[1].scenario == "reminder_2h"
     due_epoch = int(jobs[0].payload["due_epoch"])
     assert jobs[0].dedupe_key == f"assignment:moodle:1:reminder_24h:{due_epoch}"
-    assert jobs[0].payload["title"]
+    # Copy inputs, not finished copy: the pipeline writes the title and
+    # body per recipient, in each device's language.
+    assert jobs[0].payload["assignment_title"] == "HW1"
+    assert jobs[0].payload["course_name"] == "資料結構"
+    assert "title" not in jobs[0].payload
+    assert "body" not in jobs[0].payload
     # idempotent re-scan
     created = await scan_assignment_reminders(
         build_session_factory(prepared_engine), test_settings
@@ -264,3 +273,13 @@ async def test_cancellation_is_user_scoped(
     jobs_b = await _jobs(db_session, user_b.id)
     assert all(j.status == "pending" for j in jobs_a)  # A untouched
     assert all(j.status == "cancelled" for j in jobs_b)  # B cancelled
+
+
+async def test_the_reminder_key_prefix_scopes_to_exactly_one_assignment():
+    """What `push/submission_cancel.py` cancels by. Every key of the
+    assignment starts with it, whatever the offset, and no key of an
+    assignment whose id merely starts with the same digits does."""
+    due_epoch = 1_800_000_000
+    assert _dedupe_key(12, 24.0, due_epoch).startswith(reminder_key_prefix(12))
+    assert _dedupe_key(12, 0.5, due_epoch).startswith(reminder_key_prefix(12))
+    assert not _dedupe_key(123, 24.0, due_epoch).startswith(reminder_key_prefix(12))

@@ -19,7 +19,7 @@
 TigerDuck Backend is the server side of the [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) app (iOS / Android). It runs at `api.tigerduck.app` and is responsible for five things:
 
 - 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (theft detection revokes the whole chain), AES-256-GCM credential storage, user device & push-token management
-- 🔄 **User data sync (v3)** — Multi-device sync of courses / assignments / settings / bulletin subscriptions: initial client upload + per-user changelog incremental pulls, with the server periodically fetching authoritative Moodle assignment updates
+- 🔄 **User data sync (v3)** — Multi-device sync of courses / assignments / settings: initial client upload + per-user changelog incremental pulls, with the server periodically fetching authoritative Moodle assignment updates
 - 📣 **Bulletin pipeline** — Scrape NTUST departmental announcements → de-duplicate → LLM classification (canonical_org / content_tags / importance) → match subscriptions → push (dual-track: anonymous devices and logged-in users)
 - 📲 **Push delivery** — Logged-in users go through the two-phase `push_jobs` → `push_deliveries` pipeline (assignment / course reminders, bulletins, system notices); APNs Push-to-Start (iOS Live Activity), FCM fan-out (Android), bad-token classification and cleanup
 - ⏰ **Scheduling** — Server-side academic sync, push pipeline, reminder scans, Live Activity tokens, retention cleanup; all driven by a single APScheduler worker running inside the FastAPI lifespan
@@ -32,10 +32,10 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Login** — The app completes NTUST SSO itself; the backend verifies identity via the Moodle token (it never proxies SSO, avoiding the school's per-IP rate limits)
 - **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions, with a one-shot 60-second grace retry for clients that lost the rotation response
 - **Credential custody** — The NTUST password is stored AES-256-GCM encrypted with per-row AAD (key rotation supported), used only for server-side Moodle token refresh
-- **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens
+- **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens; devices report their locale and hardware model and carry their own sync and push switches (assignment reminders, Live Activity, bulletin push, …)
 
 ### 🔄 User Sync (`server/sync/`)
-- **Client-authoritative mirror** — Courses (incl. schedule_json), assignment snapshots, per-field overrides, settings documents (namespace + revision optimistic concurrency), bulletin subscriptions and read-states
+- **Client-authoritative mirror** — Courses (incl. schedule_json), assignment snapshots, per-field overrides, settings documents (namespace + revision optimistic concurrency), bulletin read-states
 - **Incremental sync** — Per-user changelog: strictly increasing revisions (a row lock makes commit order equal revision order); clients pull deltas with `since_revision`, and an expired cursor returns 410 to trigger a full sync
 - **Retention** — Periodic changelog compaction, tracking the compacted revision for the 410 boundary
 
@@ -43,18 +43,20 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Scheduled fetching** — `sync_policies` (admin-tunable) × `sync_jobs` (provisioned at login) × `sync_runs` (audit); the executor claims work under an advisory lock + `FOR UPDATE SKIP LOCKED`, safe across multiple workers
 - **Password iron rule** — An attempt marker is durably committed BEFORE every SSO attempt, so the password is used at most once; auth-class failures are never retried — sync is disabled and a reauth system notification is queued
 - **Assignment mirror** — Fetches Moodle assignments, authoritatively upserts / soft-deletes, and writes the changelog so every device converges
+- **Submission status** — After each assignment sync, asks Moodle whether the assignments due within the window (48 hours by default) are submitted; a newly submitted one has its pending reminder withdrawn and its Live Activity countdown ended
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now` (per-user cooldown; refused while the policy is disabled)
 
 ### 📣 Bulletins (`server/bulletins/`)
 - **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's TLS chain is broken, so we ship a pinned CA bundle (falling back to `verify=False`).
 - **dedup** — `content_hash` deduplication (same source + same hash is treated as a repost and marked `skipped`, no re-notification).
 - **LLM classification** — OpenAI-compatible client (defaults to a host-side [llama-server](https://github.com/ggml-org/llama.cpp)). Returns `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`.
-- **Subscription matching + dispatch (dual-track)** — Anonymous devices match `BulletinSubscription` rules through the existing `bulletin_dispatches` path; logged-in users match `user_bulletin_subscriptions` through `bulletin_user_matches` + `push_jobs`. A physical device that logs in gets a `linked_user_id` marker so the anonymous path skips it — no double pushes.
+- **Subscription matching + dispatch (dual-track)** — Anonymous devices match `BulletinSubscription` rules through the existing `bulletin_dispatches` path; logged-in users match `user_bulletin_subscriptions` (rules belong to each device and sit outside TigerSync) through `bulletin_user_matches` + `push_jobs`, and only devices whose rules matched and that have not turned bulletin push off receive it. A physical device that logs in gets a `linked_user_id` marker so the anonymous path skips it — no double pushes.
 - **State machine** — `pending` → `processed` / `skipped` / `failed`. `failed` rows return to `pending` for another tick as long as attempts < max.
 
 ### 📲 Push (`server/push/`)
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
-- **Reminder sources** — Assignment reminders (24h / 2h before due, per-user notification settings) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead); submitting / dropping / schedule changes cancel stale reminders
+- **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead); submitting / dropping / schedule changes cancel stale reminders
+- **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **APNs** — JWT auth, Push-to-Start, Live Activity update / end
 - **FCM** — Batched fan-out, automatic cleanup on `UNREGISTERED` / `SENDER_ID_MISMATCH`
 - **Auth** — All v3 routes use `Authorization: Bearer <JWT>`; admin endpoints use `X-Shared-Secret`; bulletin reads are public
@@ -160,6 +162,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Stream the last N lines of each container's logs with per-tab search; Android / Apple tabs are substring-filtered slices of the backend log
 - Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
+- Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
 
 Full design: [`docs/portal-design.md`](docs/portal-design.md).
 
@@ -213,13 +216,13 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `POST` | `/v3/devices/register` | Register user device + push token | JWT |
 | `GET` | `/v3/devices` | List devices | JWT |
 | `DELETE` | `/v3/devices/{id}` | Delete a device (revokes sessions, invalidates tokens) | JWT |
-| `PATCH` | `/v3/devices/{id}/preferences` | Update sync preferences (sync_courses / colors / names / assignments) | JWT |
+| `PATCH` | `/v3/devices/{id}/preferences` | Update device preferences (synced sections, reminder / Live Activity sync, bulletin and server push switches, locale) | JWT |
 
 ### Sync
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `POST` | `/v3/sync/initial-upload` | Initial upload of local data (courses / assignments / settings / subscriptions) | JWT |
+| `POST` | `/v3/sync/initial-upload` | Initial upload of local data (courses / assignments / overrides / settings) | JWT |
 | `GET` | `/v3/sync?since_revision=N` | Changelog incremental sync (expired cursor → 410) | JWT |
 | `GET` | `/v3/sync/full` | Full snapshot | JWT |
 | `GET` | `/v3/sync/revision` | Current revision number | JWT |
@@ -256,9 +259,9 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/v3/bulletins` | Bulletin list (cursor pagination) | JWT |
 | `GET` | `/v3/bulletins/{id}` | Bulletin detail | JWT |
 | `GET` | `/v3/bulletins/taxonomy` | org / tag label mapping | JWT |
-| `GET` | `/v3/bulletin-subscriptions` | List subscription rules | JWT |
-| `PUT` | `/v3/bulletin-subscriptions` | Bulk-put subscription rules | JWT |
-| `POST` | `/v3/bulletin-subscriptions` | Create subscription rule | JWT |
+| `GET` | `/v3/bulletin-subscriptions` | List this device's subscription rules | JWT |
+| `PUT` | `/v3/bulletin-subscriptions` | Bulk-put this device's subscription rules | JWT |
+| `POST` | `/v3/bulletin-subscriptions` | Create a subscription rule for this device | JWT |
 | `PATCH` | `/v3/bulletin-subscriptions/{id}` | Update subscription rule (base_revision) | JWT |
 | `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | Delete subscription rule(s) | JWT |
 | `GET` | `/v3/bulletin-states` | Bulletin read / starred / hidden state | JWT |

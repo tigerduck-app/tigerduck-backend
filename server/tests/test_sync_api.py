@@ -174,4 +174,6 @@ async def test_full_sync_snapshot(client) -> None:
     assert body["settings_documents"][0]["document"] == {"theme": "dark"}
     # Empty sections are present (client treats full sync as authoritative).
     assert body["course_overrides"] == []
-    assert body["bulletin_subscriptions"] == []
+    # Bulletins are not part of TigerSync: subscriptions are per device.
+    assert "bulletin_subscriptions" not in body
+    assert "bulletin_states" not in body

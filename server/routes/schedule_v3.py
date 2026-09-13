@@ -13,16 +13,12 @@ from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob, PushJobStatus
 from server.auth.schemas import ScheduleSyncV3Request, ScheduleSyncV3Response
 from server.db import SessionDep
+from server.push.dedupe import SCHEDULE_CHANNEL
+from server.push.dedupe import activity_id as _activity_id
 from server.push.dedupe import schedule_key, schedule_prefix
 
 router = APIRouter(prefix="/schedule", tags=["schedule"])
 logger = structlog.get_logger(__name__)
-
-CHANNEL = "schedule"
-
-
-def _activity_id(source_id: str, scenario: str) -> str:
-    return f"{scenario}::{source_id}"
 
 
 @router.post("/sync", response_model=ScheduleSyncV3Response)
@@ -56,7 +52,7 @@ async def sync_schedule(
                 select(PushJob)
                 .where(
                     PushJob.user_id == auth.user_id,
-                    PushJob.channel == CHANNEL,
+                    PushJob.channel == SCHEDULE_CHANNEL,
                     PushJob.status == PushJobStatus.pending.value,
                     PushJob.dedupe_key.startswith(
                         schedule_prefix(auth.device_id), autoescape=True
@@ -92,7 +88,7 @@ async def sync_schedule(
                 "user_id": auth.user_id,
                 "device_id": auth.device_id,
                 "dedupe_key": key,
-                "channel": CHANNEL,
+                "channel": SCHEDULE_CHANNEL,
                 "scenario": event.scenario.value,
                 "fire_at": event.fire_at,
                 # The snapshot is spread first: the routing keys are ours,
@@ -141,7 +137,7 @@ async def cancel_schedule(
                 select(PushJob)
                 .where(
                     PushJob.user_id == auth.user_id,
-                    PushJob.channel == CHANNEL,
+                    PushJob.channel == SCHEDULE_CHANNEL,
                     PushJob.dedupe_key.startswith(prefix, autoescape=True),
                     PushJob.status == PushJobStatus.pending.value,
                 )

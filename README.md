@@ -19,7 +19,7 @@
 TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app)（iOS / Android）的後端服務，跑在 `api.tigerduck.app`。負責五件事：
 
 - 🔐 **帳號與認證（v3）** — NTUST SSO 登入驗證、JWT access + refresh rotation（盜用偵測滅族）、AES-256-GCM 憑證加密儲存、使用者裝置與 push token 管理
-- 🔄 **使用者資料同步（v3）** — 課表 / 作業 / 設定 / 公告訂閱的多裝置同步：client 初始上傳 + per-user changelog 增量下行，伺服器端再定期代抓 Moodle 作業權威更新
+- 🔄 **使用者資料同步（v3）** — 課表 / 作業 / 設定的多裝置同步：client 初始上傳 + per-user changelog 增量下行，伺服器端再定期代抓 Moodle 作業權威更新
 - 📣 **公告管線** — 抓取 NTUST 各處室公告 → 去重 → LLM 分類（canonical_org / content_tags / importance）→ 訂閱比對 → 推播（匿名裝置與登入使用者雙軌）
 - 📲 **推播服務** — 登入使用者走 `push_jobs` → `push_deliveries` 兩階段投遞（作業 / 課程提醒、公告、系統通知）；APNs Push-to-Start（iOS Live Activity）、FCM fan-out（Android）、bad-token 分類與清理
 - ⏰ **排程同步** — server-side academic sync、推播 pipeline、提醒掃描、Live Activity token、retention 清理，全部走 APScheduler 單一 worker 在 FastAPI lifespan 內
@@ -32,10 +32,10 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **登入** — App 端完成 NTUST SSO 後，後端用 Moodle token 驗證身分（不代打 SSO，避免觸發學校 IP rate limit）
 - **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session，60 秒內的單次 grace 重試容忍掉線 client
 - **憑證保管** — NTUST 密碼以 AES-256-GCM + per-row AAD 加密存放（支援金鑰輪替），僅供伺服器端 Moodle token 刷新使用
-- **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token
+- **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）
 
 ### 🔄 使用者同步（`server/sync/`）
-- **Client-authoritative 鏡像** — 課表（含 schedule_json）、作業快照、per-field overrides、設定文件（namespace + revision 樂觀並發）、公告訂閱與已讀狀態
+- **Client-authoritative 鏡像** — 課表（含 schedule_json）、作業快照、per-field overrides、設定文件（namespace + revision 樂觀並發）、公告已讀狀態
 - **增量同步** — per-user changelog：revision 嚴格遞增（row lock 保證 commit 順序 = revision 順序），client 用 `since_revision` 拉增量；過舊回 410 觸發 full sync
 - **Retention** — changelog 定期壓縮清理，記錄 compacted revision 供 410 判斷
 
@@ -43,18 +43,20 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **排程代抓** — `sync_policies`（admin 可調）× `sync_jobs`（登入時 provision）× `sync_runs`（審計）；executor 用 advisory lock + `FOR UPDATE SKIP LOCKED` 認領，多 worker 安全
 - **密碼鐵律** — 每次 SSO 嘗試前先 durably commit attempt marker，密碼最多用一次；認證類失敗絕不重試，直接停用同步並排一筆 reauth 系統通知
 - **作業鏡像** — 抓 Moodle 作業權威 upsert / 軟刪除，寫入 changelog 讓所有裝置同步
+- **繳交狀態** — 每次作業同步後，向 Moodle 查詢時間窗內（預設 48 小時）到期作業的繳交狀態；新繳交的作業撤回待送提醒、結束倒數中的即時動態
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now`（per-user cooldown，policy 停用時拒絕）
 
 ### 📣 公告（`server/bulletins/`）
 - **scraper** — 從 NTUST 公告列表抓 HTML、解 metadata；TLS chain 是壞的所以走自簽 CA bundle 或 `verify=False`
 - **dedup** — `content_hash` 去重（同 source、同 hash 視為 repost，標 `skipped` 不重發推播）
 - **LLM 分類** — OpenAI-compatible API（預設指向 host 上的 [llama-server](https://github.com/ggml-org/llama.cpp)），輸出 `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`
-- **訂閱比對 + dispatch（雙軌）** — 匿名裝置比對 `BulletinSubscription` 走既有 `bulletin_dispatches`；登入使用者比對 `user_bulletin_subscriptions` 走 `bulletin_user_matches` + `push_jobs`。同一實體裝置登入後標記 `linked_user_id`，匿名管道跳過避免重複推播
+- **訂閱比對 + dispatch（雙軌）** — 匿名裝置比對 `BulletinSubscription` 走既有 `bulletin_dispatches`；登入使用者比對 `user_bulletin_subscriptions`（規則屬於各裝置，不在 TigerSync 同步範圍）走 `bulletin_user_matches` + `push_jobs`，只推給規則命中、且沒關閉公告推播的裝置。同一實體裝置登入後標記 `linked_user_id`，匿名管道跳過避免重複推播
 - **狀態機** — `pending` → `processed` / `skipped` / `failed`；`failed` 也會在 attempts 未滿前回到 `pending` 重試
 
 ### 📲 推播（`server/push/`）
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
-- **提醒來源** — 作業提醒（due 前 24h / 2h，依使用者 notification 設定）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
+- **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
+- **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token
 - **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Shared-Secret`；公告讀取開放
@@ -160,6 +162,7 @@ docker compose exec backend curl -sS localhost:40000/health
 - 看每個 container 的 log（5 個 tab：Backend / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Android / Apple 是針對 backend log 做關鍵字過濾
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
+- 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
 
 詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
 
@@ -213,13 +216,13 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `POST` | `/v3/devices/register` | 使用者裝置 + push token 註冊 | JWT |
 | `GET` | `/v3/devices` | 裝置列表 | JWT |
 | `DELETE` | `/v3/devices/{id}` | 刪除裝置（連動撤銷 session、失效 token） | JWT |
-| `PATCH` | `/v3/devices/{id}/preferences` | 更新同步偏好（sync_courses / colors / names / assignments） | JWT |
+| `PATCH` | `/v3/devices/{id}/preferences` | 更新裝置偏好（同步項目、作業提醒 / 即時動態同步、公告與伺服器推播開關、語系） | JWT |
 
 ### 同步
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `POST` | `/v3/sync/initial-upload` | 初始上傳本機資料（課表 / 作業 / 設定 / 訂閱） | JWT |
+| `POST` | `/v3/sync/initial-upload` | 初始上傳本機資料（課表 / 作業 / 覆寫 / 設定） | JWT |
 | `GET` | `/v3/sync?since_revision=N` | changelog 增量同步（過舊回 410） | JWT |
 | `GET` | `/v3/sync/full` | 全量快照 | JWT |
 | `GET` | `/v3/sync/revision` | 目前 revision 數字 | JWT |
@@ -256,9 +259,9 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v3/bulletins` | 公告列表（cursor 分頁） | JWT |
 | `GET` | `/v3/bulletins/{id}` | 公告詳情 | JWT |
 | `GET` | `/v3/bulletins/taxonomy` | org / tag 標籤對照 | JWT |
-| `GET` | `/v3/bulletin-subscriptions` | 訂閱規則列表 | JWT |
-| `PUT` | `/v3/bulletin-subscriptions` | 批次覆寫訂閱規則 | JWT |
-| `POST` | `/v3/bulletin-subscriptions` | 新增訂閱規則 | JWT |
+| `GET` | `/v3/bulletin-subscriptions` | 此裝置的訂閱規則列表 | JWT |
+| `PUT` | `/v3/bulletin-subscriptions` | 批次覆寫此裝置的訂閱規則 | JWT |
+| `POST` | `/v3/bulletin-subscriptions` | 新增此裝置的訂閱規則 | JWT |
 | `PATCH` | `/v3/bulletin-subscriptions/{id}` | 更新訂閱規則（base_revision） | JWT |
 | `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | 刪除訂閱規則（可帶 id 或批次） | JWT |
 | `GET` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |

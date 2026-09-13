@@ -6,7 +6,7 @@ Split from one 724-line module. Each submodule owns a router prefixed
 
 from fastapi import APIRouter
 
-from . import inspection, jobs, logs, push, status
+from . import inspection, jobs, logs, manual_tests, push, status
 
 router = APIRouter()
 router.include_router(status.router)
@@ -14,3 +14,4 @@ router.include_router(jobs.router)
 router.include_router(inspection.router)
 router.include_router(logs.router)
 router.include_router(push.router)
+router.include_router(manual_tests.router)

@@ -85,8 +85,8 @@ async def test_put_course_override_merges_per_field(client) -> None:
     course_id = await seed_course(client, login["user"]["id"])
 
     # Timestamps deliberately in the PAST relative to server time — future
-    # timestamps get clamped to arrival time (the review-1.9 behavior),
-    # which would turn this into a last-write-wins test instead.
+    # timestamps get clamped to arrival time, which would turn this into a
+    # last-write-wins test instead.
     first = await client.put(
         f"/v3/courses/{course_id}/override",
         headers=bearer(login),

@@ -18,8 +18,6 @@ from server.sync.models import (
     ChangeEntityType,
     UserAssignment,
     UserAssignmentOverride,
-    UserBulletinState,
-    UserBulletinSubscription,
     UserChangeLog,
     UserCourse,
     UserCourseOverride,
@@ -166,15 +164,6 @@ async def _read_full_snapshot(session, user_id, device_id):
             UserSettingsDocument.deleted_at.is_(None),
         )
     )
-    subscriptions = await rows(
-        select(UserBulletinSubscription).where(
-            UserBulletinSubscription.user_id == user_id,
-            UserBulletinSubscription.deleted_at.is_(None),
-        )
-    )
-    bulletin_states = await rows(
-        select(UserBulletinState).where(UserBulletinState.user_id == user_id)
-    )
     # Holidays themselves are school-wide and arrive over the public
     # calendar feed; only the user's "notify me anyway" exceptions are
     # user-scoped, so only those belong in this snapshot.
@@ -244,10 +233,6 @@ async def _read_full_snapshot(session, user_id, device_id):
         "settings_documents": [
             serializers.settings_document_to_dict(d) for d in settings_docs
         ],
-        "bulletin_subscriptions": [
-            serializers.subscription_to_dict(s) for s in subscriptions
-        ],
-        "bulletin_states": [
-            serializers.bulletin_state_to_dict(s) for s in bulletin_states
-        ],
+        # No bulletin sections: subscriptions belong to one device and read
+        # state is never shared, so neither is part of TigerSync.
     }

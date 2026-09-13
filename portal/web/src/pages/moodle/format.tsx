@@ -24,6 +24,18 @@ export function relativeTime(iso: string | null): string {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
+/** "in 3h 20m" for a time ahead, "due 5m ago" for one already passed. */
+export function timeUntil(iso: string | null): string {
+  if (!iso) return "—";
+  const diff = new Date(iso).getTime() - Date.now();
+  const mins = Math.floor(Math.abs(diff) / 60_000);
+  const text =
+    mins < 60 ? `${mins}m`
+    : mins < 1440 ? `${Math.floor(mins / 60)}h ${mins % 60}m`
+    : `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`;
+  return diff < 0 ? `due ${text} ago` : `in ${text}`;
+}
+
 export function statusBadge(s: string) {
   switch (s) {
     case "pending": return <Badge variant="default">pending</Badge>;

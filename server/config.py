@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     sync_maintenance_window: str = ""
     # Cap on `status='running'` rows ACROSS all workers — counted before
     # claiming so multiple instances can't collectively hammer the school
-    # APIs from our single egress IP (security review suggestion).
+    # APIs from our single egress IP.
     sync_job_global_concurrency: int = 5
     sync_job_stale_lock_minutes: int = 10
     # Retriable-failure backoff: base * 2^(attempts-1), capped.
@@ -142,6 +142,14 @@ class Settings(BaseSettings):
     push_retry_round_delay_seconds: int = 60
     push_job_retention_days: int = 7
     push_job_retention_interval_hours: int = 24
+
+    # --- Submission status probe (v2.1.0) ---
+    # Only assignments due inside this window get probed. The Moodle API is
+    # one request per assignment, so a full sweep would multiply load by the
+    # user's whole assignment count on every sync tick; only assignments
+    # about to enter a reminder window need an accurate answer.
+    submission_status_window_hours: int = 48
+    submission_status_max_concurrency: int = 4
 
     # --- Assignment reminders (Phase 4a) ---
     assignment_reminder_scan_interval_seconds: int = 300
