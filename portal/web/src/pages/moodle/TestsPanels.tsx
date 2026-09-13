@@ -145,7 +145,7 @@ export function LiveActivityTest({ studentId, device }: { studentId: string; dev
     <div className="space-y-3 py-2">
       <TestCard
         title="Live Activity"
-        description="Starts a Live Activity on this device through the server's push-to-start path. The phone then registers it, the server files its end for when the countdown runs out, and that end push takes it down. Its end shows under Queued Jobs once the phone has registered it, where End now dismisses it early. The fake clock has to be off on the phone — it shifts every date this sends — and Live Updates and TigerSync on, or the phone ends it on arrival."
+        description="Starts a Live Activity on this device right away, through the server's push-to-start path, and keeps it up for the minutes set below: its countdown runs to that moment, and the server's end push takes it down then. The end shows under Queued Jobs once the phone has registered the activity, where End now dismisses it early. The fake clock has to be off on the phone — it shifts every date this sends — and Live Updates and TigerSync on, or the phone ends it on arrival."
       >
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1">
@@ -162,7 +162,7 @@ export function LiveActivityTest({ studentId, device }: { studentId: string; dev
             </Select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="la-test-minutes" className="text-xs">Countdown (minutes)</Label>
+            <Label htmlFor="la-test-minutes" className="text-xs">Stays up for (minutes)</Label>
             <Input
               id="la-test-minutes"
               type="number"
@@ -226,7 +226,7 @@ export function LiveActivityTest({ studentId, device }: { studentId: string; dev
             }
             setOutcome({
               ok: true,
-              text: `Started as job #${r.data.push_job_id} (${r.data.activity_id}); its countdown ends ${fmt(String(r.data.ends_at))}.`,
+              text: `Started as job #${r.data.push_job_id} (${r.data.activity_id}); it stays up until ${fmt(String(r.data.ends_at))}.`,
             });
           }}
         >
