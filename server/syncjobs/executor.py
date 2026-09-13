@@ -17,6 +17,10 @@ Failure taxonomy → outcome:
 * `MoodleUnreachable`/`SsoUnavailable`/unexpected
                                  → retriable, backoff, last_error
                                    'sync_failed:<detail>'.
+* `SubmissionStatusDbError`      → retriable, backoff, last_error
+                                   'sync_failed:submission_status'; the
+                                   assignment list sync it followed has
+                                   already committed.
 Retriable failures exceeding max_attempts land in status 'failed' until
 pull-to-refresh or re-login revives them.
 """
@@ -74,6 +78,13 @@ logger = structlog.get_logger(__name__)
 ERROR_CREDENTIAL_INVALID = "credential_invalid"
 ERROR_SCHOOL_RATE_LIMITED = "school_rate_limited"
 ERROR_SYNC_FAILED = "sync_failed"
+
+
+class SubmissionStatusDbError(Exception):
+    """A database error while refreshing submission status, raised once the
+    assignment list sync has committed. It fails the run, so the job backs
+    off and the probe is retried within minutes rather than at the next
+    policy interval."""
 
 _DEFAULT_INTERVAL_SECONDS = 28800
 _DEFAULT_PRIORITY = 100
@@ -380,6 +391,12 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             error=f"{ERROR_SYNC_FAILED}:{str(exc)[:120]}",
             is_token_invalid=False,
         )
+    except SubmissionStatusDbError:
+        # Logged where it happened, under its own event, so not as a crash.
+        await _record_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=f"{ERROR_SYNC_FAILED}:submission_status",
+        )
     except Exception as exc:  # unexpected — never kill the tick loop
         logger.exception("syncjobs.run_crashed", job_id=job_id)
         await _record_failure(
@@ -509,8 +526,11 @@ async def _refresh_submission_status(
       (`select_assignment_ids`, `apply_submission_status`,
       `cancel_for_submitted`) is not a probe failure and is never logged as
       one. Its own transaction rolls back, and it is logged under a separate
-      event so it cannot be mistaken for routine Moodle noise; the next sync
-      re-probes.
+      event so it cannot be mistaken for routine Moodle noise. It then fails
+      the run as `SubmissionStatusDbError`: recorded as a success, the next
+      probe would be a whole policy interval away, and until then an
+      assignment already submitted keeps its reminder queued and its Live
+      Activity counting down.
     """
     settings = worker.settings
     try:
@@ -560,8 +580,9 @@ async def _refresh_submission_status(
                 )
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
-    except Exception:
+    except Exception as exc:
         logger.error("syncjobs.submissions.refresh_db_error", exc_info=True)
+        raise SubmissionStatusDbError from exc
 
 
 async def _handle_moodle_failure(

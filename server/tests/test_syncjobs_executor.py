@@ -562,13 +562,15 @@ async def test_submission_probe_rate_limit_reaches_backoff(
     assert run.status == "failed"
 
 
-async def test_submission_probe_db_error_does_not_roll_back_assignment_sync(
+async def test_submission_probe_db_error_keeps_assignment_sync_and_backs_off(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
     """A genuine database error while refreshing submission status (not a
     Moodle call) must not undo the assignment list sync, which has already
-    committed by then, must not fail the run, and must not be recorded as a
-    probe failure."""
+    committed by then -- but it must fail the run and back the job off. A
+    run recorded as a success would put the next probe a whole policy
+    interval away, and until then an assignment already submitted on
+    Moodle keeps its reminder queued and its Live Activity counting down."""
     user, _, job = await _setup_user_job(db_session)
 
     async def poisoning_select(session, *, user_id, now, window_hours):
@@ -587,12 +589,16 @@ async def test_submission_probe_db_error_does_not_roll_back_assignment_sync(
     )
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
 
+    before = datetime.now(UTC)
     await run_sync_tick(worker)
 
     await db_session.refresh(job)
     assert job.status == "pending"
-    assert job.last_success_at is not None
-    assert job.last_error is None
+    assert job.last_error == "sync_failed:submission_status"
+    # Retried on the failure backoff, not at the policy's next interval.
+    assert job.run_after <= before + timedelta(
+        seconds=worker.settings.sync_job_backoff_cap_seconds + 60
+    )
 
     rows = (
         await db_session.execute(
@@ -606,7 +612,7 @@ async def test_submission_probe_db_error_does_not_roll_back_assignment_sync(
             select(SyncRun).where(SyncRun.sync_job_id == job.id)
         )
     ).scalar_one()
-    assert run.status == "succeeded"
+    assert run.status == "failed"
 
 
 async def test_submission_status_settings_are_threaded_through(
