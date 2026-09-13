@@ -99,13 +99,25 @@ def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
 
 
-async def _enqueue_sync_trigger(session: AsyncSession, user_id) -> None:
+async def _enqueue_sync_trigger(
+    session: AsyncSession, user_id, *, source: str | None = None
+) -> None:
+    """Tell the user's devices to sync, at most once per five minutes.
+
+    `source` gives a writer that commits after the list sync a key of its
+    own: the list sync's trigger for the same five minutes may already have
+    gone out, and a device that synced on it did so before this writer's
+    change existed.
+    """
     now = datetime.now(UTC)
+    dedupe_key = f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}"
+    if source is not None:
+        dedupe_key = f"{dedupe_key}:{source}"
     stmt = (
         pg_insert(PushJob)
         .values(
             user_id=user_id,
-            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}",
+            dedupe_key=dedupe_key,
             channel="system",
             scenario="sync_trigger",
             fire_at=now,
@@ -507,6 +519,9 @@ async def _refresh_submission_status(
     (`cancel_for_submitted`) in the same transaction as the status write:
     "marked submitted, but the reminder was never cancelled" is the broken
     state this probe exists to prevent, so the two stand or fall together.
+    The same transaction enqueues a sync trigger of its own, so the user's
+    other devices fetch the flip (`apply_submission_status` logs it to the
+    changelog) instead of waiting for their next unrelated sync.
 
     Failures are handled by kind:
 
@@ -578,6 +593,7 @@ async def _refresh_submission_status(
                     moodle_assignment_ids=changed_ids,
                     now=now,
                 )
+                await _enqueue_sync_trigger(session, user_id, source="submissions")
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
     except Exception as exc:

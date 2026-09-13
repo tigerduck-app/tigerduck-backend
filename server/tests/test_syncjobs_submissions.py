@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from server.auth.models import User
+from server.sync.models import UserChangeLog, UserSyncState
 from server.syncjobs.moodle_client import FetchedSubmission
 from server.syncjobs.submissions import (
     apply_submission_status,
@@ -330,3 +332,75 @@ async def test_a_submission_without_a_timestamp_is_stamped_with_now(
     assert changed == {9}
     assert row.provider_is_submitted is True
     assert row.provider_submitted_at == NOW
+
+
+async def _changelog(db_session, user_id):
+    return (
+        await db_session.execute(
+            select(UserChangeLog)
+            .where(UserChangeLog.user_id == user_id)
+            .order_by(UserChangeLog.revision)
+        )
+    ).scalars().all()
+
+
+async def test_apply_logs_each_flip_for_incremental_sync(db_session, make_assignment):
+    """Other devices find a flip through the changelog: without an entry
+    the revision stays put and a delta sync reports nothing."""
+    flipped = await make_assignment(
+        moodle_assignment_id=1, due_at=NOW + timedelta(hours=10)
+    )
+    await make_assignment(moodle_assignment_id=2, due_at=NOW + timedelta(hours=10))
+    await db_session.flush()
+
+    await apply_submission_status(
+        db_session,
+        user_id=flipped.user_id,
+        fetched={
+            1: FetchedSubmission(
+                moodle_assignment_id=1, is_submitted=True, submitted_at=NOW
+            ),
+            2: FetchedSubmission(
+                moodle_assignment_id=2, is_submitted=False, submitted_at=None
+            ),
+        },
+        now=NOW,
+    )
+
+    entries = await _changelog(db_session, flipped.user_id)
+    assert [(e.entity_type, e.entity_id, e.operation, e.payload) for e in entries] == [
+        (
+            "assignment",
+            str(flipped.id),
+            "upsert",
+            {"fields": ["provider_is_submitted", "provider_submitted_at"]},
+        )
+    ]
+    state = await db_session.get(UserSyncState, flipped.user_id)
+    assert state.current_revision == entries[0].revision
+
+
+async def test_apply_logs_nothing_when_nothing_flips(db_session, make_assignment):
+    already = await make_assignment(
+        moodle_assignment_id=1,
+        due_at=NOW + timedelta(hours=10),
+        provider_is_submitted=True,
+    )
+    await make_assignment(moodle_assignment_id=2, due_at=NOW + timedelta(hours=10))
+    await db_session.flush()
+
+    await apply_submission_status(
+        db_session,
+        user_id=already.user_id,
+        fetched={
+            1: FetchedSubmission(
+                moodle_assignment_id=1, is_submitted=True, submitted_at=NOW
+            ),
+            2: FetchedSubmission(
+                moodle_assignment_id=2, is_submitted=False, submitted_at=None
+            ),
+        },
+        now=NOW,
+    )
+
+    assert await _changelog(db_session, already.user_id) == []

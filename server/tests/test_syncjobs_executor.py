@@ -970,3 +970,40 @@ async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
     assert row.provider_submitted_at == submitted_at
     await db_session.refresh(reminder)
     assert reminder.status == "cancelled"
+
+
+async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The list sync's trigger can go out before the probe commits, so the
+    probe's flip gets a trigger of its own rather than sharing that one's
+    dedupe key and being dropped as a duplicate of it."""
+    user, _, _ = await _setup_user_job(db_session)
+    due_at = datetime.now(UTC) + timedelta(hours=10)
+
+    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+        return {
+            aid: FetchedSubmission(
+                moodle_assignment_id=aid, is_submitted=True, submitted_at=None
+            )
+            for aid in assignment_ids
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", submitted_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(
+                PushJob.user_id == user.id, PushJob.scenario == "sync_trigger"
+            )
+        )
+    ).scalars().all()
+    # One from the list sync (it inserted the assignment), one from the probe.
+    assert len(keys) == 2
+    assert [k for k in keys if k.endswith(":submissions")] != []

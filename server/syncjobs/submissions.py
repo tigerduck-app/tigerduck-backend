@@ -19,10 +19,15 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.sync.models import UserAssignment
+from server.sync.changelog import append_change, lock_sync_state
+from server.sync.models import ChangeEntityType, UserAssignment
 from server.syncjobs.moodle_client import FetchedSubmission
 
 logger = structlog.get_logger(__name__)
+
+# What a flip changes, named in its changelog entry the way the list sync
+# names the provider fields it changed.
+_SUBMISSION_FIELDS = ("provider_is_submitted", "provider_submitted_at")
 
 
 async def select_assignment_ids(
@@ -72,6 +77,11 @@ async def apply_submission_status(
     written: the row already says that, and a probe that came back
     negative because of a transient Moodle state must not overwrite a
     submission the client reported.
+
+    Each flip is logged to the changelog as an `upsert` naming the two
+    fields, under the user's sync-state lock. Without an entry the user's
+    revision stays put, and a device syncing incrementally would show the
+    assignment unsubmitted until some unrelated change or a full snapshot.
     """
     if not fetched:
         return set()
@@ -82,6 +92,9 @@ async def apply_submission_status(
     if not submitted_ids:
         return set()
 
+    # Taken before the rows are read, as the list sync does, so a client
+    # write to one of them cannot land between this read and the flip.
+    locked_state = await lock_sync_state(session, user_id)
     rows = (
         await session.execute(
             select(UserAssignment).where(
@@ -99,6 +112,16 @@ async def apply_submission_status(
         row.provider_is_submitted = True
         row.provider_submitted_at = item.submitted_at or now
         changed.add(row.moodle_assignment_id)
+        await append_change(
+            session,
+            user_id=user_id,
+            entity_type=ChangeEntityType.assignment.value,
+            entity_id=str(row.id),
+            operation="upsert",
+            payload={"fields": list(_SUBMISSION_FIELDS)},
+            device_id=None,
+            locked_state=locked_state,
+        )
 
     if changed:
         # `Session.refresh()` expires an instance's attributes *before* it
