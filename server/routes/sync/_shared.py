@@ -10,7 +10,6 @@ import structlog
 from fastapi import APIRouter, BackgroundTasks, Query, Request
 from sqlalchemy import delete, func, select, text, update
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
-from server.push.dedupe import activity_end_prefix
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
 
@@ -30,29 +29,24 @@ async def _trigger_push_tick(request: Request) -> None:
         from server.push.pipeline import run_push_tick
         await run_push_tick(worker)
 async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> None:
-    """Cancel pending *data-freshness* pushes for *device_id*.
+    """Skip this device's queued deliveries of account-wide pushes.
 
-    When the device just did a full sync it already has fresh data — no
-    need for sync_trigger, schedule, or reminder pushes.
+    A device that has just full-synced holds fresh data, so its copy of an
+    account-wide push -- a job with no `device_id`, such as a sync trigger
+    -- has nothing left to ask for. Only this device's delivery rows are
+    skipped; every other device still receives the push.
 
-    Two passes:
-    1. Device-targeted jobs (schedule pushes with job.device_id set):
-       cancel the entire job since it only targets this device.
-    2. User-scoped jobs (sync_trigger etc. with device_id NULL):
-       skip only this device's materialized deliveries so other devices
-       still receive the push.
-
-    Live Activity end jobs (`la_end:{device_id}:`, filed by
-    `/live-activities/register`) are exempt. Nothing about this pass
-    applies to them: they exist to dismiss an activity that is on screen
-    right now, and a device holding fresh data is not a reason to leave
-    the Dynamic Island up. Sweeping them cancelled every end within
-    seconds of registration — the app full-syncs on each foreground —
-    so the end push never fired and the island sat on a dead countdown
-    until iOS's own multi-hour cleanup. `/schedule/sync` carries the
-    same exemption for the same reason (see `schedule_v3.sync_schedule`).
+    Jobs addressed to this one device are left alone. Each is a Live
+    Activity start (`/schedule/sync`), a Live Activity end
+    (`/live-activities/register`, `submission_cancel`) or an operator's
+    push, and a full sync stands in for none of them. This used to cancel
+    them: ends first, so an activity was never dismissed, and then starts,
+    so a refresh whose full sync finished after its schedule sync -- or an
+    app closed mid-refresh -- left no start job, and the next class began
+    with no Live Activity. A start that is no longer wanted is replaced by
+    the next `/schedule/sync`, and the pipeline drops one whose activity
+    the app has already started itself.
     """
-    now = datetime.now(UTC)
     device_row = (await session.execute(
         select(UserDevice.id).where(
             UserDevice.id == device_id,
@@ -62,20 +56,6 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
     )).scalar_one_or_none()
     if device_row is None:
         return
-
-    cancelled_jobs = await session.execute(
-        update(PushJob)
-        .where(
-            PushJob.user_id == user_id,
-            PushJob.device_id == device_row,
-            PushJob.status == PushJobStatus.pending.value,
-            ~PushJob.dedupe_key.startswith(
-                activity_end_prefix(device_row), autoescape=True
-            ),
-        )
-        .values(status=PushJobStatus.cancelled.value, cancelled_at=now)
-    )
-    job_count = cancelled_jobs.rowcount or 0
 
     pending_job_ids = (await session.execute(
         select(PushJob.id).where(
@@ -100,12 +80,11 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
         )
         delivery_count = result.rowcount or 0
 
-    if job_count or delivery_count:
+    if delivery_count:
         logger.info(
             "sync.cancelled_pushes_for_device",
             user_id=str(user_id),
             device_id=str(device_id),
-            jobs_cancelled=job_count,
             deliveries_skipped=delivery_count,
         )
 async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS) -> None:

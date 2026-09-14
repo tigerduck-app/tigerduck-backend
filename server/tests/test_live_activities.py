@@ -8,12 +8,19 @@ an "end" PushJob at countdown_target.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 
-from server.auth.models import DevicePushToken, PushJob, PushJobStatus
+from server.auth.models import (
+    DevicePushToken,
+    PushDelivery,
+    PushDeliveryStatus,
+    PushJob,
+    PushJobStatus,
+)
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 
@@ -178,24 +185,27 @@ async def test_register_refuses_an_activity_id_that_is_not_the_composed_one(clie
     assert response.json()["detail"] == "activity_id_mismatch"
 
 
-async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
-    """A full sync cancels this device's pending data-freshness pushes, but
-    must leave the Live Activity end job alone.
+async def test_full_sync_leaves_the_devices_own_jobs_alone(client) -> None:
+    """A full sync must not cancel a job addressed to this one device.
 
-    The app full-syncs on every foreground, so a sweep that took the end
-    job with it cancelled every end within seconds of registration: the
-    end push never fired and the Dynamic Island sat on an expired
-    countdown showing "—" until iOS's own multi-hour cleanup. Observed in
-    production as six consecutive end jobs, all cancelled, none sent.
+    Every such job is a Live Activity start or end, or an operator's push,
+    and none of them goes stale because the device now holds fresh data.
+    The sweep used to cancel them all. Ends went first: the app full-syncs
+    on every foreground, so the Dynamic Island sat on an expired countdown
+    until iOS's own cleanup (six consecutive end jobs, all cancelled, none
+    sent). Starts went next: a refresh whose full sync finished after its
+    schedule sync, or an app closed mid-refresh, left the device with no
+    start job at all, and the next class began with no Live Activity.
 
-    The start job in the same sweep is the control: it still gets
-    cancelled, so this asserts the exemption is narrow rather than a
-    disabled sweep.
+    The control is what the sweep is still for: this device's queued copy
+    of an account-wide sync trigger is skipped, since the sync it asks for
+    has just happened.
     """
     login = await _login(client)
+    device_id = uuid.UUID(login["device_id"])
     now = datetime.now(timezone.utc)
 
-    # A pending start job for this device — the thing the sweep is for.
+    # A pending start job for this device.
     schedule = await client.post(
         "/v3/schedule/sync",
         headers=_bearer(login),
@@ -223,14 +233,48 @@ async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
     end_job_id = register.json()["end_job_id"]
     assert end_job_id is not None
 
+    # An operator's push to this device, and this device's queued copy of
+    # an account-wide sync trigger. Both due later, so no pipeline tick
+    # touches them first.
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        user_id = (await s.get(PushJob, end_job_id)).user_id
+        custom = PushJob(
+            user_id=user_id,
+            device_id=device_id,
+            dedupe_key=f"custom:sweep-test:{device_id}",
+            channel="custom",
+            scenario="custom",
+            fire_at=now + timedelta(minutes=5),
+            payload={"title": "Operator", "body": "hello"},
+        )
+        trigger = PushJob(
+            user_id=user_id,
+            dedupe_key="sync_trigger:sweep-test",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now + timedelta(minutes=5),
+            payload={"kind": "sync_trigger", "source_device_id": None},
+        )
+        s.add_all([custom, trigger])
+        await s.flush()
+        delivery = PushDelivery(
+            push_job_id=trigger.id,
+            user_id=user_id,
+            device_id=device_id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="h" * 64,
+        )
+        s.add(delivery)
+        await s.commit()
+        custom_id, delivery_id = custom.id, delivery.id
+
     full = await client.get("/v3/sync/full", headers=_bearer(login))
     assert full.status_code == 200, full.text
 
-    factory = build_session_factory(client.app.state.engine)
     async with factory() as s:
-        end_job = (
-            await s.execute(select(PushJob).where(PushJob.id == end_job_id))
-        ).scalar_one()
+        end_job = await s.get(PushJob, end_job_id)
         assert end_job.status == PushJobStatus.pending.value
         assert end_job.cancelled_at is None
         assert end_job.fire_at == target
@@ -244,8 +288,14 @@ async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
         ).scalars().all()
         assert start_jobs, "expected the schedule sync to have filed a start job"
         assert all(
-            j.status == PushJobStatus.cancelled.value for j in start_jobs
+            j.status == PushJobStatus.pending.value for j in start_jobs
         ), [j.status for j in start_jobs]
+
+        assert (await s.get(PushJob, custom_id)).status == PushJobStatus.pending.value
+
+        skipped = await s.get(PushDelivery, delivery_id)
+        assert skipped.status == PushDeliveryStatus.skipped.value
+        assert skipped.failure_code == "device_already_synced"
 
 
 @pytest.mark.parametrize(
