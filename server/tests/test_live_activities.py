@@ -7,12 +7,13 @@ an "end" PushJob at countdown_target.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.auth.models import (
     DevicePushToken,
@@ -352,4 +353,90 @@ async def test_an_end_job_already_sent_does_not_block_the_next_one(
         assert end_job.dedupe_key == end_key
         earlier = await s.get(PushJob, earlier_id)
         assert earlier.status == finished.value
+        assert earlier.dedupe_key != end_key
+
+
+async def _wait_for_a_lock_waiter(engine) -> None:
+    """Return once some connection is blocked on a row lock.
+
+    Asked on a fresh connection each time: inside one transaction
+    `pg_stat_activity` answers from a snapshot taken at its first read.
+    """
+    for _ in range(200):
+        async with engine.connect() as conn:
+            waiting = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity"
+                        " WHERE datname = current_database()"
+                        " AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.025)
+    raise AssertionError("the register never reached the row lock")
+
+
+async def test_an_end_job_mid_delivery_does_not_block_the_next_one(client) -> None:
+    """The same, when the earlier end is still being delivered as the
+    activity registers again.
+
+    The pipeline holds its row lock on a job for the whole delivery, and
+    the job reads `processing` until that commits. Looking only for sent
+    and partial_failed rows passed it by; the upsert then waited on the
+    same lock, found the row `sent` once the delivery committed, and filed
+    nothing.
+    """
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+    first = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(now + timedelta(minutes=15), "f" * 128),
+    )
+    assert first.status_code == 200, first.text
+    earlier_id = first.json()["end_job_id"]
+
+    engine = client.app.state.engine
+    factory = build_session_factory(engine)
+    async with factory() as s:
+        earlier = await s.get(PushJob, earlier_id)
+        end_key = earlier.dedupe_key
+        earlier.status = PushJobStatus.processing.value
+        await s.commit()
+
+    target = now + timedelta(minutes=45)
+    async with factory() as pipeline:
+        # What `_process_job` holds while it delivers.
+        delivering = (
+            await pipeline.execute(
+                select(PushJob).where(PushJob.id == earlier_id).with_for_update()
+            )
+        ).scalar_one()
+        second = asyncio.create_task(
+            client.post(
+                "/v3/live-activities/register",
+                headers=_bearer(login),
+                json=_register_body(target, "g" * 128),
+            )
+        )
+        await _wait_for_a_lock_waiter(engine)
+        delivering.status = PushJobStatus.sent.value
+        await pipeline.commit()
+
+    response = await second
+    assert response.status_code == 200, response.text
+    end_job_id = response.json()["end_job_id"]
+    assert end_job_id is not None
+    assert end_job_id != earlier_id
+
+    async with factory() as s:
+        end_job = await s.get(PushJob, end_job_id)
+        assert end_job.status == PushJobStatus.pending.value
+        assert end_job.fire_at == target
+        assert end_job.dedupe_key == end_key
+        earlier = await s.get(PushJob, earlier_id)
+        assert earlier.status == PushJobStatus.sent.value
         assert earlier.dedupe_key != end_key

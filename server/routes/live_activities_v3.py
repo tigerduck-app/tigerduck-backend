@@ -54,17 +54,23 @@ async def _retire_finished_end_job(
     history under a key of its own, and the exact key is left for the new
     job: the pipeline's already-running check and `submission_cancel` both
     look the end job up by it.
+
+    Every row holding the key is locked, not just the finished ones. The
+    pipeline holds its lock on a job for the whole of a delivery, during
+    which the job still reads `processing`: a query for finished rows
+    alone passed it by, the delivery then committed `sent`, and the upsert
+    conflicted with it as above. Taking the lock waits that delivery out
+    and reads the row as it ended. A job still waiting is the upsert's to
+    move, and held meanwhile so the pipeline cannot claim it first.
     """
-    finished = (
+    holders = (
         (
             await session.execute(
                 select(PushJob)
                 .where(
                     PushJob.user_id == user_id,
                     PushJob.dedupe_key == dedupe_key,
-                    PushJob.status.in_(
-                        [PushJobStatus.sent.value, PushJobStatus.partial_failed.value]
-                    ),
+                    PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 )
                 .with_for_update()
             )
@@ -72,6 +78,12 @@ async def _retire_finished_end_job(
         .scalars()
         .all()
     )
+    finished = [
+        job
+        for job in holders
+        if job.status
+        in (PushJobStatus.sent.value, PushJobStatus.partial_failed.value)
+    ]
     for job in finished:
         job.dedupe_key = f"{dedupe_key}:finished:{job.id}"
     if finished:
