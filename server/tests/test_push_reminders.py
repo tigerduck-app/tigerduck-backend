@@ -394,3 +394,41 @@ async def test_pending_jobs_cancelled_once_no_device_can_receive_them(
     device.sync_assignment_reminders = True
     await db_session.commit()
     assert await scan_assignment_reminders(factory, test_settings) == 2
+
+
+async def test_a_reminder_that_found_no_recipient_is_not_filed_again(
+    db_session, prepared_engine, test_settings
+):
+    """A reminder the pipeline settled as `failed`/`no_active_tokens` no
+    longer holds `ux_push_jobs_dedupe_active`, yet the scan does not file it
+    again: the pipeline settles a job only once it is due, and the scan
+    files no key whose fire time has passed.
+    """
+    user = await _make_user(db_session)
+    # Due in just under two hours: the 2h reminder fell due a minute ago.
+    assignment = _assignment(user, due_in_hours=2 - 1 / 60)
+    db_session.add(assignment)
+    await db_session.flush()
+    due_epoch = int(assignment.due_at.timestamp())
+    db_session.add(
+        PushJob(
+            user_id=user.id,
+            dedupe_key=_dedupe_key(assignment.moodle_assignment_id, 2.0, due_epoch),
+            channel="assignment",
+            scenario="reminder_2h",
+            fire_at=assignment.due_at - timedelta(hours=2),
+            payload={"kind": "assignment_reminder"},
+            status="failed",
+            last_error="no_active_tokens",
+        )
+    )
+    await db_session.commit()
+
+    created = await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert created == 0
+    assert [(j.status, j.last_error) for j in await _jobs(db_session, user.id)] == [
+        ("failed", "no_active_tokens")
+    ]
