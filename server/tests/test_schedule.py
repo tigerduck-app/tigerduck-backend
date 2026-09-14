@@ -166,7 +166,7 @@ async def test_sync_replaces_previous_events(client: AsyncClient):
 async def test_resync_does_not_revive_already_sent_push(
     client: AsyncClient, prepared_engine
 ):
-    """Audit finding N2: a re-sync after delivery must not re-fire the push.
+    """A re-sync after delivery must not re-fire the push.
 
     Reproduce: login, sync 1 event, mark its PushJob sent in-DB (simulating
     pipeline delivery), then re-sync the same event. The job must stay

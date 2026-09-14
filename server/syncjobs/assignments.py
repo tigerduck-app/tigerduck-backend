@@ -3,9 +3,10 @@
 A successful fetch is treated as the authoritative snapshot of the
 account's assignments: new rows insert, changed provider fields update,
 rows absent from the fetch soft-delete, previously-deleted rows that
-reappear resurrect. Submission state (`provider_is_submitted` /
-`provider_submitted_at` / grading fields) is NOT fetched in Phase 3 and
-is never written here — client-uploaded values survive.
+reappear resurrect. Submission state is not written *here* — the
+assignment list endpoint does not carry it. `submissions.py` refreshes
+it separately for assignments about to enter a reminder window, and
+client-uploaded values survive everywhere else.
 
 Changelog appends run under the per-user sync-state lock
 (`lock_sync_state`), acquired once per run; payloads carry routing hints

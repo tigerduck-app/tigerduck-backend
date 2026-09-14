@@ -21,6 +21,8 @@ FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
 from __future__ import annotations
 
+import uuid
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -30,6 +32,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.models import (
+    APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
     PushDelivery,
     PushDeliveryStatus,
@@ -38,11 +41,20 @@ from server.auth.models import (
     PushTokenKind,
     PushTokenStatus,
     UserDevice,
+    UserDevicePlatform,
 )
+from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import session_scope
-from server.push.dedupe import activity_end_key
+from server.push.client_versions import schedules_reminders_locally
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
+from server.push.notification_copy import (
+    REAUTH_SCENARIO,
+    build_assignment_reminder_payload,
+    build_reauth_payload,
+)
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +77,20 @@ def _is_unregistered(status: str | None, description: str | None) -> bool:
     s = (status or "").lower()
     d = (description or "").lower()
     return s in {"410", "unregistered"} or d in _UNREGISTERED_APNS_DESCRIPTIONS
+
+
+def _has_copy(payload: dict) -> bool:
+    """Whether an alert payload carries text a person could actually read.
+
+    Only asked of server-composed alert copy. Background and Live Activity
+    payloads legitimately have no title/body — a `sync_trigger` is silent by
+    design and a schedule push takes its text from the snapshot — so this is
+    never a blanket precondition of `_send_one`.
+    """
+    return bool(
+        str(payload.get("title") or "").strip()
+        and str(payload.get("body") or "").strip()
+    )
 
 
 async def run_push_tick(worker: PushPipelineWorker) -> int:
@@ -208,7 +234,7 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
 
     now = datetime.now(UTC)
     payload = job.payload or {}
-    is_activity_job = job.channel == "schedule"
+    is_activity_job = job.channel == SCHEDULE_CHANNEL
     is_activity_end = is_activity_job and payload.get("kind") == "live_activity_end"
     if is_activity_end:
         target_token_kind = "live_activity_update"
@@ -282,12 +308,51 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
         token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
         source_device_id = (job.payload or {}).get("source_device_id")
 
+    is_assignment_reminder = job.channel == REMINDER_CHANNEL
+    if is_assignment_reminder:
+        # iPhone and iPad only. Android schedules these locally (spec 4.2)
+        # and macOS takes no notifications at all, so a delivery row for
+        # either is a duplicate at best. Both device switches must be on:
+        # the parent one because a user who turned sync off has no
+        # expectation of server-driven reminders, and the child one
+        # because that is the row the settings screen actually renders.
+        token_query = token_query.where(
+            UserDevice.cloud_sync_enabled.is_(True),
+            UserDevice.sync_assignment_reminders.is_(True),
+            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+        )
+
+    if job.channel == BULLETIN_CHANNEL:
+        # The bulletin opt-out. Per-device, not per-user: matching
+        # (server/bulletins/user_dispatch.py Pass A) and the push_jobs it
+        # writes (Pass B) never look at this column, so an opted-out device
+        # still gets its bulletin_user_matches row stamped and does not
+        # receive a backlog replay the day it opts back in. Deliberately
+        # independent of server_push_enabled, which this job never consults.
+        token_query = token_query.where(UserDevice.bulletin_push_enabled.is_(True))
+        # Subscriptions are per device, so the job names the devices whose
+        # own rules matched. A job written before that names none and goes
+        # to every device, as it always did.
+        target_device_ids = payload.get("target_device_ids")
+        if target_device_ids is not None:
+            token_query = token_query.where(
+                UserDevice.id.in_([uuid.UUID(d) for d in target_device_ids])
+            )
+
     rows = (await session.execute(token_query)).all()
     if not rows:
         return True
     values = []
     for token, device in rows:
-        if device.platform == "macos":
+        if device.platform == UserDevicePlatform.macos.value:
+            continue
+        if is_assignment_reminder and schedules_reminders_locally(
+            device.platform, device.app_version
+        ):
+            # A client that still has its own scheduler would show this
+            # reminder twice. Version comparison cannot go in the query
+            # above: app_version is VARCHAR, and "2.10.0" sorts below
+            # "2.9.0" as a string.
             continue
         if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
             continue
@@ -301,6 +366,11 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
                 "token_kind": token.token_kind,
                 "token_hash": token.token_hash,
                 "scope_key": token.scope_key,
+                # Due now by the clock `_deliver_round` reads: this host's.
+                # Left to its server default, the database clock's now(), a
+                # database clock even a few milliseconds ahead makes every
+                # delivery this tick creates wait out a retry round.
+                "next_retry_at": now,
             }
         )
     if not values:
@@ -467,10 +537,58 @@ async def _send_one(
         delivery.failure_code = "token_gone"
         return
 
+    payload = job.payload or {}
+    is_reauth = job.scenario == REAUTH_SCENARIO
+    if is_reauth or job.channel == REMINDER_CHANNEL:
+        # Copy is resolved here, not at enqueue time: one job fans out to
+        # every device on the account and they can be in different
+        # languages, so the only place the right language is known is the
+        # recipient. `session.get` is an identity-map hit — `_materialize`
+        # loaded this device earlier in the same transaction.
+        #
+        # Reauth is keyed on the job's scenario, not payload["kind"]: the
+        # portal's operator "retry + notify" endpoints (portal/app/routes/
+        # moodle/jobs.py) insert reauth_required jobs directly via SQL in
+        # the pre-v2.1.0 payload shape (no `kind`), and always will — the
+        # portal is a separate package that talks raw SQL and does not
+        # import this module. Keying on `kind` let those jobs skip copy
+        # rebuild entirely and ship the empty-banner bug this branch exists
+        # to fix.
+        device = await session.get(UserDevice, delivery.device_id)
+        locale = device.locale if device is not None else None
+        if is_reauth:
+            payload = build_reauth_payload(
+                provider=payload.get("provider", ""), locale=locale
+            )
+        else:
+            payload = build_assignment_reminder_payload(payload, locale=locale)
+        if not _has_copy(payload):
+            # Sending this would be worse than not sending it. APNs coerces a
+            # missing title to "" and delivers a banner that rings with no
+            # text; Android's FcmService drops a `reauth_required` with no
+            # copy and logs a warning nobody reads. Either way the user is
+            # told nothing, so the failure has to surface here instead —
+            # skipped, not failed, because nothing was attempted and a retry
+            # would resolve the same empty string (same shape as `token_gone`
+            # above). `MISSING_KEY_SENTINEL` deliberately does NOT land here:
+            # `server/i18n.py` returns a visibly broken string precisely so a
+            # missing key becomes a bug report rather than silence.
+            delivery.status = PushDeliveryStatus.skipped.value
+            delivery.failure_code = "empty_copy"
+            logger.error(
+                "push.empty_copy",
+                job_id=job.id,
+                delivery_id=delivery.id,
+                device_id=str(delivery.device_id),
+                locale=device.locale if device is not None else None,
+            )
+            return
+
     delivery.attempts += 1
+
     if delivery.provider == "apns":
         apns_request = build_apns_for_job(
-            payload=job.payload,
+            payload=payload,
             channel=job.channel,
             token_value=token.token_value,
             bundle_id=token.bundle_id or worker.settings.apns_bundle_id,
@@ -486,7 +604,7 @@ async def _send_one(
         result = await worker.router.send_apple(apns_request)
     else:
         fcm_request = build_fcm_for_job(
-            payload=job.payload, channel=job.channel, token_value=token.token_value
+            payload=payload, channel=job.channel, token_value=token.token_value
         )
         result = await worker.router.send_android(fcm_request)
 

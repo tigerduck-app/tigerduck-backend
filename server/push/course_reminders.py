@@ -215,7 +215,7 @@ async def scan_course_reminders(
         # could lexicographically outrank the real current semester (e.g.
         # "9999") and silently mute every portal course's reminders.
         # Two buckets merged portal-last so the result is independent of
-        # row order (final review: a single-pass flag was order-sensitive).
+        # row order (a single-pass flag was order-sensitive).
         portal_latest: dict[uuid.UUID, str] = {}
         fallback_latest: dict[uuid.UUID, str] = {}
         for course, _override in rows:

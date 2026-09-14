@@ -1,5 +1,5 @@
 """Tests for the change log service — especially the per-user commit
-ordering guarantee (security review 1.1)."""
+ordering guarantee."""
 
 from __future__ import annotations
 
@@ -114,10 +114,10 @@ async def test_expired_revision_raises(db_session) -> None:
 async def test_uncommitted_append_is_invisible_to_readers(
     db_session, prepared_engine
 ) -> None:
-    """The review-1.1 property: a reader can never see revision N+1 while
-    revision N is still uncommitted, because current_revision (the read
-    watermark) only advances inside the same transaction as the append —
-    and per-user appends serialize on the user_sync_state row lock."""
+    """A reader can never see revision N+1 while revision N is still
+    uncommitted, because current_revision (the read watermark) only
+    advances inside the same transaction as the append — and per-user
+    appends serialize on the user_sync_state row lock."""
     user = await make_user(db_session)
     committed = await append_change(
         db_session,

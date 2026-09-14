@@ -11,11 +11,24 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-# Import Base and all model modules so metadata is populated.
+# Import Base and every model module so `Base.metadata` is complete.
+#
+# This list is load-bearing, not cosmetic. Alembic diffs the database against
+# `Base.metadata`, so a model module that is never imported here is invisible
+# to autogenerate -- and autogenerate writes a `drop_table` for every table it
+# cannot see. `server.models` pulls in auth/sync/syncjobs transitively; the two
+# below have no such importer, and their four tables (academic_holidays,
+# semester_terms, system_settings, user_holiday_overrides) were being proposed
+# for deletion on every autogenerate run until this import was added.
+#
+# Adding a model module anywhere in `server/`? Make sure something in this
+# chain imports it, then confirm with `alembic check`.
 from server.config import get_settings
 from server.db import Base
 from server import models  # noqa: F401  (register tables on Base.metadata)
 from server.bulletins import models as _bulletin_models  # noqa: F401
+from server.academic_calendar import models as _academic_calendar_models  # noqa: F401
+from server import system_settings as _system_settings_models  # noqa: F401
 
 config = context.config
 

@@ -240,7 +240,7 @@ async def test_session_revoked_when_own_device_deleted(client) -> None:
         assert all(r.revoked_at is not None for r in rows)
 
 
-# --- Phase 4c: linked-user marker on device_registrations (review 1.8) ---
+# --- Phase 4c: linked-user marker on device_registrations ---
 
 
 async def _seed_anonymous_registration(client, device_id="iphone-abc") -> None:

@@ -228,6 +228,13 @@ async def register_device(
         device.app_version = payload.app_version
     if payload.os_version is not None:
         device.os_version = payload.os_version
+    if payload.device_model is not None:
+        device.device_model = payload.device_model
+    # Reported unconditionally on every register call, same as app_version /
+    # os_version above — never gated behind a preference toggle. See
+    # UserDevice.locale.
+    if payload.locale is not None:
+        device.locale = payload.locale
     if payload.cloud_sync_enabled is not None:
         if not is_new and device.cloud_sync_enabled != payload.cloud_sync_enabled:
             logger.info(
@@ -237,6 +244,10 @@ async def register_device(
                 new=payload.cloud_sync_enabled,
             )
         device.cloud_sync_enabled = payload.cloud_sync_enabled
+    if payload.bulletin_push_enabled is not None:
+        device.bulletin_push_enabled = payload.bulletin_push_enabled
+    if payload.server_push_enabled is not None:
+        device.server_push_enabled = payload.server_push_enabled
     device.deleted_at = None
     device.last_seen_at = now
     await session.flush()
@@ -247,8 +258,8 @@ async def register_device(
             session, device=device, token=payload.push_token, now=now
         )
 
-    # Phase 4c (review 1.8): if this physical device also has an anonymous
-    # v2 registration (same client device id), mark it as linked so the
+    # Phase 4c: if this physical device also has an anonymous v2
+    # registration (same client device id), mark it as linked so the
     # anonymous bulletin fan-out stops double-pushing to it.
     await session.execute(
         update(DeviceRegistration)
@@ -386,8 +397,8 @@ async def delete_device(
     device_id: str, auth: CurrentAuthDep, session: SessionDep
 ) -> None:
     """Soft-delete a device and cut its access: revoke its auth sessions
-    and invalidate its push tokens (security review — a removed device must
-    not keep working tokens).
+    and invalidate its push tokens — a removed device must not keep
+    working tokens.
 
     `device_id` is the client-owned `client_device_id` (the app's persistent
     UUID) — the identifier the clients hold — scoped to the authed user, not
@@ -474,6 +485,12 @@ async def update_device_preferences(
         raise HTTPException(status_code=404, detail="device_not_found")
     if payload.server_push_enabled is not None:
         device.server_push_enabled = payload.server_push_enabled
+    if payload.bulletin_push_enabled is not None:
+        device.bulletin_push_enabled = payload.bulletin_push_enabled
+    # Lets a device push a system-language change between register calls.
+    # See UserDevice.locale.
+    if payload.locale is not None:
+        device.locale = payload.locale
     if payload.sync_courses is not None:
         device.sync_courses = payload.sync_courses
     if payload.sync_course_colors is not None:
@@ -484,6 +501,10 @@ async def update_device_preferences(
         device.sync_assignments = payload.sync_assignments
     if payload.cloud_sync_enabled is not None:
         device.cloud_sync_enabled = payload.cloud_sync_enabled
+    if payload.sync_assignment_reminders is not None:
+        device.sync_assignment_reminders = payload.sync_assignment_reminders
+    if payload.sync_live_activity is not None:
+        device.sync_live_activity = payload.sync_live_activity
 
     await session.flush()
     await _cleanup_orphaned_sync_data(session, auth.user_id)
@@ -491,11 +512,14 @@ async def update_device_preferences(
     return DevicePreferencesV3Response(
         device_id=device.client_device_id,
         server_push_enabled=device.server_push_enabled,
+        bulletin_push_enabled=device.bulletin_push_enabled,
         sync_courses=device.sync_courses,
         sync_course_colors=device.sync_course_colors,
         sync_course_names=device.sync_course_names,
         sync_assignments=device.sync_assignments,
         cloud_sync_enabled=device.cloud_sync_enabled,
+        sync_assignment_reminders=device.sync_assignment_reminders,
+        sync_live_activity=device.sync_live_activity,
     )
 
 

@@ -12,6 +12,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
+from server.push.dedupe import SCHEDULE_CHANNEL
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -56,7 +57,7 @@ def _collapse_key(channel: str, payload: dict[str, Any]) -> str | None:
     kind = payload.get("kind", "")
     if kind == "sync_trigger":
         return _COLLAPSE_KEYS["sync_trigger"]
-    if channel == "schedule":
+    if channel == SCHEDULE_CHANNEL:
         # APNs keeps one undelivered push per collapse id. One id for the
         # whole channel let class B's start evict class A's while the phone
         # was asleep, and A never appeared. Per activity, so that only a
@@ -99,7 +100,7 @@ def build_apns_for_job(
     timestamp = int((now or datetime.now(UTC)).timestamp())
     collapse = _collapse_key(channel, payload)
 
-    if channel == "schedule":
+    if channel == SCHEDULE_CHANNEL:
         # The job payload is the client's snapshot flattened together with
         # the routing keys the source route added alongside it. Strip only
         # those routing keys — every remaining entry is a LiveActivitySnapshot

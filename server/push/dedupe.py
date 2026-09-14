@@ -19,6 +19,14 @@ from __future__ import annotations
 
 import uuid
 
+# The channel both routes below file their jobs on. `push/pipeline.py`
+# splits start from end on it, `push/job_payloads.py` builds Live Activity
+# pushes for it and `push/submission_cancel.py` files end jobs on it, all
+# through this name. Named `SCHEDULE_CHANNEL` here rather than the bare
+# `CHANNEL` its original home used, since this module is a shared home for
+# more than one channel's worth of key shapes.
+SCHEDULE_CHANNEL = "schedule"
+
 
 def schedule_prefix(device_id: uuid.UUID) -> str:
     return f"schedule:{device_id}:"
@@ -36,3 +44,14 @@ def activity_end_prefix(device_id: uuid.UUID) -> str:
 def activity_end_key(device_id: uuid.UUID, activity_id: str) -> str:
     """An end job: one per (device, running activity)."""
     return f"{activity_end_prefix(device_id)}{activity_id}"
+
+
+def activity_id(source_id: str, scenario: str) -> str:
+    """The id a Live Activity carries in its attributes, composed the same
+    way on both sides — see `composedActivityId` on the client's
+    LiveActivitySnapshot, which is "{scenario}::{sourceId}". Composing it
+    here rather than trusting a value sent by the client keeps the end
+    job's dedupe key, the update token's registered scope, and the
+    client's own id always in agreement.
+    """
+    return f"{scenario}::{source_id}"

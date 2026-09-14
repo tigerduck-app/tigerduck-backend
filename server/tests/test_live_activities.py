@@ -7,13 +7,21 @@ an "end" PushJob at countdown_target.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from server.auth.models import DevicePushToken, PushJob, PushJobStatus
+from server.auth.models import (
+    DevicePushToken,
+    PushDelivery,
+    PushDeliveryStatus,
+    PushJob,
+    PushJobStatus,
+)
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 
@@ -178,24 +186,27 @@ async def test_register_refuses_an_activity_id_that_is_not_the_composed_one(clie
     assert response.json()["detail"] == "activity_id_mismatch"
 
 
-async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
-    """A full sync cancels this device's pending data-freshness pushes, but
-    must leave the Live Activity end job alone.
+async def test_full_sync_leaves_the_devices_own_jobs_alone(client) -> None:
+    """A full sync must not cancel a job addressed to this one device.
 
-    The app full-syncs on every foreground, so a sweep that took the end
-    job with it cancelled every end within seconds of registration: the
-    end push never fired and the Dynamic Island sat on an expired
-    countdown showing "—" until iOS's own multi-hour cleanup. Observed in
-    production as six consecutive end jobs, all cancelled, none sent.
+    Every such job is a Live Activity start or end, or an operator's push,
+    and none of them goes stale because the device now holds fresh data.
+    The sweep used to cancel them all. Ends went first: the app full-syncs
+    on every foreground, so the Dynamic Island sat on an expired countdown
+    until iOS's own cleanup (six consecutive end jobs, all cancelled, none
+    sent). Starts went next: a refresh whose full sync finished after its
+    schedule sync, or an app closed mid-refresh, left the device with no
+    start job at all, and the next class began with no Live Activity.
 
-    The start job in the same sweep is the control: it still gets
-    cancelled, so this asserts the exemption is narrow rather than a
-    disabled sweep.
+    The control is what the sweep is still for: this device's queued copy
+    of an account-wide sync trigger is skipped, since the sync it asks for
+    has just happened.
     """
     login = await _login(client)
+    device_id = uuid.UUID(login["device_id"])
     now = datetime.now(timezone.utc)
 
-    # A pending start job for this device — the thing the sweep is for.
+    # A pending start job for this device.
     schedule = await client.post(
         "/v3/schedule/sync",
         headers=_bearer(login),
@@ -223,14 +234,48 @@ async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
     end_job_id = register.json()["end_job_id"]
     assert end_job_id is not None
 
+    # An operator's push to this device, and this device's queued copy of
+    # an account-wide sync trigger. Both due later, so no pipeline tick
+    # touches them first.
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        user_id = (await s.get(PushJob, end_job_id)).user_id
+        custom = PushJob(
+            user_id=user_id,
+            device_id=device_id,
+            dedupe_key=f"custom:sweep-test:{device_id}",
+            channel="custom",
+            scenario="custom",
+            fire_at=now + timedelta(minutes=5),
+            payload={"title": "Operator", "body": "hello"},
+        )
+        trigger = PushJob(
+            user_id=user_id,
+            dedupe_key="sync_trigger:sweep-test",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=now + timedelta(minutes=5),
+            payload={"kind": "sync_trigger", "source_device_id": None},
+        )
+        s.add_all([custom, trigger])
+        await s.flush()
+        delivery = PushDelivery(
+            push_job_id=trigger.id,
+            user_id=user_id,
+            device_id=device_id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="h" * 64,
+        )
+        s.add(delivery)
+        await s.commit()
+        custom_id, delivery_id = custom.id, delivery.id
+
     full = await client.get("/v3/sync/full", headers=_bearer(login))
     assert full.status_code == 200, full.text
 
-    factory = build_session_factory(client.app.state.engine)
     async with factory() as s:
-        end_job = (
-            await s.execute(select(PushJob).where(PushJob.id == end_job_id))
-        ).scalar_one()
+        end_job = await s.get(PushJob, end_job_id)
         assert end_job.status == PushJobStatus.pending.value
         assert end_job.cancelled_at is None
         assert end_job.fire_at == target
@@ -244,5 +289,154 @@ async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
         ).scalars().all()
         assert start_jobs, "expected the schedule sync to have filed a start job"
         assert all(
-            j.status == PushJobStatus.cancelled.value for j in start_jobs
+            j.status == PushJobStatus.pending.value for j in start_jobs
         ), [j.status for j in start_jobs]
+
+        assert (await s.get(PushJob, custom_id)).status == PushJobStatus.pending.value
+
+        skipped = await s.get(PushDelivery, delivery_id)
+        assert skipped.status == PushDeliveryStatus.skipped.value
+        assert skipped.failure_code == "device_already_synced"
+
+
+@pytest.mark.parametrize(
+    "finished", [PushJobStatus.sent, PushJobStatus.partial_failed]
+)
+async def test_an_end_job_already_sent_does_not_block_the_next_one(
+    client, finished
+) -> None:
+    """An activity whose id already had its end push sent still gets an
+    end job when it runs again.
+
+    `ux_push_jobs_dedupe_active` covers sent and partial_failed rows as
+    well as pending ones, so the earlier end held the key: the upsert
+    conflicted with it, its update only applies to pending rows, and the
+    route answered 200 having filed nothing. The activity then stayed on
+    screen past its countdown. Seen after a class was run early under the
+    debug clock and then again on the day; an assignment id repeats the
+    same way whenever that assignment gets a second activity.
+    """
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+    first = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(now + timedelta(minutes=15), "f" * 128),
+    )
+    assert first.status_code == 200, first.text
+    earlier_id = first.json()["end_job_id"]
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        earlier = await s.get(PushJob, earlier_id)
+        end_key = earlier.dedupe_key
+        earlier.status = finished.value
+        await s.commit()
+
+    target = now + timedelta(minutes=45)
+    second = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "g" * 128),
+    )
+    assert second.status_code == 200, second.text
+    end_job_id = second.json()["end_job_id"]
+    assert end_job_id is not None
+    assert end_job_id != earlier_id
+
+    async with factory() as s:
+        end_job = await s.get(PushJob, end_job_id)
+        assert end_job.status == PushJobStatus.pending.value
+        assert end_job.fire_at == target
+        # The pipeline's already-running check looks the end job up by this
+        # exact key, so the new one has to hold it.
+        assert end_job.dedupe_key == end_key
+        earlier = await s.get(PushJob, earlier_id)
+        assert earlier.status == finished.value
+        assert earlier.dedupe_key != end_key
+
+
+async def _wait_for_a_lock_waiter(engine) -> None:
+    """Return once some connection is blocked on a row lock.
+
+    Asked on a fresh connection each time: inside one transaction
+    `pg_stat_activity` answers from a snapshot taken at its first read.
+    """
+    for _ in range(200):
+        async with engine.connect() as conn:
+            waiting = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity"
+                        " WHERE datname = current_database()"
+                        " AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.025)
+    raise AssertionError("the register never reached the row lock")
+
+
+async def test_an_end_job_mid_delivery_does_not_block_the_next_one(client) -> None:
+    """The same, when the earlier end is still being delivered as the
+    activity registers again.
+
+    The pipeline holds its row lock on a job for the whole delivery, and
+    the job reads `processing` until that commits. Looking only for sent
+    and partial_failed rows passed it by; the upsert then waited on the
+    same lock, found the row `sent` once the delivery committed, and filed
+    nothing.
+    """
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+    first = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(now + timedelta(minutes=15), "f" * 128),
+    )
+    assert first.status_code == 200, first.text
+    earlier_id = first.json()["end_job_id"]
+
+    engine = client.app.state.engine
+    factory = build_session_factory(engine)
+    async with factory() as s:
+        earlier = await s.get(PushJob, earlier_id)
+        end_key = earlier.dedupe_key
+        earlier.status = PushJobStatus.processing.value
+        await s.commit()
+
+    target = now + timedelta(minutes=45)
+    async with factory() as pipeline:
+        # What `_process_job` holds while it delivers.
+        delivering = (
+            await pipeline.execute(
+                select(PushJob).where(PushJob.id == earlier_id).with_for_update()
+            )
+        ).scalar_one()
+        second = asyncio.create_task(
+            client.post(
+                "/v3/live-activities/register",
+                headers=_bearer(login),
+                json=_register_body(target, "g" * 128),
+            )
+        )
+        await _wait_for_a_lock_waiter(engine)
+        delivering.status = PushJobStatus.sent.value
+        await pipeline.commit()
+
+    response = await second
+    assert response.status_code == 200, response.text
+    end_job_id = response.json()["end_job_id"]
+    assert end_job_id is not None
+    assert end_job_id != earlier_id
+
+    async with factory() as s:
+        end_job = await s.get(PushJob, end_job_id)
+        assert end_job.status == PushJobStatus.pending.value
+        assert end_job.fire_at == target
+        assert end_job.dedupe_key == end_key
+        earlier = await s.get(PushJob, earlier_id)
+        assert earlier.status == PushJobStatus.sent.value
+        assert earlier.dedupe_key != end_key

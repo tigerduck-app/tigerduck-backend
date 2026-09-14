@@ -5,7 +5,7 @@ deployment. If the backend ever scales to multiple replicas, move the
 counters to Postgres or Redis; the call sites in `server/auth/service.py`
 only touch this class, so the swap is local.
 
-Why this exists (security review 1.3): the login endpoint verifies the
+Why this exists: the login endpoint verifies the
 submitted Moodle token by calling Moodle, which makes unthrottled logins
 both a credential-validation oracle and a way to get our single server IP
 rate-limited by the school.

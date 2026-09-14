@@ -19,9 +19,15 @@ DEFAULT_POLICIES: tuple[dict, ...] = (
         "enabled": True,
     },
     {
+        # Disabled by default, per spec: the course roster only moves during
+        # 加退選, so an always-on 8h poll is pure load on NTUST Moodle for the
+        # rest of the term. An admin turns it on for that window via
+        # PATCH /v3/admin/sync-policies/ntust_courses. Jobs are still
+        # provisioned at login (HANDLED_JOB_TYPES), so flipping the policy
+        # picks up every existing user without a backfill.
         "job_type": SyncJobType.ntust_courses.value,
         "default_interval_seconds": 28800,
-        "enabled": True,
+        "enabled": False,
     },
     {
         "job_type": SyncJobType.calendar.value,

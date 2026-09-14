@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+import structlog
+from sqlalchemy import select, text
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
@@ -14,13 +17,20 @@ from server.auth.models import (
     ExternalAccountCredential,
     PushJob,
     User,
+    UserDevice,
 )
+from server.config import Settings
 from server.db import build_session_factory
-from server.sync.models import UserAssignment, UserChangeLog
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
+from server.push.reminders import _dedupe_key
+from server.logging_setup import configure
+from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
+from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
+    FetchedSubmission,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -117,11 +127,20 @@ async def _setup_user_job(
             aad=blob.aad,
         )
     )
+    # Already due by the clock the executor claims with: this host's. Left
+    # to its server default, `run_after` would be the database clock's
+    # `now()`, and a database clock running even a few milliseconds ahead of
+    # this host's leaves the job not yet due when the tick claims (pinned by
+    # `test_a_job_set_up_here_is_due_whichever_way_the_clocks_disagree`).
+    fields = {
+        "run_after": datetime.now(UTC) - timedelta(minutes=1),
+        **(job_kwargs or {}),
+    }
     job = SyncJob(
         user_id=user.id,
         external_account_id=account.id,
         job_type="moodle_assignments",
-        **(job_kwargs or {}),
+        **fields,
     )
     session.add(job)
     await ensure_default_policies(session)
@@ -129,18 +148,54 @@ async def _setup_user_job(
     return user, account, job
 
 
-def _fa(aid: int) -> FetchedAssignment:
+def _fa(aid: int, *, due_at: datetime | None = None) -> FetchedAssignment:
     return FetchedAssignment(
         moodle_course_id=7001,
         moodle_assignment_id=aid,
         course_name="資料結構",
         title=f"HW{aid}",
-        due_at=datetime.now(UTC) + timedelta(days=7),
+        due_at=due_at if due_at is not None else datetime.now(UTC) + timedelta(days=7),
         cutoff_at=None,
         allow_from_at=None,
         moodle_url=None,
         intro_html=None,
     )
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_job_set_up_here_is_due_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """Every test in this file that expects a claim relies on
+    `_setup_user_job` handing it a job that is already due, and the
+    executor decides that with this host's clock. So the job must not take
+    its `run_after` from the database's clock: a Docker VM's clock drifts
+    against its host's, and one running even a few milliseconds ahead
+    leaves a job made just before the tick not yet due -- the tick claims
+    nothing, and every assertion after it sees a sync that never ran.
+
+    Pinned by running the executor on a clock that lags the database's, as
+    that drift does, and on one that leads it: the job is claimed either
+    way."""
+    await _setup_user_job(db_session)
+
+    real_datetime = executor_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(executor_module, "datetime", SkewedDatetime)
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
 
 
 async def test_stale_running_job_recovered(
@@ -309,6 +364,22 @@ async def test_expired_token_disables_job_and_queues_push(
     queues a push notification. No password-based refresh — the user must
     open the app to send a fresh token via PATCH /auth/credentials."""
     user, account, job = await _setup_user_job(db_session)
+    # The push is queued only when the account has an iPhone or iPad with
+    # course sync on (spec §4.5) — the reauth prompt asks the user to reopen
+    # the app, and nothing else can act on it. Added here rather than in
+    # `_setup_user_job` because this is the only executor test that reaches
+    # the notification path. The gate itself is covered by
+    # `test_reauth_push.py`.
+    db_session.add(
+        UserDevice(
+            user_id=user.id,
+            client_device_id="iphone-1",
+            platform="ios",
+            cloud_sync_enabled=True,
+        )
+    )
+    await db_session.commit()
+
     fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)
@@ -368,3 +439,571 @@ async def test_rate_limited_records_school_rate_limited(
     assert job.last_error == "school_rate_limited"
 
 
+async def test_assignment_sync_probes_submission_status(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """After the assignment list lands, the narrow window gets probed."""
+    await _setup_user_job(db_session)
+    probed: list[list[int]] = []
+
+    async def fake_probe(*, token, assignment_ids, max_concurrency):
+        probed.append(list(assignment_ids))
+        return {}
+
+    # Due inside the default 48h probe window, unsubmitted — in scope for
+    # select_assignment_ids so the probe actually has something to fetch.
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", fake_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert probed, "submission status was never probed"
+    assert probed == [[1]]
+
+
+async def test_probe_failure_does_not_fail_the_run(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A dead probe must not take the assignment sync down with it."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def exploding_probe(*, token, assignment_ids, max_concurrency):
+        raise RuntimeError("moodle is having a day")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", exploding_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    # The run still succeeds — assert against the SyncRun row the same way
+    # the existing success-path tests in this file do.
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.attempts == 0
+    assert job.last_success_at is not None
+    assert job.last_error is None
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "succeeded"
+
+
+async def test_submission_probe_token_invalid_disables_job(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """An invalid token discovered while probing submissions must still
+    disable the job, the same outcome as an invalid token surfacing from
+    the assignment fetch itself — every subsequent Moodle call would fail
+    identically either way."""
+    _, account, job = await _setup_user_job(db_session)
+
+    async def dead_token_probe(*, token, assignment_ids, max_concurrency):
+        raise MoodleTokenInvalid("invalidtoken")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", dead_token_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "disabled"
+    assert job.last_error == "credential_invalid"
+    await db_session.refresh(account)
+    assert account.credential_status == "invalid"
+
+
+async def test_submission_probe_rate_limit_reaches_backoff(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A rate limit on the whole probe is not a single assignment's
+    failure -- every remaining probe would fail identically, so it must
+    reach the same backoff `fetch_assignments` already gets, not be
+    swallowed as routine probe noise."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def rate_limited_probe(*, token, assignment_ids, max_concurrency):
+        raise MoodleRateLimited("http_429")
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", rate_limited_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "school_rate_limited"
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+
+
+async def test_submission_probe_db_error_keeps_assignment_sync_and_backs_off(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A genuine database error while refreshing submission status (not a
+    Moodle call) must not undo the assignment list sync, which has already
+    committed by then -- but it must fail the run and back the job off. A
+    run recorded as a success would put the next probe a whole policy
+    interval away, and until then an assignment already submitted on
+    Moodle keeps its reminder queued and its Live Activity counting down."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def poisoning_select(session, *, user_id, now, window_hours):
+        # A real database-level error, not a mocked Python exception -- so
+        # this proves the probe's failed transaction is contained, rather
+        # than merely that some exception gets caught somewhere.
+        await session.execute(text("SELECT 1/0"))
+        return []  # pragma: no cover - unreachable, the line above raises
+
+    monkeypatch.setattr(
+        "server.syncjobs.executor.select_assignment_ids", poisoning_select
+    )
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    before = datetime.now(UTC)
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "sync_failed:submission_status"
+    # Retried on the failure backoff, not at the policy's next interval.
+    assert job.run_after <= before + timedelta(
+        seconds=worker.settings.sync_job_backoff_cap_seconds + 60
+    )
+
+    rows = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1  # apply_fetched_assignments's write survived
+
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+
+
+async def test_submission_status_settings_are_threaded_through(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A non-default window/concurrency setting must actually reach
+    select_assignment_ids and the fetcher, not just exist in config."""
+    await _setup_user_job(db_session)
+    seen: dict = {}
+
+    async def recording_probe(*, token, assignment_ids, max_concurrency):
+        seen["assignment_ids"] = list(assignment_ids)
+        seen["max_concurrency"] = max_concurrency
+        return {}
+
+    # Due in 60h: inside a widened 72h window, outside the *default* 48h
+    # window -- proves window_hours actually comes from settings rather
+    # than being hardcoded to the default.
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=60))]
+    )
+    settings = test_settings.model_copy(
+        update={
+            "submission_status_window_hours": 72,
+            "submission_status_max_concurrency": 9,
+        }
+    )
+    worker = _worker(prepared_engine, settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", recording_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert seen["assignment_ids"] == [1]
+    assert seen["max_concurrency"] == 9
+
+
+
+
+@pytest.mark.parametrize(
+    ("escalation", "last_error"),
+    [
+        (MoodleRateLimited("http_429"), "school_rate_limited"),
+        (
+            MoodleUnreachable("submission_probe_unreachable"),
+            "sync_failed:submission_probe_unreachable",
+        ),
+    ],
+    ids=["rate-limited", "unreachable"],
+)
+async def test_a_probe_escalation_keeps_the_committed_list_sync(
+    db_session, prepared_engine, test_settings, monkeypatch, escalation, last_error
+):
+    """An escalation from the submission probe backs the job off exactly as
+    before -- the run fails, the job waits with the error -- but the
+    assignment list sync already committed, so its rows and changelog
+    entries stay. Probing inside the list sync's transaction let one 429
+    on the probe roll back a list sync that had succeeded."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def escalating_probe(*, token, assignment_ids, max_concurrency):
+        raise escalation
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", escalating_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == last_error
+    run = (
+        await db_session.execute(
+            select(SyncRun).where(SyncRun.sync_job_id == job.id)
+        )
+    ).scalar_one()
+    assert run.status == "failed"
+
+    rows = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalars().all()
+    assert [r.moodle_assignment_id for r in rows] == [1]
+    changes = (
+        await db_session.execute(
+            select(UserChangeLog).where(UserChangeLog.user_id == user.id)
+        )
+    ).scalars().all()
+    assert [(c.entity_type, c.entity_id, c.operation) for c in changes] == [
+        ("assignment", str(rows[0].id), "upsert")
+    ]
+
+
+async def test_the_probe_waits_on_moodle_without_the_sync_state_lock(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """Every client write for a user queues behind that user's
+    `user_sync_state` row lock (`sync.changelog.lock_sync_state`), and the
+    assignment list sync takes it. By the time the probe waits on Moodle --
+    a site-info call plus a request per assignment, each allowed the full
+    fetch timeout -- that lock must be released and the list sync
+    committed.
+
+    Checked from a second connection inside the stubbed Moodle call: it
+    takes the lock with NOWAIT, sees the synced row, and finds no other
+    connection idle inside a transaction. The sync-state row exists before
+    the run, as it does for anyone who has synced before, so a lock still
+    held would show up as a conflict rather than as a missing row."""
+    user, _, _ = await _setup_user_job(db_session)
+    db_session.add(UserSyncState(user_id=user.id))
+    await db_session.commit()
+    seen: dict = {}
+
+    async def observing_probe(*, token, assignment_ids, max_concurrency):
+        async with prepared_engine.connect() as conn:
+            try:
+                row = (
+                    await conn.execute(
+                        text(
+                            "SELECT user_id FROM user_sync_state "
+                            "WHERE user_id = :u FOR UPDATE NOWAIT"
+                        ),
+                        {"u": user.id},
+                    )
+                ).first()
+                seen["lock"] = "acquired" if row is not None else "no row"
+            except Exception as exc:  # lock_not_available while it is held
+                seen["lock"] = f"blocked: {type(exc).__name__}"
+            await conn.rollback()
+            seen["rows"] = (
+                await conn.execute(
+                    text("SELECT count(*) FROM user_assignments WHERE user_id = :u"),
+                    {"u": user.id},
+                )
+            ).scalar_one()
+            seen["idle_in_transaction"] = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND state LIKE 'idle in transaction%' "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            ).scalar_one()
+            await conn.rollback()
+        return {}
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", observing_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    assert seen == {"lock": "acquired", "rows": 1, "idle_in_transaction": 0}
+
+
+async def test_a_job_taken_back_while_the_probe_ran_is_left_to_its_new_owner(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The run's success is recorded in a transaction of its own after the
+    probe, so it re-checks that the job is still this worker's: stale-lock
+    recovery may have taken it back while the probe waited on Moodle, and
+    then the recovery's bookkeeping must stand."""
+    _, _, job = await _setup_user_job(db_session)
+
+    async def probe_while_the_job_is_recovered(
+        *, token, assignment_ids, max_concurrency
+    ):
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE sync_jobs SET status = 'pending', locked_by = NULL, "
+                    "locked_at = NULL, last_error = 'sync_failed:stale_lock' "
+                    "WHERE id = :id"
+                ),
+                {"id": job.id},
+            )
+        return {}
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher,
+        "fetch_submission_status",
+        probe_while_the_job_is_recovered,
+        raising=False,
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "sync_failed:stale_lock"
+    assert job.last_success_at is None
+
+
+@pytest.fixture
+def executor_logs_through_the_production_chain(monkeypatch):
+    """Log through the chain `logging_setup.configure` builds in production.
+
+    The same approach as `production_log_chain` in
+    test_moodle_submission_status.py: call the real `configure`, save and
+    restore the process-global logger state it changes, and replace the
+    module's logger proxy -- which froze its bound logger on first use,
+    under whatever an earlier test configured -- with one created after
+    `configure`.
+    """
+    names = ("httpx", "httpcore")
+    saved = {n: logging.getLogger(n).level for n in names}
+    root = logging.getLogger().level
+    try:
+        # Production settings refuse to load without a shared secret. Name
+        # one here rather than leave it to a local `.env`, which neither a
+        # clean checkout nor CI has.
+        configure(
+            Settings(
+                env="production",
+                log_level="INFO",
+                api_shared_secret="test-shared-secret",
+            )
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "logger",
+            structlog.get_logger("server.syncjobs.executor"),
+        )
+        yield
+    finally:
+        structlog.reset_defaults()
+        for n, level in saved.items():
+            logging.getLogger(n).setLevel(level)
+        logging.getLogger().setLevel(root)
+
+
+async def test_an_unexpected_probe_failure_is_logged_without_the_token(
+    db_session,
+    prepared_engine,
+    test_settings,
+    monkeypatch,
+    capsys,
+    executor_logs_through_the_production_chain,
+):
+    """The executor's handler around the whole submission fetch logs an
+    unanticipated exception with its traceback, from a frame that holds the
+    Moodle token, and `exc_info` renders the message of every exception in
+    the `__cause__`/`__context__` chain. So an exception whose message
+    carries the token -- inside a full webservice URL, chained under another
+    that carries it too -- must come out scrubbed.
+
+    The messages are built outside the raising function: a traceback also
+    prints each frame's source line, and an f-string at the `raise` would
+    put `wstoken=` in the output from this test's own source.
+    """
+    token = "tok_executor_leak_canary"
+    await _setup_user_job(db_session, token=token)
+    leaky_url = (
+        "https://moodle.example.test/webservice/rest/server.php"
+        f"?wstoken={token}&wsfunction=x"
+    )
+    inner_message = f"upstream refused {leaky_url}"
+    outer_message = f"probe blew up handling {leaky_url}"
+
+    async def leaky_probe(*, token, assignment_ids, max_concurrency):
+        try:
+            raise ValueError(inner_message)
+        except ValueError:
+            raise RuntimeError(outer_message)
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", leaky_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    stdout = capsys.readouterr().out
+    assert token not in stdout, "the Moodle token reached the log output"
+    lines = [
+        line for line in stdout.splitlines() if "submissions.refresh_failed" in line
+    ]
+    assert len(lines) == 1, lines
+    payload = json.loads(lines[0])
+    assert payload["error"] == "RuntimeError"
+    traceback_text = payload["exception"]
+    # Scrubbed, not dropped: both messages are still rendered.
+    assert "probe blew up handling" in traceback_text
+    assert "upstream refused" in traceback_text
+    assert traceback_text.count("wstoken=<token-redacted>") == 2
+
+
+async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """Through the whole executor: the probe reports an assignment
+    submitted, the row is marked submitted, and the reminder still waiting
+    for it is cancelled. Every other probe test here returns `{}` or
+    raises, so without this nothing notices if the executor stops handing
+    the probe's result to `apply_submission_status`, or that answer on to
+    `cancel_for_submitted`."""
+    user, _, _ = await _setup_user_job(db_session)
+    due_at = datetime.now(UTC) + timedelta(hours=10)
+    reminder = PushJob(
+        user_id=user.id,
+        dedupe_key=_dedupe_key(1, 2.0, int(due_at.timestamp())),
+        channel=REMINDER_CHANNEL,
+        scenario="reminder_2h",
+        fire_at=due_at - timedelta(hours=2),
+        payload={"kind": "assignment_reminder", "moodle_assignment_id": 1},
+    )
+    db_session.add(reminder)
+    await db_session.commit()
+    submitted_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
+
+    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+        return {
+            aid: FetchedSubmission(
+                moodle_assignment_id=aid, is_submitted=True, submitted_at=submitted_at
+            )
+            for aid in assignment_ids
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", submitted_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    row = (
+        await db_session.execute(
+            select(UserAssignment)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.provider_is_submitted is True
+    assert row.provider_submitted_at == submitted_at
+    await db_session.refresh(reminder)
+    assert reminder.status == "cancelled"
+
+
+async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The list sync's trigger can go out before the probe commits, so the
+    probe's flip gets a trigger of its own rather than sharing that one's
+    dedupe key and being dropped as a duplicate of it."""
+    user, _, _ = await _setup_user_job(db_session)
+    due_at = datetime.now(UTC) + timedelta(hours=10)
+
+    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+        return {
+            aid: FetchedSubmission(
+                moodle_assignment_id=aid, is_submitted=True, submitted_at=None
+            )
+            for aid in assignment_ids
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(
+        worker.fetcher, "fetch_submission_status", submitted_probe, raising=False
+    )
+
+    await run_sync_tick(worker)
+
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(
+                PushJob.user_id == user.id, PushJob.scenario == "sync_trigger"
+            )
+        )
+    ).scalars().all()
+    # One from the list sync (it inserted the assignment), one from the probe.
+    assert len(keys) == 2
+    assert [k for k in keys if k.endswith(":submissions")] != []

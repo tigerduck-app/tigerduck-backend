@@ -18,6 +18,19 @@ def configure(settings: Settings) -> None:
         level=level,
     )
 
+    # httpx logs every request at INFO as `HTTP Request: GET <full url> ...`,
+    # and the Moodle webservice takes its token as a `wstoken` query
+    # parameter, so at INFO every sync writes a usable Moodle credential to
+    # stdout in plaintext. The client code is careful never to log the token
+    # itself -- it truncates error strings and omits request parameters --
+    # and all of that is undone by a library logger nobody looked at.
+    #
+    # WARNING keeps httpx's real failures while dropping the request line.
+    # If you ever need the request log back for debugging, redact the query
+    # string rather than lowering this.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     processors: list = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

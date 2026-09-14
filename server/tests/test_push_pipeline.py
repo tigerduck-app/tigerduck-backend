@@ -14,10 +14,13 @@ from server.auth.models import (
     User,
     UserDevice,
 )
+from server.auth.models import push as push_models_module
 from server.db import build_session_factory
+from server.push import pipeline as pipeline_module
 from server.push.apns_client import SendResult
 from server.push.dedupe import activity_end_key, schedule_key
 from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -130,6 +133,93 @@ async def test_due_job_claimed_and_sent(
     ).scalar_one()
     assert delivery.status == "sent"
     assert delivery.provider == "apns"
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_delivery_made_this_tick_goes_out_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """A tick materializes a job's deliveries, then sends each one whose
+    `next_retry_at` has come by the pipeline's own clock. A delivery made
+    moments earlier in the same tick must qualify. Stamped instead by the
+    database's clock, one running even a few milliseconds ahead (a Docker
+    VM's clock drifts against its host's) leaves every fresh delivery
+    waiting out a retry round while the job spends an attempt sending
+    nothing.
+
+    Pinned by running the pipeline on a clock that lags the database's and
+    on one that leads it: the push goes out on the first tick either way."""
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    real_datetime = pipeline_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(pipeline_module, "datetime", SkewedDatetime)
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+
+    assert len(apple.requests) == 1
+    await db_session.refresh(job)
+    assert job.status == "sent"
+
+
+@pytest.mark.parametrize(
+    "database_clock_lead",
+    [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
+    ids=["database-behind", "clocks-agree", "database-ahead"],
+)
+async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_clocks_disagree(
+    db_session, prepared_engine, test_settings, monkeypatch, database_clock_lead
+):
+    """Every `pg_insert(PushJob)` call site in product code omits
+    `available_at` and takes the column's default. Left to the database's
+    `now()`, a database clock even a few milliseconds ahead of the app
+    host's (a Docker VM's drifts against its host's) stamps it later than
+    the claim's own `now`, and `_trigger_push_tick` firing immediately
+    after the job is queued (as it does from `_enqueue_sync_trigger`) can
+    miss the job for a whole retry round.
+
+    Pinned by constructing the job on a clock that lags the claim's and on
+    one that leads it: the job is claimed on its very first tick either
+    way, because the default and the claim read the same clock."""
+    real_datetime = pipeline_module.datetime
+
+    class SkewedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.now(tz) - database_clock_lead
+
+    monkeypatch.setattr(pipeline_module, "datetime", SkewedDatetime)
+    monkeypatch.setattr(push_models_module, "datetime", SkewedDatetime)
+
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = PushJob(
+        user_id=user.id,
+        dedupe_key="system:test:no-available-at",
+        channel="system",
+        scenario="reauth_required",
+        fire_at=datetime.now(UTC) - timedelta(minutes=5),
+        payload={"title": "t", "body": "b"},
+        # available_at deliberately omitted -- exercises the column default.
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+
+    assert len(apple.requests) == 1
 
 
 async def test_future_or_unavailable_jobs_not_claimed(
@@ -470,9 +560,9 @@ async def test_exhausted_delivery_keeps_last_transport_error(
 async def test_zero_work_round_does_not_burn_final_attempt(
     db_session, prepared_engine, test_settings
 ):
-    """Final review (phase 4 M2): a round where every pending delivery's
-    next_retry_at is still in the future must not consume the job's last
-    attempt and force-fail deliveries that never used theirs."""
+    """A round where every pending delivery's next_retry_at is still in
+    the future must not consume the job's last attempt and force-fail
+    deliveries that never used theirs."""
     user, _, _ = await _setup_user_device_token(db_session)
     job = _job(user, attempts=2, max_attempts=3)
     db_session.add(job)
@@ -870,3 +960,169 @@ async def test_start_job_is_not_cancelled_on_a_retry_round(
     assert [r.device_token for r in apple.requests] == ["pts-tok"]
     await db_session.refresh(job)
     assert job.status == "sent"
+
+
+# UserDevice.bulletin_push_enabled gates ONLY the bulletin channel. It is
+# read in exactly one place -- the token_query built above, when
+# job.channel == "bulletin" -- so a device that opted out of bulletins
+# must keep every other channel exactly as it was, and a device that
+# never touched the flag (or explicitly turned it back on) must keep
+# receiving bulletins.
+
+
+async def _bulletin_flag_device(
+    db_session,
+    *,
+    bulletin_push_enabled: bool | None = None,
+    client_device_id: str = "dev-bulletin-flag",
+    app_version: str = "2.1.0",
+):
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    device_kwargs = dict(
+        user_id=user.id,
+        client_device_id=client_device_id,
+        platform="ios",
+        app_version=app_version,
+    )
+    # Omitting the kwarg entirely (rather than passing False/True) is what
+    # stands in for "a device that never sent this field" -- the column's
+    # own default applies, exactly as it would for a pre-migration row.
+    if bulletin_push_enabled is not None:
+        device_kwargs["bulletin_push_enabled"] = bulletin_push_enabled
+    device = UserDevice(**device_kwargs)
+    db_session.add(device)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash=f"hash-{client_device_id}",
+            token_value=f"tok-{client_device_id}",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    db_session.add(_push_to_start_token(device, token_value=f"pts-{client_device_id}"))
+    await db_session.flush()
+    return user, device
+
+
+async def _delivered_device_ids_for_job(session, job_id) -> set:
+    rows = (
+        await session.execute(
+            select(PushDelivery.device_id).where(PushDelivery.push_job_id == job_id)
+        )
+    ).scalars().all()
+    return set(rows)
+
+
+async def test_bulletin_flag_false_blocks_only_the_bulletin_channel(
+    db_session, prepared_engine, test_settings
+):
+    """One opted-out device, three jobs: the bulletin is withheld, and an
+    assignment reminder and a server-started Live Activity still land."""
+    user, device = await _bulletin_flag_device(db_session, bulletin_push_enabled=False)
+
+    bulletin_job = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:flag-false",
+    )
+    reminder_job = _job(
+        user,
+        channel=REMINDER_CHANNEL,
+        scenario="reminder_24h",
+        dedupe_key="assignment:test:flag-false",
+    )
+    activity_job = _start_job(user, device)
+    db_session.add_all([bulletin_job, reminder_job, activity_job])
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert await _delivered_device_ids_for_job(db_session, bulletin_job.id) == set()
+    assert device.id in await _delivered_device_ids_for_job(db_session, reminder_job.id)
+    assert device.id in await _delivered_device_ids_for_job(db_session, activity_job.id)
+
+
+@pytest.mark.parametrize("bulletin_push_enabled", [True, None], ids=["true", "unset"])
+async def test_bulletin_flag_true_or_unset_receives_bulletin(
+    db_session, prepared_engine, test_settings, bulletin_push_enabled
+):
+    """True (explicitly re-enabled) and unset (a device that predates the
+    column, or a pre-2.1.0 client that never sends the field) both resolve
+    to "deliver" -- only an explicit false withholds the bulletin."""
+    user, device = await _bulletin_flag_device(
+        db_session,
+        bulletin_push_enabled=bulletin_push_enabled,
+        client_device_id=f"dev-bulletin-{bulletin_push_enabled}",
+    )
+    assert device.bulletin_push_enabled is True
+
+    job = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key=f"bulletin:test:flag-{bulletin_push_enabled}",
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert device.id in await _delivered_device_ids_for_job(db_session, job.id)
+
+
+async def test_bulletin_job_reaches_only_its_target_devices(
+    db_session, prepared_engine, test_settings
+):
+    """Subscriptions belong to a device, so a bulletin job names the devices
+    whose rules matched and lands on those alone. A job written before that
+    names none and still goes to every device with bulletin push on."""
+    user, phone = await _bulletin_flag_device(
+        db_session, client_device_id="dev-target-phone"
+    )
+    ipad = UserDevice(
+        user_id=user.id,
+        client_device_id="dev-target-ipad",
+        platform="ipados",
+        app_version="2.1.0",
+    )
+    db_session.add(ipad)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=ipad.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-dev-target-ipad",
+            token_value="tok-dev-target-ipad",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    targeted = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:targeted",
+        payload={"title": "t", "body": "b", "target_device_ids": [str(phone.id)]},
+    )
+    legacy = _job(
+        user,
+        channel="bulletin",
+        scenario="bulletin_matched",
+        dedupe_key="bulletin:test:legacy",
+    )
+    db_session.add_all([targeted, legacy])
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings, apple=ScriptedSender())
+    await run_push_tick(worker)
+
+    assert await _delivered_device_ids_for_job(db_session, targeted.id) == {phone.id}
+    assert await _delivered_device_ids_for_job(db_session, legacy.id) == {phone.id, ipad.id}

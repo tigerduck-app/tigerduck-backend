@@ -4,12 +4,15 @@ Two passes per tick, both crash-idempotent:
 
   A. Match — bulletins that are LLM-processed but have no
      `bulletin_user_match_runs` row are matched against every enabled
-     `user_bulletin_subscriptions` rule (same Rule semantics as the
-     anonymous matcher); hits become `bulletin_user_matches` rows
-     (ON CONFLICT DO NOTHING) and the run marker is written.
+     `user_bulletin_subscriptions` rule of every signed-in device (same
+     Rule semantics as the anonymous matcher). Rules are per device, so a
+     user's hit becomes one `bulletin_user_matches` row naming the devices
+     whose own rules matched (ON CONFLICT DO NOTHING), and the run marker
+     is written.
   B. Push — matches with `pushed_at IS NULL` get one push_job each
      (dedupe key `bulletin:{id}`; an existing active job is adopted
-     instead of erroring) and are stamped with push_job_id/pushed_at.
+     instead of erroring), aimed at those devices alone, and are stamped
+     with push_job_id/pushed_at.
 
 The anonymous flow's `bulletins.notified_at` is never touched here —
 that column remains the cursor of the device_registrations pipeline.
@@ -25,7 +28,7 @@ from sqlalchemy import exists, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from server.auth.models import PushJob
+from server.auth.models import PushJob, UserDevice
 from server.bulletins.matcher import Rule, rule_hits
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.taxonomy import SubscriptionMode
@@ -75,47 +78,66 @@ async def _match_new_bulletins(
     subs = (
         (
             await session.execute(
-                select(UserBulletinSubscription).where(
+                select(UserBulletinSubscription)
+                .join(UserDevice, UserDevice.id == UserBulletinSubscription.device_id)
+                .where(
                     UserBulletinSubscription.enabled.is_(True),
                     UserBulletinSubscription.deleted_at.is_(None),
+                    # A signed-out device keeps its rules for when it signs
+                    # back in, but receives nothing meanwhile.
+                    UserDevice.deleted_at.is_(None),
                 )
+                .order_by(UserBulletinSubscription.id)
             )
         )
         .scalars()
         .all()
     )
-    per_user: dict[uuid.UUID, list[tuple[int, Rule]]] = {}
+    # user -> device -> that device's rules
+    per_user: dict[uuid.UUID, dict[uuid.UUID, list[tuple[int, Rule]]]] = {}
     for sub in subs:
         rule = Rule(
             orgs=frozenset(sub.orgs or ()),
             tags=frozenset(sub.tags or ()),
             mode=SubscriptionMode(sub.mode),
         )
-        per_user.setdefault(sub.user_id, []).append((sub.id, rule))
+        per_user.setdefault(sub.user_id, {}).setdefault(sub.device_id, []).append(
+            (sub.id, rule)
+        )
 
     for bulletin in bulletins:
         values: list[dict] = []
         if bulletin.canonical_org is not None:
-            for user_id, rules in per_user.items():
-                hit_sub_id = next(
-                    (
-                        sub_id
-                        for sub_id, rule in rules
-                        if rule_hits(
-                            rule,
-                            canonical_org=bulletin.canonical_org,
-                            content_tags=bulletin.content_tags or [],
-                        )
-                    ),
-                    None,
-                )
-                if hit_sub_id is not None:
+            for user_id, devices in per_user.items():
+                # device -> the first of its rules that matched
+                hits: dict[uuid.UUID, int] = {}
+                for device_id, rules in devices.items():
+                    hit_sub_id = next(
+                        (
+                            sub_id
+                            for sub_id, rule in rules
+                            if rule_hits(
+                                rule,
+                                canonical_org=bulletin.canonical_org,
+                                content_tags=bulletin.content_tags or [],
+                            )
+                        ),
+                        None,
+                    )
+                    if hit_sub_id is not None:
+                        hits[device_id] = hit_sub_id
+                if hits:
+                    first_sub_id = min(hits.values())
                     values.append(
                         {
                             "bulletin_id": bulletin.id,
                             "user_id": user_id,
-                            "subscription_id": hit_sub_id,
-                            "match_reason": {"subscription_id": hit_sub_id},
+                            "subscription_id": first_sub_id,
+                            # Pass B aims the push at exactly these devices.
+                            "match_reason": {
+                                "subscription_id": first_sub_id,
+                                "device_ids": sorted(str(d) for d in hits),
+                            },
                             "matched_at": now,
                         }
                     )
@@ -155,6 +177,20 @@ async def _push_pending_matches(session: AsyncSession, now: datetime) -> int:
         title = bulletin.title_clean or bulletin.title
         body = bulletin.summary or title
         dedupe_key = f"bulletin:{bulletin.id}"
+        payload = {
+            "kind": "bulletin",
+            "title": title,
+            "body": body,
+            "bulletin_id": bulletin.id,
+            "source_url": bulletin.source_url,
+            "canonical_org": bulletin.canonical_org or "",
+        }
+        device_ids = (match.match_reason or {}).get("device_ids")
+        if device_ids is not None:
+            # Only the devices whose own rules matched. A match written
+            # before rules were per device names none, and its job goes to
+            # every device as it always did.
+            payload["target_device_ids"] = device_ids
         result = await session.execute(
             pg_insert(PushJob)
             .values(
@@ -163,14 +199,7 @@ async def _push_pending_matches(session: AsyncSession, now: datetime) -> int:
                 channel=CHANNEL,
                 scenario=SCENARIO,
                 fire_at=now,
-                payload={
-                    "kind": "bulletin",
-                    "title": title,
-                    "body": body,
-                    "bulletin_id": bulletin.id,
-                    "source_url": bulletin.source_url,
-                    "canonical_org": bulletin.canonical_org or "",
-                },
+                payload=payload,
             )
             .on_conflict_do_nothing()
             .returning(PushJob.id)

@@ -7,24 +7,88 @@ an "end" PushJob at countdown_target.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.models import DevicePushToken, PushJob, PushJobStatus, PushTokenStatus
+from server.auth.models import (
+    PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
+    DevicePushToken,
+    PushJob,
+    PushJobStatus,
+    PushTokenStatus,
+)
 from server.auth.schemas import (
     LiveActivityRegisterV3Request,
     LiveActivityRegisterV3Response,
 )
 from server.db import SessionDep
-from server.push.dedupe import activity_end_key
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 
 router = APIRouter(prefix="/live-activities", tags=["live-activities"])
 logger = structlog.get_logger(__name__)
+
+
+async def _retire_finished_end_job(
+    session: AsyncSession, *, user_id: uuid.UUID, dedupe_key: str
+) -> None:
+    """Move an end job that already went out off `dedupe_key`.
+
+    `ux_push_jobs_dedupe_active` covers `sent` and `partial_failed` as well
+    as jobs still waiting, so the end an earlier run of the same activity id
+    received holds the key for good. The upsert in the route then conflicts
+    with it, its update only applies to a job still waiting, and the
+    activity registering now got no end job at all: it stayed on screen
+    past its countdown until iOS's own cleanup. The id repeats whenever a
+    class occurrence runs twice (the debug clock does exactly that) and
+    whenever an assignment gets a second activity.
+
+    A register whose countdown is still ahead is a running activity, so
+    whatever that earlier end did is over. The row keeps its status and
+    history under a key of its own, and the exact key is left for the new
+    job: the pipeline's already-running check and `submission_cancel` both
+    look the end job up by it.
+
+    Every row holding the key is locked, not just the finished ones. The
+    pipeline holds its lock on a job for the whole of a delivery, during
+    which the job still reads `processing`: a query for finished rows
+    alone passed it by, the delivery then committed `sent`, and the upsert
+    conflicted with it as above. Taking the lock waits that delivery out
+    and reads the row as it ended. A job still waiting is the upsert's to
+    move, and held meanwhile so the pipeline cannot claim it first.
+    """
+    holders = (
+        (
+            await session.execute(
+                select(PushJob)
+                .where(
+                    PushJob.user_id == user_id,
+                    PushJob.dedupe_key == dedupe_key,
+                    PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    finished = [
+        job
+        for job in holders
+        if job.status
+        in (PushJobStatus.sent.value, PushJobStatus.partial_failed.value)
+    ]
+    for job in finished:
+        job.dedupe_key = f"{dedupe_key}:finished:{job.id}"
+    if finished:
+        # Before the upsert reads the index.
+        await session.flush()
 
 
 @router.post("/register", response_model=LiveActivityRegisterV3Response)
@@ -110,13 +174,16 @@ async def register_live_activity(
     dedupe_key = activity_end_key(auth.device_id, payload.activity_id)
     end_job_id = None
     if payload.countdown_target > now:
+        await _retire_finished_end_job(
+            session, user_id=auth.user_id, dedupe_key=dedupe_key
+        )
         end_stmt = (
             pg_insert(PushJob)
             .values(
                 user_id=auth.user_id,
                 device_id=auth.device_id,
                 dedupe_key=dedupe_key,
-                channel="schedule",
+                channel=SCHEDULE_CHANNEL,
                 scenario="activityEnd",
                 fire_at=payload.countdown_target,
                 # Snapshot first, routing keys after: a snapshot carrying
@@ -132,14 +199,7 @@ async def register_live_activity(
                 index_elements=["user_id", "dedupe_key"],
                 # ux_push_jobs_dedupe_active is partial (active statuses);
                 # repeat its predicate so ON CONFLICT matches the index.
-                index_where=PushJob.status.in_(
-                    [
-                        PushJobStatus.pending.value,
-                        PushJobStatus.processing.value,
-                        PushJobStatus.sent.value,
-                        PushJobStatus.partial_failed.value,
-                    ]
-                ),
+                index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": payload.countdown_target,
                     "payload": {
@@ -161,5 +221,13 @@ async def register_live_activity(
         row = result.first()
         if row:
             end_job_id = row[0]
+        else:
+            # The activity is running with nothing scheduled to end it.
+            # Not expected once finished jobs are retired above, so leave a
+            # trace rather than answer as if it will be ended.
+            logger.warning(
+                "live_activities.end_job_not_filed",
+                activity_id=payload.activity_id,
+            )
 
     return LiveActivityRegisterV3Response(token_id=token_id, end_job_id=end_job_id)

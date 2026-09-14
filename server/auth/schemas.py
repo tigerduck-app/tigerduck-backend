@@ -53,6 +53,10 @@ class DeviceInfo(BaseModel):
     device_class: DeviceClass | None = None
     app_version: str | None = Field(default=None, max_length=32)
     os_version: str | None = Field(default=None, max_length=32)
+    # Hardware model, see UserDevice.device_model. Optional: absent leaves
+    # the stored value alone, so a client that predates the field never
+    # blanks it.
+    device_model: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def device_class_fits_platform(self) -> "DeviceInfo":
@@ -125,6 +129,22 @@ class PushTokenIn(BaseModel):
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
     cloud_sync_enabled: bool | None = None
+    # None means "not reported" and leaves the stored value untouched --
+    # same convention as cloud_sync_enabled above. Lets a client carry the
+    # bulletin opt-out on every register call, self-healing the flag onto
+    # a device that dropped and re-registered, without a 2.0.x client
+    # (which never sends this field) ever resetting it.
+    bulletin_push_enabled: bool | None = None
+    # None means "not reported" and leaves the stored value untouched --
+    # same convention as cloud_sync_enabled and bulletin_push_enabled above.
+    # Lets a client carry the global push opt-out on every register call,
+    # so a 2.0.x client that never sends this field can never reset it.
+    server_push_enabled: bool | None = None
+    # BCP-47 tag, e.g. "zh-Hant-TW". Reported unconditionally on every
+    # registration call (not gated behind a preference toggle) — see
+    # UserDevice.locale for why. Optional so older clients keep working.
+    # max_length mirrors UserDevice.locale's String(35) column.
+    locale: str | None = Field(default=None, max_length=35)
 
 
 class DeviceRegisterV3Response(BaseModel):
@@ -148,21 +168,34 @@ class DeviceListV3Response(BaseModel):
 
 class DevicePreferencesV3Request(BaseModel):
     server_push_enabled: bool | None = None
+    # None leaves the stored value unchanged, same as every other switch
+    # on this request -- an old client that has never heard of this field
+    # must not reset it back to true on every PATCH.
+    bulletin_push_enabled: bool | None = None
     sync_courses: bool | None = None
     sync_course_colors: bool | None = None
     sync_course_names: bool | None = None
     sync_assignments: bool | None = None
     cloud_sync_enabled: bool | None = None
+    sync_assignment_reminders: bool | None = None
+    sync_live_activity: bool | None = None
+    # Lets the device push a changed system language between register calls
+    # rather than waiting for the next app launch. See UserDevice.locale.
+    # max_length mirrors UserDevice.locale's String(35) column.
+    locale: str | None = Field(default=None, max_length=35)
 
 
 class DevicePreferencesV3Response(BaseModel):
     device_id: str
     server_push_enabled: bool
+    bulletin_push_enabled: bool
     sync_courses: bool
     sync_course_colors: bool
     sync_course_names: bool
     sync_assignments: bool
     cloud_sync_enabled: bool
+    sync_assignment_reminders: bool
+    sync_live_activity: bool
 
 
 class ScheduleScenario(str, Enum):

@@ -65,7 +65,7 @@ async def test_retry_within_grace_returns_fresh_tokens(client) -> None:
     token_b = first.json()["refresh_token"]
 
     # Simulated lost response: client retries with A within the grace
-    # window (review 1.5) — gets fresh tokens, no logout.
+    # window — gets fresh tokens, no logout.
     retry = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
     assert retry.status_code == 200
     token_c = retry.json()["refresh_token"]
@@ -154,9 +154,9 @@ async def test_expired_session_401(client) -> None:
     assert response.json()["detail"] == "refresh_token_expired"
 
 async def test_grace_retry_is_one_shot(client) -> None:
-    """Final review F1: replaying token A a SECOND time within the grace
-    window must be treated as theft, not another benign retry — otherwise
-    an attacker holding A can mint unbounded live sessions for 60s."""
+    """Replaying token A a SECOND time within the grace window must be
+    treated as theft, not another benign retry — otherwise an attacker
+    holding A can mint unbounded live sessions for 60s."""
     login = await do_login(client)
     token_a = login["refresh_token"]
 

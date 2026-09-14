@@ -300,9 +300,9 @@ async def test_match_device_ids_union_across_multiple_rules(
 async def test_match_device_ids_skips_linked_devices(
     prepared_engine: AsyncEngine,
 ) -> None:
-    """Review 1.8: a device linked to a logged-in v3 user gets bulletins
-    via the user-level push_jobs flow — the anonymous fan-out must skip it
-    or the phone rings twice for every bulletin."""
+    """A device linked to a logged-in v3 user gets bulletins via the
+    user-level push_jobs flow — the anonymous fan-out must skip it or the
+    phone rings twice for every bulletin."""
     from server.auth.models import User
 
     factory = async_sessionmaker(prepared_engine, expire_on_commit=False)

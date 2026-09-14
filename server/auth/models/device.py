@@ -57,9 +57,29 @@ class UserDevice(Base):
         String(16), default="", server_default=""
     )
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Hardware model as the device reports it: "Google Pixel 8" on Android,
+    # the machine identifier ("iPhone17,3", "Mac15,3") on Apple. For support
+    # work in the portal only; nothing targets or gates on it.
+    device_model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     app_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     os_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # BCP-47 tag reported by the device at registration. Nullable: rows
+    # predating this column, and clients that have not shipped the field
+    # yet, fall back to English at send time. Never gated on a preference —
+    # gating would leave a window where a device is registered but has no
+    # language, exactly when the first push may need one. A device fact
+    # like `app_version` / `os_version` above, not a user preference.
+    locale: Mapped[str | None] = mapped_column(String(35), nullable=True)
     server_push_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    # Gates ONLY the bulletin channel, in push/pipeline.py::_materialize.
+    # Separate from `server_push_enabled` above, which today reaches
+    # nothing but operator custom-push targeting
+    # (custom_push_targeting.py, portal/routes/custom_push.py) -- bulletins
+    # are part of the always-on essential-info sync (spec §6), and this is
+    # the per-device control the bulletins page itself owns.
+    bulletin_push_enabled: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )
     sync_courses: Mapped[bool] = mapped_column(
@@ -75,6 +95,16 @@ class UserDevice(Base):
         Boolean, default=True, server_default=sa.text("true")
     )
     cloud_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    # Device-level "does this device push THIS category to the cloud".
+    # Separate from the user-level values in the `notification` settings
+    # document: the document says how long before a deadline to remind,
+    # these say whether this particular device takes part at all.
+    sync_assignment_reminders: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sa.text("true")
+    )
+    sync_live_activity: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=sa.text("true")
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(

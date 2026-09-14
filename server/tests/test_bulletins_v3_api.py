@@ -111,6 +111,64 @@ async def test_subscription_cross_user_isolation(client) -> None:
     assert response.status_code == 404
 
 
+async def test_subscriptions_are_per_device(client) -> None:
+    """One account, two devices: each device keeps its own rules, cannot
+    reach the other's, and no rule edit enters the sync change log --
+    subscriptions are not part of TigerSync."""
+    from sqlalchemy import func, select
+
+    from server.sync.models import UserChangeLog
+
+    login_phone = await do_login(client)
+    ipad_body = dict(LOGIN_BODY)
+    ipad_body["device_info"] = {"client_device_id": "ipad-xyz", "platform": "ipados"}
+    login_ipad = (await client.post("/v3/auth/login", json=ipad_body)).json()
+    assert login_ipad["user"]["id"] == login_phone["user"]["id"]
+
+    create = await client.post(
+        "/v3/bulletin-subscriptions",
+        headers=bearer(login_phone),
+        json={"name": "phone only", "orgs": ["教務處"]},
+    )
+    assert create.status_code == 200, create.text
+    sub_id = create.json()["id"]
+
+    phone_list = await client.get("/v3/bulletin-subscriptions", headers=bearer(login_phone))
+    assert [r["name"] for r in phone_list.json()["items"]] == ["phone only"]
+    ipad_list = await client.get("/v3/bulletin-subscriptions", headers=bearer(login_ipad))
+    assert ipad_list.json()["items"] == []
+
+    # The iPad's snapshot PUT replaces the iPad's rules, never the phone's.
+    put = await client.put(
+        "/v3/bulletin-subscriptions",
+        headers=bearer(login_ipad),
+        json={"rules": [{"name": "ipad only", "orgs": [], "tags": []}]},
+    )
+    assert put.status_code == 200
+    phone_list = await client.get("/v3/bulletin-subscriptions", headers=bearer(login_phone))
+    assert [r["name"] for r in phone_list.json()["items"]] == ["phone only"]
+
+    for method, kwargs in (
+        ("patch", {"json": {"base_revision": 1, "name": "x"}}),
+        ("delete", {}),
+    ):
+        response = await getattr(client, method)(
+            f"/v3/bulletin-subscriptions/{sub_id}", headers=bearer(login_ipad), **kwargs
+        )
+        assert response.status_code == 404, method
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        logged = (
+            await session.execute(
+                select(func.count())
+                .select_from(UserChangeLog)
+                .where(UserChangeLog.entity_type == "bulletin_subscription")
+            )
+        ).scalar_one()
+    assert logged == 0
+
+
 async def test_bulletin_state_put_and_get(client) -> None:
     login = await do_login(client)
     bulletin_id = await seed_bulletin(client)
