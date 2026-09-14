@@ -246,3 +246,60 @@ async def test_full_sync_does_not_cancel_the_activity_end_job(client) -> None:
         assert all(
             j.status == PushJobStatus.cancelled.value for j in start_jobs
         ), [j.status for j in start_jobs]
+
+
+@pytest.mark.parametrize(
+    "finished", [PushJobStatus.sent, PushJobStatus.partial_failed]
+)
+async def test_an_end_job_already_sent_does_not_block_the_next_one(
+    client, finished
+) -> None:
+    """An activity whose id already had its end push sent still gets an
+    end job when it runs again.
+
+    `ux_push_jobs_dedupe_active` covers sent and partial_failed rows as
+    well as pending ones, so the earlier end held the key: the upsert
+    conflicted with it, its update only applies to pending rows, and the
+    route answered 200 having filed nothing. The activity then stayed on
+    screen past its countdown. Seen after a class was run early under the
+    debug clock and then again on the day; an assignment id repeats the
+    same way whenever that assignment gets a second activity.
+    """
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+    first = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(now + timedelta(minutes=15), "f" * 128),
+    )
+    assert first.status_code == 200, first.text
+    earlier_id = first.json()["end_job_id"]
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        earlier = await s.get(PushJob, earlier_id)
+        end_key = earlier.dedupe_key
+        earlier.status = finished.value
+        await s.commit()
+
+    target = now + timedelta(minutes=45)
+    second = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "g" * 128),
+    )
+    assert second.status_code == 200, second.text
+    end_job_id = second.json()["end_job_id"]
+    assert end_job_id is not None
+    assert end_job_id != earlier_id
+
+    async with factory() as s:
+        end_job = await s.get(PushJob, end_job_id)
+        assert end_job.status == PushJobStatus.pending.value
+        assert end_job.fire_at == target
+        # The pipeline's already-running check looks the end job up by this
+        # exact key, so the new one has to hold it.
+        assert end_job.dedupe_key == end_key
+        earlier = await s.get(PushJob, earlier_id)
+        assert earlier.status == finished.value
+        assert earlier.dedupe_key != end_key
