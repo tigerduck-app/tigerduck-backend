@@ -31,10 +31,11 @@ logger = structlog.get_logger(__name__)
 
 
 class HolidayOverrideRequest(BaseModel):
-    #: True keeps class reminders on for this holiday. False is stored
-    #: rather than deleted so the client can turn the exception off without
-    #: the change looking like "never set it", which is what a delete would
-    #: mean to a device that had not synced in between.
+    #: True keeps class reminders and class Live Activities on for this
+    #: holiday. False is stored rather than deleted so the client can turn
+    #: the exception off without the change looking like "never set it",
+    #: which is what a delete would mean to a device that had not synced in
+    #: between.
     notify: bool
 
 

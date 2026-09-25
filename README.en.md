@@ -56,6 +56,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 📲 Push (`server/push/`)
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
 - **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead); submitting / dropping / schedule changes cancel stale reminders
+- **School holidays** — Course reminders and the class Live Activities (`classPreparing` / `inClass`) are not sent on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error = holiday`. Assignment Live Activities ignore holidays
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **APNs** — JWT auth, Push-to-Start, Live Activity update / end
 - **FCM** — Batched fan-out, automatic cleanup on `UNREGISTERED` / `SENDER_ID_MISMATCH`
@@ -267,12 +268,20 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/v3/bulletin-states` | Bulletin read / starred / hidden state | JWT |
 | `PUT` | `/v3/bulletin-states/{id}` | Set per-bulletin state | JWT |
 
+### Academic calendar
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/v3/calendar/semesters` | Term dates and school holidays (ETag) | none |
+| `GET` | `/v3/sync/holiday-overrides` | The user's holiday exceptions ("Still have class?") | JWT |
+| `PUT` | `/v3/sync/holiday-overrides/{holiday_id}` | Set whether one holiday still gets class notifications | JWT |
+
 ### Schedule / Live Activity
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler) | JWT |
-| `DELETE` | `/v3/schedule/sync` | Delete schedule data | JWT |
+| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler; class starts are checked against school holidays when they fire) | JWT |
+| `DELETE` | `/v3/schedule/{source_id}` | Cancel this device's pending starts for one source | JWT |
 | `POST` | `/v3/live-activities/register` | Register Live Activity update token | JWT |
 
 ### Server-side fetch / Admin

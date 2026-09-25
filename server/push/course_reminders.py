@@ -233,6 +233,8 @@ async def scan_course_reminders(
         # them back. Apple guards twice — the app also stays quiet — but the
         # backend half is what stops a push being *sent*, which is the only
         # half that works when the app is not running to suppress anything.
+        # The class Live Activity starts apply the same rule when they fire
+        # — `pipeline._classes_quiet`; a change here belongs there too.
         holiday_ranges = (
             await session.execute(
                 select(

@@ -56,6 +56,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 📲 推播（`server/push/`）
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
 - **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
+- **校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在校曆假日（`academic_holidays`）不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error = holiday`。作業類 Live Activity 不受假日影響
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token
@@ -267,12 +268,20 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |
 | `PUT` | `/v3/bulletin-states/{id}` | 設定單一公告狀態 | JWT |
 
+### 校曆
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/v3/calendar/semesters` | 學期起訖與校曆假日（ETag） | 無 |
+| `GET` | `/v3/sync/holiday-overrides` | 使用者的假日例外（「還要上課？」） | JWT |
+| `PUT` | `/v3/sync/holiday-overrides/{holiday_id}` | 設定某個假日是否照常送課程通知 | JWT |
+
 ### 排程 / Live Activity
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程） | JWT |
-| `DELETE` | `/v3/schedule/sync` | 刪除排程資料 | JWT |
+| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程；課堂類在送出時才依校曆假日判斷） | JWT |
+| `DELETE` | `/v3/schedule/{source_id}` | 取消此裝置某個 source 待送的排程 | JWT |
 | `POST` | `/v3/live-activities/register` | 註冊 Live Activity update token | JWT |
 
 ### 伺服器代抓 / 管理
