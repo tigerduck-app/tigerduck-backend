@@ -1026,6 +1026,25 @@ async def test_class_start_fires_on_a_holiday_the_user_has_class_on(
     assert job.status == "sent"
 
 
+async def test_a_bad_school_timezone_holds_back_nothing_but_class_starts(
+    db_session, prepared_engine, test_settings
+):
+    """The zone is only read for a class start's holiday check, so a typo
+    in it must not stop every other push along with it."""
+    user, _, _ = await _setup_user_device_token(db_session)
+    db_session.add(_job(user))
+    await db_session.commit()
+
+    settings = test_settings.model_copy(
+        update={"course_reminder_timezone": "Asia/Taipe"}
+    )
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, settings, apple=apple)
+    await run_push_tick(worker)
+
+    assert len(apple.requests) == 1
+
+
 async def test_assignment_start_fires_on_a_holiday(
     db_session, prepared_engine, test_settings
 ):
