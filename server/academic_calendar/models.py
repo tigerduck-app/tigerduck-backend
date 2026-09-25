@@ -106,7 +106,8 @@ class AcademicHoliday(Base):
 
 
 class UserHolidayOverride(Base):
-    """A user's decision to keep receiving class reminders on one holiday."""
+    """A user's decision to keep receiving class reminders and class Live
+    Activities on one holiday."""
 
     __tablename__ = "user_holiday_overrides"
 
