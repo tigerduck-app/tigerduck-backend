@@ -24,13 +24,15 @@ from __future__ import annotations
 import uuid
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -43,6 +45,7 @@ from server.auth.models import (
     UserDevice,
     UserDevicePlatform,
 )
+from server.auth.schemas import ScheduleScenario
 from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import session_scope
@@ -63,6 +66,13 @@ logger = structlog.get_logger(__name__)
 _CLAIM_LOCK_KEY = 0x54445F50555348
 
 _UNREGISTERED_APNS_DESCRIPTIONS = {"baddevicetoken", "unregistered"}
+
+# The schedule scenarios that announce a class. A school holiday silences
+# these and not `assignmentUrgent`: a deadline on a day off is still a
+# deadline — the same split the app's own scenario resolver makes.
+_CLASS_SCENARIOS = frozenset(
+    {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
+)
 
 
 @dataclass(frozen=True)
@@ -185,7 +195,9 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 # commit and now — never double-process.
                 logger.warning("push.job_reclaimed", job_id=job_id)
                 return
-            if await _materialize(session, job):
+            if await _materialize(
+                session, job, tz=ZoneInfo(worker.settings.course_reminder_timezone)
+            ):
                 await _deliver_round(worker, session, job)
     except Exception:
         logger.exception("push.job_crashed", job_id=job_id)
@@ -211,7 +223,7 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 )
 
 
-async def _materialize(session: AsyncSession, job: PushJob) -> bool:
+async def _materialize(session: AsyncSession, job: PushJob, *, tz: tzinfo) -> bool:
     """Create one delivery row per active token. Idempotent — a stale-
     recovered job re-materializes onto the same unique index.
 
@@ -273,6 +285,27 @@ async def _materialize(session: AsyncSession, job: PushJob) -> bool:
             return False
         if is_activity_end:
             token_query = token_query.where(DevicePushToken.scope_key == activity_id)
+        elif (
+            job.scenario in _CLASS_SCENARIOS
+            # ponytail: the day the start fires on, not the class's own day.
+            # Same day while `classPreparing` leads by at most 4 h and the
+            # first period starts at 08:10; read the snapshot's class start
+            # if the app ever allows a longer lead.
+            and await _classes_quiet(
+                session, user_id=job.user_id, day=job.fire_at.astimezone(tz).date()
+            )
+            and not await _has_deliveries(session, job)
+        ):
+            # The class this would announce does not meet. The app files a
+            # class's starts up to a day ahead without consulting the school
+            # calendar, so the holiday is decided here, when the start
+            # fires — which also lets a holiday published since, or a
+            # "還要上課？" toggle flipped since, reach a job already waiting.
+            # Cancelled rather than failed, and only before the first
+            # delivery, for the reasons given for a running activity below.
+            _settle(job, status=PushJobStatus.cancelled, error="holiday", now=now)
+            logger.info("push.activity_holiday", job_id=job.id, activity_id=activity_id)
+            return False
         elif not await _has_deliveries(session, job) and (
             await _activity_already_registered(
                 session, job=job, activity_id=activity_id, now=now
@@ -393,6 +426,44 @@ def _settle(job: PushJob, *, status: PushJobStatus, error: str, now: datetime) -
         job.cancelled_at = now
     job.locked_by = None
     job.locked_at = None
+
+
+async def _classes_quiet(
+    session: AsyncSession, *, user_id: uuid.UUID, day: date
+) -> bool:
+    """Whether classes do not meet for `user_id` on `day`.
+
+    The rule `course_reminders.scan_course_reminders` applies to the class
+    reminder alerts: a holiday covers the day and the user has not opted in
+    to any holiday that does. Opting in to one un-silences the day even
+    when a second, overlapping holiday covers it too.
+    """
+    covering = (
+        (
+            await session.execute(
+                select(AcademicHoliday.id).where(
+                    AcademicHoliday.start_date <= day,
+                    AcademicHoliday.end_date >= day,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not covering:
+        return False
+    opted_in = (
+        await session.execute(
+            select(UserHolidayOverride.id)
+            .where(
+                UserHolidayOverride.user_id == user_id,
+                UserHolidayOverride.holiday_id.in_(covering),
+                UserHolidayOverride.notify.is_(True),
+            )
+            .limit(1)
+        )
+    ).first()
+    return opted_in is None
 
 
 async def _has_deliveries(session: AsyncSession, job: PushJob) -> bool:
