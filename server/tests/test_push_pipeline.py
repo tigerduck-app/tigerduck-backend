@@ -1026,6 +1026,64 @@ async def test_class_start_fires_on_a_holiday_the_user_has_class_on(
     assert job.status == "sent"
 
 
+async def _tick_start_filed_a_day_ahead(
+    db_session, prepared_engine, test_settings, *, holiday_on, target=None
+):
+    """A start firing now for tomorrow's class, which `/schedule/sync`
+    accepts, with a holiday on the class's day or on the day it fires."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    job = _start_job(user, device, scenario="classPreparing")
+    class_start = job.fire_at + timedelta(days=1)
+    job.payload = {
+        **job.payload,
+        "countdownTarget": class_start.isoformat() if target is None else target,
+    }
+    holiday = _holiday_on(class_start if holiday_on == "class" else job.fire_at)
+    db_session.add_all([job, holiday])
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    return job, apple
+
+
+async def test_class_start_is_held_by_a_holiday_on_the_class_day(
+    db_session, prepared_engine, test_settings
+):
+    job, apple = await _tick_start_filed_a_day_ahead(
+        db_session, prepared_engine, test_settings, holiday_on="class"
+    )
+
+    assert apple.requests == []
+    assert job.last_error == "holiday"
+
+
+async def test_class_start_is_not_held_by_a_holiday_on_the_day_it_fires(
+    db_session, prepared_engine, test_settings
+):
+    job, apple = await _tick_start_filed_a_day_ahead(
+        db_session, prepared_engine, test_settings, holiday_on="fire"
+    )
+
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
+    assert job.status == "sent"
+
+
+@pytest.mark.parametrize("target", ["not a date", 1e300])
+async def test_an_unusable_class_time_falls_back_to_the_day_it_fires(
+    db_session, prepared_engine, test_settings, target
+):
+    job, apple = await _tick_start_filed_a_day_ahead(
+        db_session, prepared_engine, test_settings, holiday_on="fire", target=target
+    )
+
+    assert apple.requests == []
+    assert job.last_error == "holiday"
+
+
 async def test_a_bad_school_timezone_holds_back_nothing_but_class_starts(
     db_session, prepared_engine, test_settings
 ):

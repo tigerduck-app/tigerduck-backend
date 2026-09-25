@@ -57,6 +57,7 @@ from server.push.notification_copy import (
     build_assignment_reminder_payload,
     build_reauth_payload,
 )
+from server.push.payload import _to_unix_seconds
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 
@@ -287,15 +288,8 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             token_query = token_query.where(DevicePushToken.scope_key == activity_id)
         elif (
             job.scenario in _CLASS_SCENARIOS
-            # ponytail: the day the start fires on, not the class's own day.
-            # Same day while `classPreparing` leads by at most 4 h and the
-            # first period starts at 08:10; read the snapshot's class start
-            # if the app ever allows a longer lead. The zone is resolved here,
-            # for class starts only, so a bad setting cannot stop other pushes.
             and await _classes_quiet(
-                session,
-                user_id=job.user_id,
-                day=job.fire_at.astimezone(ZoneInfo(school_tz)).date(),
+                session, user_id=job.user_id, day=_class_day(job, school_tz)
             )
             and not await _has_deliveries(session, job)
         ):
@@ -429,6 +423,29 @@ def _settle(job: PushJob, *, status: PushJobStatus, error: str, now: datetime) -
         job.cancelled_at = now
     job.locked_by = None
     job.locked_at = None
+
+
+def _class_day(job: PushJob, school_tz: str) -> date:
+    """The day the class a start announces meets on, in the school's zone.
+
+    Read from the snapshot's `countdownTarget` — the class start for
+    `classPreparing`, its end for `inClass`, both on the day the class
+    meets — because `/schedule/sync` does not tie `fire_at` to that day: a
+    start filed to fire the evening before would be checked against the
+    wrong date. A snapshot with no usable target falls back to the day the
+    start fires. The zone is resolved here, for class starts alone, so a
+    bad setting cannot stop any other push.
+    """
+    target = _to_unix_seconds((job.payload or {}).get("countdownTarget"))
+    try:
+        moment = (
+            datetime.fromtimestamp(target, UTC) if target is not None else job.fire_at
+        )
+    except (OverflowError, OSError, ValueError):
+        # A target no calendar can hold is malformed client data; the day
+        # the start fires is the best remaining guess.
+        moment = job.fire_at
+    return moment.astimezone(ZoneInfo(school_tz)).date()
 
 
 async def _classes_quiet(
