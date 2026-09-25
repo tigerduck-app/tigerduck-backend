@@ -24,7 +24,7 @@ from __future__ import annotations
 import uuid
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta, tzinfo
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -196,7 +196,7 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 logger.warning("push.job_reclaimed", job_id=job_id)
                 return
             if await _materialize(
-                session, job, tz=ZoneInfo(worker.settings.course_reminder_timezone)
+                session, job, school_tz=worker.settings.course_reminder_timezone
             ):
                 await _deliver_round(worker, session, job)
     except Exception:
@@ -223,7 +223,7 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 )
 
 
-async def _materialize(session: AsyncSession, job: PushJob, *, tz: tzinfo) -> bool:
+async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -> bool:
     """Create one delivery row per active token. Idempotent — a stale-
     recovered job re-materializes onto the same unique index.
 
@@ -290,9 +290,12 @@ async def _materialize(session: AsyncSession, job: PushJob, *, tz: tzinfo) -> bo
             # ponytail: the day the start fires on, not the class's own day.
             # Same day while `classPreparing` leads by at most 4 h and the
             # first period starts at 08:10; read the snapshot's class start
-            # if the app ever allows a longer lead.
+            # if the app ever allows a longer lead. The zone is resolved here,
+            # for class starts only, so a bad setting cannot stop other pushes.
             and await _classes_quiet(
-                session, user_id=job.user_id, day=job.fire_at.astimezone(tz).date()
+                session,
+                user_id=job.user_id,
+                day=job.fire_at.astimezone(ZoneInfo(school_tz)).date(),
             )
             and not await _has_deliveries(session, job)
         ):
