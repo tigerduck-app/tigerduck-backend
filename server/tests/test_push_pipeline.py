@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
 
+from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.auth.models import (
     DevicePushToken,
     PushDelivery,
@@ -722,18 +724,18 @@ async def test_activity_job_without_activity_id_sends_nothing(
 # put a second copy on the lock screen and ring the alert for it.
 
 
-def _start_job(user, device, *, activity_id="inClass::c1"):
+def _start_job(user, device, *, scenario="inClass"):
     return _job(
         user,
         device_id=device.id,
         channel="schedule",
-        scenario="inClass",
-        dedupe_key=schedule_key(device.id, "c1", "inClass"),
+        scenario=scenario,
+        dedupe_key=schedule_key(device.id, "c1", scenario),
         payload={
             "kind": "schedule",
-            "scenario": "inClass",
+            "scenario": scenario,
             "source_id": "c1",
-            "activity_id": activity_id,
+            "activity_id": f"{scenario}::c1",
             "title": "Math",
             "subtitle": "09:10-10:00",
             "accentHex": 1,
@@ -923,7 +925,8 @@ async def test_start_job_is_not_cancelled_on_a_retry_round(
     """Once a delivery row exists the push may already have reached a
     token and started the activity the registration now describes;
     cancelling on the retry round would strand the other delivery as
-    pending and record a sent push as never sent."""
+    pending and record a sent push as never sent. The same goes for a
+    holiday that turned up between the rounds."""
     user, device, token = await _setup_user_device_token(db_session)
     pts = _push_to_start_token(device)
     db_session.add(pts)
@@ -951,6 +954,7 @@ async def test_start_job_is_not_cancelled_on_a_retry_round(
             fire_at=datetime.now(UTC) + timedelta(minutes=40),
         )
     )
+    db_session.add(_holiday_on(job.fire_at))
     await db_session.commit()
 
     apple = ScriptedSender([SendResult(success=True, status="200")])
@@ -959,6 +963,78 @@ async def test_start_job_is_not_cancelled_on_a_retry_round(
 
     assert [r.device_token for r in apple.requests] == ["pts-tok"]
     await db_session.refresh(job)
+    assert job.status == "sent"
+
+
+# A class that does not meet is not announced. The app files a class's
+# starts up to a day ahead without consulting the school calendar, so the
+# holiday is decided here, when the start fires — which is also what lets
+# a holiday published since, or a "還要上課？" toggle flipped since, reach
+# a job that was already waiting.
+
+
+def _holiday_on(moment):
+    day = moment.astimezone(ZoneInfo("Asia/Taipei")).date()
+    return AcademicHoliday(
+        name_zh="中秋節", name_en="Mid-Autumn", start_date=day, end_date=day
+    )
+
+
+async def _tick_start_on_a_holiday(
+    db_session, prepared_engine, test_settings, *, scenario, opted_in=False
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    job = _start_job(user, device, scenario=scenario)
+    holiday = _holiday_on(job.fire_at)
+    db_session.add_all([job, holiday])
+    await db_session.flush()
+    if opted_in:
+        db_session.add(
+            UserHolidayOverride(user_id=user.id, holiday_id=holiday.id, notify=True)
+        )
+    await db_session.commit()
+
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+    await db_session.refresh(job)
+    return job, apple
+
+
+@pytest.mark.parametrize("scenario", ["classPreparing", "inClass"])
+async def test_class_start_is_cancelled_on_a_holiday(
+    db_session, prepared_engine, test_settings, scenario
+):
+    job, apple = await _tick_start_on_a_holiday(
+        db_session, prepared_engine, test_settings, scenario=scenario
+    )
+
+    assert apple.requests == []
+    assert job.status == "cancelled"
+    assert job.last_error == "holiday"
+
+
+async def test_class_start_fires_on_a_holiday_the_user_has_class_on(
+    db_session, prepared_engine, test_settings
+):
+    job, apple = await _tick_start_on_a_holiday(
+        db_session, prepared_engine, test_settings, scenario="inClass", opted_in=True
+    )
+
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
+    assert job.status == "sent"
+
+
+async def test_assignment_start_fires_on_a_holiday(
+    db_session, prepared_engine, test_settings
+):
+    """A deadline on a day off is still a deadline."""
+    job, apple = await _tick_start_on_a_holiday(
+        db_session, prepared_engine, test_settings, scenario="assignmentUrgent"
+    )
+
+    assert [r.device_token for r in apple.requests] == ["pts-tok"]
     assert job.status == "sent"
 
 
