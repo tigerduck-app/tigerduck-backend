@@ -155,7 +155,7 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 3,
+        "w": 4,
         "h": 4
       }
     },
@@ -217,9 +217,9 @@
       },
       "id": 3,
       "gridPos": {
-        "x": 3,
+        "x": 4,
         "y": 1,
-        "w": 3,
+        "w": 4,
         "h": 4
       }
     },
@@ -289,9 +289,9 @@
       },
       "id": 4,
       "gridPos": {
-        "x": 6,
+        "x": 8,
         "y": 1,
-        "w": 3,
+        "w": 4,
         "h": 4
       }
     },
@@ -357,16 +357,16 @@
       },
       "id": 5,
       "gridPos": {
-        "x": 9,
+        "x": 12,
         "y": 1,
-        "w": 3,
+        "w": 4,
         "h": 4
       }
     },
     {
       "type": "stat",
       "title": "Last scrape",
-      "description": "Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.",
+      "description": "Since a scrape last read at least one bulletin off the list page. Failed scrapes are not counted, nor ones whose page parsed to nothing (the board always lists something, so that means the markup changed). The scraper runs every 10 minutes by default; right after a backend restart this counts from the restart.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -378,7 +378,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id=\"bulletin_scrape\"}) or max(process_start_time_seconds{job=\"backend\"}))",
+          "expr": "time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job=\"backend\"}))",
           "legendFormat": "__auto",
           "range": true
         }
@@ -428,9 +428,77 @@
       },
       "id": 6,
       "gridPos": {
-        "x": 12,
+        "x": 16,
         "y": 1,
-        "w": 3,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Rows in last scrape",
+      "description": "Bulletins the last scrape parsed off the list page. 0 means the page answered with nothing parseable.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(tigerduck_bulletin_scrape_rows) and on() (sum(tigerduck_scheduler_job_runs_total{job_id=\"bulletin_scrape\"}) > 0)",
+          "legendFormat": "__auto",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "noValue": "waiting for first scrape"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
         "h": 4
       }
     },
@@ -490,11 +558,11 @@
         "wideLayout": true,
         "showPercentChange": false
       },
-      "id": 7,
+      "id": 8,
       "gridPos": {
-        "x": 15,
-        "y": 1,
-        "w": 3,
+        "x": 0,
+        "y": 5,
+        "w": 8,
         "h": 4
       }
     },
@@ -554,11 +622,11 @@
         "wideLayout": true,
         "showPercentChange": false
       },
-      "id": 8,
+      "id": 9,
       "gridPos": {
-        "x": 18,
-        "y": 1,
-        "w": 3,
+        "x": 8,
+        "y": 5,
+        "w": 8,
         "h": 4
       }
     },
@@ -618,22 +686,22 @@
         "wideLayout": true,
         "showPercentChange": false
       },
-      "id": 9,
+      "id": 10,
       "gridPos": {
-        "x": 21,
-        "y": 1,
-        "w": 3,
+        "x": 16,
+        "y": 5,
+        "w": 8,
         "h": 4
       }
     },
     {
-      "id": 10,
+      "id": 11,
       "type": "row",
       "title": "Over time",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 9,
         "w": 24,
         "h": 1
       },
@@ -697,10 +765,10 @@
           "sort": "desc"
         }
       },
-      "id": 11,
+      "id": 12,
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 10,
         "w": 16,
         "h": 9
       }
@@ -1164,10 +1232,10 @@
           "sort": "desc"
         }
       },
-      "id": 12,
+      "id": 13,
       "gridPos": {
         "x": 16,
-        "y": 6,
+        "y": 10,
         "w": 8,
         "h": 9
       }
@@ -1226,10 +1294,10 @@
           "sort": "desc"
         }
       },
-      "id": 13,
+      "id": 14,
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 19,
         "w": 12,
         "h": 8
       }
@@ -1693,22 +1761,22 @@
           "sort": "desc"
         }
       },
-      "id": 14,
+      "id": 15,
       "gridPos": {
         "x": 12,
-        "y": 15,
+        "y": 19,
         "w": 12,
         "h": 8
       }
     },
     {
-      "id": 15,
+      "id": 16,
       "type": "row",
       "title": "Details",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -1887,10 +1955,10 @@
           "show": false
         }
       },
-      "id": 16,
+      "id": 17,
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 28,
         "w": 24,
         "h": 10
       }
@@ -1957,10 +2025,10 @@
           "values": true
         }
       },
-      "id": 17,
+      "id": 18,
       "gridPos": {
         "x": 0,
-        "y": 34,
+        "y": 38,
         "w": 12,
         "h": 8
       }
@@ -2018,10 +2086,10 @@
           "values": true
         }
       },
-      "id": 18,
+      "id": 19,
       "gridPos": {
         "x": 12,
-        "y": 34,
+        "y": 38,
         "w": 12,
         "h": 8
       }

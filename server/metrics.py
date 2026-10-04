@@ -387,6 +387,29 @@ def publish_settings(settings: Settings) -> None:
     STALE_LOCK_SECONDS.labels(queue="sync").set(settings.sync_job_stale_lock_minutes * 60)
 
 
+# --- Bulletin scraper ---
+
+BULLETIN_SCRAPE_ROWS = Gauge(
+    "tigerduck_bulletin_scrape_rows",
+    "Bulletins the last scrape parsed off the list page.",
+)
+# The scrape job finishing without an error isn't enough: a list page that
+# answers 200 but parses to nothing (NTUST changed the markup) also does.
+# The board always lists something, so only a scrape that read at least one
+# row counts as working.
+BULLETIN_LAST_NONEMPTY_SCRAPE = Gauge(
+    "tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds",
+    "Unix time of the last scrape that parsed at least one bulletin; 0 until "
+    "the first such scrape since the process started.",
+)
+
+
+def observe_bulletin_scrape(rows: int) -> None:
+    BULLETIN_SCRAPE_ROWS.set(rows)
+    if rows:
+        BULLETIN_LAST_NONEMPTY_SCRAPE.set_to_current_time()
+
+
 # --- Push providers ---
 
 PUSH_SEND_DURATION = Histogram(

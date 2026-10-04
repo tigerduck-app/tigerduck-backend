@@ -371,9 +371,9 @@ L.add(stat("Push failed, 1h", PROM, [prom('sum(tigerduck_push_jobs_finished_last
 L.add(stat("Sync overdue", PROM, [prom("sum(tigerduck_sync_jobs_overdue) or vector(0)")],
            thresholds=steps(("orange", 1), ("red", 10)),
            desc="Pending sync jobs more than 10 minutes past their run time."), 4, 4)
-L.add(stat("Bulletin scrape", PROM, [prom('time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}) or max(process_start_time_seconds{job="backend"}))')], unit="s",
+L.add(stat("Bulletin scrape", PROM, [prom('time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job="backend"}))')], unit="s",
            thresholds=steps(("orange", 1800), ("red", 7200)),
-           desc='Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.'), 4, 4)
+           desc='Since a scrape last read at least one bulletin off the list page. Failed scrapes are not counted, nor ones whose page parsed to nothing (the board always lists something, so that means the markup changed). The scraper runs every 10 minutes by default; right after a backend restart this counts from the restart.'), 4, 4)
 L.add(stat("DB conns used", PROM, [prom("sum(pg_stat_activity_count) / max(pg_settings_max_connections)")],
            unit="percentunit", thresholds=steps(("orange", 0.7), ("red", 0.9))), 4, 4)
 L.add(stat("Backend memory", PROM, [prom('process_resident_memory_bytes{job="backend"}')], unit="bytes", graph=True), 4, 4)
@@ -831,21 +831,29 @@ dashboards["push-jobs"] = dashboard(
 SRC = "source IN (${source:sqlstring})"
 L = Layout()
 L.row("Now")
-L.add(stat("Live bulletins", PG, [sql(f"SELECT count(*) AS \"bulletins\" FROM bulletins WHERE NOT is_deleted AND {SRC}")]), 3, 4)
-L.add(stat("New in range", PG, [sql(f"SELECT count(*) AS \"new\" FROM bulletins WHERE $__timeFilter(first_seen_at) AND {SRC}")]), 3, 4)
+L.add(stat("Live bulletins", PG, [sql(f"SELECT count(*) AS \"bulletins\" FROM bulletins WHERE NOT is_deleted AND {SRC}")]), 4, 4)
+L.add(stat("New in range", PG, [sql(f"SELECT count(*) AS \"new\" FROM bulletins WHERE $__timeFilter(first_seen_at) AND {SRC}")]), 4, 4)
 L.add(stat("Waiting for the LLM", PG, [sql(f"SELECT count(*) AS \"pending\" FROM bulletins WHERE processing_state = 'pending' AND NOT is_deleted AND {SRC}")],
            thresholds=steps(("orange", 20), ("red", 100)),
-           desc="Bulletins scraped but not yet classified. Grows when llama-server is down."), 3, 4)
+           desc="Bulletins scraped but not yet classified. Grows when llama-server is down."), 4, 4)
 L.add(stat("Processing failed", PG, [sql(f"SELECT count(*) AS \"failed\" FROM bulletins WHERE processing_state = 'failed' AND NOT is_deleted AND {SRC}")],
-           thresholds=steps(("orange", 1))), 3, 4)
-L.add(stat("Last scrape", PROM, [prom('time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}) or max(process_start_time_seconds{job="backend"}))')], unit="s",
-           thresholds=steps(("orange", 1800), ("red", 7200)), desc='Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.'), 3, 4)
+           thresholds=steps(("orange", 1))), 4, 4)
+L.add(stat("Last scrape", PROM, [prom('time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job="backend"}))')], unit="s",
+           thresholds=steps(("orange", 1800), ("red", 7200)), desc='Since a scrape last read at least one bulletin off the list page. Failed scrapes are not counted, nor ones whose page parsed to nothing (the board always lists something, so that means the markup changed). The scraper runs every 10 minutes by default; right after a backend restart this counts from the restart.'), 4, 4)
+rows_in_last_scrape = stat("Rows in last scrape", PROM, [prom(
+    # The gauge reads 0 from startup; only show it once the scrape job has
+    # run since the restart, so a deploy doesn't flash a red 0.
+    'max(tigerduck_bulletin_scrape_rows) and on() (sum(tigerduck_scheduler_job_runs_total{job_id="bulletin_scrape"}) > 0)')],
+    thresholds={"mode": "absolute", "steps": [{"color": "red", "value": None}, {"color": "green", "value": 1}]},
+    desc="Bulletins the last scrape parsed off the list page. 0 means the page answered with nothing parseable.")
+rows_in_last_scrape["fieldConfig"]["defaults"]["noValue"] = "waiting for first scrape"
+L.add(rows_in_last_scrape, 4, 4)
 L.add(stat("Subscriptions", PG, [sql("""
 SELECT (SELECT count(*) FROM user_bulletin_subscriptions WHERE enabled AND deleted_at IS NULL)
      + (SELECT count(*) FROM bulletin_subscriptions WHERE enabled) AS "subscriptions"
-""")], desc="Enabled subscriptions, signed-in and anonymous."), 3, 4)
-L.add(stat("Matched in range", PG, [sql("SELECT count(*) AS \"matches\" FROM bulletin_user_matches WHERE $__timeFilter(matched_at)")]), 3, 4)
-L.add(stat("Pushed in range", PG, [sql("SELECT count(*) AS \"pushed\" FROM bulletin_user_matches WHERE $__timeFilter(pushed_at)")]), 3, 4)
+""")], desc="Enabled subscriptions, signed-in and anonymous."), 8, 4)
+L.add(stat("Matched in range", PG, [sql("SELECT count(*) AS \"matches\" FROM bulletin_user_matches WHERE $__timeFilter(matched_at)")]), 8, 4)
+L.add(stat("Pushed in range", PG, [sql("SELECT count(*) AS \"pushed\" FROM bulletin_user_matches WHERE $__timeFilter(pushed_at)")]), 8, 4)
 
 L.row("Over time")
 L.add(series("New bulletins per day by unit", PG, [sql(per_day(f"""

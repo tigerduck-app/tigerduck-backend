@@ -32,6 +32,7 @@ from server.bulletins.llm.base import LLMError, LLMProvider
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.scraper import fetch_list
 from server.config import Settings
+from server.metrics import observe_bulletin_scrape
 from server.push.router import PushRouter
 
 logger = structlog.get_logger(__name__)
@@ -108,6 +109,7 @@ async def scrape_job(
     ts = now or datetime.now(timezone.utc)
     async with http_client_factory() as client:
         rows = await fetch_list(settings.bulletin_list_url, client)
+    observe_bulletin_scrape(len(rows))
 
     async with session_factory() as session:
         outcome = await upsert_list_rows(session, rows, now=ts)

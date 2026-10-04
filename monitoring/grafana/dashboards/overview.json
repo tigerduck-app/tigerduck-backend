@@ -1017,7 +1017,7 @@
     {
       "type": "stat",
       "title": "Bulletin scrape",
-      "description": "Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.",
+      "description": "Since a scrape last read at least one bulletin off the list page. Failed scrapes are not counted, nor ones whose page parsed to nothing (the board always lists something, so that means the markup changed). The scraper runs every 10 minutes by default; right after a backend restart this counts from the restart.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1029,7 +1029,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id=\"bulletin_scrape\"}) or max(process_start_time_seconds{job=\"backend\"}))",
+          "expr": "time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job=\"backend\"}))",
           "legendFormat": "__auto",
           "range": true
         }
