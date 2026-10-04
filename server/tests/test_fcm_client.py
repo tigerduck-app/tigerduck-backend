@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 import firebase_admin
@@ -101,6 +102,21 @@ async def test_a_sync_trigger_reaches_fcm_at_normal_priority(fcm_sender, monkeyp
 
     assert result.success is True
     assert sent[0].android.priority == "normal"
+
+
+async def test_a_sync_trigger_outlasts_doze(fcm_sender, monkeypatch):
+    # FCM holds a normal-priority message for a dozing phone until its next
+    # maintenance window — hours apart in deep Doze — and drops it once the
+    # TTL runs out. Five minutes lost nearly every trigger to a phone asleep.
+    sent = _capture_send(monkeypatch)
+    request = build_fcm_for_job(
+        payload=SYNC_TRIGGER, channel="system", token_value="fcm-tok"
+    )
+
+    await fcm_sender.send(request)
+
+    assert sent[0].android.ttl >= timedelta(hours=6)
+    assert sent[0].android.collapse_key == "sync"
 
 
 async def test_a_notification_reaches_fcm_at_high_priority(fcm_sender, monkeypatch):

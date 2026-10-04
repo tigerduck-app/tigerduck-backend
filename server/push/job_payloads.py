@@ -25,6 +25,7 @@ from server.push.payload import (
 
 _RESERVED = {"title", "body"}
 _DEFAULT_TTL_SECONDS = 24 * 3600
+_SYNC_TRIGGER_FCM_TTL_SECONDS = 12 * 3600
 
 # Keys a schedule job's payload carries alongside the client's snapshot:
 # written by `/schedule/sync` and `/live-activities/register`, read by the
@@ -258,7 +259,12 @@ def build_fcm_for_job(
             title="",
             body="",
             data={"kind": "sync_trigger"},
-            ttl_seconds=300,
+            # Long enough to outlast Doze. FCM holds a normal-priority
+            # message for a dozing phone until its next maintenance window,
+            # which comes hours apart once Doze deepens, and drops it if the
+            # TTL runs out first. The collapse key keeps one per phone, so
+            # a long TTL queues one sync, not a backlog.
+            ttl_seconds=_SYNC_TRIGGER_FCM_TTL_SECONDS,
             collapse_key=collapse,
             # The app shows nothing for a sync trigger. FCM demotes an app
             # whose high-priority messages keep showing nothing, and the
