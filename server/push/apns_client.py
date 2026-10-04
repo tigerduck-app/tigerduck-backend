@@ -7,6 +7,7 @@ for development and production; `use_sandbox` picks the APNs host.
 from __future__ import annotations
 
 import asyncio
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -31,6 +32,47 @@ class SendResult:
 class PushSender(Protocol):
     async def send(self, request: ApnsRequest) -> SendResult: ...
     async def close(self) -> None: ...
+
+
+# TCP keepalive on an APNs connection: the first probe after a minute
+# without traffic, then every 10s, and the connection is reported lost
+# after 3 go unanswered.
+_KEEPALIVE_IDLE_SECONDS = 60
+_KEEPALIVE_INTERVAL_SECONDS = 10
+_KEEPALIVE_PROBES = 3
+
+
+class _KeepAliveProtocol:
+    """Turns TCP keepalive on for each connection aioapns opens.
+
+    A connection sits idle for up to `apns_connection_idle_seconds`
+    between sends, and a NAT or load balancer on the way drops a flow that
+    quiet without telling either end: the next send then waits out its
+    whole timeout, and the delivery goes out a retry round later. A probe
+    each minute keeps the route's state alive, and a peer that stops
+    answering is reported lost, so the pool stops handing the connection
+    out.
+    """
+
+    def connection_made(self, transport: asyncio.BaseTransport) -> None:
+        sock = transport.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            # TCP_KEEPIDLE on Linux, TCP_KEEPALIVE on macOS.
+            idle = getattr(socket, "TCP_KEEPIDLE", None) or getattr(
+                socket, "TCP_KEEPALIVE", None
+            )
+            if idle is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, idle, _KEEPALIVE_IDLE_SECONDS)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(
+                    socket.IPPROTO_TCP,
+                    socket.TCP_KEEPINTVL,
+                    _KEEPALIVE_INTERVAL_SECONDS,
+                )
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, _KEEPALIVE_PROBES)
+        super().connection_made(transport)  # type: ignore[misc]
 
 
 class AioApnsSender:
@@ -62,13 +104,13 @@ class AioApnsSender:
             use_sandbox=self._settings.apns_env == "development",
         )
         # aioapns closes a connection after INACTIVITY_TIME (10s) idle. Give
-        # this pool's connections the configured lifetime instead — on our
-        # pool's protocol class, not aioapns's own, so nothing else using
-        # the library changes.
+        # this pool's connections the configured lifetime instead, with TCP
+        # keepalive to see them through it — on our pool's protocol class,
+        # not aioapns's own, so nothing else using the library changes.
         base = client.pool.protocol_class
         client.pool.protocol_class = type(
             base.__name__,
-            (base,),
+            (_KeepAliveProtocol, base),
             {"INACTIVITY_TIME": self._settings.apns_connection_idle_seconds},
         )
         return client
@@ -100,8 +142,16 @@ class AioApnsSender:
             # would keep handing out; replace the client so the next send
             # reconnects. Not "unregistered", so the pipeline retries the
             # delivery.
-            self._client = self._build_client()
-            client.pool.close()
+            #
+            # Once per client: sends that timed out on it together replace
+            # it once, rather than each discarding the last one's
+            # replacement with its connections open. And its pool is closed
+            # only once every send already on it is over, which the timeout
+            # bounds — two ticks can send at once, and closing it now would
+            # cut off one still receiving its answer.
+            if self._client is client:
+                self._client = self._build_client()
+                asyncio.get_running_loop().call_later(timeout, client.pool.close)
             logger.warning("apns.send_timeout", timeout_seconds=timeout)
             return SendResult(
                 success=False,
@@ -116,8 +166,11 @@ class AioApnsSender:
         )
 
     async def close(self) -> None:
-        # aioapns APNs has no public close; connections GC when client dereferenced.
-        pass
+        # aioapns' APNs has no close of its own, and its pool's connections
+        # now stay open for `apns_connection_idle_seconds`, each with a
+        # timer pending on the loop — close them rather than leave both to
+        # outlive the app.
+        self._client.pool.close()
 
 
 class RecordingSender:
