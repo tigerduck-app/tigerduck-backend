@@ -78,6 +78,10 @@ def test_settings() -> Settings:
     # Honor TIGERDUCK_TEST_DATABASE_URL so the same tests can run in a
     # CI/container setup where Postgres lives on a different host (e.g. the
     # compose `postgres` service) without editing this file.
+    #
+    # `metrics_port=0` keeps a test that runs the lifespan from binding the
+    # fixed :9000, where two concurrent test runs, or anything else on the
+    # host already listening there, would collide.
     database_url = os.environ.get(
         "TIGERDUCK_TEST_DATABASE_URL",
         "postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck_test",
@@ -86,6 +90,7 @@ def test_settings() -> Settings:
         env="development",
         database_url=database_url,
         apns_env="development",
+        metrics_port=0,
         sync_job_tick_seconds=99999,
         push_pipeline_tick_seconds=99999,
         assignment_reminder_scan_interval_seconds=99999,

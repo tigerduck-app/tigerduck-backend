@@ -9,11 +9,13 @@ asyncio loop.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import timedelta
 from pathlib import Path
 
 import structlog
 
+from server.metrics import observe_push_send, push_send_outcome
 from server.push.apns_client import SendResult
 from server.push.payload import FcmRequest
 
@@ -48,6 +50,12 @@ class FcmSender:
         self._send_timeout = send_timeout_seconds
 
     async def send(self, request: FcmRequest) -> SendResult:
+        started = time.perf_counter()
+        result = await self._send(request)
+        _observe_sends([result], started)
+        return result
+
+    async def _send(self, request: FcmRequest) -> SendResult:
         import firebase_admin
         from firebase_admin import messaging
 
@@ -129,7 +137,7 @@ class FcmSender:
         chunk_size = 500
         for start in range(0, len(requests), chunk_size):
             chunk = requests[start : start + chunk_size]
-            # Data-only — see `send()` for the rationale. Title/body live
+            # Data-only — see `_send()` for the rationale. Title/body live
             # inside `data` so the Android client can render the notification
             # itself and attach the deep-link PendingIntent.
             msgs = [
@@ -144,6 +152,7 @@ class FcmSender:
                 )
                 for r in chunk
             ]
+            started = time.perf_counter()
             try:
                 batch = await asyncio.wait_for(
                     asyncio.to_thread(
@@ -154,24 +163,52 @@ class FcmSender:
             except asyncio.TimeoutError:
                 # Same detach-and-move-on contract as `send`. One stuck
                 # batch can't wedge the whole dispatcher tick.
-                results.extend(
+                timed_out = [
                     SendResult(
                         success=False,
                         status="TIMEOUT",
                         description=f"FCM batch exceeded {self._send_timeout}s",
                     )
                     for _ in chunk
-                )
+                ]
+                _observe_sends(timed_out, started)
+                results.extend(timed_out)
                 continue
+            except Exception:
+                # The whole batch call failed, so no message got a result
+                # of its own; every one of them failed with it.
+                elapsed = time.perf_counter() - started
+                for _ in chunk:
+                    observe_push_send("fcm", "failure", elapsed)
+                raise
 
-            for resp in batch.responses:
-                results.append(_classify_batch_response(resp, firebase_admin, messaging))
+            chunk_results = [
+                _classify_batch_response(resp, firebase_admin, messaging)
+                for resp in batch.responses
+            ]
+            _observe_sends(chunk_results, started)
+            results.extend(chunk_results)
         return results
 
     async def close(self) -> None:
         import firebase_admin
 
         firebase_admin.delete_app(self._app)
+
+
+def _observe_sends(results: list[SendResult], started: float) -> None:
+    """Record one push-send observation per message.
+
+    A batch gives every message its result at once, when `send_each`
+    returns, so each is observed with the batch's time: that is how long
+    the message took to come back, and it keeps the histogram's count in
+    messages for both paths.
+    """
+    elapsed = time.perf_counter() - started
+    for result in results:
+        observe_push_send(
+            "fcm", push_send_outcome(result.success, result.status), elapsed
+        )
 
 
 def _classify_batch_response(resp, firebase_admin, messaging) -> SendResult:

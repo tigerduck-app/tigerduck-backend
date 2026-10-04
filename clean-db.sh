@@ -54,6 +54,7 @@ for vol in tigerduck_tigerduck_pgdata tigerduck_pgdata tigerduck_pgdataw; do
 done
 
 echo "[clean-db] docker compose up -d --build"
+ensure_monitor_db_password
 docker compose "${COMPOSE_FILE_ARGS[@]}" up -d --build
 echo
 echo "[clean-db] stack is up. logs: ./logs.sh"

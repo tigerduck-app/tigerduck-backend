@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +17,7 @@ import structlog
 from aioapns import APNs, NotificationRequest, PushType
 
 from server.config import Settings
+from server.metrics import observe_push_send, push_send_outcome
 from server.push.payload import ApnsRequest, PushKind
 
 logger = structlog.get_logger(__name__)
@@ -133,11 +135,13 @@ class AioApnsSender:
         )
         client = self._client
         timeout = self._settings.apns_send_timeout_seconds
+        started = time.perf_counter()
         try:
             result = await asyncio.wait_for(
                 client.send_notification(notification), timeout=timeout
             )
         except asyncio.TimeoutError:
+            observe_push_send("apns", "timeout", time.perf_counter() - started)
             # Most likely a connection that died without a FIN, which aioapns
             # would keep handing out; replace the client so the next send
             # reconnects. Not "unregistered", so the pipeline retries the
@@ -158,6 +162,16 @@ class AioApnsSender:
                 status="TIMEOUT",
                 description=f"APNs send exceeded {timeout}s",
             )
+        except Exception:
+            # aioapns raises on connection trouble rather than returning a
+            # result; the callers turn that into a failed delivery.
+            observe_push_send("apns", "failure", time.perf_counter() - started)
+            raise
+        observe_push_send(
+            "apns",
+            push_send_outcome(result.is_successful, result.status),
+            time.perf_counter() - started,
+        )
         return SendResult(
             success=result.is_successful,
             status=result.status,

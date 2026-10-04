@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
-from server import __version__
+from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
@@ -207,6 +207,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = scheduler
     app.state.settings = settings
 
+    # Started once everything above is up, so the metrics endpoint comes up
+    # with the API: uvicorn does not accept requests until this startup
+    # finishes, LLM probe included, and a scrape should not say otherwise.
+    metrics.bind_engine(engine)
+    metrics.publish_settings(settings)
+    metrics_server = metrics.start_metrics_server(
+        settings.metrics_port, settings.metrics_host
+    )
+
     scheduler.start()
     logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
 
@@ -215,6 +224,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         scheduler.shutdown(wait=False)
         await _finish_running_ticks(_SHUTDOWN_TICK_WAIT_SECONDS)
+        # shutdown() blocks until the server thread's poll loop notices,
+        # up to half a second; keep the event loop free while it does.
+        await asyncio.to_thread(metrics.stop_metrics_server, metrics_server)
+        metrics.bind_engine(None)
         await router.close()
         await engine.dispose()
         logger.info("server.shutdown")
@@ -249,6 +262,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             )
         return await call_next(request)
+
+    # Added after the 410 middleware so it wraps it (Starlette runs the
+    # last-added middleware outermost) and counts those answers too.
+    app.add_middleware(metrics.HttpMetricsMiddleware)
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:

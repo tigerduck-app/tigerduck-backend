@@ -1,0 +1,66 @@
+# The push_jobs queue and its per-token deliveries.
+collector_name: tigerduck_push
+
+metrics:
+  - metric_name: tigerduck_push_jobs
+    type: gauge
+    help: Rows in push_jobs by channel and status. Finished jobs are pruned after push_job_retention_days.
+    key_labels: [channel, status]
+    values: [count]
+    query: |
+      SELECT channel, status, count(*) AS count
+      FROM push_jobs
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_push_jobs_due
+    type: gauge
+    help: Pending jobs whose fire time has passed and that aren't backing off.
+    values: [count]
+    query: |
+      SELECT count(*) AS count
+      FROM push_jobs
+      WHERE status = 'pending' AND fire_at <= now() AND available_at <= now()
+
+  - metric_name: tigerduck_push_oldest_due_seconds
+    type: gauge
+    help: How late the most overdue due job is, 0 when none are due.
+    values: [age]
+    query: |
+      SELECT COALESCE(extract(epoch FROM now() - min(fire_at)), 0) AS age
+      FROM push_jobs
+      WHERE status = 'pending' AND fire_at <= now() AND available_at <= now()
+
+  # How long the longest-held claim has been held, with no threshold baked
+  # in: compare it with tigerduck_stale_lock_seconds{queue="push"}, which the
+  # backend exports from the setting its worker actually uses.
+  - metric_name: tigerduck_push_oldest_lock_age_seconds
+    type: gauge
+    help: Seconds the longest-claimed processing job has been locked, 0 when none.
+    values: [age]
+    query: |
+      SELECT COALESCE(extract(epoch FROM now() - min(locked_at)), 0) AS age
+      FROM push_jobs
+      WHERE status = 'processing'
+
+  - metric_name: tigerduck_push_jobs_finished_last_hour
+    type: gauge
+    help: Jobs that reached a final status in the last hour.
+    key_labels: [channel, status]
+    values: [count]
+    query: |
+      SELECT channel, status, count(*) AS count
+      FROM push_jobs
+      WHERE status IN ('sent', 'partial_failed', 'failed', 'cancelled')
+        AND updated_at > now() - interval '1 hour'
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_push_deliveries_last_hour
+    type: gauge
+    help: Deliveries (one per device token) finished in the last hour.
+    key_labels: [provider, token_kind, status]
+    values: [count]
+    query: |
+      SELECT provider, token_kind, status, count(*) AS count
+      FROM push_deliveries
+      WHERE status <> 'pending' AND updated_at > now() - interval '1 hour'
+      GROUP BY 1, 2, 3

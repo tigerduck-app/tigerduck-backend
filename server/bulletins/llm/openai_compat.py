@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import unicodedata
 from typing import Any
 
@@ -29,6 +30,7 @@ from server.bulletins.llm.prompts import (
     build_user_prompt,
 )
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag, Importance
+from server.metrics import observe_llm_request
 
 logger = structlog.get_logger(__name__)
 
@@ -127,15 +129,24 @@ class OpenAICompatibleProvider:
         )
 
     async def _once(self, payload: dict[str, Any]) -> BulletinMetadata:
-        response = await self._client.post(
-            f"{self._base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self._api_key}"},
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
-        content = _extract_message_content(data)
-        return _parse_response(content)
+        # Timed through parsing: a reply that doesn't parse is a failed
+        # request as far as classification goes, and gets retried like one.
+        started = time.perf_counter()
+        try:
+            response = await self._client.post(
+                f"{self._base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = _extract_message_content(data)
+            metadata = _parse_response(content)
+        except Exception:
+            observe_llm_request("error", time.perf_counter() - started)
+            raise
+        observe_llm_request("success", time.perf_counter() - started)
+        return metadata
 
     async def close(self) -> None:
         if self._owns_client:

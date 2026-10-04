@@ -1,0 +1,51 @@
+# Loki, single process, chunks and index on the tigerduck_loki volume.
+# Holds the stack's container logs, shipped by Alloy (monitoring/alloy).
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+
+schema_config:
+  configs:
+    - from: 2026-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 720h
+  # Loki reads the level out of each line (structlog's JSON "level" field,
+  # or words like ERROR / WARNING) into detected_level, which the Logs
+  # dashboard filters on.
+  discover_log_levels: true
+  # Needed for the log-volume histograms in Grafana's Logs Drilldown.
+  volume_enabled: true
+
+# Retention is enforced by the compactor; without it logs never expire.
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+pattern_ingester:
+  enabled: true
+
+analytics:
+  reporting_enabled: false

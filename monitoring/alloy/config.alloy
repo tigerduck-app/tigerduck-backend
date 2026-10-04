@@ -1,0 +1,97 @@
+// Grafana Alloy: tails this compose project's container logs through the
+// docker socket and ships them to Loki.
+//
+// Every line gets two labels: `service` (the compose service: backend,
+// portal, postgres, grafana, …) and `container` (tigerduck-internal, …).
+
+discovery.docker "host" {
+  host = "unix:///var/run/docker.sock"
+  // A recreated container (deploy, crash loop) gets a new ID; pick it up
+  // quickly. Its log is read from the start, so nothing is lost either way.
+  refresh_interval = "15s"
+}
+
+// Filtering happens here, on the discovered targets. Dropping a target in
+// loki.source.docker's own relabel_rules still tails the container, just
+// with every label stripped.
+discovery.relabel "tigerduck" {
+  targets = discovery.docker.host.targets
+
+  // Only this stack's containers, not whatever else runs on the host
+  // (nginx-proxy-manager, other projects). TIGERDUCK_LOG_PROJECT exists
+  // for test stacks running under another compose project name.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    regex         = coalesce(sys.env("TIGERDUCK_LOG_PROJECT"), "tigerduck")
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "tigerduck" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.tigerduck.output
+  forward_to = [loki.process.clean.receiver]
+}
+
+loki.process "clean" {
+  // Dev mode colours structlog's console output. Without this every line
+  // carries the ANSI escape codes and text search misses across them.
+  stage.replace {
+    expression = `(\x1b\[[0-9;]*m)`
+    replace    = ""
+  }
+
+  // Loki fills detected_level by itself for JSON (structlog in production)
+  // and logfmt (the Go services). The formats below it can't read, so the
+  // level is pulled out here into `level`, which Loki takes instead.
+
+  // structlog's dev console renderer: "<timestamp> [info     ] event …"
+  stage.regex {
+    expression = `^\S+ \[(?P<level>[a-z]+)\s*\]`
+  }
+
+  // Python's stdlib logging (server/logging_setup.py) and uvicorn:
+  // "WARNING:apscheduler.scheduler: …", "INFO:     Started server process"
+  stage.regex {
+    expression = `^(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL):`
+  }
+
+  // Postgres: "<date> <time> <tz> [pid] LOG:  …", with its own severity
+  // names. DETAIL / HINT / STATEMENT / CONTEXT lines belong to an error
+  // report, so they count as errors.
+  stage.match {
+    selector = `{service="postgres"} |~ "^\\S+ \\S+ \\S+ \\[\\d+\\] [A-Z]+[0-9]?:"`
+
+    stage.regex {
+      expression = `^\S+ \S+ \S+ \[\d+\] (?P<pg_level>[A-Z]+[0-9]?):`
+    }
+
+    stage.template {
+      source   = "level"
+      template = `{{ $l := .pg_level }}{{ if eq $l "LOG" "INFO" "NOTICE" }}info{{ else if eq $l "WARNING" }}warn{{ else if eq $l "DEBUG1" "DEBUG2" "DEBUG3" "DEBUG4" "DEBUG5" }}debug{{ else if eq $l "FATAL" "PANIC" }}critical{{ else }}error{{ end }}`
+    }
+  }
+
+  stage.structured_metadata {
+    values = { level = "" }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://tigerduck-loki:3100/loki/api/v1/push"
+  }
+}

@@ -1,0 +1,42 @@
+# The bulletin pipeline: scrape → LLM classify → match → dispatch.
+collector_name: tigerduck_bulletins
+
+metrics:
+  - metric_name: tigerduck_bulletins
+    type: gauge
+    help: Live (not deleted) bulletins by processing state.
+    key_labels: [processing_state]
+    values: [count]
+    query: |
+      SELECT processing_state, count(*) AS count
+      FROM bulletins
+      WHERE NOT is_deleted
+      GROUP BY 1
+
+  - metric_name: tigerduck_bulletins_new_24h
+    type: gauge
+    help: Bulletins first seen in the last 24 hours, by source.
+    key_labels: [source]
+    values: [count]
+    query: |
+      SELECT source, count(*) FILTER (WHERE first_seen_at > now() - interval '24 hours') AS count
+      FROM bulletins
+      GROUP BY 1
+
+  # When the scraper last succeeded is the backend's
+  # tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}:
+  # the newest last_seen_at here only moves when a scrape finds a bulletin.
+
+  - metric_name: tigerduck_bulletin_subscriptions
+    type: gauge
+    help: Enabled bulletin subscriptions, from signed-in users and from anonymous (legacy) devices.
+    key_labels: [kind]
+    values: [count]
+    query: |
+      SELECT 'user' AS kind, count(*) AS count
+      FROM user_bulletin_subscriptions
+      WHERE enabled AND deleted_at IS NULL
+      UNION ALL
+      SELECT 'anonymous', count(*)
+      FROM bulletin_subscriptions
+      WHERE enabled

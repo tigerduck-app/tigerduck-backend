@@ -16,6 +16,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.metrics import instrument_scheduler
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.push.course_reminders import scan_course_reminders
@@ -211,4 +212,6 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=30,
         )
+    # After every add_job, so each job's series start at zero.
+    instrument_scheduler(scheduler)
     return scheduler
