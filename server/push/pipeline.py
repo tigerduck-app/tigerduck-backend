@@ -382,12 +382,13 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
         )
 
     if job.channel == COURSE_CHANNEL:
+        # iPhone and iPad only, listed so a client added later fails closed.
         # Android posts its own class reminders and FcmService has no
         # handler for the server's, so there a delivery is a high-priority
         # message that shows nothing — and FCM demotes an app's
         # high-priority messages once enough of them show nothing.
         token_query = token_query.where(
-            UserDevice.platform != UserDevicePlatform.android.value
+            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS)
         )
 
     if job.channel == BULLETIN_CHANNEL:

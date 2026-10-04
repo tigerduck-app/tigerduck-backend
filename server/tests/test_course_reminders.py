@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import select
 
-from server.auth.models import PushJob, User
+from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
 from server.push.course_reminders import scan_course_reminders
 from server.sync.models import (
@@ -28,9 +28,26 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 # --- scan_course_reminders ---
 
 
-async def _make_user(session, student_id="b11203058"):
+async def _make_user(session, student_id="b11203058", *, platform="ios"):
+    """A user with one device on `platform` the pipeline can push to — the
+    scan files nothing for an account no device of which could receive it."""
     user = User(student_id=student_id)
     session.add(user)
+    await session.flush()
+    device = UserDevice(
+        user_id=user.id, client_device_id=f"dev-{student_id}", platform=platform
+    )
+    session.add(device)
+    await session.flush()
+    session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="fcm" if platform == "android" else "apns",
+            token_kind="standard",
+            token_hash=f"hash-{student_id}",
+            token_value=f"tok-{student_id}",
+        )
+    )
     await session.flush()
     return user
 
@@ -109,6 +126,42 @@ async def test_creates_job_for_default_offset(
     # idempotent re-scan
     assert await scan_course_reminders(factory, settings) == 0
 
+
+async def test_no_job_for_an_account_with_only_android_devices(
+    db_session, prepared_engine, test_settings
+):
+    # Android posts its own class reminders, so the pipeline sends these to
+    # no Android device. Filed anyway, each would settle as a failed job.
+    user = await _make_user(db_session, platform="android")
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+
+    assert await scan_course_reminders(factory, settings) == 0
+    assert await _jobs(db_session, user.id) == []
+
+
+
+@pytest.mark.parametrize("platform", ["watchos", "windows", "wearos", "web"])
+async def test_no_job_for_an_account_with_no_iphone_or_ipad(
+    db_session, prepared_engine, test_settings, platform
+):
+    # The pipeline sends class reminders to iPhone and iPad only, so a
+    # client added later is not sent them by default; the scan files none
+    # for an account it could not deliver to.
+    user = await _make_user(db_session, platform=platform)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+
+    assert await scan_course_reminders(factory, settings) == 0
+    assert await _jobs(db_session, user.id) == []
 
 async def test_settings_control_offsets_and_disable(
     db_session, prepared_engine, test_settings

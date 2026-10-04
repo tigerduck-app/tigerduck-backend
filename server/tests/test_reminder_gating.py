@@ -28,6 +28,7 @@ clients do, and a 2.0.2 iPhone still runs AssignmentReminderScheduler.
 #
 # class reminders -- Android schedules these locally as well
 # 11. a course reminder reaches the iPhone and not the Android device
+# 12. nor any platform but iPhone and iPad (a client added later fails closed)
 
 from __future__ import annotations
 
@@ -250,3 +251,40 @@ async def test_course_reminder_skips_android(
     delivered = await _delivered_device_ids(db_session)
     assert iphone.id in delivered
     assert android.id not in delivered
+
+
+@pytest.mark.parametrize("platform", ["watchos", "windows", "wearos", "web"])
+async def test_course_reminder_reaches_only_iphone_and_ipad(
+    db_session, prepared_engine, test_settings, platform
+):
+    # The same fail-closed rule as assignment reminders: a client added
+    # later gets class reminders only once it is listed, not by default.
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    other = await _device_with_token(
+        db_session, user, client_device_id=f"dev-{platform}", platform=platform
+    )
+    iphone = await _device_with_token(
+        db_session, user, client_device_id="dev-iphone", platform="ios"
+    )
+    job = _job(
+        user,
+        channel=COURSE_CHANNEL,
+        scenario="reminder_10m",
+        dedupe_key=f"course:test:12:{platform}",
+        payload={
+            "kind": "course_reminder",
+            "title": "上課提醒：資料結構",
+            "body": "10 分鐘後上課",
+        },
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings)
+    await run_push_tick(worker)
+
+    delivered = await _delivered_device_ids(db_session)
+    assert iphone.id in delivered
+    assert other.id not in delivered
