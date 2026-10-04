@@ -21,6 +21,8 @@ from server.push.payload import (
     _to_unix_seconds,
     build_alert_request,
     build_custom_push_popup_apns,
+    build_custom_push_popup_fcm,
+    build_fcm_alert_request,
 )
 
 _RESERVED = {"title", "body"}
@@ -275,6 +277,32 @@ def build_fcm_for_job(
 
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
+    # The portal's custom pushes, built as on APNs by the builders the
+    # retired dispatchers used: a lowercase `force_ring` FcmService reads,
+    # and the silent channel unless the operator asked for a sound.
+    force_ring = str(payload.get("force_ring")).lower() in {"true", "1"}
+    if payload.get("kind") == "custom_push_popup":
+        return build_custom_push_popup_fcm(
+            fcm_token=token_value,
+            title=title,
+            body=body,
+            notification_id=str(payload.get("notification_id") or ""),
+            force_ring=force_ring,
+            ttl_seconds=ttl_seconds,
+        )
+    if payload.get("kind") == "custom_push_bulletin":
+        return build_fcm_alert_request(
+            fcm_token=token_value,
+            title=title,
+            body=body,
+            bulletin_id=int(payload["bulletin_id"]),
+            source_url="",
+            canonical_org="server",
+            ttl_seconds=ttl_seconds,
+            kind="custom_push_bulletin",
+            force_ring=force_ring,
+        )
+
     data = {
         "title": title,
         "body": body,

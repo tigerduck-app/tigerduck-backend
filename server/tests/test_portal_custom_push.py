@@ -95,3 +95,16 @@ def test_an_iphone_rings_only_when_the_operator_asked(build, force_ring) -> None
     aps = _apns_message(build(force_ring=force_ring))["aps"]
 
     assert ("sound" in aps) is force_ring
+
+
+@pytest.mark.parametrize("build", [_popup, _record], ids=["popup", "record"])
+@pytest.mark.parametrize("force_ring", [False, True])
+def test_android_is_told_to_ring_only_when_the_operator_asked(build, force_ring) -> None:
+    # FcmService picks the audible or silent channel from force_ring; the
+    # channel id alongside it has to say the same thing.
+    data = _fcm_data(build(force_ring=force_ring))
+
+    assert data["force_ring"] == ("true" if force_ring else "false")
+    assert data["android_channel_id"] == (
+        "bulletins_sound" if force_ring else "bulletins_silent"
+    )
