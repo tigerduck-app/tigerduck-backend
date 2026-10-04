@@ -63,7 +63,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Auth** — All v3 routes use `Authorization: Bearer <JWT>`; admin endpoints use `X-Shared-Secret`; bulletin reads are public
 
 ### ⏰ Scheduler
-- **Single worker** — APScheduler runs inside the FastAPI lifespan; replica count is locked at 1. Multiple replicas would double-send (see [`docs/scheduler.md`](docs/scheduler.md)).
+- **Single worker** — APScheduler runs inside the FastAPI lifespan; replica count is locked at 1. Multiple replicas would double-send.
 - **Tick design** — Bulletin scrape / process / dispatch (anonymous + user-level), sync jobs, the push pipeline, assignment / course reminder scans, and retention each have their own interval trigger and don't block each other; cross-worker safety comes from DB locks (advisory lock + `SKIP LOCKED`).
 
 ## Stack
@@ -165,8 +165,6 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 - Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
 - Show who signed in through Cloudflare Access, with a Sign out link that ends their Access session. Dev and LAN visits have no Access session, so the link stays hidden there
-
-Full design: [`docs/portal-design.md`](docs/portal-design.md).
 
 ### LLM (host side)
 
@@ -335,7 +333,7 @@ tigerduck-backend/
 │   ├── secrets/                 # APNs .p8 (gitignored)
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest (unit + integration)
-├── portal/                      # Operator portal — separate FastAPI app (see docs/portal-design.md)
+├── portal/                      # Operator portal — separate FastAPI app
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── app/                     # FastAPI: main / config / db (asyncpg) / logs / status / routes / static

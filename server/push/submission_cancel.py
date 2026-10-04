@@ -35,7 +35,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.auth.schemas import ScheduleScenario
-from server.push.dedupe import SCHEDULE_CHANNEL
+from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY, SCHEDULE_CHANNEL
 from server.push.dedupe import activity_end_key
 from server.push.dedupe import activity_id as _activity_id
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
@@ -322,6 +322,7 @@ async def _end_running_activities(
                 channel=SCHEDULE_CHANNEL,
                 scenario="activityEnd",
                 fire_at=now,
+                priority=LIVE_ACTIVITY_JOB_PRIORITY,
                 payload=payload,
             )
             .on_conflict_do_update(
@@ -332,6 +333,8 @@ async def _end_running_activities(
                 index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": now,
+                    # Same reason as the register route's upsert.
+                    "priority": LIVE_ACTIVITY_JOB_PRIORITY,
                     "status": PushJobStatus.pending.value,
                     "updated_at": now,
                 },

@@ -874,7 +874,7 @@ export function NodeDetailPanel({
                   try {
                     const res = await fetch("/api/moodle/push-tick", { method: "POST" });
                     const body = await res.text();
-                    let resp: { ok?: boolean; error?: string; detail?: string } = {};
+                    let resp: { ok?: boolean; done?: boolean; error?: string; detail?: string } = {};
                     try {
                       resp = JSON.parse(body);
                     } catch {
@@ -885,6 +885,8 @@ export function NodeDetailPanel({
                         "Push tick failed: " +
                           (resp.error ?? resp.detail ?? `HTTP ${res.status}`)
                       );
+                    } else if (resp.done === false) {
+                      alert("Push tick is still sending; the queue updates as it goes.");
                     }
                   } catch (e) {
                     alert("Push tick request failed: " + (e instanceof Error ? e.message : String(e)));

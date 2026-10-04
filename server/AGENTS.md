@@ -17,7 +17,7 @@ What ships today:
 - Live Activity update / end pushes, built in `push/job_payloads.py`
 - FCM fan-out (Android push)
 - Bulletin pipeline (scrape → dedup → LLM classify → match → dispatch)
-- APScheduler-in-lifespan (single worker — see `docs/scheduler.md`)
+- APScheduler-in-lifespan (single worker)
 
 ## STRUCTURE
 ```text
@@ -90,8 +90,8 @@ cp .env.example .env          # defaults to TIGERDUCK_ENV=development
 the script appends `-f docker-compose.dev.yml`, which publishes
 backend `:40000` + portal `:40010` to the host (via a non-internal
 bridge — see the dev override file for why) and drops the prod-only
-`proxy-net`. See `docs/local-dev-backend.md` for the full first-time
-setup.
+`proxy-net`. See the README's Deployment section for the full
+first-time setup.
 
 Health checks from outside the container (only work in dev where the
 ports are published):
@@ -181,7 +181,8 @@ into the backend container via `docker-compose.yml`.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
-  Never spin up a second replica — see `docs/scheduler.md`.
+  Never spin up a second replica: each would run every job, and every
+  push would go out twice.
 
 ## ANTI-PATTERNS
 - Do not handle Moodle/NTUST credentials outside `server/auth/`.

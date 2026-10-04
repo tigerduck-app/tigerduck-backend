@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import uuid
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import BigInteger, all_, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -50,6 +52,7 @@ from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
+from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
@@ -105,13 +108,30 @@ def _has_copy(payload: dict) -> bool:
 
 
 async def run_push_tick(worker: PushPipelineWorker) -> int:
-    """One scheduler tick: recover stale jobs, claim due jobs, process
-    them sequentially. Returns the number of jobs processed."""
+    """One scheduler tick: recover stale jobs, then claim and process due
+    jobs a batch at a time until none are left. Returns the number of jobs
+    processed.
+
+    Draining, rather than one batch per tick: the end of a class period
+    puts every phone's Live Activity end, next-class start and reminders
+    due in the same minute, and one batch per tick left the last of them
+    minutes late. The batch size only bounds how many jobs sit claimed at
+    once. A job this tick already handled is not claimed again. Every path
+    that returns one to pending pushes its `available_at` out, but a drain
+    that outlasts that delay finds it due once more; it is left pending for
+    the next tick. Claimed and passed over instead, it would sit in
+    `processing` until stale recovery, minutes late and an attempt down.
+    """
     await _recover_stale_jobs(worker)
-    claimed = await _claim_due_jobs(worker)
-    for job_id in claimed:
-        await _process_job(worker, job_id=job_id)
-    return len(claimed)
+    processed: set[int] = set()
+    while True:
+        claimed = await _claim_due_jobs(worker, skip=processed)
+        if not claimed:
+            break
+        for job_id in claimed:
+            await _process_job(worker, job_id=job_id)
+        processed.update(claimed)
+    return len(processed)
 
 
 async def _recover_stale_jobs(worker: PushPipelineWorker) -> None:
@@ -152,7 +172,15 @@ async def _recover_stale_jobs(worker: PushPipelineWorker) -> None:
         logger.warning("push.stale_recovered", count=len(jobs))
 
 
-async def _claim_due_jobs(worker: PushPipelineWorker) -> list[int]:
+async def _claim_due_jobs(
+    worker: PushPipelineWorker, *, skip: Collection[int] = ()
+) -> list[int]:
+    """Claim up to a batch of due jobs, leaving out the ids in `skip`.
+
+    `skip` goes to Postgres as one array parameter rather than an IN list:
+    a tick that drains a large send can have handled more jobs than a
+    statement may carry parameters.
+    """
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
         await session.execute(select(func.pg_advisory_xact_lock(_CLAIM_LOCK_KEY)))
@@ -164,6 +192,7 @@ async def _claim_due_jobs(worker: PushPipelineWorker) -> list[int]:
                         PushJob.status == PushJobStatus.pending.value,
                         PushJob.fire_at <= now,
                         PushJob.available_at <= now,
+                        PushJob.id != all_(literal(sorted(skip), ARRAY(BigInteger))),
                     )
                     .order_by(PushJob.priority, PushJob.fire_at)
                     .limit(worker.settings.push_pipeline_batch_size)
@@ -350,6 +379,16 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             UserDevice.cloud_sync_enabled.is_(True),
             UserDevice.sync_assignment_reminders.is_(True),
             UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+        )
+
+    if job.channel == COURSE_CHANNEL:
+        # iPhone and iPad only, listed so a client added later fails closed.
+        # Android posts its own class reminders and FcmService has no
+        # handler for the server's, so there a delivery is a high-priority
+        # message that shows nothing — and FCM demotes an app's
+        # high-priority messages once enough of them show nothing.
+        token_query = token_query.where(
+            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS)
         )
 
     if job.channel == BULLETIN_CHANNEL:

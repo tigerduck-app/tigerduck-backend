@@ -13,7 +13,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob, PushJobStatus
 from server.auth.schemas import ScheduleSyncV3Request, ScheduleSyncV3Response
 from server.db import SessionDep
-from server.push.dedupe import SCHEDULE_CHANNEL
+from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY, SCHEDULE_CHANNEL
 from server.push.dedupe import activity_id as _activity_id
 from server.push.dedupe import schedule_key, schedule_prefix
 
@@ -91,6 +91,7 @@ async def sync_schedule(
                 "channel": SCHEDULE_CHANNEL,
                 "scenario": event.scenario.value,
                 "fire_at": event.fire_at,
+                "priority": LIVE_ACTIVITY_JOB_PRIORITY,
                 # The snapshot is spread first: the routing keys are ours,
                 # and a snapshot that happened to carry one must not
                 # redirect the job.

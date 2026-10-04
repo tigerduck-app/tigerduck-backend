@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.auth.models import (
@@ -222,6 +222,52 @@ async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_cl
     await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
 
     assert len(apple.requests) == 1
+
+
+async def test_one_tick_sends_every_job_that_is_due(
+    db_session, prepared_engine, test_settings
+):
+    # A class period's end puts every phone's Live Activity end, next-class
+    # start and reminders due in the same minute. Taking one batch per tick
+    # left the rest for later ticks, and the last of them went out minutes
+    # after they were due.
+    user, _, _ = await _setup_user_device_token(db_session)
+    burst = test_settings.push_pipeline_batch_size * 2 + 5
+    jobs = [_job(user, dedupe_key=f"system:burst:{i}") for i in range(burst)]
+    db_session.add_all(jobs)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    processed = await run_push_tick(worker)
+
+    assert processed == burst
+    assert len(apple.requests) == burst
+    for job in jobs:
+        await db_session.refresh(job)
+    assert {job.status for job in jobs} == {"sent"}
+
+
+async def test_a_job_due_again_mid_tick_is_left_pending_for_the_next(
+    db_session, prepared_engine, test_settings
+):
+    # A tick that drains for longer than the retry round delay meets a job
+    # it already sent once and returned to pending. Claimed and then passed
+    # over, it sat in `processing` until stale recovery — minutes late, and
+    # a round down. A zero delay makes it due again at once.
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    settings = test_settings.model_copy(update={"push_retry_round_delay_seconds": 0})
+    apple = ScriptedSender([SendResult(success=False, status="500", description="x")])
+    processed = await run_push_tick(_worker(prepared_engine, settings, apple=apple))
+
+    await db_session.refresh(job)
+    assert processed == 1
+    assert len(apple.requests) == 1
+    assert (job.status, job.locked_by) == ("pending", None)
 
 
 async def test_future_or_unavailable_jobs_not_claimed(
@@ -1279,3 +1325,22 @@ async def test_bulletin_job_reaches_only_its_target_devices(
 
     assert await _delivered_device_ids_for_job(db_session, targeted.id) == {phone.id}
     assert await _delivered_device_ids_for_job(db_session, legacy.id) == {phone.id, ipad.id}
+
+
+async def test_the_stale_job_sweep_reads_an_index(db_session):
+    # Every tick, every 5s, starts with this sweep. push_jobs keeps 7 days
+    # of rows, nearly all of them finished; the sweep wants only the few
+    # stuck in `processing`, and without an index each tick reads them all.
+    await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = (
+        await db_session.execute(
+            text(
+                "EXPLAIN SELECT id FROM push_jobs "
+                "WHERE status = 'processing' "
+                "AND locked_at < now() - interval '5 minutes' "
+                "FOR UPDATE SKIP LOCKED"
+            )
+        )
+    ).scalars().all()
+
+    assert "idx_push_jobs_stale_lock" in "\n".join(plan)

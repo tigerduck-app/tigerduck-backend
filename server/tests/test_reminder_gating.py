@@ -25,6 +25,10 @@ clients do, and a 2.0.2 iPhone still runs AssignmentReminderScheduler.
 # scope -- proves the gate is not global
 # 9. a bulletin-channel job still reaches the Android device
 # 10. a bulletin-channel job still reaches the 2.0.2 iPhone
+#
+# class reminders -- Android schedules these locally as well
+# 11. a course reminder reaches the iPhone and not the Android device
+# 12. nor any platform but iPhone and iPad (a client added later fails closed)
 
 from __future__ import annotations
 
@@ -42,6 +46,7 @@ from server.auth.models import (
 )
 from server.db import build_session_factory
 from server.push.apns_client import SendResult
+from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
@@ -209,3 +214,77 @@ async def test_bulletin_channel_is_not_gated(
 
     delivered = await _delivered_device_ids(db_session)
     assert device.id in delivered, case
+
+
+async def test_course_reminder_skips_android(
+    db_session, prepared_engine, test_settings
+):
+    # Android posts its own class reminders (ClassPreparingNotificationScheduler)
+    # and FcmService drops the server's copy, so on Android this is a
+    # high-priority message that shows nothing -- the pattern FCM demotes.
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    android = await _device_with_token(
+        db_session, user, client_device_id="dev-android", platform="android"
+    )
+    iphone = await _device_with_token(
+        db_session, user, client_device_id="dev-iphone", platform="ios"
+    )
+    job = _job(
+        user,
+        channel=COURSE_CHANNEL,
+        scenario="reminder_10m",
+        dedupe_key="course:test:11",
+        payload={
+            "kind": "course_reminder",
+            "title": "上課提醒：資料結構",
+            "body": "10 分鐘後上課",
+        },
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings)
+    await run_push_tick(worker)
+
+    delivered = await _delivered_device_ids(db_session)
+    assert iphone.id in delivered
+    assert android.id not in delivered
+
+
+@pytest.mark.parametrize("platform", ["watchos", "windows", "wearos", "web"])
+async def test_course_reminder_reaches_only_iphone_and_ipad(
+    db_session, prepared_engine, test_settings, platform
+):
+    # The same fail-closed rule as assignment reminders: a client added
+    # later gets class reminders only once it is listed, not by default.
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    other = await _device_with_token(
+        db_session, user, client_device_id=f"dev-{platform}", platform=platform
+    )
+    iphone = await _device_with_token(
+        db_session, user, client_device_id="dev-iphone", platform="ios"
+    )
+    job = _job(
+        user,
+        channel=COURSE_CHANNEL,
+        scenario="reminder_10m",
+        dedupe_key=f"course:test:12:{platform}",
+        payload={
+            "kind": "course_reminder",
+            "title": "上課提醒：資料結構",
+            "body": "10 分鐘後上課",
+        },
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    worker = _worker(prepared_engine, test_settings)
+    await run_push_tick(worker)
+
+    delivered = await _delivered_device_ids(db_session)
+    assert iphone.id in delivered
+    assert other.id not in delivered

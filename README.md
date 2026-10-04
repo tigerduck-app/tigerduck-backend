@@ -63,7 +63,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Shared-Secret`；公告讀取開放
 
 ### ⏰ 排程
-- **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send（見 [`docs/scheduler.md`](docs/scheduler.md)）
+- **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send
 - **tick 設計** — 公告 scrape / process / dispatch（匿名 + 使用者層）、sync jobs、推播 pipeline、作業 / 課程提醒掃描、retention 各自 interval trigger，互不阻塞；跨 worker 安全由 DB 鎖保證（advisory lock + `SKIP LOCKED`）
 
 ## 技術棧
@@ -165,8 +165,6 @@ docker compose exec backend curl -sS localhost:40000/health
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
 - 經 Cloudflare Access 進來時顯示登入者 email 與 Sign out 連結，按下會結束其 Access session；dev / LAN 直連沒有 Access session，連結不會出現
-
-詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
 
 ### LLM（host 端）
 
@@ -335,7 +333,7 @@ tigerduck-backend/
 │   ├── secrets/                 # APNs .p8（gitignored）
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest（單元 + 整合）
-├── portal/                      # 管理介面 — 另一個 FastAPI app（見 docs/portal-design.md）
+├── portal/                      # 管理介面 — 另一個 FastAPI app
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── app/                     # FastAPI：main / config / db (asyncpg) / logs / status / routes / static

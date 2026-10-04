@@ -27,6 +27,13 @@ import uuid
 # more than one channel's worth of key shapes.
 SCHEDULE_CHANNEL = "schedule"
 
+# `push_jobs.priority` for every Live Activity start and end (the column's
+# default is 100; the pipeline claims the lowest first). A class period's
+# end puts every phone's end, next-class start and reminders due in the
+# same minute, and an activity is the one push whose lateness is on screen:
+# a finished class left up on the Dynamic Island, or the next one missing.
+LIVE_ACTIVITY_JOB_PRIORITY = 10
+
 
 def schedule_prefix(device_id: uuid.UUID) -> str:
     return f"schedule:{device_id}:"

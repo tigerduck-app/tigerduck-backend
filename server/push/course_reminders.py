@@ -22,7 +22,15 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
-from server.auth.models import PushJob, PushJobStatus
+from server.auth.models import (
+    APPLE_HANDHELD_PLATFORMS,
+    DevicePushToken,
+    PushJob,
+    PushJobStatus,
+    PushTokenKind,
+    PushTokenStatus,
+    UserDevice,
+)
 from server.config import Settings
 from server.db import session_scope
 from server.sync.models import (
@@ -160,6 +168,38 @@ async def _course_prefs(
     return prefs
 
 
+async def _users_with_a_recipient(
+    session: AsyncSession, user_ids: set[uuid.UUID], now: datetime
+) -> set[uuid.UUID]:
+    """The users among `user_ids` with at least one device the pipeline
+    would deliver a class reminder to: an active standard token on an
+    iPhone or iPad.
+
+    Mirrors `reminders._users_with_a_recipient`, for the same reason. The
+    pipeline checks again at send time and stays the authority; this only
+    keeps the scan from filing jobs nothing could receive. Filed anyway,
+    every reminder of an Android-only account would settle as
+    `failed`/`no_active_tokens`, a failed row per reminder.
+    """
+    if not user_ids:
+        return set()
+    rows = await session.execute(
+        select(UserDevice.user_id)
+        .join(DevicePushToken, DevicePushToken.device_id == UserDevice.id)
+        .where(
+            UserDevice.user_id.in_(user_ids),
+            UserDevice.deleted_at.is_(None),
+            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+            DevicePushToken.token_kind == PushTokenKind.standard.value,
+            DevicePushToken.status == PushTokenStatus.active.value,
+            (DevicePushToken.expires_at.is_(None))
+            | (DevicePushToken.expires_at > now),
+        )
+        .distinct()
+    )
+    return set(rows.scalars().all())
+
+
 async def scan_course_reminders(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -295,6 +335,9 @@ async def scan_course_reminders(
             return 0
 
         prefs = await _course_prefs(session, user_ids, settings)
+        reachable = await _users_with_a_recipient(
+            session, {course.user_id for course, _ in eligible}, now
+        )
 
         skipped: set[tuple[int, date]] = set()
         course_ids = [course.id for course, _ in eligible]
@@ -320,7 +363,10 @@ async def scan_course_reminders(
         values: list[dict] = []
         for course, override in eligible:
             enabled, offsets = prefs[course.user_id]
-            if not enabled:
+            # No device could receive it. Its pending jobs drop out of
+            # valid_keys and are cancelled below, as when reminders are
+            # switched off, and are filed again once a device can.
+            if not enabled or course.user_id not in reachable:
                 continue
             occurrences = course_occurrences(
                 course.schedule_json,

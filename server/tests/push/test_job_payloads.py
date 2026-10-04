@@ -56,6 +56,22 @@ def test_schedule_start_is_a_push_to_start():
     assert "dismissal-date" not in aps
 
 
+def test_schedule_start_asks_ios_for_the_activitys_update_token():
+    # On iOS 18+ a push-started activity gets an update token — and the app
+    # is woken to register it, which is what files the activity's end on
+    # the server — only when the start push asks for one. Without it, an
+    # activity started while the app was not running had no end push, and
+    # stayed up after class until the app was next opened.
+    req = build_apns_for_job(
+        payload=_start_payload(),
+        channel="schedule",
+        token_value="abc",
+        bundle_id="org.ntust.app.TigerDuck",
+    )
+
+    assert req.message["aps"]["input-push-token"] == 1
+
+
 def test_schedule_start_stale_date_is_the_countdown_in_unix_seconds():
     req = build_apns_for_job(
         payload=_start_payload(),

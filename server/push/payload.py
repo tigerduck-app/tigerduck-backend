@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 
 # Swift's JSONDecoder uses `.deferredToDate` by default, which encodes/
@@ -175,6 +175,9 @@ class FcmRequest:
     data: dict[str, str]
     ttl_seconds: int = 7 * 24 * 3600
     collapse_key: str | None = None
+    # Android delivery priority. "high" wakes a dozing device and is meant
+    # for messages the user sees; "normal" is for silent background work.
+    priority: Literal["high", "normal"] = "high"
 
 
 def build_fcm_alert_request(

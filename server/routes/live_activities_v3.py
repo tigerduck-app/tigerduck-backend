@@ -29,7 +29,11 @@ from server.auth.schemas import (
     LiveActivityRegisterV3Response,
 )
 from server.db import SessionDep
-from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
+from server.push.dedupe import (
+    LIVE_ACTIVITY_JOB_PRIORITY,
+    SCHEDULE_CHANNEL,
+    activity_end_key,
+)
 
 router = APIRouter(prefix="/live-activities", tags=["live-activities"])
 logger = structlog.get_logger(__name__)
@@ -186,6 +190,7 @@ async def register_live_activity(
                 channel=SCHEDULE_CHANNEL,
                 scenario="activityEnd",
                 fire_at=payload.countdown_target,
+                priority=LIVE_ACTIVITY_JOB_PRIORITY,
                 # Snapshot first, routing keys after: a snapshot carrying
                 # one of our keys must not redirect the job.
                 payload={
@@ -202,6 +207,9 @@ async def register_live_activity(
                 index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": payload.countdown_target,
+                    # A job filed before Live Activity jobs went out first
+                    # still carries the column default.
+                    "priority": LIVE_ACTIVITY_JOB_PRIORITY,
                     "payload": {
                         **payload.snapshot,
                         "kind": "live_activity_end",

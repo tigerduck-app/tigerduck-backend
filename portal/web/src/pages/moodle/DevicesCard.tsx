@@ -131,6 +131,8 @@ export function DevicesCard({ devices, pushJobs, pushDeliveries, studentId }: { 
                         const res = await fetch("/api/moodle/push-tick", { method: "POST" });
                         const data = await res.json();
                         if (!data.ok) alert("Push tick failed: " + (data.error ?? "unknown"));
+                        else if (data.done === false)
+                          alert("Push tick is still sending; the queue updates as it goes.");
                       } catch (e) {
                         alert("Push tick request failed");
                       }

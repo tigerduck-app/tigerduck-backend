@@ -27,7 +27,8 @@ class FcmSender:
         self,
         credentials_path: Path,
         project_id: str,
-        send_timeout_seconds: float = 15.0,
+        send_timeout_seconds: float = 30.0,
+        http_timeout_seconds: float = 10.0,
     ) -> None:
         # Import lazily so test envs without firebase-admin installed can
         # still import this module to grab `RecordingFcmSender`.
@@ -40,7 +41,9 @@ class FcmSender:
         self._app = firebase_admin.initialize_app(
             cred,
             name="tigerduck-fcm",
-            options={"projectId": project_id},
+            # `httpTimeout` bounds each HTTP request firebase-admin makes;
+            # unset, it is 120s and outlives the `wait_for` in `send`.
+            options={"projectId": project_id, "httpTimeout": http_timeout_seconds},
         )
         self._send_timeout = send_timeout_seconds
 
@@ -60,7 +63,7 @@ class FcmSender:
             token=request.token,
             data=request.data,
             android=messaging.AndroidConfig(
-                priority="high",
+                priority=request.priority,
                 ttl=timedelta(seconds=request.ttl_seconds),
                 collapse_key=request.collapse_key,
             ),
@@ -70,9 +73,7 @@ class FcmSender:
                 asyncio.to_thread(messaging.send, msg, app=self._app),
                 timeout=self._send_timeout,
             )
-            return SendResult(
-                success=True, status="200", description=msg_id
-            )
+            return SendResult(success=True, status="200", notification_id=msg_id)
         except asyncio.TimeoutError:
             # The to_thread worker is still running underneath us; we've just
             # detached. That's intentional — better to leak a daemon thread
@@ -136,7 +137,7 @@ class FcmSender:
                     token=r.token,
                     data=r.data,
                     android=messaging.AndroidConfig(
-                        priority="high",
+                        priority=r.priority,
                         ttl=timedelta(seconds=r.ttl_seconds),
                         collapse_key=r.collapse_key,
                     ),
@@ -181,7 +182,7 @@ def _classify_batch_response(resp, firebase_admin, messaging) -> SendResult:
     the dispatcher already understands.
     """
     if resp.success:
-        return SendResult(success=True, status="200", description=resp.message_id)
+        return SendResult(success=True, status="200", notification_id=resp.message_id)
     exc = resp.exception
     if isinstance(exc, messaging.UnregisteredError):
         return SendResult(success=False, status="UNREGISTERED", description=str(exc))
