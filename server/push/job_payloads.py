@@ -146,6 +146,11 @@ def build_apns_for_job(
                 attributes_type or _DEFAULT_ACTIVITY_ATTRIBUTES_TYPE
             )
             aps["attributes"] = {"activityId": activity_id}
+            # Ask iOS (18+, the app's minimum) for the new activity's update
+            # token. Without it the system neither issues one nor wakes an
+            # app that is not running, so the app never registers the
+            # activity and the server never files its end push.
+            aps["input-push-token"] = 1
             aps["alert"] = {
                 "title": str(snapshot.get("title") or ""),
                 "body": str(snapshot.get("subtitle") or ""),
