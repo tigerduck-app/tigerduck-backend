@@ -23,6 +23,7 @@ from server.push.payload import (
     build_custom_push_popup_apns,
     build_custom_push_popup_fcm,
     build_fcm_alert_request,
+    thread_id_for,
 )
 
 _RESERVED = {"title", "body"}
@@ -217,7 +218,6 @@ def build_apns_for_job(
             bulletin_id=int(payload["bulletin_id"]),
             source_url="",
             canonical_org="server",
-            thread_id=channel,
             ttl_seconds=ttl_seconds,
             now=now,
             kind="custom_push_bulletin",
@@ -231,7 +231,7 @@ def build_apns_for_job(
             "badge": 1,
             "sound": "default",
             "mutable-content": 1,
-            "thread-id": channel,
+            "thread-id": thread_id_for(channel),
         },
         **_extras(payload),
     }

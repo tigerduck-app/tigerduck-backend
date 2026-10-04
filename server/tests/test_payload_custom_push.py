@@ -21,6 +21,7 @@ def test_apns_bulletin_kind_extras_when_passed():
     assert req.message["kind"] == "custom_push_bulletin"
     assert req.message["force_ring"] == "false"
     assert "sound" not in req.message["aps"]
+    assert req.message["aps"]["thread-id"] == "other"
 
 
 def test_apns_bulletin_force_ring_sets_default_sound():
@@ -102,6 +103,7 @@ def test_apns_popup_payload_carries_title_body_id():
     assert req.message["body"] == "hello"
     assert req.message["aps"]["alert"] == {"title": "hi", "body": "hello"}
     assert req.message["aps"]["sound"] == "default"
+    assert req.message["aps"]["thread-id"] == "other"
 
 
 def test_fcm_popup_payload_data_strings_only():
