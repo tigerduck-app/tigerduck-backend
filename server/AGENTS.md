@@ -31,6 +31,7 @@ server/
 ├── security.py                # shared-secret dependency (X-Push-Token)
 ├── system_settings.py         # operator-tunable settings read at runtime
 ├── logging_setup.py           # structlog console/JSON
+├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor

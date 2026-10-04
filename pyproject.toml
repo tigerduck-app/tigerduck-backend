@@ -18,6 +18,7 @@ dependencies = [
     "httpx[http2]>=0.28.1",
     "selectolax>=0.4.7",
     "trafilatura>=2.0.0",
+    "prometheus-client>=0.26.0",
 ]
 
 [dependency-groups]

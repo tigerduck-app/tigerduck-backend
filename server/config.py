@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
     api_shared_secret: str = ""
 
+    # --- Metrics ---
+    # Port the Prometheus /metrics endpoint is served on. It is kept off the
+    # API port on purpose: :40000 is forwarded to the internet by
+    # nginx-proxy-manager, while this one is only reachable on the internal
+    # docker network Prometheus scrapes over. 0 disables the endpoint.
+    metrics_port: int = 9000
+
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
     # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
