@@ -6,7 +6,7 @@ name: CI
 # broken portal and a deploy was whoever remembered to run the build locally.
 #
 # Three jobs, deliberately narrow:
-#   server-tests  the 391-test pytest suite, against a real Postgres — the
+#   server-tests  the pytest suite, against a real Postgres — the
 #                 fixtures DROP/CREATE their own database, so a throwaway
 #                 service container is the honest way to run them.
 #   portal-web    `tsc -b && vite build`. The typecheck is the point; a
