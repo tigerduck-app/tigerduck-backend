@@ -51,11 +51,20 @@ services:
     container_name: tigerduck-internal
     restart: unless-stopped
     # tigerduck-monitoring so Prometheus can scrape the metrics port (9000).
-    networks: [tigerduck-db, proxy-net, tigerduck-monitoring]
+    # The alias exists only on that network; the backend binds its metrics
+    # port to the address it resolves to (TIGERDUCK_METRICS_HOST below), so
+    # nothing on proxy-net or tigerduck-db can reach the port.
+    networks:
+      tigerduck-db:
+      proxy-net:
+      tigerduck-monitoring:
+        aliases: [tigerduck-internal-metrics]
     depends_on:
       postgres:
         condition: service_healthy
     env_file: .env
+    environment:
+      TIGERDUCK_METRICS_HOST: tigerduck-internal-metrics
     # Mount the APNs auth key read-only. Also makes cert rotation a host-side
     # operation (drop the new .p8, restart container) instead of a rebuild.
     volumes:
@@ -109,7 +118,7 @@ services:
   # One-shot: creates or refreshes the read-only tigerduck_monitor role the
   # exporter and Grafana log in as, then exits. Runs on every `up`.
   monitor-role:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     container_name: tigerduck-monitor-role
     restart: "no"
     networks: [tigerduck-db]
@@ -121,7 +130,10 @@ services:
       PGUSER: tigerduck
       PGDATABASE: tigerduck
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+      # Its own secret, never POSTGRES_PASSWORD: whoever reads it from an
+      # exporter's or Grafana's environment gets a read-only login, not the
+      # superuser. ./start.sh generates one into .env when it's missing.
+      MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-}
     volumes:
       - ./monitoring/postgres/monitor-role.sh:/monitor-role.sh:ro
     entrypoint: ["sh", "/monitor-role.sh"]
@@ -137,7 +149,7 @@ services:
     environment:
       DATA_SOURCE_URI: tigerduck-db:5432/tigerduck?sslmode=disable
       DATA_SOURCE_USER: tigerduck_monitor
-      DATA_SOURCE_PASS: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+      DATA_SOURCE_PASS: ${TIGERDUCK_MONITOR_DB_PASSWORD:-}
 
   # App-level counts from SQL (devices online, push queue, sync jobs, …)
   # as Prometheus gauges, so they get a history.
@@ -153,7 +165,7 @@ services:
     environment:
       # URL form, so a password with URL-reserved characters must be
       # percent-encoded. secrets.token_urlsafe output never needs it.
-      SQLEXPORTER_TARGET_DSN: postgres://tigerduck_monitor:${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}@tigerduck-db:5432/tigerduck?sslmode=disable
+      SQLEXPORTER_TARGET_DSN: postgres://tigerduck_monitor:${TIGERDUCK_MONITOR_DB_PASSWORD:-}@tigerduck-db:5432/tigerduck?sslmode=disable
     volumes:
       - ./monitoring/sql-exporter:/etc/sql_exporter:ro
 
@@ -195,6 +207,10 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
+      # Re-reads prometheus.yml every 30s when it changes: a bind-mounted
+      # file edit doesn't restart the container, so without this a pulled
+      # config change would sit unused until someone restarts Prometheus.
+      - --config.auto-reload
     volumes:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - tigerduck_prometheus:/prometheus
@@ -268,7 +284,7 @@ services:
       GF_PLUGINS_PREINSTALL_ASYNC: "false"
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
       # Read by monitoring/grafana/provisioning/datasources/datasources.yml.
-      TIGERDUCK_MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+      TIGERDUCK_MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-}
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro

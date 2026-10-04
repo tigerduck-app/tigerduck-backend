@@ -13,9 +13,12 @@ metrics:
       FROM sync_jobs
       GROUP BY 1, 2
 
+  # Only jobs the worker would claim: its policy enabled and inside its
+  # active window (server/syncjobs/executor.py). A switched-off or
+  # out-of-season type keeps pending jobs that aren't late, just parked.
   - metric_name: tigerduck_sync_jobs_overdue
     type: gauge
-    help: Pending jobs more than 10 minutes past their run_after.
+    help: Claimable pending jobs more than 10 minutes past their run_after.
     key_labels: [job_type]
     values: [count]
     query: |
@@ -23,6 +26,9 @@ metrics:
       FROM sync_policies p
       LEFT JOIN sync_jobs j ON j.job_type = p.job_type
           AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'
+          AND p.enabled
+          AND (p.active_from IS NULL OR p.active_from <= now())
+          AND (p.active_until IS NULL OR p.active_until > now())
       GROUP BY 1
 
   # sync_job_stale_lock_minutes defaults to 10.
@@ -62,18 +68,22 @@ metrics:
       WHERE r.started_at > now() - interval '1 hour' AND r.finished_at IS NOT NULL
       GROUP BY 1
 
-  # Among jobs still scheduled, how long since the most out-of-date one
-  # last succeeded. Climbs when sync silently stops making progress.
+  # Among jobs the worker would claim, how long since the most out-of-date
+  # one last succeeded. Climbs when sync silently stops making progress.
   - metric_name: tigerduck_sync_oldest_success_age_seconds
     type: gauge
-    help: Age of the oldest last success among pending jobs, per type.
+    help: Age of the oldest last success among claimable pending jobs, per type.
     key_labels: [job_type]
     values: [age]
     query: |
-      SELECT job_type,
-             COALESCE(max(extract(epoch FROM now() - COALESCE(last_success_at, created_at))), 0) AS age
-      FROM sync_jobs
-      WHERE status = 'pending'
+      SELECT j.job_type,
+             COALESCE(max(extract(epoch FROM now() - COALESCE(j.last_success_at, j.created_at))), 0) AS age
+      FROM sync_jobs j
+      JOIN sync_policies p ON p.job_type = j.job_type
+      WHERE j.status = 'pending'
+        AND p.enabled
+        AND (p.active_from IS NULL OR p.active_from <= now())
+        AND (p.active_until IS NULL OR p.active_until > now())
       GROUP BY 1
 
   - metric_name: tigerduck_sync_policy_enabled

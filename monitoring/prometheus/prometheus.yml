@@ -26,4 +26,4 @@ scrape_configs:
   # metrics port. Port 40000 is the public API and never serves these.
   - job_name: backend
     static_configs:
-      - targets: ["tigerduck-internal:9000"]
+      - targets: ["tigerduck-internal-metrics:9000"]

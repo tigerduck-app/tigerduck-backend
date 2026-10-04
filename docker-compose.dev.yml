@@ -41,9 +41,11 @@ networks:
 services:
   backend:
     networks: !override
-      - tigerduck-db
-      - tigerduck-host
-      - tigerduck-monitoring
+      tigerduck-db:
+      tigerduck-host:
+      # Same alias as the base file: the metrics port binds to it.
+      tigerduck-monitoring:
+        aliases: [tigerduck-internal-metrics]
     ports:
       - "40000:40000"
   portal:

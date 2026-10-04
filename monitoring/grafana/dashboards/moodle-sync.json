@@ -429,7 +429,7 @@
     {
       "type": "stat",
       "title": "Overdue",
-      "description": "Pending jobs more than 10 minutes past run_after. The sync tick runs every 30 seconds, so these should be picked up long before.",
+      "description": "Pending jobs more than 10 minutes past run_after, counting only types the worker would claim (policy enabled and inside its active window). The sync tick runs every 30 seconds, so these should be picked up long before.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
@@ -441,7 +441,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT count(*) AS \"overdue\" FROM sync_jobs j WHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'",
+          "rawSql": "SELECT count(*) AS \"overdue\"\nFROM sync_jobs j\nJOIN sync_policies p ON p.job_type = j.job_type\nWHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'\n  AND p.enabled AND (p.active_from IS NULL OR p.active_from <= now()) AND (p.active_until IS NULL OR p.active_until > now())",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"
@@ -2262,7 +2262,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT COALESCE(u.student_id, u.id::text) AS \"student\",\n       a.provider AS \"provider\",\n       CASE a.credential_status WHEN 'active' THEN 'active' ELSE a.credential_status END AS \"credential\",\n       a.last_auth_success_at AS \"last sign-in ok\",\n       a.last_auth_failure_at AS \"last sign-in failed\",\n       left(a.last_auth_error, 200) AS \"error\"\nFROM external_accounts a\nJOIN users u ON u.id = a.user_id\nWHERE (${search:sqlstring} = '' OR COALESCE(u.student_id, '') ILIKE '%' || ${search:sqlstring} || '%')\nORDER BY (a.credential_status <> 'active') DESC, a.last_auth_failure_at DESC NULLS LAST\nLIMIT 500",
+          "rawSql": "SELECT COALESCE(u.student_id, u.id::text) AS \"student\",\n       a.provider AS \"provider\",\n       a.credential_status AS \"credential\",\n       a.last_auth_success_at AS \"last sign-in ok\",\n       a.last_auth_failure_at AS \"last sign-in failed\",\n       left(a.last_auth_error, 200) AS \"error\"\nFROM external_accounts a\nJOIN users u ON u.id = a.user_id\nWHERE (${search:sqlstring} = '' OR COALESCE(u.student_id, '') ILIKE '%' || ${search:sqlstring} || '%')\nORDER BY (a.credential_status <> 'active') DESC, a.last_auth_failure_at DESC NULLS LAST\nLIMIT 500",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"

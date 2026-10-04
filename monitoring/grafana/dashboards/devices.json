@@ -1889,7 +1889,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT $__timeGroupAlias(ud.created_at, '1d', 0), ud.platform AS metric, count(*) AS value\nFROM user_devices ud JOIN users u ON u.id = ud.user_id\nWHERE $__timeFilter(ud.created_at) AND ud.platform IN (${platform:sqlstring})\nGROUP BY 1, 2\nORDER BY 1",
+          "rawSql": "WITH days AS (\n    SELECT generate_series(date_trunc('day', $__timeFrom()::timestamptz, 'Asia/Taipei'), $__timeTo()::timestamptz, interval '1 day') AS day\n),\ncounts AS (\nSELECT date_trunc('day', ud.created_at, 'Asia/Taipei') AS day, ud.platform AS metric, count(*) AS value\nFROM user_devices ud JOIN users u ON u.id = ud.user_id\nWHERE $__timeFilter(ud.created_at) AND ud.platform IN (${platform:sqlstring})\nGROUP BY 1, 2\n),\nmetrics AS (SELECT DISTINCT metric FROM counts)\nSELECT d.day AS \"time\", m.metric, COALESCE(c.value, 0) AS value\nFROM days d\nCROSS JOIN metrics m\nLEFT JOIN counts c ON c.day = d.day AND c.metric = m.metric\nORDER BY 1",
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code"

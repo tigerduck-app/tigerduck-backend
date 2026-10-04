@@ -195,8 +195,8 @@ Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單�
 
 - **postgres-exporter**：Postgres server 本身的統計。
 - **sql-exporter**：每 30 秒用 SQL 取一次 app 層的數字（線上裝置、推播佇列、同步工作⋯），讓它們有歷史。查詢都在 `monitoring/sql-exporter/collectors/`。
-- **Backend `:9000/metrics`**（`server/metrics.py`）：HTTP、排程、DB pool、APNs / FCM / LLM 耗時。只開在內部的 `tigerduck-monitoring` 網路，對外的 `:40000` 永遠不回應 `/metrics`。
-- **Grafana 的 SQL datasource**：表格類 panel 直接讀資料庫，用唯讀的 `tigerduck_monitor` role；這個 role 由一次性的 `monitor-role` service 在每次 `./start.sh` 時建立或更新。
+- **Backend `:9000/metrics`**（`server/metrics.py`）：HTTP、排程、DB pool、APNs / FCM / LLM 耗時。這個 port 只綁在 backend 於內部 `tigerduck-monitoring` 網路上的位址（`TIGERDUCK_METRICS_HOST`），`proxy-net` 上的東西都連不到；對外的 `:40000` 永遠不回應 `/metrics`。
+- **Grafana 的 SQL datasource**：表格類 panel 直接讀資料庫，用唯讀的 `tigerduck_monitor` role；這個 role 由一次性的 `monitor-role` service 在每次 `./start.sh` 時建立或更新。它有自己的密碼（`TIGERDUCK_MONITOR_DB_PASSWORD`，沒設的話 `./start.sh` 會產生一組寫進 `.env`），並有 30 秒的 statement timeout，重的查詢不會卡住 migration 要等的 lock。
 - **Alloy → Loki**：透過 docker socket 收每個 container 的輸出。
 
 從 Prometheus 畫的圖從第一次部署監控那天開始累積；SQL panel 則是資料表裡有什麼就顯示什麼。
@@ -211,9 +211,9 @@ Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單�
 
 **修改方式**
 
-- Dashboard 是 `monitoring/grafana/dashboards/` 裡的檔案，無法在 UI 直接存檔。在 Grafana 裡改好後 Export → Export as JSON，取代原檔即可。在 UI 從頭新建的 dashboard 會存在 Grafana 的 volume 裡。
+- `monitoring/grafana/dashboards/` 裡的 dashboard 由 `monitoring/grafana/build_dashboards.py` 產生，多個 panel 共用的篩選與查詢只定義一次；無法在 UI 直接存檔。改那支腳本後執行 `python3 monitoring/grafana/build_dashboards.py`（只需要 Python 3），Grafana 30 秒內會讀到新的 JSON。在 UI 試出來的 panel 要搬回腳本裡。在 UI 從頭新建的 dashboard 會存在 Grafana 的 volume 裡。
 - 想替 app 數字加歷史：在 `monitoring/sql-exporter/collectors/*.collector.yml` 加一條查詢。
-- 設定只在啟動時讀。改了 `monitoring/` 底下的東西後，重啟對應的 service，例如 `docker compose restart grafana`（或 `prometheus`、`sql-exporter`、`loki`、`alloy`）。
+- Prometheus 會在 `prometheus.yml` 改動後 30 秒內自動重讀，Grafana 的 dashboard 也是。`monitoring/` 底下其他設定只在啟動時讀：改了之後重啟對應的 service，例如 `docker compose restart grafana`（或 `sql-exporter`、`loki`、`alloy`）。
 - 版本都已鎖定：每個監控 image 都以 tag + digest 固定，Grafana 的 plugin 版本寫在 `GF_PLUGINS_PREINSTALL`，重啟不會拉新版。升級方式寫在 `docker-compose.yml` 的註解裡。
 
 ### LLM（host 端）

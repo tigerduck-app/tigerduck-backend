@@ -15,9 +15,15 @@
 #                     are the second guard.
 # CONNECTION LIMIT  — a runaway dashboard can't eat into the 100 connections
 #                     the backend and portal share.
+# statement_timeout — a query can't hold its locks for long: an ALTER TABLE
+#                     from a migration, or the portal's restore, would queue
+#                     behind it and every backend query on that table behind
+#                     the ALTER.
+# lock_timeout      — and one stuck behind such an ALTER gives up instead of
+#                     adding to the queue.
 set -eu
 
-: "${MONITOR_DB_PASSWORD:?MONITOR_DB_PASSWORD is empty — set TIGERDUCK_MONITOR_DB_PASSWORD or POSTGRES_PASSWORD in .env}"
+: "${MONITOR_DB_PASSWORD:?TIGERDUCK_MONITOR_DB_PASSWORD is not set in .env. ./start.sh generates one; or add it yourself: python -c 'import secrets; print(secrets.token_urlsafe(32))'}"
 
 psql -v ON_ERROR_STOP=1 -v pw="$MONITOR_DB_PASSWORD" <<'SQL'
 -- Re-granting an existing membership is a NOTICE on every run after the first.
@@ -29,6 +35,8 @@ ALTER ROLE tigerduck_monitor
     WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE CONNECTION LIMIT 10
     PASSWORD :'pw';
 ALTER ROLE tigerduck_monitor SET default_transaction_read_only = on;
+ALTER ROLE tigerduck_monitor SET statement_timeout = '30s';
+ALTER ROLE tigerduck_monitor SET lock_timeout = '5s';
 GRANT pg_monitor, pg_read_all_data TO tigerduck_monitor;
 SQL
 

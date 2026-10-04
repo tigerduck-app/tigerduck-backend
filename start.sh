@@ -12,6 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 source ./_compose-files.sh
 
+ensure_monitor_db_password
 docker compose "${COMPOSE_FILE_ARGS[@]}" up -d --build
 echo
 echo "[start] stack is up. logs: ./logs.sh"
