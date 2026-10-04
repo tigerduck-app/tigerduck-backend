@@ -52,10 +52,13 @@ _ANDROID_CHANNELS = {
 
 # FCM allows at most 4 active collapse keys per device at once. The
 # schedule channel is keyed per activity in `_collapse_key` instead.
+#
+# Class and homework reminders have none, like bulletins: on iOS a collapse
+# id replaces the notification already on screen as well as an undelivered
+# one, so a shared one left a single reminder of either kind showing, and
+# never a stack of them.
 _COLLAPSE_KEYS = {
     "sync_trigger": "sync",
-    "course": "reminder",
-    "assignment": "reminder",
 }
 
 
