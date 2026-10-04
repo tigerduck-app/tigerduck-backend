@@ -98,11 +98,16 @@ class Settings(BaseSettings):
     # Path to the service-account JSON downloaded from the Firebase console.
     # When the file is missing the router falls back to RecordingFcmSender.
     fcm_credentials_path: Path = SERVER_DIR / "secrets" / "fcm_service_account.json"
-    # Hard cap on a single FCM send. firebase-admin's sync `messaging.send`
-    # has no per-call timeout, so without this a stuck token-mint or
-    # unreachable googleapis lookup blocks the bulletin_dispatch tick
-    # indefinitely and APScheduler skips every following tick.
-    fcm_send_timeout_seconds: float = 15.0
+    # Timeout of each HTTP request firebase-admin makes (its `httpTimeout`
+    # app option; 120s when unset). Google asks for at least 10s.
+    fcm_http_timeout_seconds: float = 10.0
+    # Hard cap on a single FCM send, waited on from the event loop. Without
+    # it a stuck token-mint or unreachable googleapis lookup blocks the
+    # bulletin_dispatch tick indefinitely and APScheduler skips every
+    # following tick. Keep it above twice fcm_http_timeout_seconds:
+    # firebase-admin retries a timed-out request once, and a send this cap
+    # abandons keeps running on its thread and may still be delivered.
+    fcm_send_timeout_seconds: float = 30.0
 
 
     # --- Sync change log retention ---

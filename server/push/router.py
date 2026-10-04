@@ -67,6 +67,7 @@ def build_router(settings: Settings) -> PushRouter:
             settings.fcm_credentials_path,
             settings.fcm_project_id,
             send_timeout_seconds=settings.fcm_send_timeout_seconds,
+            http_timeout_seconds=settings.fcm_http_timeout_seconds,
         )
     else:
         from server.push.fcm_client import RecordingFcmSender

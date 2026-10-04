@@ -221,6 +221,11 @@ def build_fcm_for_job(
             data={"kind": "sync_trigger"},
             ttl_seconds=300,
             collapse_key=collapse,
+            # The app shows nothing for a sync trigger. FCM demotes an app
+            # whose high-priority messages keep showing nothing, and the
+            # demotion reaches the messages that do show; Firebase files
+            # background sync under normal priority.
+            priority="normal",
         )
 
     title = str(payload.get("title") or "")
