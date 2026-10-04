@@ -1,8 +1,9 @@
 # Sourced by start.sh / stop.sh / logs.sh / clean-db.sh.
 #
 # Reads TIGERDUCK_ENV from .env. When the value is "development", appends
-# the docker-compose.dev.yml override (publishes port 40000, drops
-# proxy-net). Otherwise leaves the prod-shaped base file alone.
+# the docker-compose.dev.yml override (publishes backend 40000, portal
+# 40010, Grafana 40020 and Prometheus 40021, drops proxy-net). Otherwise
+# leaves the prod-shaped base file alone.
 #
 # Why grep-based instead of `set -a; source .env`: the .env file is a
 # docker-compose dotenv file, not a shell file, and may contain values

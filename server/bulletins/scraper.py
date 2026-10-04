@@ -18,7 +18,7 @@ from datetime import date, datetime, time, timezone
 
 import httpx
 import structlog
-from selectolax.parser import HTMLParser
+from selectolax.lexbor import LexborHTMLParser
 
 logger = structlog.get_logger(__name__)
 
@@ -62,7 +62,7 @@ def _parse_posted_at(raw: str) -> datetime | None:
 
 
 def parse_list_html(html: str) -> list[ListRow]:
-    tree = HTMLParser(html)
+    tree = LexborHTMLParser(html)
     table = tree.css_first("table.listTB")
     if table is None:
         logger.warning("bulletins.scraper.no_table_found")

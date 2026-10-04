@@ -1,21 +1,25 @@
 # TigerDuck backend stack.
 #
 # Networks:
-#   * tigerduck-db   — internal-only bridge. postgres lives here alone and the
-#                      backend joins to talk to it. internal:true means the
-#                      network has NO outbound NAT, so postgres cannot reach
-#                      the public internet even if it tried.
+#   * tigerduck-db   — internal-only bridge for postgres and its clients: the
+#                      backend, the portal, the one-shot monitor-role,
+#                      postgres-exporter, sql-exporter and Grafana.
+#                      internal:true means the network has NO outbound NAT,
+#                      so postgres cannot reach the public internet even if
+#                      it tried.
 #   * proxy-net      — shared with nginx-proxy-manager. External. NPM proxies
 #                      api.tigerduck.app to `http://tigerduck-internal:40000`
-#                      over this network (container DNS by name). Only the
-#                      backend joins this — postgres stays off it.
-#   * tigerduck-monitoring — internal-only bridge for Prometheus and what it
-#                      scrapes. Grafana joins it to query Prometheus.
+#                      over this network (container DNS by name). The
+#                      backend, the portal and Grafana join it; postgres
+#                      stays off it.
+#   * tigerduck-monitoring — internal-only bridge for Prometheus, Loki and
+#                      what they collect from. Grafana joins it to query them.
 #
-# No ports are published to the host for any service. Everything reaches
-# the backend through nginx-proxy-manager via proxy-net. Postgres is reachable
-# only from the backend, via tigerduck-db. Grafana is the one monitoring
-# service on proxy-net, served under the portal host at /grafana.
+# No ports are published to the host for any service. Everything from
+# outside reaches the stack over proxy-net (nginx-proxy-manager / cloudflared).
+# Postgres is reachable only from the services on tigerduck-db. Grafana is
+# the one monitoring service on proxy-net, served under the portal host at
+# /grafana.
 #
 # llama-server stays NATIVE on the host (Docker Desktop on Mac can't surface
 # Metal GPU). The backend reaches it via Docker Desktop's host-gateway:

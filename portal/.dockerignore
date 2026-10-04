@@ -1,0 +1,15 @@
+# The image installs its own deps: `npm ci` in the web-builder stage and
+# `uv sync` from uv.lock in the runtime stage. Host copies would overwrite
+# the npm install (`COPY web/ ./`) with whatever versions and native
+# binaries the host has, and bloat the build context.
+web/node_modules/
+web/dist/
+.venv/
+
+# Python and tool artefacts.
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Tests are not needed in the image.
+tests/
