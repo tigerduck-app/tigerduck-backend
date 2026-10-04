@@ -10,13 +10,17 @@ the test suite does it per test -- never registers anything twice.
 
 The metrics are served on their own port by `start_metrics_server`, never
 by the FastAPI app: :40000 is what nginx-proxy-manager forwards to the
-internet, while the metrics port is only reachable on the internal docker
-network Prometheus scrapes over.
+internet. In compose the metrics port is bound to the backend's address on
+the internal monitoring network only, so neither the internet nor anything
+else on proxy-net can reach it.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 import time
+import weakref
 from collections.abc import Callable, Iterable
 from wsgiref.simple_server import WSGIServer
 
@@ -42,6 +46,7 @@ from prometheus_client.core import GaugeMetricFamily
 from prometheus_client.registry import Collector
 from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.pool import QueuePool
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from server import __version__
@@ -119,12 +124,33 @@ def route_template(scope: Scope) -> str:
         if template:
             return template
     # Starlette's own routes (FastAPI's /docs, /openapi.json) set the
-    # endpoint they matched but not `route`. One without path parameters
-    # matched its path exactly, so that path is the template and cannot
-    # carry anything the client chose.
-    if "endpoint" in scope and not scope.get("path_params"):
+    # endpoint they matched but not `route`. The path is used as the label
+    # only when it is one of the app's own parameterless routes: a Mount
+    # (static files, a sub-app) also sets the endpoint, and a raw path under
+    # it is whatever the client sent, which would mint a series per request.
+    app = scope.get("app")
+    if "endpoint" in scope and app is not None and scope["path"] in _static_paths(app):
         return scope["path"]
     return UNMATCHED_ROUTE
+
+
+_STATIC_PATHS: weakref.WeakKeyDictionary[object, frozenset[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _static_paths(app: object) -> frozenset[str]:
+    """Paths of the app's plain routes that take no parameters, worked out
+    once per app."""
+    paths = _STATIC_PATHS.get(app)
+    if paths is None:
+        paths = frozenset(
+            route.path
+            for route in getattr(app, "routes", ())
+            if isinstance(route, Route) and "{" not in route.path
+        )
+        _STATIC_PATHS[app] = paths
+    return paths
 
 
 class HttpMetricsMiddleware:
@@ -164,6 +190,12 @@ class HttpMetricsMiddleware:
             route = route_template(scope)
             HTTP_REQUESTS.labels(method=method, route=route, status=str(status)).inc()
             HTTP_REQUEST_DURATION.labels(method=method, route=route).observe(elapsed)
+            if status != 500:
+                # Creates the route's 500 series at zero the first time the
+                # route is seen. The first real 500 is then an increase that
+                # rate() and increase() count, not a series that appears
+                # already at one, which they can't.
+                HTTP_REQUESTS.labels(method=method, route=route, status="500")
 
 
 # --- Scheduler ---
@@ -331,6 +363,17 @@ PUSH_SEND_DURATION = Histogram(
 )
 
 
+PUSH_PROVIDERS = ("apns", "fcm")
+PUSH_OUTCOMES = ("success", "failure", "timeout")
+
+# Every provider and outcome exists from startup at zero, for the same
+# reason as the scheduler's series: the first failure after a deploy has to
+# be an increase, or rate() and increase() never see it.
+for _provider in PUSH_PROVIDERS:
+    for _outcome in PUSH_OUTCOMES:
+        PUSH_SEND_DURATION.labels(provider=_provider, outcome=_outcome)
+
+
 def push_send_outcome(success: bool, status: str | None) -> str:
     """Map a sender's `SendResult` onto the push histogram's outcome."""
     if success:
@@ -360,6 +403,10 @@ LLM_REQUEST_DURATION = Histogram(
 )
 
 
+for _outcome in ("success", "error"):
+    LLM_REQUEST_DURATION.labels(outcome=_outcome)
+
+
 def observe_llm_request(outcome: str, seconds: float) -> None:
     LLM_REQUEST_DURATION.labels(outcome=outcome).observe(seconds)
 
@@ -367,25 +414,38 @@ def observe_llm_request(outcome: str, seconds: float) -> None:
 # --- Exposition ---
 
 
-def start_metrics_server(port: int) -> WSGIServer | None:
-    """Serve /metrics on `port` from a daemon thread; 0 serves nothing.
+def start_metrics_server(port: int, host: str = "0.0.0.0") -> WSGIServer | None:
+    """Serve /metrics on `host`:`port` from a daemon thread; port 0 serves
+    nothing.
 
-    Binds every interface: in production the container is only reachable
-    on its docker networks, and the port is not published to the host.
+    `host` is an address or a name. In compose it is the backend's alias on
+    the monitoring network, which resolves to the backend's address on that
+    network alone, so the port is bound there and not on proxy-net or
+    tigerduck-db.
 
-    A port that cannot be bound is logged and skipped rather than raised.
-    The API matters more than its metrics, and a target Prometheus cannot
-    scrape already shows up as down.
+    A host that doesn't resolve or a port that cannot be bound is logged and
+    skipped rather than raised. The API matters more than its metrics, and a
+    target Prometheus cannot scrape already shows up as down.
     """
     if port == 0:
         return None
     try:
-        server, _thread = start_http_server(port, addr="0.0.0.0")
-    except OSError as exc:
-        logger.error("metrics.server_failed", port=port, error=str(exc))
+        addr = _resolve(host)
+        server, _thread = start_http_server(port, addr=addr)
+    except (OSError, OverflowError) as exc:
+        # OverflowError is what bind raises for a port outside 0-65535.
+        logger.error("metrics.server_failed", host=host, port=port, error=str(exc))
         return None
-    logger.info("metrics.serving", port=port)
+    logger.info("metrics.serving", host=host, addr=addr, port=port)
     return server
+
+
+def _resolve(host: str) -> str:
+    """`host` as an IPv4 address, looked up if it's a name."""
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        return socket.gethostbyname(host)
 
 
 def stop_metrics_server(server: WSGIServer | None) -> None:

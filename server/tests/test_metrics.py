@@ -14,6 +14,7 @@ import socket
 import time
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -30,6 +31,7 @@ from apscheduler.events import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from httpx import ASGITransport, AsyncClient
 from prometheus_client import REGISTRY
 from sqlalchemy import text
@@ -141,6 +143,52 @@ async def test_path_that_matches_no_route_is_labelled_unmatched():
         "tigerduck_http_requests_total",
         {"method": "GET", "route": "/wp-login.php", "status": "404"},
     ) is None
+
+
+async def test_path_under_a_mount_is_labelled_unmatched():
+    """A Mount sets the endpoint it matched but no route template; a raw path
+    under it is client-chosen and must not become a label value."""
+    app = _small_app()
+    app.mount("/static", StaticFiles(directory=str(Path(__file__).parent)), name="static")
+    before = _value(
+        "tigerduck_http_requests_total", method="GET", route="unmatched", status="404"
+    )
+
+    async with _small_client(app) as client:
+        assert (await client.get("/static/no-such-file-a1b2")).status_code == 404
+
+    assert _value(
+        "tigerduck_http_requests_total", method="GET", route="unmatched", status="404"
+    ) == before + 1
+    assert REGISTRY.get_sample_value(
+        "tigerduck_http_requests_total",
+        {"method": "GET", "route": "/static/no-such-file-a1b2", "status": "404"},
+    ) is None
+
+
+async def test_first_request_to_a_route_creates_its_500_series_at_zero():
+    route = "/v3/devices/{device_id}/in-progress"
+
+    async with _small_client(_small_app()) as client:
+        assert (await client.get("/v3/devices/abc/in-progress")).status_code == 200
+
+    assert REGISTRY.get_sample_value(
+        "tigerduck_http_requests_total",
+        {"method": "GET", "route": route, "status": "500"},
+    ) == 0.0
+
+
+def test_push_and_llm_series_exist_before_any_send():
+    for provider in ("apns", "fcm"):
+        for outcome in ("success", "failure", "timeout"):
+            assert REGISTRY.get_sample_value(
+                "tigerduck_push_send_duration_seconds_count",
+                {"provider": provider, "outcome": outcome},
+            ) is not None
+    for outcome in ("success", "error"):
+        assert REGISTRY.get_sample_value(
+            "tigerduck_llm_request_duration_seconds_count", {"outcome": outcome}
+        ) is not None
 
 
 async def test_unknown_method_collapses_to_other():
@@ -667,6 +715,26 @@ def test_metrics_server_serves_the_default_registry():
         httpx.get(f"http://127.0.0.1:{port}/metrics")
 
 
+def test_metrics_server_binds_the_address_its_host_resolves_to():
+    port = _free_port()
+    server = metrics.start_metrics_server(port, "localhost")
+    assert server is not None
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+        assert httpx.get(f"http://127.0.0.1:{port}/metrics").status_code == 200
+    finally:
+        metrics.stop_metrics_server(server)
+
+
+def test_a_host_that_does_not_resolve_is_logged_not_raised():
+    assert metrics.start_metrics_server(_free_port(), "no-such-host.invalid") is None
+
+
+@pytest.mark.parametrize("port", [-1, 90000])
+def test_a_port_out_of_range_is_logged_not_raised(port):
+    assert metrics.start_metrics_server(port) is None
+
+
 def test_a_port_already_taken_is_logged_not_raised():
     with socket.socket() as taken:
         taken.bind(("0.0.0.0", 0))
@@ -690,9 +758,11 @@ async def test_lifespan_serves_metrics_only_while_the_app_runs(
         async with httpx.AsyncClient() as scraper:
             body = (await scraper.get(url)).text
         assert "tigerduck_db_pool_size 5.0" in body
+        # The series exists from startup; its value is whatever the rest of
+        # the suite has added to the shared registry, so only presence counts.
         assert (
             'tigerduck_scheduler_job_runs_total{job_id="bulletin_scrape",'
-            'outcome="error"} 0.0'
+            'outcome="error"} '
         ) in body
 
     with pytest.raises(httpx.ConnectError):

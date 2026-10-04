@@ -211,7 +211,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # with the API: uvicorn does not accept requests until this startup
     # finishes, LLM probe included, and a scrape should not say otherwise.
     metrics.bind_engine(engine)
-    metrics_server = metrics.start_metrics_server(settings.metrics_port)
+    metrics_server = metrics.start_metrics_server(
+        settings.metrics_port, settings.metrics_host
+    )
 
     scheduler.start()
     logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
@@ -221,7 +223,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         scheduler.shutdown(wait=False)
         await _finish_running_ticks(_SHUTDOWN_TICK_WAIT_SECONDS)
-        metrics.stop_metrics_server(metrics_server)
+        # shutdown() blocks until the server thread's poll loop notices,
+        # up to half a second; keep the event loop free while it does.
+        await asyncio.to_thread(metrics.stop_metrics_server, metrics_server)
         metrics.bind_engine(None)
         await router.close()
         await engine.dispose()
