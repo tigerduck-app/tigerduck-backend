@@ -169,11 +169,16 @@ async def _course_prefs(
 
 
 async def _users_with_a_recipient(
-    session: AsyncSession, user_ids: set[uuid.UUID], now: datetime
+    session: AsyncSession,
+    user_ids: set[uuid.UUID],
+    now: datetime,
+    *,
+    token_required: bool = True,
 ) -> set[uuid.UUID]:
     """The users among `user_ids` with at least one device the pipeline
     would deliver a class reminder to: an active standard token on an
-    iPhone or iPad.
+    iPhone or iPad. With `token_required=False`, the iPhone or iPad alone,
+    whatever its tokens.
 
     Mirrors `reminders._users_with_a_recipient`, for the same reason. The
     pipeline checks again at send time and stays the authority; this only
@@ -183,20 +188,21 @@ async def _users_with_a_recipient(
     """
     if not user_ids:
         return set()
-    rows = await session.execute(
-        select(UserDevice.user_id)
-        .join(DevicePushToken, DevicePushToken.device_id == UserDevice.id)
-        .where(
-            UserDevice.user_id.in_(user_ids),
-            UserDevice.deleted_at.is_(None),
-            UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+    query = select(UserDevice.user_id).where(
+        UserDevice.user_id.in_(user_ids),
+        UserDevice.deleted_at.is_(None),
+        UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+    )
+    if token_required:
+        query = query.join(
+            DevicePushToken, DevicePushToken.device_id == UserDevice.id
+        ).where(
             DevicePushToken.token_kind == PushTokenKind.standard.value,
             DevicePushToken.status == PushTokenStatus.active.value,
             (DevicePushToken.expires_at.is_(None))
             | (DevicePushToken.expires_at > now),
         )
-        .distinct()
-    )
+    rows = await session.execute(query.distinct())
     return set(rows.scalars().all())
 
 
@@ -335,8 +341,16 @@ async def scan_course_reminders(
             return 0
 
         prefs = await _course_prefs(session, user_ids, settings)
-        reachable = await _users_with_a_recipient(
-            session, {course.user_id for course, _ in eligible}, now
+        eligible_users = {course.user_id for course, _ in eligible}
+        reachable = await _users_with_a_recipient(session, eligible_users, now)
+        # An iPhone or iPad with no usable token right now: APNs dropped
+        # it, or the app has not registered a new one yet. Nothing new is
+        # filed for these users, but their filed reminders stay. Cancelled,
+        # one due before the next scan was gone for good even when the app
+        # registered a token in time, since a scan only files future jobs.
+        # Still unreachable when due, it fails as `no_active_tokens`.
+        awaiting_token = await _users_with_a_recipient(
+            session, eligible_users - reachable, now, token_required=False
         )
 
         skipped: set[tuple[int, date]] = set()
@@ -363,10 +377,14 @@ async def scan_course_reminders(
         values: list[dict] = []
         for course, override in eligible:
             enabled, offsets = prefs[course.user_id]
-            # No device could receive it. Its pending jobs drop out of
-            # valid_keys and are cancelled below, as when reminders are
-            # switched off, and are filed again once a device can.
-            if not enabled or course.user_id not in reachable:
+            # No device could ever receive it (Android only, or signed
+            # out). Its pending jobs drop out of valid_keys and are
+            # cancelled below, as when reminders are switched off, and are
+            # filed again once a device can.
+            if not enabled or (
+                course.user_id not in reachable
+                and course.user_id not in awaiting_token
+            ):
                 continue
             occurrences = course_occurrences(
                 course.schedule_json,
@@ -419,9 +437,11 @@ async def scan_course_reminders(
                         }
                     )
 
-        if values:
+        # Filed only where a device can receive it now.
+        to_file = [value for value in values if value["user_id"] in reachable]
+        if to_file:
             result = await session.execute(
-                pg_insert(PushJob).values(values).on_conflict_do_nothing()
+                pg_insert(PushJob).values(to_file).on_conflict_do_nothing()
             )
             created = result.rowcount or 0
 

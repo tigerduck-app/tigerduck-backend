@@ -163,6 +163,44 @@ async def test_no_job_for_an_account_with_no_iphone_or_ipad(
     assert await scan_course_reminders(factory, settings) == 0
     assert await _jobs(db_session, user.id) == []
 
+
+async def test_a_filed_reminder_outlives_a_token_gone_between_scans(
+    db_session, prepared_engine, test_settings
+):
+    # APNs dropped the token, or the app has not registered a new one yet.
+    # Cancelled, a reminder due before the next scan was lost even when the
+    # app registered a token in time: a scan files no key already due.
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    await db_session.commit()
+    settings = _scan_settings(test_settings, local)
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, settings) == 1
+
+    device = (
+        await db_session.execute(select(UserDevice).where(UserDevice.user_id == user.id))
+    ).scalar_one()
+    token = (
+        await db_session.execute(
+            select(DevicePushToken).where(DevicePushToken.device_id == device.id)
+        )
+    ).scalar_one()
+    token.status = "invalidated"
+    # Added meanwhile, a course is not filed: nothing could receive it yet.
+    db_session.add(_course(user, course_key="MA1001", schedule_json=schedule))
+    await db_session.commit()
+
+    assert await scan_course_reminders(factory, settings) == 0
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["pending"]
+
+    # Signed out: there is no device left to wait for.
+    device.deleted_at = datetime.now(UTC)
+    await db_session.commit()
+    await scan_course_reminders(factory, settings)
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["cancelled"]
+
+
 async def test_settings_control_offsets_and_disable(
     db_session, prepared_engine, test_settings
 ):

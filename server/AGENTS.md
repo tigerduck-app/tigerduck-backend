@@ -200,6 +200,10 @@ into the backend container via `docker-compose.yml`.
   tick finish on its own.
 - The `course` and `assignment` channels deliver to iPhone and iPad only
   (`APPLE_HANDHELD_PLATFORMS`); Android posts its own class reminders.
+  The reminder scans file nothing for a user with no such device and
+  cancel what they filed. A device whose token is gone for now (APNs
+  dropped it, the app has not registered a new one) keeps its filed
+  reminders; only new ones wait for a token.
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
