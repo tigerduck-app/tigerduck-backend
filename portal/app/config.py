@@ -58,8 +58,11 @@ class Settings(BaseSettings):
         # explicitly (see .env.example and the README's Deployment section).
         env_mode = env.get("TIGERDUCK_ENV", "development")
         # Match _compose-files.sh's URL choices so the status page and
-        # the start.sh stdout never disagree.
-        if env_mode == "development":
+        # the start.sh stdout never disagree. It loads the dev override
+        # (published localhost ports) only on an exact "development" and
+        # treats a missing key as prod, so the URLs read the raw value
+        # rather than env_mode's default.
+        if env.get("TIGERDUCK_ENV") == "development":
             default_backend = "http://localhost:40000"
             default_portal = "http://localhost:40010"
         else:
