@@ -12,8 +12,11 @@ from server.config import Settings
 
 def configure(settings: Settings) -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    # Library loggers (apscheduler, sqlalchemy, httpx, …) go through stdlib
+    # logging, not structlog. The level and logger name lead each line so
+    # Loki can tell their errors from their chatter.
     logging.basicConfig(
-        format="%(message)s",
+        format="%(levelname)s:%(name)s: %(message)s",
         stream=sys.stdout,
         level=level,
     )
@@ -30,6 +33,12 @@ def configure(settings: Settings) -> None:
     # string rather than lowering this.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    # APScheduler logs "Running job" and "executed successfully" at INFO for
+    # every run: two lines every five seconds from the push tick alone. The
+    # scheduler metrics (server/metrics.py) count and time every run, so
+    # keep only what goes wrong; a job that raises is still logged at ERROR.
+    logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
     processors: list = [
         structlog.contextvars.merge_contextvars,
