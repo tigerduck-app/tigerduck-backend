@@ -211,6 +211,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # with the API: uvicorn does not accept requests until this startup
     # finishes, LLM probe included, and a scrape should not say otherwise.
     metrics.bind_engine(engine)
+    metrics.publish_settings(settings)
     metrics_server = metrics.start_metrics_server(
         settings.metrics_port, settings.metrics_host
     )

@@ -335,6 +335,34 @@ def test_listener_counts_success_and_error_and_times_each_run():
     ) == pytest.approx(total + 2.5 + 1.0)
 
 
+def test_listener_records_the_last_success_but_not_an_error():
+    job_id = "metrics_test_last_success"
+    wall = _Clock()
+    listener = metrics.SchedulerJobMetrics(wall_clock=wall)
+
+    wall.now = 1_700_000_000.0
+    listener(_execution(EVENT_JOB_EXECUTED, job_id))
+    wall.now = 1_700_000_600.0
+    listener(_execution(EVENT_JOB_ERROR, job_id))
+
+    # The error leaves the last success where it was.
+    assert REGISTRY.get_sample_value(
+        "tigerduck_scheduler_job_last_success_timestamp_seconds", {"job_id": job_id}
+    ) == 1_700_000_000.0
+
+
+def test_published_settings_are_the_stale_lock_thresholds_in_seconds():
+    metrics.publish_settings(
+        Settings(push_job_stale_lock_minutes=7, sync_job_stale_lock_minutes=12)
+    )
+    assert REGISTRY.get_sample_value(
+        "tigerduck_stale_lock_seconds", {"queue": "push"}
+    ) == 420
+    assert REGISTRY.get_sample_value(
+        "tigerduck_stale_lock_seconds", {"queue": "sync"}
+    ) == 720
+
+
 def test_listener_counts_missed_and_skipped_runs_without_timing_them():
     job_id = "metrics_test_not_run"
     listener = metrics.SchedulerJobMetrics()

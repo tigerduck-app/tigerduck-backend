@@ -50,6 +50,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from server import __version__
+from server.config import Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -222,6 +223,16 @@ SCHEDULER_JOB_DURATION = Histogram(
     ),
 )
 
+# When each job last finished without raising, as a Unix time. For a job
+# that raises on failure, like bulletin_scrape, this is when its work last
+# actually got done, which "time since the last run" can't tell apart.
+SCHEDULER_JOB_LAST_SUCCESS = Gauge(
+    "tigerduck_scheduler_job_last_success_timestamp_seconds",
+    "Unix time each scheduler job last finished without raising. Absent "
+    "until its first success since the process started.",
+    ["job_id"],
+)
+
 _SCHEDULER_EVENT_MASK = (
     EVENT_JOB_SUBMITTED
     | EVENT_JOB_EXECUTED
@@ -240,8 +251,13 @@ class SchedulerJobMetrics:
     the attempt is reported as EVENT_JOB_MAX_INSTANCES instead.
     """
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+    ) -> None:
         self._clock = clock
+        self._wall_clock = wall_clock
         self._started: dict[str, float] = {}
 
     def __call__(self, event: JobEvent) -> None:
@@ -258,6 +274,8 @@ class SchedulerJobMetrics:
                 SCHEDULER_JOB_DURATION.labels(job_id=job_id).observe(
                     self._clock() - started
                 )
+            if outcome == "success":
+                SCHEDULER_JOB_LAST_SUCCESS.labels(job_id=job_id).set(self._wall_clock())
         elif event.code == EVENT_JOB_MISSED:
             outcome = "missed"
         elif event.code == EVENT_JOB_MAX_INSTANCES:
@@ -349,6 +367,24 @@ REGISTRY.register(_db_pool_collector)
 def bind_engine(engine: AsyncEngine | None) -> None:
     """Point the pool metrics at `engine`; None stops reporting them."""
     _db_pool_collector.engine = engine
+
+
+# --- Settings the dashboards compare against ---
+
+# The stale-lock thresholds the workers actually run with. The dashboards'
+# "stuck" counts read these instead of hardcoding the defaults, so changing
+# TIGERDUCK_PUSH_JOB_STALE_LOCK_MINUTES or ..._SYNC_JOB_... moves them too.
+STALE_LOCK_SECONDS = Gauge(
+    "tigerduck_stale_lock_seconds",
+    "How long a claimed job may stay locked before its worker treats it as "
+    "abandoned and takes it back, per queue.",
+    ["queue"],
+)
+
+
+def publish_settings(settings: Settings) -> None:
+    STALE_LOCK_SECONDS.labels(queue="push").set(settings.push_job_stale_lock_minutes * 60)
+    STALE_LOCK_SECONDS.labels(queue="sync").set(settings.sync_job_stale_lock_minutes * 60)
 
 
 # --- Push providers ---
