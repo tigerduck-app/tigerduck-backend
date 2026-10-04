@@ -207,6 +207,9 @@ async def register_live_activity(
                 index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": payload.countdown_target,
+                    # A job filed before Live Activity jobs went out first
+                    # still carries the column default.
+                    "priority": LIVE_ACTIVITY_JOB_PRIORITY,
                     "payload": {
                         **payload.snapshot,
                         "kind": "live_activity_end",

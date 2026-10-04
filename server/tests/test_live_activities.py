@@ -142,6 +142,41 @@ async def test_register_live_activity_token_upserts(client) -> None:
         assert jobs[0].payload["kind"] == "live_activity_end"
 
 
+async def test_re_registering_moves_an_older_end_job_to_the_front(client) -> None:
+    # An end job filed before Live Activity jobs went out first carries the
+    # column default; the register that updates it brings it forward too.
+    login = await _login(client)
+    target = datetime.now(timezone.utc) + timedelta(minutes=15)
+    first = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "b" * 128),
+    )
+    assert first.status_code == 200, first.text
+    end_job_id = first.json()["end_job_id"]
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        await s.execute(
+            text("UPDATE push_jobs SET priority = 100 WHERE id = :id"),
+            {"id": end_job_id},
+        )
+        await s.commit()
+
+    second = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target + timedelta(minutes=5), "b" * 128),
+    )
+    assert second.status_code == 200, second.text
+
+    from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY
+
+    async with factory() as s:
+        job = await s.get(PushJob, end_job_id)
+        assert job.priority == LIVE_ACTIVITY_JOB_PRIORITY
+
+
 async def test_end_job_source_id_comes_from_top_level_field(client) -> None:
     """The end-push payload must reference the top-level source_id even if
     the client snapshot carries a divergent sourceId — the cancel_by_source

@@ -333,6 +333,8 @@ async def _end_running_activities(
                 index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
                 set_={
                     "fire_at": now,
+                    # Same reason as the register route's upsert.
+                    "priority": LIVE_ACTIVITY_JOB_PRIORITY,
                     "status": PushJobStatus.pending.value,
                     "updated_at": now,
                 },

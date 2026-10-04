@@ -438,6 +438,8 @@ async def test_accelerating_a_pending_end_job_preserves_its_payload(db_session):
     assert pending_job.status == PushJobStatus.pending.value
     assert pending_job.fire_at == NOW
     assert pending_job.payload == rich_payload
+    # Filed at the column default, it now goes out ahead of other due pushes.
+    assert pending_job.priority == LIVE_ACTIVITY_JOB_PRIORITY
 
 
 async def test_missing_assignment_row_does_not_file_an_undeliverable_job(db_session):
