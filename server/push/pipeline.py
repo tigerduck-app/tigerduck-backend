@@ -50,6 +50,7 @@ from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
+from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
@@ -350,6 +351,15 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             UserDevice.cloud_sync_enabled.is_(True),
             UserDevice.sync_assignment_reminders.is_(True),
             UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
+        )
+
+    if job.channel == COURSE_CHANNEL:
+        # Android posts its own class reminders and FcmService has no
+        # handler for the server's, so there a delivery is a high-priority
+        # message that shows nothing — and FCM demotes an app's
+        # high-priority messages once enough of them show nothing.
+        token_query = token_query.where(
+            UserDevice.platform != UserDevicePlatform.android.value
         )
 
     if job.channel == BULLETIN_CHANNEL:
