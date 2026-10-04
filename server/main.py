@@ -72,6 +72,20 @@ def _forget_tick(task: asyncio.Task) -> None:
         logger.error("push.force_tick_failed", exc_info=task.exception())
 
 
+# How long shutdown waits for such a tick. Under Docker's 10s stop grace
+# period, so the wait is not itself cut short by SIGKILL.
+_SHUTDOWN_TICK_WAIT_SECONDS = 8.0
+
+
+async def _finish_running_ticks(timeout: float) -> None:
+    """Let ticks `/push-tick` answered early finish before shutdown closes
+    the router and database they send through. A delivery cut off
+    mid-send leaves its job in `processing` until stale recovery, minutes
+    later."""
+    if _running_ticks:
+        await asyncio.wait(set(_running_ticks), timeout=timeout)
+
+
 # How long startup is willing to wait for the LLM endpoint. 60s comfortably
 # covers a cold `llama-server` load of Gemma-4 E4B Q4 on Apple Silicon.
 _LLM_READY_WAIT_SECONDS = 60.0
@@ -200,6 +214,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        await _finish_running_ticks(_SHUTDOWN_TICK_WAIT_SECONDS)
         await router.close()
         await engine.dispose()
         logger.info("server.shutdown")

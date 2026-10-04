@@ -64,3 +64,30 @@ async def test_a_long_tick_is_reported_still_sending_and_carries_on(
     assert resp.json() == {"ok": True, "done": False}
     # Answered, not cancelled: the drain still finishes.
     await asyncio.wait_for(finished.wait(), timeout=2)
+
+
+async def test_shutdown_lets_a_tick_still_sending_finish(monkeypatch):
+    # Shutdown closes the push router and the database a tick sends
+    # through; one cut off mid-delivery leaves its job in `processing`
+    # until stale recovery, minutes later.
+    finished = asyncio.Event()
+
+    async def tick():
+        await asyncio.sleep(0.2)
+        finished.set()
+
+    task = asyncio.create_task(tick())
+    monkeypatch.setattr(main_module, "_running_ticks", {task})
+
+    await main_module._finish_running_ticks(timeout=2)
+
+    assert finished.is_set()
+
+
+async def test_shutdown_waits_for_a_tick_only_so_long(monkeypatch):
+    stuck = asyncio.create_task(asyncio.Event().wait())
+    monkeypatch.setattr(main_module, "_running_ticks", {stuck})
+
+    await asyncio.wait_for(main_module._finish_running_ticks(timeout=0.05), timeout=1)
+
+    stuck.cancel()
