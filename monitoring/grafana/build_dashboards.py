@@ -259,6 +259,24 @@ def var_custom(name, label, values, default, multi=False, include_all=False, all
     return v
 
 
+def var_prom_value(name, expr):
+    """A hidden variable holding the value of a one-series PromQL `expr`,
+    re-read on every dashboard load."""
+    query = f"query_result({expr})"
+    return {"name": name, "type": "query", "datasource": PROM, "hide": 2, "refresh": 1,
+            "query": query, "definition": query,
+            # query_result() lists each series as "{labels} value timestamp".
+            "regex": "/ ([0-9.]+) [0-9]+$/",
+            "current": {}, "options": []}
+
+
+def stale_lock(var, default_seconds):
+    """The stale-lock interval its worker uses, as SQL. The backend exports
+    it (tigerduck_stale_lock_seconds); `default_seconds`, the setting's
+    default, only stands in if Prometheus can't be reached."""
+    return f"make_interval(secs => COALESCE(NULLIF('${{{var}}}', '')::float, {default_seconds}))"
+
+
 def var_text(name, label, desc=""):
     return {"name": name, "label": label, "type": "textbox", "query": "", "description": desc,
             "current": {"selected": False, "text": "", "value": ""}, "options": [{"selected": True, "text": "", "value": ""}]}
@@ -353,9 +371,9 @@ L.add(stat("Push failed, 1h", PROM, [prom('sum(tigerduck_push_jobs_finished_last
 L.add(stat("Sync overdue", PROM, [prom("sum(tigerduck_sync_jobs_overdue) or vector(0)")],
            thresholds=steps(("orange", 1), ("red", 10)),
            desc="Pending sync jobs more than 10 minutes past their run time."), 4, 4)
-L.add(stat("Bulletin scrape", PROM, [prom("max(tigerduck_bulletin_last_scrape_age_seconds)")], unit="s",
+L.add(stat("Bulletin scrape", PROM, [prom('time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}) or max(process_start_time_seconds{job="backend"}))')], unit="s",
            thresholds=steps(("orange", 1800), ("red", 7200)),
-           desc="The scraper runs every 10 minutes by default."), 4, 4)
+           desc='Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.'), 4, 4)
 L.add(stat("DB conns used", PROM, [prom("sum(pg_stat_activity_count) / max(pg_settings_max_connections)")],
            unit="percentunit", thresholds=steps(("orange", 0.7), ("red", 0.9))), 4, 4)
 L.add(stat("Backend memory", PROM, [prom('process_resident_memory_bytes{job="backend"}')], unit="bytes", graph=True), 4, 4)
@@ -548,8 +566,9 @@ WHERE {JOB_FILTER} AND j.status = 'pending' AND j.run_after < now() - interval '
 """)],
            thresholds=steps(("orange", 1), ("red", 10)),
            desc="Pending jobs more than 10 minutes past run_after, counting only types the worker would claim (policy enabled and inside its active window). The sync tick runs every 30 seconds, so these should be picked up long before."), 3, 4)
-L.add(stat("Stuck", PG, [sql(f"SELECT count(*) AS \"stuck\" FROM sync_jobs j WHERE {JOB_FILTER} AND j.status = 'running' AND j.locked_at < now() - interval '10 minutes'")],
-           thresholds=steps(("red", 1)), desc="Running for more than sync_job_stale_lock_minutes (10)."), 3, 4)
+L.add(stat("Stuck", PG, [sql(f"SELECT count(*) AS \"stuck\" FROM sync_jobs j WHERE {JOB_FILTER} AND j.status = 'running' AND j.locked_at < now() - {stale_lock('sync_stale_lock', 600)}")],
+           thresholds=steps(("red", 1)),
+           desc="Running for longer than the worker's stale-lock limit (TIGERDUCK_SYNC_JOB_STALE_LOCK_MINUTES, read from the backend)."), 3, 4)
 L.add(stat("Runs", PG, [sql(f"SELECT count(*) AS \"runs\" FROM sync_runs r JOIN sync_jobs j ON j.id = r.sync_job_id WHERE {JOB_FILTER} AND $__timeFilter(r.started_at)")],
            desc="Sync runs started in the dashboard's time range."), 3, 4)
 L.add(stat("Failed runs", PG, [sql(f"SELECT count(*) AS \"failed\" FROM sync_runs r JOIN sync_jobs j ON j.id = r.sync_job_id WHERE {JOB_FILTER} AND $__timeFilter(r.started_at) AND r.status = 'failed'")],
@@ -679,6 +698,7 @@ sync_vars = [
     var_sql("log_source", "Log source", "SELECT DISTINCT source FROM sync_log_entries ORDER BY 1"),
     var_sql("log_level", "Log level", "SELECT DISTINCT level FROM sync_log_entries ORDER BY 1"),
     var_text("message", "Log message"),
+    var_prom_value("sync_stale_lock", 'max(tigerduck_stale_lock_seconds{queue="sync"})'),
 ]
 dashboards["moodle-sync"] = dashboard(
     "tigerduck-sync", "Moodle sync", "Server-side academic sync: policies, per-student jobs, runs, accounts and the activity log.",
@@ -698,9 +718,9 @@ L.add(stat("Oldest due job", PG, [sql(f'SELECT COALESCE(extract(epoch FROM now()
            desc="How late the most overdue pending job is. Climbing means the push tick is stuck or not running."), 4, 4)
 L.add(stat("Scheduled", PG, [sql(f"SELECT count(*) AS \"scheduled\" FROM push_jobs WHERE status = 'pending' AND fire_at > now() AND {CH}")],
            desc="Pending jobs set to fire later.", thresholds=steps(base=BLUE)), 4, 4)
-L.add(stat("Stuck processing", PG, [sql(f"SELECT count(*) AS \"stuck\" FROM push_jobs WHERE status = 'processing' AND locked_at < now() - interval '5 minutes' AND {CH}")],
+L.add(stat("Stuck processing", PG, [sql(f"SELECT count(*) AS \"stuck\" FROM push_jobs WHERE status = 'processing' AND locked_at < now() - {stale_lock('push_stale_lock', 300)} AND {CH}")],
            thresholds=steps(("red", 1)),
-           desc="Jobs claimed more than 5 minutes ago (push_job_stale_lock_minutes) and never finished."), 4, 4)
+           desc="Jobs claimed longer ago than the worker's stale-lock limit (TIGERDUCK_PUSH_JOB_STALE_LOCK_MINUTES, read from the backend) and never finished."), 4, 4)
 L.add(stat("Failed in range", PG, [sql(f"SELECT count(*) AS \"failed\" FROM push_jobs WHERE status IN ('failed', 'partial_failed') AND $__timeFilter(updated_at) AND {CH}")],
            thresholds=steps(("orange", 1), ("red", 20))), 4, 4)
 L.add(stat("Sent in range", PG, [sql(f"SELECT count(*) AS \"sent\" FROM push_jobs WHERE status = 'sent' AND $__timeFilter(sent_at) AND {CH}")]), 4, 4)
@@ -801,6 +821,7 @@ push_vars = [
                "$__all", multi=True, include_all=True),
     var_custom("provider", "Provider", [("APNs", "apns"), ("FCM", "fcm")], "$__all", multi=True, include_all=True),
     var_text("search", "Search failures", "Student ID, scenario or error text"),
+    var_prom_value("push_stale_lock", 'max(tigerduck_stale_lock_seconds{queue="push"})'),
 ]
 dashboards["push-jobs"] = dashboard(
     "tigerduck-push-jobs", "Push", "The push_jobs queue, its deliveries, and the send path to APNs / FCM.",
@@ -817,8 +838,8 @@ L.add(stat("Waiting for the LLM", PG, [sql(f"SELECT count(*) AS \"pending\" FROM
            desc="Bulletins scraped but not yet classified. Grows when llama-server is down."), 3, 4)
 L.add(stat("Processing failed", PG, [sql(f"SELECT count(*) AS \"failed\" FROM bulletins WHERE processing_state = 'failed' AND NOT is_deleted AND {SRC}")],
            thresholds=steps(("orange", 1))), 3, 4)
-L.add(stat("Last scrape", PROM, [prom('max(tigerduck_bulletin_last_scrape_age_seconds{source=~"${source:regex}"})')], unit="s",
-           thresholds=steps(("orange", 1800), ("red", 7200)), desc="The scraper runs every 10 minutes by default."), 3, 4)
+L.add(stat("Last scrape", PROM, [prom('time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}) or max(process_start_time_seconds{job="backend"}))')], unit="s",
+           thresholds=steps(("orange", 1800), ("red", 7200)), desc='Since the bulletin scraper last ran without an error. It runs every 10 minutes by default; right after a backend restart this counts from the restart until the first run.'), 3, 4)
 L.add(stat("Subscriptions", PG, [sql("""
 SELECT (SELECT count(*) FROM user_bulletin_subscriptions WHERE enabled AND deleted_at IS NULL)
      + (SELECT count(*) FROM bulletin_subscriptions WHERE enabled) AS "subscriptions"
@@ -1134,7 +1155,8 @@ student_daily AS (
 ),
 {stretches("device")},
 {stretches("student")}
-SELECT p.t AS "time", usr.*, reg.*, act.*
+SELECT p.t AS "time", usr.*, reg.*, act.*,
+       usr."Active users, 14 days"::float / NULLIF(usr."Registered users", 0) AS "Active share"
 FROM points p
 CROSS JOIN LATERAL (
     SELECT (SELECT count(DISTINCT u.student_id)
@@ -1143,8 +1165,15 @@ CROSS JOIN LATERAL (
               AND u.created_at <= p.t
               AND (u.deleted_at IS NULL OR u.deleted_at > p.t)) AS "Registered users",
            (SELECT count(*)
-            FROM student_spans
-            WHERE active_from <= p.t AND active_until > p.t) AS "Active users, 14 days"
+            FROM student_spans s
+            WHERE s.active_from <= p.t AND s.active_until > p.t
+              -- Counted like "Registered users": not before the account
+              -- existed, nor after it was deleted.
+              AND EXISTS (SELECT 1
+                          FROM users u
+                          WHERE u.student_id = s.key
+                            AND u.created_at <= p.t
+                            AND (u.deleted_at IS NULL OR u.deleted_at > p.t))) AS "Active users, 14 days"
 ) AS usr
 CROSS JOIN LATERAL (
     SELECT count(*) FILTER (WHERE grp = 'iphone_ipad') AS "Registered: iPhone + iPad",
@@ -1162,14 +1191,17 @@ CROSS JOIN LATERAL (
     FROM device_spans s
     JOIN dev dv ON dv.id = s.key
     WHERE s.active_from <= p.t AND s.active_until > p.t
+      -- A deleted device stops counting as active, as it stops counting
+      -- as registered.
+      AND (dv.deleted_at IS NULL OR dv.deleted_at > p.t)
 ) AS act
 ORDER BY 1"""
 
 
-def from_panel(title, panel_id, field, color, desc=""):
+def from_panel(title, panel_id, field, color, desc="", unit="short", decimals=None):
     """A big number taken from another panel's query: its latest value."""
     p = stat(title, DASH_DS, [{"refId": "A", "datasource": DASH_DS, "panelId": panel_id, "withTransforms": False}],
-             thresholds=steps(base=color), desc=desc, graph=True)
+             thresholds=steps(base=color), desc=desc, graph=True, unit=unit, decimals=decimals)
     p["options"]["reduceOptions"]["fields"] = f"/^{field}$/"
     return p
 
@@ -1214,14 +1246,8 @@ SELECT count(DISTINCT student_id) AS "new"
 FROM users
 WHERE student_id IS NOT NULL AND deleted_at IS NULL AND $__timeFilter(created_at)
 """)], thresholds=steps(base="blue"), desc="Students whose first sign-in falls in the selected time range."), 6, 5)
-L.add(stat("Active share", PG, [sql("""
-SELECT count(DISTINCT u.student_id) FILTER (WHERE d.last_seen_at > now() - interval '14 days')::float
-       / NULLIF(count(DISTINCT u.student_id), 0) AS "active share"
-FROM users u
-LEFT JOIN user_devices d ON d.user_id = u.id AND d.deleted_at IS NULL
-WHERE u.student_id IS NOT NULL AND u.deleted_at IS NULL
-""")], unit="percentunit", decimals=0, thresholds=steps(base="green"),
-           desc="Share of registered students active in the last 14 days, by their devices' latest request."), 6, 5)
+L.add(from_panel("Active share", source, "Active share", "green", unit="percentunit", decimals=0,
+                 desc="Active users over registered users, both as in the Users graph below."), 6, 5)
 users_panel = wide_graph(series("Users", PG, [sql(USERBASE_SQL, fmt="time_series")], decimals=0,
                                 desc="Registered: distinct student IDs. Active (dashed): students with a device active in the trailing 14 days. " + ACTIVE_DESC))
 users_panel["fieldConfig"]["overrides"] = [
@@ -1233,7 +1259,7 @@ users_panel["fieldConfig"]["overrides"] = [
                     {"id": "custom.fillOpacity", "value": 0}]},
 ]
 users_panel["maxDataPoints"] = 200
-users_panel["transformations"] = without_fields("^(Registered|Active 14d): .*$")
+users_panel["transformations"] = without_fields("^((Registered|Active 14d): .*|Active share)$")
 L.add(users_panel, 24, 10, pid=source)
 
 L.row("Devices")
@@ -1249,7 +1275,7 @@ devices_panel = wide_graph(series(
     desc="Solid: registered devices. Dashed: devices active in the trailing 14 days. Same colour, same platform. Hover for the totals. " + ACTIVE_DESC))
 devices_panel["fieldConfig"]["overrides"] = line_styles(PLATFORM_COLORS)
 devices_panel["fieldConfig"]["defaults"]["custom"]["fillOpacity"] = 0
-devices_panel["transformations"] = without_fields("^(Registered users|Active users, 14 days)$")
+devices_panel["transformations"] = without_fields("^(Registered users|Active users, 14 days|Active share)$")
 L.add(devices_panel, 24, 12)
 
 L.row("Growth")

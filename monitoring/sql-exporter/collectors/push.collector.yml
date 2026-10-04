@@ -30,16 +30,17 @@ metrics:
       FROM push_jobs
       WHERE status = 'pending' AND fire_at <= now() AND available_at <= now()
 
-  # push_job_stale_lock_minutes defaults to 5; past that the next tick's
-  # sweep should have reclaimed the job.
-  - metric_name: tigerduck_push_jobs_stuck
+  # How long the longest-held claim has been held, with no threshold baked
+  # in: compare it with tigerduck_stale_lock_seconds{queue="push"}, which the
+  # backend exports from the setting its worker actually uses.
+  - metric_name: tigerduck_push_oldest_lock_age_seconds
     type: gauge
-    help: Jobs claimed more than 5 minutes ago that never finished.
-    values: [count]
+    help: Seconds the longest-claimed processing job has been locked, 0 when none.
+    values: [age]
     query: |
-      SELECT count(*) AS count
+      SELECT COALESCE(extract(epoch FROM now() - min(locked_at)), 0) AS age
       FROM push_jobs
-      WHERE status = 'processing' AND locked_at < now() - interval '5 minutes'
+      WHERE status = 'processing'
 
   - metric_name: tigerduck_push_jobs_finished_last_hour
     type: gauge

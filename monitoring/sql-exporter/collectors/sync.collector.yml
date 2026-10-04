@@ -31,17 +31,18 @@ metrics:
           AND (p.active_until IS NULL OR p.active_until > now())
       GROUP BY 1
 
-  # sync_job_stale_lock_minutes defaults to 10.
-  - metric_name: tigerduck_sync_jobs_stuck
+  # How long the longest-running job of each type has been locked, with no
+  # threshold baked in: compare it with tigerduck_stale_lock_seconds{queue="sync"},
+  # which the backend exports from the setting its worker actually uses.
+  - metric_name: tigerduck_sync_oldest_lock_age_seconds
     type: gauge
-    help: Jobs running for more than 10 minutes.
+    help: Seconds the longest-running sync job of each type has been locked, 0 when none.
     key_labels: [job_type]
-    values: [count]
+    values: [age]
     query: |
-      SELECT p.job_type, count(j.id) AS count
+      SELECT p.job_type, COALESCE(extract(epoch FROM now() - min(j.locked_at)), 0) AS age
       FROM sync_policies p
-      LEFT JOIN sync_jobs j ON j.job_type = p.job_type
-          AND j.status = 'running' AND j.locked_at < now() - interval '10 minutes'
+      LEFT JOIN sync_jobs j ON j.job_type = p.job_type AND j.status = 'running'
       GROUP BY 1
 
   - metric_name: tigerduck_sync_runs_last_hour

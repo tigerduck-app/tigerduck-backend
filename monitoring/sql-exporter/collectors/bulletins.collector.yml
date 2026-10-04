@@ -23,19 +23,9 @@ metrics:
       FROM bulletins
       GROUP BY 1
 
-  # Every scrape bumps last_seen_at on the bulletins still listed, so the
-  # newest last_seen_at per source is when that source was last scraped.
-  # custom_push rows are operator pushes stored as bulletins, never scraped.
-  - metric_name: tigerduck_bulletin_last_scrape_age_seconds
-    type: gauge
-    help: Seconds since each bulletin source was last scraped successfully.
-    key_labels: [source]
-    values: [age]
-    query: |
-      SELECT source, extract(epoch FROM now() - max(last_seen_at)) AS age
-      FROM bulletins
-      WHERE source <> 'custom_push'
-      GROUP BY 1
+  # When the scraper last succeeded is the backend's
+  # tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="bulletin_scrape"}:
+  # the newest last_seen_at here only moves when a scrape finds a bulletin.
 
   - metric_name: tigerduck_bulletin_subscriptions
     type: gauge

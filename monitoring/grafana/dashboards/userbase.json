@@ -240,22 +240,20 @@
     {
       "type": "stat",
       "title": "Active share",
-      "description": "Share of registered students active in the last 14 days, by their devices' latest request.",
+      "description": "Active users over registered users, both as in the Users graph below.",
       "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "tigerduck-db"
+        "type": "datasource",
+        "uid": "-- Dashboard --"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "tigerduck-db"
+            "type": "datasource",
+            "uid": "-- Dashboard --"
           },
-          "rawSql": "SELECT count(DISTINCT u.student_id) FILTER (WHERE d.last_seen_at > now() - interval '14 days')::float\n       / NULLIF(count(DISTINCT u.student_id), 0) AS \"active share\"\nFROM users u\nLEFT JOIN user_devices d ON d.user_id = u.id AND d.deleted_at IS NULL\nWHERE u.student_id IS NOT NULL AND u.deleted_at IS NULL",
-          "format": "table",
-          "rawQuery": true,
-          "editorMode": "code"
+          "panelId": 2,
+          "withTransforms": false
         }
       ],
       "fieldConfig": {
@@ -283,11 +281,11 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/^Active share$/",
           "values": false
         },
         "colorMode": "value",
-        "graphMode": "none",
+        "graphMode": "area",
         "justifyMode": "auto",
         "textMode": "auto",
         "orientation": "auto",
@@ -317,7 +315,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "WITH points AS (\n    -- Sample times across the range, plus now() so the last point is the\n    -- current number.\n    SELECT generate_series(\n               date_trunc('hour', $__timeFrom()::timestamptz),\n               now(),\n               GREATEST(make_interval(secs => $__interval_ms / 1000.0), interval '1 hour')\n           ) AS t\n    UNION\n    SELECT now()\n),\nseen AS (\n    -- Activity: logins and access-token refreshes (auth_sessions keeps every\n    -- one, and an app in use refreshes every 15 minutes), plus each\n    -- device's latest request.\n    SELECT device_id, created_at AS at\n    FROM auth_sessions\n    WHERE device_id IS NOT NULL\n      AND created_at > $__timeFrom()::timestamptz - interval '14 days'\n    UNION ALL\n    SELECT id, last_seen_at\n    FROM user_devices\n    WHERE last_seen_at > $__timeFrom()::timestamptz - interval '14 days'\n),\ndev AS (\n    SELECT d.id, d.created_at, d.deleted_at, u.student_id,\n           CASE WHEN d.platform IN ('ios', 'ipados') THEN 'iphone_ipad'\n                WHEN d.platform = 'macos' THEN 'macos'\n                WHEN d.platform = 'android' THEN 'android'\n                ELSE 'other' END AS grp\n    FROM user_devices d\n    JOIN users u ON u.id = d.user_id\n),\ndevice_daily AS (\n    SELECT device_id AS key, date_trunc('day', at) AS day, min(at) AS first_at, max(at) AS last_at\n    FROM seen\n    GROUP BY 1, 2\n),\nstudent_daily AS (\n    SELECT dv.student_id AS key, dd.day, min(dd.first_at) AS first_at, max(dd.last_at) AS last_at\n    FROM device_daily dd\n    JOIN dev dv ON dv.id = dd.key\n    WHERE dv.student_id IS NOT NULL\n    GROUP BY 1, 2\n),\ndevice_marked AS (\n    SELECT key, day, first_at, last_at,\n           CASE WHEN lag(last_at) OVER w + interval '14 days' >= first_at THEN 0 ELSE 1 END AS starts_new\n    FROM device_daily\n    WINDOW w AS (PARTITION BY key ORDER BY day)\n),\ndevice_numbered AS (\n    SELECT key, first_at, last_at, sum(starts_new) OVER (PARTITION BY key ORDER BY day) AS stretch\n    FROM device_marked\n),\ndevice_spans AS (\n    SELECT key, min(first_at) AS active_from, max(last_at) + interval '14 days' AS active_until\n    FROM device_numbered\n    GROUP BY key, stretch\n),\nstudent_marked AS (\n    SELECT key, day, first_at, last_at,\n           CASE WHEN lag(last_at) OVER w + interval '14 days' >= first_at THEN 0 ELSE 1 END AS starts_new\n    FROM student_daily\n    WINDOW w AS (PARTITION BY key ORDER BY day)\n),\nstudent_numbered AS (\n    SELECT key, first_at, last_at, sum(starts_new) OVER (PARTITION BY key ORDER BY day) AS stretch\n    FROM student_marked\n),\nstudent_spans AS (\n    SELECT key, min(first_at) AS active_from, max(last_at) + interval '14 days' AS active_until\n    FROM student_numbered\n    GROUP BY key, stretch\n)\nSELECT p.t AS \"time\", usr.*, reg.*, act.*\nFROM points p\nCROSS JOIN LATERAL (\n    SELECT (SELECT count(DISTINCT u.student_id)\n            FROM users u\n            WHERE u.student_id IS NOT NULL\n              AND u.created_at <= p.t\n              AND (u.deleted_at IS NULL OR u.deleted_at > p.t)) AS \"Registered users\",\n           (SELECT count(*)\n            FROM student_spans\n            WHERE active_from <= p.t AND active_until > p.t) AS \"Active users, 14 days\"\n) AS usr\nCROSS JOIN LATERAL (\n    SELECT count(*) FILTER (WHERE grp = 'iphone_ipad') AS \"Registered: iPhone + iPad\",\n           count(*) FILTER (WHERE grp = 'macos') AS \"Registered: macOS\",\n           count(*) FILTER (WHERE grp = 'android') AS \"Registered: Android\",\n           count(*) AS \"Registered: all\"\n    FROM dev\n    WHERE created_at <= p.t AND (deleted_at IS NULL OR deleted_at > p.t)\n) AS reg\nCROSS JOIN LATERAL (\n    SELECT count(*) FILTER (WHERE dv.grp = 'iphone_ipad') AS \"Active 14d: iPhone + iPad\",\n           count(*) FILTER (WHERE dv.grp = 'macos') AS \"Active 14d: macOS\",\n           count(*) FILTER (WHERE dv.grp = 'android') AS \"Active 14d: Android\",\n           count(*) AS \"Active 14d: all\"\n    FROM device_spans s\n    JOIN dev dv ON dv.id = s.key\n    WHERE s.active_from <= p.t AND s.active_until > p.t\n) AS act\nORDER BY 1",
+          "rawSql": "WITH points AS (\n    -- Sample times across the range, plus now() so the last point is the\n    -- current number.\n    SELECT generate_series(\n               date_trunc('hour', $__timeFrom()::timestamptz),\n               now(),\n               GREATEST(make_interval(secs => $__interval_ms / 1000.0), interval '1 hour')\n           ) AS t\n    UNION\n    SELECT now()\n),\nseen AS (\n    -- Activity: logins and access-token refreshes (auth_sessions keeps every\n    -- one, and an app in use refreshes every 15 minutes), plus each\n    -- device's latest request.\n    SELECT device_id, created_at AS at\n    FROM auth_sessions\n    WHERE device_id IS NOT NULL\n      AND created_at > $__timeFrom()::timestamptz - interval '14 days'\n    UNION ALL\n    SELECT id, last_seen_at\n    FROM user_devices\n    WHERE last_seen_at > $__timeFrom()::timestamptz - interval '14 days'\n),\ndev AS (\n    SELECT d.id, d.created_at, d.deleted_at, u.student_id,\n           CASE WHEN d.platform IN ('ios', 'ipados') THEN 'iphone_ipad'\n                WHEN d.platform = 'macos' THEN 'macos'\n                WHEN d.platform = 'android' THEN 'android'\n                ELSE 'other' END AS grp\n    FROM user_devices d\n    JOIN users u ON u.id = d.user_id\n),\ndevice_daily AS (\n    SELECT device_id AS key, date_trunc('day', at) AS day, min(at) AS first_at, max(at) AS last_at\n    FROM seen\n    GROUP BY 1, 2\n),\nstudent_daily AS (\n    SELECT dv.student_id AS key, dd.day, min(dd.first_at) AS first_at, max(dd.last_at) AS last_at\n    FROM device_daily dd\n    JOIN dev dv ON dv.id = dd.key\n    WHERE dv.student_id IS NOT NULL\n    GROUP BY 1, 2\n),\ndevice_marked AS (\n    SELECT key, day, first_at, last_at,\n           CASE WHEN lag(last_at) OVER w + interval '14 days' >= first_at THEN 0 ELSE 1 END AS starts_new\n    FROM device_daily\n    WINDOW w AS (PARTITION BY key ORDER BY day)\n),\ndevice_numbered AS (\n    SELECT key, first_at, last_at, sum(starts_new) OVER (PARTITION BY key ORDER BY day) AS stretch\n    FROM device_marked\n),\ndevice_spans AS (\n    SELECT key, min(first_at) AS active_from, max(last_at) + interval '14 days' AS active_until\n    FROM device_numbered\n    GROUP BY key, stretch\n),\nstudent_marked AS (\n    SELECT key, day, first_at, last_at,\n           CASE WHEN lag(last_at) OVER w + interval '14 days' >= first_at THEN 0 ELSE 1 END AS starts_new\n    FROM student_daily\n    WINDOW w AS (PARTITION BY key ORDER BY day)\n),\nstudent_numbered AS (\n    SELECT key, first_at, last_at, sum(starts_new) OVER (PARTITION BY key ORDER BY day) AS stretch\n    FROM student_marked\n),\nstudent_spans AS (\n    SELECT key, min(first_at) AS active_from, max(last_at) + interval '14 days' AS active_until\n    FROM student_numbered\n    GROUP BY key, stretch\n)\nSELECT p.t AS \"time\", usr.*, reg.*, act.*,\n       usr.\"Active users, 14 days\"::float / NULLIF(usr.\"Registered users\", 0) AS \"Active share\"\nFROM points p\nCROSS JOIN LATERAL (\n    SELECT (SELECT count(DISTINCT u.student_id)\n            FROM users u\n            WHERE u.student_id IS NOT NULL\n              AND u.created_at <= p.t\n              AND (u.deleted_at IS NULL OR u.deleted_at > p.t)) AS \"Registered users\",\n           (SELECT count(*)\n            FROM student_spans s\n            WHERE s.active_from <= p.t AND s.active_until > p.t\n              -- Counted like \"Registered users\": not before the account\n              -- existed, nor after it was deleted.\n              AND EXISTS (SELECT 1\n                          FROM users u\n                          WHERE u.student_id = s.key\n                            AND u.created_at <= p.t\n                            AND (u.deleted_at IS NULL OR u.deleted_at > p.t))) AS \"Active users, 14 days\"\n) AS usr\nCROSS JOIN LATERAL (\n    SELECT count(*) FILTER (WHERE grp = 'iphone_ipad') AS \"Registered: iPhone + iPad\",\n           count(*) FILTER (WHERE grp = 'macos') AS \"Registered: macOS\",\n           count(*) FILTER (WHERE grp = 'android') AS \"Registered: Android\",\n           count(*) AS \"Registered: all\"\n    FROM dev\n    WHERE created_at <= p.t AND (deleted_at IS NULL OR deleted_at > p.t)\n) AS reg\nCROSS JOIN LATERAL (\n    SELECT count(*) FILTER (WHERE dv.grp = 'iphone_ipad') AS \"Active 14d: iPhone + iPad\",\n           count(*) FILTER (WHERE dv.grp = 'macos') AS \"Active 14d: macOS\",\n           count(*) FILTER (WHERE dv.grp = 'android') AS \"Active 14d: Android\",\n           count(*) AS \"Active 14d: all\"\n    FROM device_spans s\n    JOIN dev dv ON dv.id = s.key\n    WHERE s.active_from <= p.t AND s.active_until > p.t\n      -- A deleted device stops counting as active, as it stops counting\n      -- as registered.\n      AND (dv.deleted_at IS NULL OR dv.deleted_at > p.t)\n) AS act\nORDER BY 1",
           "format": "time_series",
           "rawQuery": true,
           "editorMode": "code"
@@ -411,7 +409,7 @@
           "id": "filterFieldsByName",
           "options": {
             "exclude": {
-              "pattern": "^(Registered|Active 14d): .*$"
+              "pattern": "^((Registered|Active 14d): .*|Active share)$"
             }
           }
         }
@@ -1078,7 +1076,7 @@
           "id": "filterFieldsByName",
           "options": {
             "exclude": {
-              "pattern": "^(Registered users|Active users, 14 days)$"
+              "pattern": "^(Registered users|Active users, 14 days|Active share)$"
             }
           }
         }

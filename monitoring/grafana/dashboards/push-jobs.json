@@ -113,6 +113,21 @@
             "value": ""
           }
         ]
+      },
+      {
+        "name": "push_stale_lock",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "hide": 2,
+        "refresh": 1,
+        "query": "query_result(max(tigerduck_stale_lock_seconds{queue=\"push\"}))",
+        "definition": "query_result(max(tigerduck_stale_lock_seconds{queue=\"push\"}))",
+        "regex": "/ ([0-9.]+) [0-9]+$/",
+        "current": {},
+        "options": []
       }
     ]
   },
@@ -358,7 +373,7 @@
     {
       "type": "stat",
       "title": "Stuck processing",
-      "description": "Jobs claimed more than 5 minutes ago (push_job_stale_lock_minutes) and never finished.",
+      "description": "Jobs claimed longer ago than the worker's stale-lock limit (TIGERDUCK_PUSH_JOB_STALE_LOCK_MINUTES, read from the backend) and never finished.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
@@ -370,7 +385,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT count(*) AS \"stuck\" FROM push_jobs WHERE status = 'processing' AND locked_at < now() - interval '5 minutes' AND channel IN (${channel:sqlstring})",
+          "rawSql": "SELECT count(*) AS \"stuck\" FROM push_jobs WHERE status = 'processing' AND locked_at < now() - make_interval(secs => COALESCE(NULLIF('${push_stale_lock}', '')::float, 300)) AND channel IN (${channel:sqlstring})",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"

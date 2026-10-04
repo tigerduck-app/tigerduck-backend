@@ -132,6 +132,21 @@
             "value": ""
           }
         ]
+      },
+      {
+        "name": "sync_stale_lock",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "hide": 2,
+        "refresh": 1,
+        "query": "query_result(max(tigerduck_stale_lock_seconds{queue=\"sync\"}))",
+        "definition": "query_result(max(tigerduck_stale_lock_seconds{queue=\"sync\"}))",
+        "regex": "/ ([0-9.]+) [0-9]+$/",
+        "current": {},
+        "options": []
       }
     ]
   },
@@ -501,7 +516,7 @@
     {
       "type": "stat",
       "title": "Stuck",
-      "description": "Running for more than sync_job_stale_lock_minutes (10).",
+      "description": "Running for longer than the worker's stale-lock limit (TIGERDUCK_SYNC_JOB_STALE_LOCK_MINUTES, read from the backend).",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
@@ -513,7 +528,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT count(*) AS \"stuck\" FROM sync_jobs j WHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'running' AND j.locked_at < now() - interval '10 minutes'",
+          "rawSql": "SELECT count(*) AS \"stuck\" FROM sync_jobs j WHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'running' AND j.locked_at < now() - make_interval(secs => COALESCE(NULLIF('${sync_stale_lock}', '')::float, 600))",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"
