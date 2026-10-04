@@ -141,7 +141,8 @@ A request that came through a Cloudflare Access application carries
 `access: {email, logout_url}`, or `null` when the header is missing, and
 the layout shows the email and a **Sign out** link in the sidebar footer
 and the mobile menu. Dev and LAN requests skip Access, so they show
-neither: there is no Access session to end.
+neither: there is no Access session to end. Because the body now names
+the operator, `/api/env` is sent with `Cache-Control: private, no-store`.
 
 The link points at `/cdn-cgi/access/logout`, which Cloudflare answers at
 its edge on every Access-protected hostname. It clears the portal's
@@ -153,7 +154,7 @@ path inside the SPA and never reach Cloudflare.
 
 The email is for display only. The portal still authorises nothing; a
 client that bypassed Access could set the header and would get a wrong
-label, nothing more.
+label and a sign-out link that just reloads the portal, nothing more.
 
 ## LAN IPs
 

@@ -7,7 +7,7 @@ directly (dev, LAN) has no such header and no Access session to end.
 
 The email is for display only. Nothing here authorises anything: a client
 that bypasses Access could set the header itself, and all it would get is
-a wrong label next to a sign-out link.
+a wrong label and a sign-out link that just reloads the portal.
 """
 from __future__ import annotations
 

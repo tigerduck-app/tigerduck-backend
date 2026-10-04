@@ -166,8 +166,12 @@ export function Layout() {
               )}
             </div>
           )}
-          <ThemeToggle iconOnly={sidebarCollapsed} />
-          {access && <SignOutLink access={access} iconOnly={sidebarCollapsed} />}
+          <div className="flex flex-col gap-0.5">
+            <ThemeToggle iconOnly={sidebarCollapsed} />
+            {access && (
+              <SignOutLink access={access} iconOnly={sidebarCollapsed} />
+            )}
+          </div>
         </div>
       </aside>
 
@@ -229,24 +233,28 @@ function ApnsBadge({ apns }: { apns: ApnsConfig | undefined }) {
 
 // Cloudflare answers the logout path at its edge, so this must be a full
 // page load. A react-router link would resolve it inside the SPA instead,
-// and the request would never reach Cloudflare.
+// and the request would never reach Cloudflare. Both the sidebar and the
+// mobile menu render this one component so that rule lives in one place.
 function SignOutLink({
   access,
   iconOnly = false,
+  className,
 }: {
   access: AccessSession;
   iconOnly?: boolean;
+  className?: string;
 }) {
   return (
     <Button
       asChild
       variant="ghost"
       size="sm"
-      className={
+      className={cn(
         iconOnly
           ? "w-full justify-center px-0 text-muted-foreground"
-          : "w-full justify-start gap-2 px-2 text-muted-foreground"
-      }
+          : "w-full justify-start gap-2 px-2 text-muted-foreground",
+        className,
+      )}
     >
       <a
         href={access.logout_url}
@@ -316,13 +324,11 @@ function MobileNav({
               >
                 {access.email}
               </div>
-              <a
-                href={access.logout_url}
-                className="flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-              >
-                <LogOut className="h-4 w-4" />
-                Sign out
-              </a>
+              {/* Sized like the nav items above it. */}
+              <SignOutLink
+                access={access}
+                className="h-auto gap-2.5 px-3 py-2 text-sm"
+              />
             </div>
           )}
         </nav>

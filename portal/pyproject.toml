@@ -18,6 +18,8 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
+    # The async tests run on anyio's pytest plugin (pytest.mark.anyio).
+    "anyio>=4.0",
 ]
 
 [tool.pytest.ini_options]

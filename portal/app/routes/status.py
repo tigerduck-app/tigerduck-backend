@@ -46,7 +46,10 @@ async def env_info(request: Request) -> JSONResponse:
             # Per request, not per process: the same portal answers both
             # Access-fronted and direct (dev, LAN) traffic.
             "access": access_session(request),
-        }
+        },
+        # The body names the signed-in operator, so no shared cache in
+        # front of the portal may keep it.
+        headers={"Cache-Control": "private, no-store"},
     )
 
 

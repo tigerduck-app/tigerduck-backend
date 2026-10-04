@@ -20,9 +20,10 @@ ACCESS_EMAIL = "Cf-Access-Authenticated-User-Email"
 
 async def _get_env(headers: dict[str, str] | None = None) -> httpx.Response:
     # The route only reads app.state.settings, so skip the lifespan and
-    # its database pool and set the settings directly.
+    # its database pool and set the settings directly. model_construct
+    # keeps the field defaults and reads nothing from the shell's env.
     app = FastAPI()
-    app.state.settings = Settings()
+    app.state.settings = Settings.model_construct()
     app.include_router(status.router)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://portal") as client:
@@ -51,3 +52,12 @@ async def test_env_treats_a_blank_access_header_as_no_session() -> None:
 
     assert r.status_code == 200
     assert r.json()["access"] is None
+
+
+async def test_env_is_never_cached() -> None:
+    # The body now names the signed-in operator, and a direct request gets
+    # access: null. A shared cache in front of the portal must not hand
+    # either answer to someone else.
+    r = await _get_env({ACCESS_EMAIL: "ops@example.com"})
+
+    assert r.headers["cache-control"] == "private, no-store"
