@@ -19,6 +19,8 @@ from server.push.payload import (
     PushKind,
     _normalize_snapshot_for_apns,
     _to_unix_seconds,
+    build_alert_request,
+    build_custom_push_popup_apns,
 )
 
 _RESERVED = {"title", "body"}
@@ -180,9 +182,41 @@ def build_apns_for_job(
             collapse_id=collapse,
         )
 
-    # Standard alert (existing logic)
+    # The portal's custom pushes: the same requests the retired custom-push
+    # dispatchers built, which is what the apps' handlers were written
+    # against — top-level title/body for the popup's tap handler, and a
+    # sound only when the operator asked for one.
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
+    force_ring = str(payload.get("force_ring")).lower() in {"true", "1"}
+    if payload.get("kind") == "custom_push_popup":
+        return build_custom_push_popup_apns(
+            device_token=token_value,
+            bundle_id=bundle_id,
+            title=title,
+            body=body,
+            notification_id=str(payload.get("notification_id") or ""),
+            force_ring=force_ring,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+    if payload.get("kind") == "custom_push_bulletin":
+        return build_alert_request(
+            device_token=token_value,
+            bundle_id=bundle_id,
+            title=title,
+            body=body,
+            bulletin_id=int(payload["bulletin_id"]),
+            source_url="",
+            canonical_org="server",
+            thread_id=channel,
+            ttl_seconds=ttl_seconds,
+            now=now,
+            kind="custom_push_bulletin",
+            force_ring=force_ring,
+        )
+
+    # Standard alert (existing logic)
     message = {
         "aps": {
             "alert": {"title": title, "body": body},

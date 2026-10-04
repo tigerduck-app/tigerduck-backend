@@ -2,9 +2,8 @@
 
 Delivers through the real v3 pipeline: the portal resolves target devices
 from the v3 tables and inserts one `push_jobs` row per device (channel
-'custom'); the backend's push-pipeline worker (polls every ~30s) fans them
-out to APNs/FCM, honouring each token's dev/prod environment. No
-portal→backend call.
+'custom'); the backend's push-pipeline worker (polls every few seconds) fans them
+out to APNs/FCM. No portal→backend call.
 
 `keeps_record` additionally stores a `bulletins` row for in-app history,
 marked done in `bulletin_user_match_runs` so the subscription dispatcher
@@ -54,6 +53,30 @@ class _SendRequest(_TargetFilter):
     body: str = Field(min_length=1, max_length=2000)
     keeps_record: bool
     force_ring: bool
+
+
+def build_custom_push_payload(
+    *,
+    title: str,
+    body: str,
+    force_ring: bool,
+    notification_id: str | None = None,
+    bulletin_id: int | None = None,
+) -> dict:
+    """The push_jobs payload for one custom push.
+
+    `kind` and its id are what each app routes on: a popup needs its
+    `notification_id` (the apps de-dupe shown popups by it), a recorded push
+    the `bulletin_id` of the stored bulletin it opens. Android's FcmService
+    drops a message that names neither, so without them a custom push
+    reached every Android device and showed on none.
+    """
+    payload: dict = {"title": title, "body": body, "force_ring": force_ring}
+    if bulletin_id is not None:
+        payload.update(kind="custom_push_bulletin", bulletin_id=bulletin_id)
+    else:
+        payload.update(kind="custom_push_popup", notification_id=notification_id)
+    return payload
 
 
 def _targeting_where(filt: _TargetFilter) -> tuple[str, list]:
@@ -147,9 +170,7 @@ async def send(body: _SendRequest, pool=Depends(get_pool)) -> JSONResponse:
     request_id = secrets.token_hex(8)  # 16 chars
     kind = "record" if body.keeps_record else "popup"
     target_classes = ",".join(body.target_classes)
-    payload = json.dumps(
-        {"title": body.title, "body": body.body, "force_ring": body.force_ring}
-    )
+    bulletin_id: int | None = None
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -205,6 +226,15 @@ async def send(body: _SendRequest, pool=Depends(get_pool)) -> JSONResponse:
                     bulletin_id,
                 )
 
+            payload = json.dumps(
+                build_custom_push_payload(
+                    title=body.title,
+                    body=body.body,
+                    force_ring=body.force_ring,
+                    notification_id=None if body.keeps_record else request_id,
+                    bulletin_id=bulletin_id,
+                )
+            )
             if targets:
                 await conn.executemany(
                     """
