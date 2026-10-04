@@ -367,26 +367,6 @@ async def test_each_device_keeps_its_own_schedule(client: AsyncClient):
     assert phone_again.json() == {"pending": 1, "replaced": 0}
 
 
-class _RecordingSender:
-    """PushSender double that records every request and reports success.
-    Each push test module keeps its own (see test_reminder_gating.py)."""
-
-    def __init__(self):
-        self.requests = []
-
-    async def send(self, request):
-        from server.push.apns_client import SendResult
-
-        self.requests.append(request)
-        return SendResult(success=True, status="200")
-
-    async def send_multi(self, requests):
-        return [await self.send(r) for r in requests]
-
-    async def close(self):
-        pass
-
-
 async def test_a_live_activity_start_goes_out_ahead_of_other_due_pushes(
     client: AsyncClient, test_settings
 ):
@@ -396,6 +376,8 @@ async def test_a_live_activity_start_goes_out_ahead_of_other_due_pushes(
     from server.auth.models import DevicePushToken
     from server.push.pipeline import PushPipelineWorker, run_push_tick
     from server.push.router import PushRouter
+    from server.push.apns_client import RecordingSender
+    from server.push.fcm_client import RecordingFcmSender
 
     login = await _login(client)
     fire = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -438,11 +420,11 @@ async def test_a_live_activity_start_goes_out_ahead_of_other_due_pushes(
         start.fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)
         await s.commit()
 
-    apple = _RecordingSender()
+    apple = RecordingSender()
     worker = PushPipelineWorker(
         session_factory=factory,
         settings=test_settings,
-        router=PushRouter(apple=apple, android=_RecordingSender()),
+        router=PushRouter(apple=apple, android=RecordingFcmSender()),
         worker_id="la-start-priority-test",
     )
     await run_push_tick(worker)

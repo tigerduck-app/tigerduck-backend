@@ -477,25 +477,6 @@ async def test_an_end_job_mid_delivery_does_not_block_the_next_one(client) -> No
         assert earlier.dedupe_key != end_key
 
 
-class _RecordingSender:
-    """PushSender double that records every request and reports success."""
-
-    def __init__(self):
-        self.requests = []
-
-    async def send(self, request):
-        from server.push.apns_client import SendResult
-
-        self.requests.append(request)
-        return SendResult(success=True, status="200")
-
-    async def send_multi(self, requests):
-        return [await self.send(r) for r in requests]
-
-    async def close(self):
-        pass
-
-
 async def _backlog(session, *, user_id, device_id, count: int) -> None:
     """`count` bulletin pushes for the device, due well before now — the
     pile a class period's end leaves in the queue."""
@@ -531,6 +512,8 @@ async def test_a_live_activity_end_goes_out_ahead_of_other_due_pushes(
     # waited its turn behind the rest left the finished class on screen.
     from server.push.pipeline import PushPipelineWorker, run_push_tick
     from server.push.router import PushRouter
+    from server.push.apns_client import RecordingSender
+    from server.push.fcm_client import RecordingFcmSender
 
     login = await _login(client)
     target = datetime.now(timezone.utc) + timedelta(minutes=15)
@@ -552,11 +535,11 @@ async def test_a_live_activity_end_goes_out_ahead_of_other_due_pushes(
         end.fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)  # class over
         await s.commit()
 
-    apple = _RecordingSender()
+    apple = RecordingSender()
     worker = PushPipelineWorker(
         session_factory=factory,
         settings=test_settings,
-        router=PushRouter(apple=apple, android=_RecordingSender()),
+        router=PushRouter(apple=apple, android=RecordingFcmSender()),
         worker_id="la-priority-test",
     )
     await run_push_tick(worker)
