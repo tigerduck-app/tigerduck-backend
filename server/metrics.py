@@ -399,8 +399,8 @@ BULLETIN_SCRAPE_ROWS = Gauge(
 # row counts as working.
 BULLETIN_LAST_NONEMPTY_SCRAPE = Gauge(
     "tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds",
-    "Unix time of the last scrape that parsed at least one bulletin; 0 until "
-    "the first such scrape since the process started.",
+    "Unix time of the last scrape that parsed and stored at least one "
+    "bulletin; 0 until the first such scrape since the process started.",
 )
 
 

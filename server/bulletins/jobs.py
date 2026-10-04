@@ -109,12 +109,14 @@ async def scrape_job(
     ts = now or datetime.now(timezone.utc)
     async with http_client_factory() as client:
         rows = await fetch_list(settings.bulletin_list_url, client)
-    observe_bulletin_scrape(len(rows))
 
     async with session_factory() as session:
         outcome = await upsert_list_rows(session, rows, now=ts)
         await _mark_stale_deleted(session, settings, ts)
         await session.commit()
+    # Only once the rows are stored: a scrape whose write failed and rolled
+    # back hasn't worked, however well the page parsed.
+    observe_bulletin_scrape(len(rows))
 
     logger.info(
         "bulletins.scrape_job.done",

@@ -409,6 +409,43 @@ async def test_scrape_records_rows_and_only_a_nonempty_scrape_as_working(
 
 
 @_async
+async def test_scrape_whose_write_fails_is_not_recorded_as_working(
+    prepared_engine: AsyncEngine, test_settings: Settings, monkeypatch
+) -> None:
+    settings = _test_settings_override(test_settings)
+    factory = async_sessionmaker(prepared_engine, expire_on_commit=False)
+    page = """
+        <html><body><table class="listTB table"><tbody>
+        <tr><td>2026-04-22</td><td>圖書館</td>
+          <td><a href="https://bulletin.ntust.edu.tw/p/450-1045-900602,c0.php">two</a></td>
+        </tr>
+        </tbody></table></body></html>
+    """
+    rows = REGISTRY.get_sample_value("tigerduck_bulletin_scrape_rows")
+    working = REGISTRY.get_sample_value(
+        "tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds"
+    )
+
+    async def failing_upsert(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(bulletin_jobs, "upsert_list_rows", failing_upsert)
+    with pytest.raises(RuntimeError):
+        await bulletin_jobs.scrape_job(
+            factory,
+            settings,
+            http_client_factory=_http_client_factory(
+                _RoutingTransport({settings.bulletin_list_url: page})
+            ),
+        )
+
+    assert REGISTRY.get_sample_value("tigerduck_bulletin_scrape_rows") == rows
+    assert REGISTRY.get_sample_value(
+        "tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds"
+    ) == working
+
+
+@_async
 async def test_stale_rows_flip_to_deleted(
     prepared_engine: AsyncEngine, test_settings: Settings
 ) -> None:
