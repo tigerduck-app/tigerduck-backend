@@ -13,7 +13,7 @@ from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
 import structlog  # noqa: E402
-from fastapi import Depends, FastAPI  # noqa: E402
+from fastapi import BackgroundTasks, Depends, FastAPI  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
@@ -238,12 +238,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"pong": "tigerduck"}
 
     @app.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
-    async def force_push_tick() -> dict:
+    async def force_push_tick(background_tasks: BackgroundTasks) -> dict:
+        """Start a push tick and answer at once.
+
+        Run after the response: a tick drains every due job, which after a
+        large send outlasts the portal's 30s wait on this call, and the
+        portal would report a tick that is still sending as failed.
+        """
         worker = getattr(app.state, "push_worker", None)
         if worker is None:
             return {"ok": False, "error": "push_worker not available"}
         from server.push.pipeline import run_push_tick
-        await run_push_tick(worker)
+        background_tasks.add_task(run_push_tick, worker)
         return {"ok": True}
 
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
