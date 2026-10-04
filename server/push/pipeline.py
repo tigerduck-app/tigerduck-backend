@@ -106,13 +106,32 @@ def _has_copy(payload: dict) -> bool:
 
 
 async def run_push_tick(worker: PushPipelineWorker) -> int:
-    """One scheduler tick: recover stale jobs, claim due jobs, process
-    them sequentially. Returns the number of jobs processed."""
+    """One scheduler tick: recover stale jobs, then claim and process due
+    jobs a batch at a time until none are left. Returns the number of jobs
+    processed.
+
+    Draining, rather than one batch per tick: the end of a class period
+    puts every phone's Live Activity end, next-class start and reminders
+    due in the same minute, and one batch per tick left the last of them
+    minutes late. The batch size only bounds how many jobs sit claimed at
+    once. A job this tick already handled is never taken again — every
+    path that returns one to pending also pushes its `available_at` out —
+    but a claim made only of those ends the tick rather than loop on it;
+    such a job then waits in `processing` for stale recovery.
+    """
     await _recover_stale_jobs(worker)
-    claimed = await _claim_due_jobs(worker)
-    for job_id in claimed:
-        await _process_job(worker, job_id=job_id)
-    return len(claimed)
+    processed: set[int] = set()
+    while True:
+        claimed = [
+            job_id for job_id in await _claim_due_jobs(worker)
+            if job_id not in processed
+        ]
+        if not claimed:
+            break
+        for job_id in claimed:
+            await _process_job(worker, job_id=job_id)
+        processed.update(claimed)
+    return len(processed)
 
 
 async def _recover_stale_jobs(worker: PushPipelineWorker) -> None:

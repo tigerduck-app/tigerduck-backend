@@ -56,7 +56,7 @@ def build_scheduler(
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
-    * `push_pipeline_tick` — user push_jobs delivery pipeline every 30s
+    * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible

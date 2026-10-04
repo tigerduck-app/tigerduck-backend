@@ -224,6 +224,30 @@ async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_cl
     assert len(apple.requests) == 1
 
 
+async def test_one_tick_sends_every_job_that_is_due(
+    db_session, prepared_engine, test_settings
+):
+    # A class period's end puts every phone's Live Activity end, next-class
+    # start and reminders due in the same minute. Taking one batch per tick
+    # left the rest for later ticks, and the last of them went out minutes
+    # after they were due.
+    user, _, _ = await _setup_user_device_token(db_session)
+    burst = test_settings.push_pipeline_batch_size * 2 + 5
+    jobs = [_job(user, dedupe_key=f"system:burst:{i}") for i in range(burst)]
+    db_session.add_all(jobs)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    processed = await run_push_tick(worker)
+
+    assert processed == burst
+    assert len(apple.requests) == burst
+    for job in jobs:
+        await db_session.refresh(job)
+    assert {job.status for job in jobs} == {"sent"}
+
+
 async def test_future_or_unavailable_jobs_not_claimed(
     db_session, prepared_engine, test_settings
 ):

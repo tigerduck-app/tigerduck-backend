@@ -440,3 +440,91 @@ async def test_an_end_job_mid_delivery_does_not_block_the_next_one(client) -> No
         earlier = await s.get(PushJob, earlier_id)
         assert earlier.status == PushJobStatus.sent.value
         assert earlier.dedupe_key != end_key
+
+
+class _RecordingSender:
+    """PushSender double that records every request and reports success."""
+
+    def __init__(self):
+        self.requests = []
+
+    async def send(self, request):
+        from server.push.apns_client import SendResult
+
+        self.requests.append(request)
+        return SendResult(success=True, status="200")
+
+    async def send_multi(self, requests):
+        return [await self.send(r) for r in requests]
+
+    async def close(self):
+        pass
+
+
+async def _backlog(session, *, user_id, device_id, count: int) -> None:
+    """`count` bulletin pushes for the device, due well before now — the
+    pile a class period's end leaves in the queue."""
+    session.add(
+        DevicePushToken(
+            device_id=device_id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-standard",
+            token_value="standard-token",
+        )
+    )
+    due = datetime.now(timezone.utc) - timedelta(minutes=10)
+    for i in range(count):
+        session.add(
+            PushJob(
+                user_id=user_id,
+                dedupe_key=f"bulletin:backlog:{i}",
+                channel="bulletin",
+                scenario="bulletin_matched",
+                fire_at=due,
+                available_at=due,
+                payload={"kind": "bulletin", "title": "t", "body": "b", "bulletin_id": i},
+            )
+        )
+
+
+async def test_a_live_activity_end_goes_out_ahead_of_other_due_pushes(
+    client, test_settings
+) -> None:
+    # The end of a class period puts every phone's Live Activity end,
+    # next-class start and reminders due in the same minute. An end that
+    # waited its turn behind the rest left the finished class on screen.
+    from server.push.pipeline import PushPipelineWorker, run_push_tick
+    from server.push.router import PushRouter
+
+    login = await _login(client)
+    target = datetime.now(timezone.utc) + timedelta(minutes=15)
+    response = await client.post(
+        "/v3/live-activities/register",
+        headers=_bearer(login),
+        json=_register_body(target, "b" * 128),
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        end = (
+            await s.execute(
+                select(PushJob).where(PushJob.dedupe_key.like(f"la_end:%:{ACTIVITY_ID}"))
+            )
+        ).scalar_one()
+        await _backlog(s, user_id=end.user_id, device_id=end.device_id, count=30)
+        end.fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)  # class over
+        await s.commit()
+
+    apple = _RecordingSender()
+    worker = PushPipelineWorker(
+        session_factory=factory,
+        settings=test_settings,
+        router=PushRouter(apple=apple, android=_RecordingSender()),
+        worker_id="la-priority-test",
+    )
+    await run_push_tick(worker)
+
+    assert len(apple.requests) == 31
+    assert apple.requests[0].message["aps"].get("event") == "end"

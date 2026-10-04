@@ -151,7 +151,11 @@ class Settings(BaseSettings):
     moodle_fetch_timeout_seconds: float = 20.0
 
     # --- User push pipeline (Phase 4) ---
-    push_pipeline_tick_seconds: int = 30
+    # How often the pipeline looks for due jobs: the most a job waits past
+    # its fire_at when the queue is empty. A Live Activity's end is one of
+    # them, so this is how long a finished class can stay on screen. Each
+    # tick drains every due job, `push_pipeline_batch_size` at a time.
+    push_pipeline_tick_seconds: int = 5
     push_pipeline_batch_size: int = 10
     push_job_stale_lock_minutes: int = 5
     # Delay before a job with still-pending deliveries gets another round.

@@ -365,3 +365,87 @@ async def test_each_device_keeps_its_own_schedule(client: AsyncClient):
         json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
     )
     assert phone_again.json() == {"pending": 1, "replaced": 0}
+
+
+class _RecordingSender:
+    """PushSender double that records every request and reports success.
+    Each push test module keeps its own (see test_reminder_gating.py)."""
+
+    def __init__(self):
+        self.requests = []
+
+    async def send(self, request):
+        from server.push.apns_client import SendResult
+
+        self.requests.append(request)
+        return SendResult(success=True, status="200")
+
+    async def send_multi(self, requests):
+        return [await self.send(r) for r in requests]
+
+    async def close(self):
+        pass
+
+
+async def test_a_live_activity_start_goes_out_ahead_of_other_due_pushes(
+    client: AsyncClient, test_settings
+):
+    # A class's Live Activity starts as the period before it ends, the
+    # minute every phone's end, start and reminders fall due together. A
+    # start that waited its turn behind the rest came up late.
+    from server.auth.models import DevicePushToken
+    from server.push.pipeline import PushPipelineWorker, run_push_tick
+    from server.push.router import PushRouter
+
+    login = await _login(client)
+    fire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    response = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", fire, "Intro to CS")]},
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    due = datetime.now(timezone.utc) - timedelta(minutes=10)
+    async with factory() as s:
+        start = (
+            await s.execute(select(PushJob).where(PushJob.channel == "schedule"))
+        ).scalar_one()
+        for kind, scope in (("push_to_start", "TigerDuckActivityAttributes"), ("standard", None)):
+            s.add(
+                DevicePushToken(
+                    device_id=start.device_id,
+                    provider="apns",
+                    token_kind=kind,
+                    token_hash=f"hash-{kind}",
+                    token_value=f"token-{kind}",
+                    scope_key=scope,
+                )
+            )
+        for i in range(30):
+            s.add(
+                PushJob(
+                    user_id=start.user_id,
+                    dedupe_key=f"bulletin:backlog:{i}",
+                    channel="bulletin",
+                    scenario="bulletin_matched",
+                    fire_at=due,
+                    available_at=due,
+                    payload={"kind": "bulletin", "title": "t", "body": "b", "bulletin_id": i},
+                )
+            )
+        start.fire_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        await s.commit()
+
+    apple = _RecordingSender()
+    worker = PushPipelineWorker(
+        session_factory=factory,
+        settings=test_settings,
+        router=PushRouter(apple=apple, android=_RecordingSender()),
+        worker_id="la-start-priority-test",
+    )
+    await run_push_tick(worker)
+
+    assert len(apple.requests) == 31
+    assert apple.requests[0].message["aps"].get("event") == "start"
