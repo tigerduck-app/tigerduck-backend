@@ -114,6 +114,24 @@ def test_extract_markdown_pulls_body_from_minimal_html() -> None:
     assert "公告標題" in md
 
 
+def test_extract_markdown_writes_underline_as_markdown_not_html() -> None:
+    # The apps render body_md as markdown and show inline HTML as literal
+    # text, and content_hash dedup hashes this output, so its shape must
+    # not drift. trafilatura 2.3 writes <u>…</u> here, which is why
+    # pyproject.toml holds it below 2.3.
+    html = """
+    <html><body><article>
+    <p>申請注意事項如下，請同學務必詳閱並於期限內完成線上申請與列印。</p>
+    <p>系統於申請時間截止後即<u>無法登入</u>，亦<u>無法列印及編輯</u>，逾期恕不受理。</p>
+    <p>本助學金只開放上學期申請，申請後會進行財產查核，查核通過者將抵扣學雜費。</p>
+    </article></body></html>
+    """
+    md = extract_markdown(html)
+    assert md is not None
+    assert "無法登入" in md
+    assert "<u>" not in md
+
+
 # ---- Hashing ---------------------------------------------------------------
 
 

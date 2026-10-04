@@ -114,7 +114,7 @@ async def register_live_activity(
     scenario = payload.snapshot.get("scenario")
     if scenario is not None and payload.activity_id != f"{scenario}::{payload.source_id}":
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="activity_id_mismatch",
         )
 
