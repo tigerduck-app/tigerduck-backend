@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.auth.models import (
@@ -1325,3 +1325,22 @@ async def test_bulletin_job_reaches_only_its_target_devices(
 
     assert await _delivered_device_ids_for_job(db_session, targeted.id) == {phone.id}
     assert await _delivered_device_ids_for_job(db_session, legacy.id) == {phone.id, ipad.id}
+
+
+async def test_the_stale_job_sweep_reads_an_index(db_session):
+    # Every tick, every 5s, starts with this sweep. push_jobs keeps 7 days
+    # of rows, nearly all of them finished; the sweep wants only the few
+    # stuck in `processing`, and without an index each tick reads them all.
+    await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = (
+        await db_session.execute(
+            text(
+                "EXPLAIN SELECT id FROM push_jobs "
+                "WHERE status = 'processing' "
+                "AND locked_at < now() - interval '5 minutes' "
+                "FOR UPDATE SKIP LOCKED"
+            )
+        )
+    ).scalars().all()
+
+    assert "idx_push_jobs_stale_lock" in "\n".join(plan)
