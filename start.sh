@@ -4,7 +4,7 @@
 #
 # Reads TIGERDUCK_ENV from .env: when "development", also loads
 # docker-compose.dev.yml (publishes port 40000 to host, drops proxy-net).
-# See docs/local-dev-backend.md.
+# See the README's Deployment section.
 #
 # Usage:
 #   ./start.sh
