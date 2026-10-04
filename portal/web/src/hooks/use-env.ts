@@ -7,5 +7,10 @@ export function useEnv() {
     queryKey: ["env"],
     queryFn: () => api<EnvInfo>("/api/env"),
     staleTime: Infinity,
+    // The payload names the Cloudflare Access user, which can change while
+    // this tab stays open: another operator signing in from a second tab
+    // replaces the session cookie. Ask again whenever the tab comes back to
+    // the foreground, overriding the app-wide refetchOnWindowFocus: false.
+    refetchOnWindowFocus: "always",
   });
 }

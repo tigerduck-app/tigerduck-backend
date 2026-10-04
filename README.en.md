@@ -164,6 +164,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 - Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
+- Show who signed in through Cloudflare Access, with a Sign out link that ends their Access session. Dev and LAN visits have no Access session, so the link stays hidden there
 
 Full design: [`docs/portal-design.md`](docs/portal-design.md).
 
@@ -338,6 +339,7 @@ tigerduck-backend/
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── app/                     # FastAPI: main / config / db (asyncpg) / logs / status / routes / static
+│   ├── tests/                   # pytest, no database needed
 │   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA (built into the image as web/dist)
 ├── scripts/                     # One-shot tools (backfill, seed, etc.)
 ├── deploy/launchd/              # macOS launchd plist (llama-server and other host-side services)
@@ -353,7 +355,7 @@ tigerduck-backend/
 ## Contributing
 
 PRs and issues are welcome. Before submitting:
-1. `uv run pytest` is green
+1. `uv run pytest` is green, and so is `cd portal && uv run pytest` if you touched the portal's Python
 2. If you touched the portal frontend, `cd portal/web && npm run build` passes too — the `tsc -b` typecheck is the part that matters
 3. Include an alembic revision if you touch the schema
 4. Name your branch `feature/your-feature` or `fix/your-fix`; target the `dev` branch in the PR

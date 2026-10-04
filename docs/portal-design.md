@@ -134,6 +134,30 @@ Backend has `TIGERDUCK_SKIP_LLM_PROBE` (default `false`). When `true`,
 displays the current value as a pill on the status page — no toggle in
 the UI, edit `.env` and run `./start.sh`.
 
+## Sign-out (Cloudflare Access)
+
+A request that came through a Cloudflare Access application carries
+`Cf-Access-Authenticated-User-Email`. `/api/env` turns it into
+`access: {email, logout_url}`, or `null` when the header is missing, and
+the layout shows the email and a **Sign out** link in the sidebar footer
+and the mobile menu. Dev and LAN requests skip Access, so they show
+neither: there is no Access session to end. Because the body now names
+the operator, `/api/env` is sent with `Cache-Control: private, no-store`,
+and the SPA asks for it again whenever the tab returns to the foreground,
+so an operator who signed in from another tab shows up without a reload.
+
+The link points at `/cdn-cgi/access/logout`, which Cloudflare answers at
+its edge on every Access-protected hostname. It clears the portal's
+authorization cookie and revokes the user's Access session for every app
+in the account, not just the portal, so it works the same whether the
+operator signed in at the portal or at the App Launcher. It must be a
+full page load (a plain `<a>`): a react-router link would resolve the
+path inside the SPA and never reach Cloudflare.
+
+The email is for display only. The portal still authorises nothing; a
+client that bypassed Access could set the header and would get a wrong
+label and a sign-out link that just reloads the portal, nothing more.
+
 ## LAN IPs
 
 `_compose-files.sh::_detect_lan_ips` enumerates `en*` / `eth*` /

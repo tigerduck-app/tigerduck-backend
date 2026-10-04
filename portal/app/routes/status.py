@@ -11,6 +11,7 @@ import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from ..access import access_session
 from ..status import (
     apns_config,
     backend_version,
@@ -42,7 +43,13 @@ async def env_info(request: Request) -> JSONResponse:
             "apns_config": apns_config(
                 s.apns_env, s.apns_team_id, s.apns_key_id, s.apns_key_path
             ),
-        }
+            # Per request, not per process: the same portal answers both
+            # Access-fronted and direct (dev, LAN) traffic.
+            "access": access_session(request),
+        },
+        # The body names the signed-in operator, so no shared cache in
+        # front of the portal may keep it.
+        headers={"Cache-Control": "private, no-store"},
     )
 
 

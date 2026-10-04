@@ -11,9 +11,9 @@ name: CI
 #                 service container is the honest way to run them.
 #   portal-web    `tsc -b && vite build`. The typecheck is the point; a
 #                 dependency bump that breaks types fails here, not on deploy.
-#   portal-app    the operator portal's Python. It has no tests, so this
-#                 checks the lockfile resolves and the app imports — which is
-#                 what actually broke when routes/moodle.py became a package.
+#   portal-app    the operator portal's Python. Checks the lockfile resolves
+#                 and the app imports — which is what actually broke when
+#                 routes/moodle.py became a package — then runs its tests.
 #
 # No Docker build, no lint gate, no coverage threshold. Add them when they
 # would have caught something.
@@ -121,7 +121,13 @@ jobs:
         run: uv sync --frozen
 
       - name: Import the app
-        # No tests to run, so the check is that every module still imports.
-        # A package split that leaves a route module unreferenced, or an
-        # __init__ that forgets to re-export, fails right here.
+        # The tests import only the routes they cover, so this is what
+        # proves every module still imports. A package split that leaves a
+        # route module unreferenced, or an __init__ that forgets to
+        # re-export, fails right here.
         run: uv run --frozen python -c "import app.main; print('portal app imports OK')"
+
+      - name: Run tests
+        # No database: the tests drive routes that only read settings and
+        # request headers.
+        run: uv run --frozen pytest -q

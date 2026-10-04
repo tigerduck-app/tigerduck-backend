@@ -5,6 +5,7 @@ import {
   CalendarDays,
   GraduationCap,
   HardDrive,
+  LogOut,
   Menu,
   Megaphone,
   Monitor,
@@ -15,10 +16,11 @@ import {
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useEnv } from "@/hooks/use-env";
 import { cn } from "@/lib/cn";
-import type { ApnsConfig, FcmConfig } from "@/types/api";
+import type { AccessSession, ApnsConfig, FcmConfig } from "@/types/api";
 
 type NavItem = {
   to: string;
@@ -48,6 +50,7 @@ export function Layout() {
   const isDev = env.data?.env === "development";
   const items = NAV.filter((n) => !n.devOnly || isDev);
   const bottomItems = NAV_BOTTOM.filter((n) => !n.devOnly || isDev);
+  const access = env.data?.access ?? null;
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
     try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
   });
@@ -153,14 +156,27 @@ export function Layout() {
                 <span className="font-medium">FCM</span>
                 <FcmBadge fcm={env.data?.fcm_config} />
               </div>
+              {access && (
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="font-medium">User</span>
+                  <span className="min-w-0 truncate" title={access.email}>
+                    {access.email}
+                  </span>
+                </div>
+              )}
             </div>
           )}
-          <ThemeToggle iconOnly={sidebarCollapsed} />
+          <div className="flex flex-col gap-0.5">
+            <ThemeToggle iconOnly={sidebarCollapsed} />
+            {access && (
+              <SignOutLink access={access} iconOnly={sidebarCollapsed} />
+            )}
+          </div>
         </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <MobileNav items={[...items, ...bottomItems]} />
+        <MobileNav items={[...items, ...bottomItems]} access={access} />
         <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6" style={{ overflowAnchor: "none" }}>
           <div className="mx-auto w-full space-y-6">
             <Outlet />
@@ -215,7 +231,49 @@ function ApnsBadge({ apns }: { apns: ApnsConfig | undefined }) {
   return <EnvBadge env={apns.apns_env} />;
 }
 
-function MobileNav({ items }: { items: NavItem[] }) {
+// Cloudflare answers the logout path at its edge, so this must be a full
+// page load. A react-router link would resolve it inside the SPA instead,
+// and the request would never reach Cloudflare. Both the sidebar and the
+// mobile menu render this one component so that rule lives in one place.
+function SignOutLink({
+  access,
+  iconOnly = false,
+  className,
+}: {
+  access: AccessSession;
+  iconOnly?: boolean;
+  className?: string;
+}) {
+  return (
+    <Button
+      asChild
+      variant="ghost"
+      size="sm"
+      className={cn(
+        iconOnly
+          ? "w-full justify-center px-0 text-muted-foreground"
+          : "w-full justify-start gap-2 px-2 text-muted-foreground",
+        className,
+      )}
+    >
+      <a
+        href={access.logout_url}
+        title={`Sign ${access.email} out of Cloudflare Access`}
+      >
+        <LogOut className="h-4 w-4" />
+        {!iconOnly && <span className="flex-1 text-left">Sign out</span>}
+      </a>
+    </Button>
+  );
+}
+
+function MobileNav({
+  items,
+  access,
+}: {
+  items: NavItem[];
+  access: AccessSession | null;
+}) {
   const [open, setOpen] = React.useState(false);
 
   return (
@@ -258,6 +316,21 @@ function MobileNav({ items }: { items: NavItem[] }) {
               {item.label}
             </NavLink>
           ))}
+          {access && (
+            <div className="mt-2 border-t border-border pt-2">
+              <div
+                className="truncate px-3 py-1 text-xs text-muted-foreground"
+                title={access.email}
+              >
+                {access.email}
+              </div>
+              {/* Sized like the nav items above it. */}
+              <SignOutLink
+                access={access}
+                className="h-auto gap-2.5 px-3 py-2 text-sm"
+              />
+            </div>
+          )}
         </nav>
       )}
     </>
