@@ -142,7 +142,9 @@ A request that came through a Cloudflare Access application carries
 the layout shows the email and a **Sign out** link in the sidebar footer
 and the mobile menu. Dev and LAN requests skip Access, so they show
 neither: there is no Access session to end. Because the body now names
-the operator, `/api/env` is sent with `Cache-Control: private, no-store`.
+the operator, `/api/env` is sent with `Cache-Control: private, no-store`,
+and the SPA asks for it again whenever the tab returns to the foreground,
+so an operator who signed in from another tab shows up without a reload.
 
 The link points at `/cdn-cgi/access/logout`, which Cloudflare answers at
 its edge on every Access-protected hostname. It clears the portal's
