@@ -85,19 +85,25 @@ print_stack_status() {
     log_level="$(_dotenv_value TIGERDUCK_LOG_LEVEL)"
     llm_url="$(_dotenv_value TIGERDUCK_LLM_BASE_URL)"
 
-    local portal_url
+    local portal_url grafana_url prometheus_url
     case "$env_val" in
         development)
             backend_url="http://localhost:40000/v3 (published to host)"
             portal_url="http://localhost:40010 (published to host)"
+            grafana_url="http://localhost:40020 (published to host, no sign-in)"
+            prometheus_url="http://localhost:40021 (published to host)"
             ;;
         production)
             backend_url="http://tigerduck-internal:40000/v3 (proxy-net only)"
             portal_url="http://tigerduck-portal:40010 (proxy-net only)"
+            grafana_url="http://tigerduck-grafana:3000/grafana/ (proxy-net only, Cloudflare Access sign-in)"
+            prometheus_url="(internal only, query it through Grafana)"
             ;;
         *)
             backend_url="http://tigerduck-internal:40000/v3 (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
             portal_url="http://tigerduck-portal:40010 (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
+            grafana_url="http://tigerduck-grafana:3000/grafana/ (proxy-net only — TIGERDUCK_ENV='$env_val' treated as prod)"
+            prometheus_url="(internal only, query it through Grafana)"
             ;;
     esac
 
@@ -120,6 +126,8 @@ print_stack_status() {
     echo "  backend version  : ${backend_version:-(unknown — server/__init__.py not parsable)}"
     echo "  backend          : ${backend_url}"
     echo "  portal           : ${portal_url}"
+    echo "  grafana          : ${grafana_url}"
+    echo "  prometheus       : ${prometheus_url}"
     echo "  apns env         : ${apns_env:-(unset)}"
     echo "  llm probe        : ${skip_llm}"
     echo "  llm url          : ${llm_url:-(unset)}"
@@ -134,6 +142,7 @@ print_stack_status() {
             [[ -z "$ip" ]] && continue
             echo "    backend  http://${ip}:40000"
             echo "    portal   http://${ip}:40010"
+            echo "    grafana  http://${ip}:40020"
         done
     else
         echo "  lan ips          : (none detected — no RFC1918 address on en*/eth*/wlan*)"

@@ -1,0 +1,29 @@
+# Prometheus scrape config. Every target is reached by container name over
+# the internal tigerduck-monitoring network; nothing here is published.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Postgres server stats (connections, locks, transactions, sizes) via
+  # postgres-exporter, logged in as the read-only tigerduck_monitor role.
+  - job_name: postgres
+    static_configs:
+      - targets: ["tigerduck-postgres-exporter:9187"]
+
+  # App-level counts from SQL (devices online, push queue, sync jobs,
+  # bulletins) via sql_exporter. See monitoring/sql-exporter/collectors.
+  - job_name: app
+    static_configs:
+      - targets: ["tigerduck-sql-exporter:9399"]
+
+  # The backend's own metrics (HTTP, scheduler, DB pool) on its private
+  # metrics port. Port 40000 is the public API and never serves these.
+  - job_name: backend
+    static_configs:
+      - targets: ["tigerduck-internal:9000"]

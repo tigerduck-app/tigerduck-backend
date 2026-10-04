@@ -78,6 +78,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 | Push | `aioapns` (APNs), `google-auth` + `httpx` (FCM v1) |
 | LLM | OpenAI-compatible client → llama-server (host), `response_format: json_object` + JSON schema |
 | Deployment | Docker Compose + nginx-proxy-manager |
+| Monitoring | Prometheus + Grafana + Loki (Grafana Alloy), postgres-exporter, sql_exporter |
 
 ## Architecture
 
@@ -110,6 +111,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **`tigerduck-db` network**: internal-only bridge — Postgres has no route to the public internet.
 - **`proxy-net`**: shared with nginx-proxy-manager; both backend and portal join it.
 - **`tigerduck-host` (dev only)**: bridge added by `docker-compose.dev.yml` so backend `:40000` and portal `:40010` can publish to host ports.
+- **`tigerduck-monitoring`**: internal-only bridge for Prometheus, Loki and what they collect from. Grafana is the one monitoring service on `proxy-net`; see [Monitoring](#monitoring-grafana).
 - **llama-server**: runs natively on the host (Docker Desktop / macOS can't pass through Metal GPU). The backend reaches it via `host.docker.internal`.
 - **portal**: stateless read-only operator UI. Ships without an app-level auth gate — front it with Cloudflare Zero Trust Application (or any auth-proxy) if you need one.
 
@@ -146,7 +148,7 @@ docker compose exec backend curl -sS localhost:40000/health
 
 ### Operator scripts
 
-All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they additionally load `docker-compose.dev.yml` (publishes backend `:40000` + portal `:40010` to the host via a non-internal bridge network — the prod-only `proxy-net` is dropped because there's no NPM locally). The mode lives in `.env`; the scripts pick the right compose files automatically.
+All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they additionally load `docker-compose.dev.yml` (publishes backend `:40000` + portal `:40010` + Grafana `:40020` + Prometheus `:40021` to the host via a non-internal bridge network — the prod-only `proxy-net` is dropped because there's no NPM locally). The mode lives in `.env`; the scripts pick the right compose files automatically.
 
 | Script | Purpose |
 |---|---|
@@ -165,6 +167,55 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 - Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
 - Show who signed in through Cloudflare Access, with a Sign out link that ends their Access session. Dev and LAN visits have no Access session, so the link stays hidden there
+
+### Monitoring (Grafana)
+
+Grafana, Prometheus and Loki come up with the rest of the stack; their config lives in `monitoring/`. They keep the history the portal doesn't: who is online, sync and push health over time, request rates, every container's logs.
+
+| | Development | Production |
+|---|---|---|
+| Grafana | `http://localhost:40020` (and the LAN IPs `./start.sh` prints), no sign-in | `https://portal.<your-domain>/grafana/`, signed in by Cloudflare Access |
+| Prometheus | `http://localhost:40021` | Internal only; query it from Grafana |
+
+The dashboards live in the **TigerDuck** folder; the TigerDuck menu at the top right of each one switches between them.
+
+| Dashboard | What's on it |
+|---|---|
+| Userbase | Registered users (by student ID) and devices (iPhone + iPad / macOS / Android) against those active in the last 14 days, as line charts with the current numbers above. Rebuilt from the database, so the history reaches back to launch |
+| Overview | Online and active devices, every scrape target's health, request rate and errors, push delay, overdue sync jobs, the last bulletin scrape, recent errors |
+| Devices | Everything on the portal's Devices tab (device table, platform / app / OS / model breakdown, lists), plus online (seen within N minutes) and active (seen within 14 days) devices over time. Filters for platform, app version, both windows, and a search box |
+| Moodle sync | Sync policies, per-student jobs, runs and their durations, failure reasons, NTUST accounts that need to sign in again, the per-user activity log |
+| Push | The push_jobs queue, deliveries by provider, APNs / FCM send time, failures, custom pushes |
+| Bulletins | Scrape freshness, the LLM backlog and its failures, new bulletins per unit, matches and pushes |
+| Logs | Every container's logs from Loki (30 days), by service and level, with text search |
+| Backend API | Requests by route and status, latency, scheduler job runs and durations, the SQLAlchemy pool, CPU and memory |
+| Postgres | Connections by state and client, live sessions, locks, transactions, table sizes |
+
+Where the numbers come from:
+
+- **postgres-exporter**: Postgres server stats.
+- **sql-exporter**: app counts taken with SQL every 30 seconds (devices online, the push queue, sync jobs, …) so they have a history. The queries are in `monitoring/sql-exporter/collectors/`.
+- **Backend `:9000/metrics`** (`server/metrics.py`): HTTP, scheduler, DB pool, and APNs / FCM / LLM timings. Served only on the internal `tigerduck-monitoring` network; the public `:40000` never answers `/metrics`.
+- **Grafana's SQL datasource**: table panels read the database directly as the read-only `tigerduck_monitor` role, which the one-shot `monitor-role` service creates or refreshes on every `./start.sh`.
+- **Alloy → Loki**: every container's output, read through the docker socket.
+
+Charts drawn from Prometheus start on the day monitoring is first deployed; SQL panels show whatever is in the tables.
+
+**Production setup**
+
+1. In `.env`, set `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` and `TIGERDUCK_CF_ACCESS_AUD`, the AUD tag of the portal's Access application. Grafana has no login of its own: it signs people in from the `Cf-Access-Jwt-Assertion` token Access adds to every request, after checking its signature, issuer and audience. A request that reaches Grafana without going through Access (LAN straight to NPM, another container on `proxy-net`) is refused, and with the two values unset nobody gets in.
+2. Route `/grafana` on the portal host to `tigerduck-grafana:3000`, keeping the `/grafana` prefix:
+   - nginx-proxy-manager: on the portal's proxy host, add a Custom Location `/grafana` → `http`, `tigerduck-grafana`, `3000`, with no path after the host. For Grafana Live, add `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` to the location's advanced config.
+   - cloudflared pointing straight at the portal: add an ingress rule above the portal's, with `hostname: portal.<your-domain>`, `path: ^/grafana`, `service: http://tigerduck-grafana:3000`.
+3. Nothing to change in Cloudflare Access: the application on the portal host already covers `/grafana`, as long as its path is left empty. Signing out of the portal signs out of Grafana too.
+
+**Changing things**
+
+- Dashboards are files in `monitoring/grafana/dashboards/` and can't be saved from the UI. Edit one in Grafana, then Export → Export as JSON and replace the file. Dashboards made from scratch in the UI are kept in the Grafana volume.
+- A new app metric with history: add a query to one of `monitoring/sql-exporter/collectors/*.collector.yml`.
+- Config is read at startup. After editing anything in `monitoring/`, restart the service it belongs to, e.g. `docker compose restart grafana` (or `prometheus`, `sql-exporter`, `loki`, `alloy`).
+- Prometheus and Loki both keep 30 days.
+- Versions are pinned: every monitoring image by tag and digest, and Grafana's plugins in `GF_PLUGINS_PREINSTALL`, so restarts never pull anything new. The comments in `docker-compose.yml` say how to upgrade.
 
 ### LLM (host side)
 
@@ -321,6 +372,7 @@ tigerduck-backend/
 │   ├── config.py                # pydantic-settings; every setting reads from TIGERDUCK_* env
 │   ├── db.py / models.py        # SQLAlchemy async engine, DeviceRegistration
 │   ├── security.py              # shared-secret dependency
+│   ├── metrics.py               # Prometheus metrics, served on :9000 (never the public :40000)
 │   ├── _ssl_compat.py           # Lenient OpenSSL 3 mode (NTUST's TLS chain is broken)
 │   ├── auth/                    # v3 identity: crypto (credential encryption) / tokens / service / rate_limit / moodle / models
 │   ├── sync/                    # v3 user sync: upload / changelog / serializers / retention / models
@@ -339,9 +391,10 @@ tigerduck-backend/
 │   ├── app/                     # FastAPI: main / config / db (asyncpg) / logs / status / routes / static
 │   ├── tests/                   # pytest, no database needed
 │   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA (built into the image as web/dist)
+├── monitoring/                  # Grafana (provisioning + dashboards), Prometheus, Loki, Alloy, sql-exporter collectors
 ├── scripts/                     # One-shot tools (backfill, seed, etc.)
 ├── deploy/launchd/              # macOS launchd plist (llama-server and other host-side services)
-├── docker-compose.yml           # Base (backend + postgres + portal, all on proxy-net)
+├── docker-compose.yml           # Base (backend + postgres + portal on proxy-net, plus the monitoring services)
 ├── docker-compose.dev.yml       # Auto-loaded when TIGERDUCK_ENV=development; publishes ports + swaps to a host bridge
 ├── _compose-files.sh            # Shared: derives compose -f flags from TIGERDUCK_ENV
 ├── Dockerfile / entrypoint.sh   # Backend container

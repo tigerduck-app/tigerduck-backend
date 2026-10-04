@@ -11,6 +11,10 @@
 #   * Publishes backend port 40000 on `tigerduck-host` so iPhone
 #     Simulator hits `localhost:40000` and physical devices hit
 #     `<your-mac-LAN-IP>:40000`.
+#   * Publishes Grafana on 40020 and Prometheus on 40021, both open to the
+#     LAN with no sign-in. Grafana drops the Cloudflare Access JWT check
+#     (there's no Access in front of a dev box) for anonymous Admin, and
+#     serves from / instead of /grafana.
 #
 # Why `tigerduck-host` instead of leaving backend on only `tigerduck-db`:
 # the base file's `tigerduck-db` network has `internal: true`
@@ -39,6 +43,7 @@ services:
     networks: !override
       - tigerduck-db
       - tigerduck-host
+      - tigerduck-monitoring
     ports:
       - "40000:40000"
   portal:
@@ -49,3 +54,23 @@ services:
       - tigerduck-host
     ports:
       - "40010:40010"
+  prometheus:
+    # Same internal-network gotcha: tigerduck-monitoring alone can't publish.
+    networks: !override
+      - tigerduck-monitoring
+      - tigerduck-host
+    ports:
+      - "40021:9090"
+  grafana:
+    networks: !override
+      - tigerduck-monitoring
+      - tigerduck-db
+      - tigerduck-host
+    ports:
+      - "40020:3000"
+    environment:
+      GF_SERVER_ROOT_URL: http://localhost:40020/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "false"
+      GF_AUTH_JWT_ENABLED: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin

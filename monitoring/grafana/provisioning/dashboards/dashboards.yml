@@ -1,0 +1,15 @@
+# Loads every JSON file in monitoring/grafana/dashboards into the TigerDuck
+# folder. The files are the source of truth: UI edits to these dashboards
+# can't be saved. To change one, edit it in the UI, export it as JSON
+# (Share → Export, "Export for sharing externally" off), and replace the file.
+apiVersion: 1
+
+providers:
+  - name: tigerduck
+    folder: TigerDuck
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

@@ -137,7 +137,19 @@ async def docker_containers(timeout_s: float = 3.0) -> list[dict[str, Any]]:
     missing, engine unreachable) surface as a single synthetic row so
     the page still tells the operator something is wrong.
     """
-    names = ["tigerduck-db", "tigerduck-internal", "tigerduck-portal"]
+    names = [
+        "tigerduck-db",
+        "tigerduck-internal",
+        "tigerduck-portal",
+        # Monitoring (monitoring/ in the repo). The one-shot
+        # tigerduck-monitor-role exits after each start, so it's left out.
+        "tigerduck-grafana",
+        "tigerduck-prometheus",
+        "tigerduck-loki",
+        "tigerduck-alloy",
+        "tigerduck-postgres-exporter",
+        "tigerduck-sql-exporter",
+    ]
     if not Path(DOCKER_SOCK).exists():
         return [
             {

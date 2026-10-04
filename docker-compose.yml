@@ -9,10 +9,13 @@
 #                      api.tigerduck.app to `http://tigerduck-internal:40000`
 #                      over this network (container DNS by name). Only the
 #                      backend joins this — postgres stays off it.
+#   * tigerduck-monitoring — internal-only bridge for Prometheus and what it
+#                      scrapes. Grafana joins it to query Prometheus.
 #
-# No ports are published to the host for either service. Everything reaches
+# No ports are published to the host for any service. Everything reaches
 # the backend through nginx-proxy-manager via proxy-net. Postgres is reachable
-# only from the backend, via tigerduck-db.
+# only from the backend, via tigerduck-db. Grafana is the one monitoring
+# service on proxy-net, served under the portal host at /grafana.
 #
 # llama-server stays NATIVE on the host (Docker Desktop on Mac can't surface
 # Metal GPU). The backend reaches it via Docker Desktop's host-gateway:
@@ -47,7 +50,8 @@ services:
     # over proxy-net. Do NOT change without updating NPM's proxy target.
     container_name: tigerduck-internal
     restart: unless-stopped
-    networks: [tigerduck-db, proxy-net]
+    # tigerduck-monitoring so Prometheus can scrape the metrics port (9000).
+    networks: [tigerduck-db, proxy-net, tigerduck-monitoring]
     depends_on:
       postgres:
         condition: service_healthy
@@ -90,6 +94,186 @@ services:
       # report "is the .p8 / fcm.json on disk?" without exposing contents.
       - ./server/secrets:/backend-secrets:ro
 
+  # --- Monitoring -----------------------------------------------------------
+  # Metrics: postgres-exporter, sql-exporter, backend :9000 → Prometheus.
+  # Logs:    every container → Alloy → Loki.
+  # Both read by Grafana.
+  #
+  # Every image is pinned by tag and digest, so a re-pushed tag can't change
+  # what runs. The digest is the multi-arch index, valid on arm64 and amd64.
+  # To upgrade one: change the tag, then take the new digest from
+  #   docker buildx imagetools inspect <image>:<tag>
+  # Bumping Grafana also means bumping GF_PLUGINS_PREINSTALL below.
+  # Config lives in monitoring/. See the README's Monitoring section.
+
+  # One-shot: creates or refreshes the read-only tigerduck_monitor role the
+  # exporter and Grafana log in as, then exits. Runs on every `up`.
+  monitor-role:
+    image: postgres:17-alpine
+    container_name: tigerduck-monitor-role
+    restart: "no"
+    networks: [tigerduck-db]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: tigerduck-db
+      PGUSER: tigerduck
+      PGDATABASE: tigerduck
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+    volumes:
+      - ./monitoring/postgres/monitor-role.sh:/monitor-role.sh:ro
+    entrypoint: ["sh", "/monitor-role.sh"]
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    container_name: tigerduck-postgres-exporter
+    restart: unless-stopped
+    networks: [tigerduck-db, tigerduck-monitoring]
+    depends_on:
+      monitor-role:
+        condition: service_completed_successfully
+    environment:
+      DATA_SOURCE_URI: tigerduck-db:5432/tigerduck?sslmode=disable
+      DATA_SOURCE_USER: tigerduck_monitor
+      DATA_SOURCE_PASS: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+
+  # App-level counts from SQL (devices online, push queue, sync jobs, …)
+  # as Prometheus gauges, so they get a history.
+  sql-exporter:
+    image: burningalchemist/sql_exporter:0.24.9@sha256:6c554722faccd4b54342ccd765f87b26e8e65fba2a8cddc60bec6de336ecf2e0
+    container_name: tigerduck-sql-exporter
+    restart: unless-stopped
+    networks: [tigerduck-db, tigerduck-monitoring]
+    depends_on:
+      monitor-role:
+        condition: service_completed_successfully
+    command: ["-config.file=/etc/sql_exporter/sql_exporter.yml"]
+    environment:
+      # URL form, so a password with URL-reserved characters must be
+      # percent-encoded. secrets.token_urlsafe output never needs it.
+      SQLEXPORTER_TARGET_DSN: postgres://tigerduck_monitor:${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}@tigerduck-db:5432/tigerduck?sslmode=disable
+    volumes:
+      - ./monitoring/sql-exporter:/etc/sql_exporter:ro
+
+  loki:
+    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    container_name: tigerduck-loki
+    restart: unless-stopped
+    networks: [tigerduck-monitoring]
+    command: ["-config.file=/etc/loki/loki.yml"]
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/loki.yml:ro
+      - tigerduck_loki:/loki
+
+  # Ships every container's logs in this project to Loki. Reads them over
+  # the docker socket, which (even read-only) is root-equivalent on the
+  # host, the same trade the portal already makes for its log tabs.
+  alloy:
+    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    container_name: tigerduck-alloy
+    restart: unless-stopped
+    networks: [tigerduck-monitoring]
+    depends_on: [loki]
+    command: ["run", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Remembers how far into each container's log it has read, so a
+      # restart doesn't ship everything again.
+      - tigerduck_alloy:/var/lib/alloy/data
+
+  prometheus:
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    container_name: tigerduck-prometheus
+    restart: unless-stopped
+    # Internal network only: nothing outside the stack reaches Prometheus.
+    # Grafana is its only reader.
+    networks: [tigerduck-monitoring]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - tigerduck_prometheus:/prometheus
+
+  grafana:
+    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    container_name: tigerduck-grafana
+    restart: unless-stopped
+    # proxy-net so NPM can route <portal host>/grafana here, and for the
+    # outbound fetch of Cloudflare's signing keys. tigerduck-db for the SQL
+    # datasource.
+    networks: [tigerduck-monitoring, tigerduck-db, proxy-net]
+    depends_on:
+      monitor-role:
+        condition: service_completed_successfully
+    environment:
+      GF_SERVER_ROOT_URL: ${TIGERDUCK_GRAFANA_ROOT_URL:-https://portal.tigerduck.app/grafana/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # No Grafana login. A visitor is signed in from the JWT that
+      # Cloudflare Access attaches to every request it lets through,
+      # checked against the team's signing keys and the Access app's AUD
+      # tag. A request that skipped Access (LAN straight to NPM, another
+      # container on proxy-net) has no valid token and gets nothing. With
+      # the two TIGERDUCK_CF_ACCESS_* values unset nobody gets in, which
+      # is the safe way to be misconfigured. Dev mode swaps all of this
+      # for anonymous access (docker-compose.dev.yml).
+      GF_AUTH_JWT_ENABLED: "true"
+      GF_AUTH_JWT_HEADER_NAME: Cf-Access-Jwt-Assertion
+      GF_AUTH_JWT_EMAIL_CLAIM: email
+      GF_AUTH_JWT_USERNAME_CLAIM: email
+      GF_AUTH_JWT_JWK_SET_URL: https://${TIGERDUCK_CF_ACCESS_TEAM_DOMAIN:-}/cdn-cgi/access/certs
+      GF_AUTH_JWT_CACHE_TTL: 60m
+      GF_AUTH_JWT_EXPECT_CLAIMS: '{"iss": "https://${TIGERDUCK_CF_ACCESS_TEAM_DOMAIN:-}", "aud": "${TIGERDUCK_CF_ACCESS_AUD:-}"}'
+      GF_AUTH_JWT_AUTO_SIGN_UP: "true"
+      # Everyone Access lets in is an operator, same as the portal.
+      GF_USERS_AUTO_ASSIGN_ORG_ROLE: Admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # Grafana 13 fetches its own plugins (the Loki / Prometheus / Postgres
+      # datasources, the Drilldown apps) from grafana.com rather than
+      # shipping them all in the image, and by default updates them to
+      # whatever is newest on every start, in the background — a page opened
+      # during the swap fails with "could not load plugin", and dev and prod
+      # drift apart. So: every preinstalled plugin is pinned to the newest
+      # version compatible with the Grafana above, installed before Grafana
+      # starts serving, and never auto-updated. An installed plugin at the
+      # pinned version is left alone, so restarts need no network; a fresh
+      # volume needs grafana.com reachable once. To see what's newest for a
+      # Grafana version: https://grafana.com/api/plugins/<id>/versions
+      GF_PLUGINS_PREINSTALL: >-
+        grafana-lokiexplore-app@2.6.0,
+        grafana-metricsdrilldown-app@2.5.1,
+        grafana-exploretraces-app@2.2.1,
+        grafana-pyroscope-app@2.3.1,
+        grafana-advisor-app@1.1.0,
+        loki@13.2.1,
+        prometheus@13.2.2,
+        grafana-postgresql-datasource@13.0.4,
+        grafana-pyroscope-datasource@13.0.6,
+        elasticsearch@12.9.1,
+        influxdb@13.1.6,
+        jaeger@13.0.4,
+        mssql@13.0.6,
+        mysql@13.1.3,
+        opentsdb@13.0.4,
+        stackdriver@12.6.2,
+        tempo@13.2.2,
+        zipkin@12.4.9
+      GF_PLUGINS_PREINSTALL_ASYNC: "false"
+      GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
+      # Read by monitoring/grafana/provisioning/datasources/datasources.yml.
+      TIGERDUCK_MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-${POSTGRES_PASSWORD}}
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - tigerduck_grafana:/var/lib/grafana
+
 networks:
   tigerduck-db:
     # Explicit name avoids the "<project>_<key>" prefix that compose adds by
@@ -99,8 +283,15 @@ networks:
     # internal:true → no NAT to the host's default route. Postgres has no path
     # to the public internet from this network.
     internal: true
+  tigerduck-monitoring:
+    name: tigerduck-monitoring
+    internal: true
   proxy-net:
     external: true
 
 volumes:
   tigerduck_pgdata:
+  tigerduck_prometheus:
+  tigerduck_grafana:
+  tigerduck_loki:
+  tigerduck_alloy:

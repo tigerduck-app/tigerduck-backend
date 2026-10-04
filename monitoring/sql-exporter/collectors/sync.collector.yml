@@ -1,0 +1,96 @@
+# Server-side academic sync (Moodle assignments, NTUST courses, …) and the
+# NTUST accounts it signs in with.
+collector_name: tigerduck_sync
+
+metrics:
+  - metric_name: tigerduck_sync_jobs
+    type: gauge
+    help: Sync jobs by type and status.
+    key_labels: [job_type, status]
+    values: [count]
+    query: |
+      SELECT job_type, status, count(*) AS count
+      FROM sync_jobs
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_sync_jobs_overdue
+    type: gauge
+    help: Pending jobs more than 10 minutes past their run_after.
+    key_labels: [job_type]
+    values: [count]
+    query: |
+      SELECT p.job_type, count(j.id) AS count
+      FROM sync_policies p
+      LEFT JOIN sync_jobs j ON j.job_type = p.job_type
+          AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'
+      GROUP BY 1
+
+  # sync_job_stale_lock_minutes defaults to 10.
+  - metric_name: tigerduck_sync_jobs_stuck
+    type: gauge
+    help: Jobs running for more than 10 minutes.
+    key_labels: [job_type]
+    values: [count]
+    query: |
+      SELECT p.job_type, count(j.id) AS count
+      FROM sync_policies p
+      LEFT JOIN sync_jobs j ON j.job_type = p.job_type
+          AND j.status = 'running' AND j.locked_at < now() - interval '10 minutes'
+      GROUP BY 1
+
+  - metric_name: tigerduck_sync_runs_last_hour
+    type: gauge
+    help: Sync runs started in the last hour, by type and outcome.
+    key_labels: [job_type, status]
+    values: [count]
+    query: |
+      SELECT j.job_type, r.status, count(*) AS count
+      FROM sync_runs r
+      JOIN sync_jobs j ON j.id = r.sync_job_id
+      WHERE r.started_at > now() - interval '1 hour'
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_sync_run_max_duration_last_hour_seconds
+    type: gauge
+    help: Longest finished sync run in the last hour.
+    key_labels: [job_type]
+    values: [seconds]
+    query: |
+      SELECT j.job_type, max(extract(epoch FROM r.finished_at - r.started_at)) AS seconds
+      FROM sync_runs r
+      JOIN sync_jobs j ON j.id = r.sync_job_id
+      WHERE r.started_at > now() - interval '1 hour' AND r.finished_at IS NOT NULL
+      GROUP BY 1
+
+  # Among jobs still scheduled, how long since the most out-of-date one
+  # last succeeded. Climbs when sync silently stops making progress.
+  - metric_name: tigerduck_sync_oldest_success_age_seconds
+    type: gauge
+    help: Age of the oldest last success among pending jobs, per type.
+    key_labels: [job_type]
+    values: [age]
+    query: |
+      SELECT job_type,
+             COALESCE(max(extract(epoch FROM now() - COALESCE(last_success_at, created_at))), 0) AS age
+      FROM sync_jobs
+      WHERE status = 'pending'
+      GROUP BY 1
+
+  - metric_name: tigerduck_sync_policy_enabled
+    type: gauge
+    help: Whether each sync type is switched on in sync_policies (1) or off (0).
+    key_labels: [job_type]
+    values: [enabled]
+    query: |
+      SELECT job_type, CASE WHEN enabled THEN 1 ELSE 0 END AS enabled
+      FROM sync_policies
+
+  - metric_name: tigerduck_external_accounts
+    type: gauge
+    help: Linked external accounts by provider and credential status. Anything but active needs the student to sign in again.
+    key_labels: [provider, credential_status]
+    values: [count]
+    query: |
+      SELECT provider, credential_status, count(*) AS count
+      FROM external_accounts
+      GROUP BY 1, 2

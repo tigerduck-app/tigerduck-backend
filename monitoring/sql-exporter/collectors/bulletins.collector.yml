@@ -1,0 +1,52 @@
+# The bulletin pipeline: scrape → LLM classify → match → dispatch.
+collector_name: tigerduck_bulletins
+
+metrics:
+  - metric_name: tigerduck_bulletins
+    type: gauge
+    help: Live (not deleted) bulletins by processing state.
+    key_labels: [processing_state]
+    values: [count]
+    query: |
+      SELECT processing_state, count(*) AS count
+      FROM bulletins
+      WHERE NOT is_deleted
+      GROUP BY 1
+
+  - metric_name: tigerduck_bulletins_new_24h
+    type: gauge
+    help: Bulletins first seen in the last 24 hours, by source.
+    key_labels: [source]
+    values: [count]
+    query: |
+      SELECT source, count(*) FILTER (WHERE first_seen_at > now() - interval '24 hours') AS count
+      FROM bulletins
+      GROUP BY 1
+
+  # Every scrape bumps last_seen_at on the bulletins still listed, so the
+  # newest last_seen_at per source is when that source was last scraped.
+  # custom_push rows are operator pushes stored as bulletins, never scraped.
+  - metric_name: tigerduck_bulletin_last_scrape_age_seconds
+    type: gauge
+    help: Seconds since each bulletin source was last scraped successfully.
+    key_labels: [source]
+    values: [age]
+    query: |
+      SELECT source, extract(epoch FROM now() - max(last_seen_at)) AS age
+      FROM bulletins
+      WHERE source <> 'custom_push'
+      GROUP BY 1
+
+  - metric_name: tigerduck_bulletin_subscriptions
+    type: gauge
+    help: Enabled bulletin subscriptions, from signed-in users and from anonymous (legacy) devices.
+    key_labels: [kind]
+    values: [count]
+    query: |
+      SELECT 'user' AS kind, count(*) AS count
+      FROM user_bulletin_subscriptions
+      WHERE enabled AND deleted_at IS NULL
+      UNION ALL
+      SELECT 'anonymous', count(*)
+      FROM bulletin_subscriptions
+      WHERE enabled

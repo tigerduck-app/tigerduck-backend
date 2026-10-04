@@ -78,6 +78,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 | 推播 | `aioapns`（APNs）、`google-auth` + `httpx`（FCM v1）|
 | LLM | OpenAI-compatible client → llama-server (host)、`response_format: json_object` + JSON schema |
 | 部署 | Docker Compose + nginx-proxy-manager 反代 |
+| 監控 | Prometheus + Grafana + Loki（Grafana Alloy）、postgres-exporter、sql_exporter |
 
 ## 系統架構
 
@@ -110,6 +111,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **`tigerduck-db` 網路**：internal-only bridge，postgres 完全沒有外網路由
 - **`proxy-net`**：與 nginx-proxy-manager 共用；backend + portal 都加入
 - **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 能 publish 到 host port
+- **`tigerduck-monitoring`**：internal-only bridge，給 Prometheus、Loki 和它們收資料的對象用；監控服務裡只有 Grafana 掛 `proxy-net`，見[監控](#監控grafana)
 - **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
 - **portal**：stateless 只讀的操作介面，本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy
 
@@ -146,7 +148,7 @@ docker compose exec backend curl -sS localhost:40000/health
 
 ### 操作腳本
 
-四個腳本都會讀 `.env` 裡的 `TIGERDUCK_ENV`，遇到 `development` 就額外載入 `docker-compose.dev.yml`（把 backend 40000 / portal 40010 publish 到 host，並用一條非 internal 的橋接網路規避 proxy-net 在本機沒有 NPM 的問題）。換句話說：把 mode 寫在 `.env`，腳本自己會挑對的 compose 檔。
+四個腳本都會讀 `.env` 裡的 `TIGERDUCK_ENV`，遇到 `development` 就額外載入 `docker-compose.dev.yml`（把 backend 40000 / portal 40010 / Grafana 40020 / Prometheus 40021 publish 到 host，並用一條非 internal 的橋接網路規避 proxy-net 在本機沒有 NPM 的問題）。換句話說：把 mode 寫在 `.env`，腳本自己會挑對的 compose 檔。
 
 | 腳本 | 用途 |
 |---|---|
@@ -165,6 +167,54 @@ docker compose exec backend curl -sS localhost:40000/health
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
 - 經 Cloudflare Access 進來時顯示登入者 email 與 Sign out 連結，按下會結束其 Access session；dev / LAN 直連沒有 Access session，連結不會出現
+
+### 監控（Grafana）
+
+Grafana、Prometheus、Loki 跟整個 stack 一起起來，設定都在 `monitoring/`。portal 不留歷史，這套補上：誰在線上、同步與推播的健康狀況隨時間的變化、request 量、所有 container 的 log。
+
+| | Development | Production |
+|---|---|---|
+| Grafana | `http://localhost:40020`（以及 `./start.sh` 印出的 LAN IP），不用登入 | `https://portal.<your-domain>/grafana/`，由 Cloudflare Access 登入 |
+| Prometheus | `http://localhost:40021` | 只在內部網路，從 Grafana 查 |
+
+Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單可以互相切換。
+
+| Dashboard | 內容 |
+|---|---|
+| Userbase | 已註冊使用者（以學號計）與裝置（iPhone + iPad / macOS / Android），對照 14 天內活躍的數量，折線圖上方附目前數字。由資料庫重建，歷史可回溯到上線那天 |
+| Overview | 線上 / 活躍裝置、每個 scrape target 的健康、request 量與錯誤、推播延遲、逾期的同步工作、上次公告爬取時間、最近的錯誤 |
+| Devices | portal Devices 分頁的所有內容（裝置表、平台 / App / OS / 型號分布、清單），加上線上（N 分鐘內出現過）與活躍（14 天內出現過）裝置的趨勢。可依平台、App 版本、兩個時間窗篩選，並有搜尋框 |
+| Moodle sync | 同步政策、每位學生的同步工作、執行次數與耗時、失敗原因、需要重新登入的 NTUST 帳號、每位使用者的活動紀錄 |
+| Push | push_jobs 佇列、各 provider 的投遞、APNs / FCM 發送耗時、失敗、自訂推播 |
+| Bulletins | 爬取新鮮度、LLM 待處理與失敗、各單位新公告、配對與推播 |
+| Logs | 所有 container 的 log（Loki，保留 30 天），可依 service 與 level 篩選、全文搜尋 |
+| Backend API | 各 route 與狀態碼的 request、延遲、排程 job 的執行次數與耗時、SQLAlchemy pool、CPU 與記憶體 |
+| Postgres | 依狀態與來源的連線數、即時 session、lock、transaction、資料表大小 |
+
+數據來源：
+
+- **postgres-exporter**：Postgres server 本身的統計。
+- **sql-exporter**：每 30 秒用 SQL 取一次 app 層的數字（線上裝置、推播佇列、同步工作⋯），讓它們有歷史。查詢都在 `monitoring/sql-exporter/collectors/`。
+- **Backend `:9000/metrics`**（`server/metrics.py`）：HTTP、排程、DB pool、APNs / FCM / LLM 耗時。只開在內部的 `tigerduck-monitoring` 網路，對外的 `:40000` 永遠不回應 `/metrics`。
+- **Grafana 的 SQL datasource**：表格類 panel 直接讀資料庫，用唯讀的 `tigerduck_monitor` role；這個 role 由一次性的 `monitor-role` service 在每次 `./start.sh` 時建立或更新。
+- **Alloy → Loki**：透過 docker socket 收每個 container 的輸出。
+
+從 Prometheus 畫的圖從第一次部署監控那天開始累積；SQL panel 則是資料表裡有什麼就顯示什麼。
+
+**正式環境設定**
+
+1. 在 `.env` 設 `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` 與 `TIGERDUCK_CF_ACCESS_AUD`（portal 那個 Access application 的 AUD tag）。Grafana 沒有自己的登入：它讀 Access 加在每個 request 上的 `Cf-Access-Jwt-Assertion` token，驗過簽章、issuer 與 audience 後直接登入。沒經過 Access 就到達 Grafana 的 request（LAN 直連 NPM、`proxy-net` 上的其他 container）會被拒絕；這兩個值沒設的話，誰都進不去。
+2. 把 portal host 的 `/grafana` 導到 `tigerduck-grafana:3000`，保留 `/grafana` 前綴：
+   - nginx-proxy-manager：在 portal 的 proxy host 加一個 Custom Location `/grafana` → `http`、`tigerduck-grafana`、`3000`，host 後面不要加路徑。要用 Grafana Live 的話，在該 location 的 advanced config 加上 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`
+   - cloudflared 直接指向 portal 的話：在 portal 那條規則之前加一條 ingress rule，`hostname: portal.<your-domain>`、`path: ^/grafana`、`service: http://tigerduck-grafana:3000`。
+3. Cloudflare Access 不用改：portal host 上的 application 已經涵蓋 `/grafana`（只要它的 path 留空）。從 portal 登出也會一併登出 Grafana。
+
+**修改方式**
+
+- Dashboard 是 `monitoring/grafana/dashboards/` 裡的檔案，無法在 UI 直接存檔。在 Grafana 裡改好後 Export → Export as JSON，取代原檔即可。在 UI 從頭新建的 dashboard 會存在 Grafana 的 volume 裡。
+- 想替 app 數字加歷史：在 `monitoring/sql-exporter/collectors/*.collector.yml` 加一條查詢。
+- 設定只在啟動時讀。改了 `monitoring/` 底下的東西後，重啟對應的 service，例如 `docker compose restart grafana`（或 `prometheus`、`sql-exporter`、`loki`、`alloy`）。
+- 版本都已鎖定：每個監控 image 都以 tag + digest 固定，Grafana 的 plugin 版本寫在 `GF_PLUGINS_PREINSTALL`，重啟不會拉新版。升級方式寫在 `docker-compose.yml` 的註解裡。
 
 ### LLM（host 端）
 
@@ -321,6 +371,7 @@ tigerduck-backend/
 │   ├── config.py                # pydantic-settings，所有設定走 TIGERDUCK_* env
 │   ├── db.py / models.py        # SQLAlchemy async engine、DeviceRegistration
 │   ├── security.py              # shared-secret dependency
+│   ├── metrics.py               # Prometheus metrics，開在 :9000（不是對外的 :40000）
 │   ├── _ssl_compat.py           # OpenSSL 3 寬容模式（NTUST TLS chain 是壞的）
 │   ├── auth/                    # v3 身分層：crypto（憑證加密）/ tokens / service / rate_limit / moodle / models
 │   ├── sync/                    # v3 使用者同步：upload / changelog / serializers / retention / models
@@ -339,9 +390,10 @@ tigerduck-backend/
 │   ├── app/                     # FastAPI：main / config / db (asyncpg) / logs / status / routes / static
 │   ├── tests/                   # pytest，不需要資料庫
 │   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA（build 進 image 的 web/dist）
+├── monitoring/                  # Grafana（provisioning + dashboards）、Prometheus、Loki、Alloy、sql-exporter collectors
 ├── scripts/                     # backfill / seed 等一次性腳本
 ├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
-├── docker-compose.yml           # 基底（backend + postgres + portal，都掛 proxy-net）
+├── docker-compose.yml           # 基底（backend + postgres + portal 掛 proxy-net，加上監控服務）
 ├── docker-compose.dev.yml       # TIGERDUCK_ENV=development 時自動載入，publish ports + 換成 host bridge
 ├── _compose-files.sh            # 共用：根據 TIGERDUCK_ENV 算出要載入哪些 compose 檔
 ├── Dockerfile / entrypoint.sh   # backend 容器

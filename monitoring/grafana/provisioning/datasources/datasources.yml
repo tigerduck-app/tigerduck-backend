@@ -1,0 +1,40 @@
+# Datasources Grafana creates on boot. Provisioned ones can't be edited in
+# the UI; change them here and restart Grafana.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://tigerduck-prometheus:9090
+    isDefault: true
+    editable: false
+
+  # Container logs, shipped by Alloy.
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://tigerduck-loki:3100
+    editable: false
+    jsonData:
+      maxLines: 5000
+
+  # Direct SQL against the app database, for panels about rows rather than
+  # server stats (push_jobs by status, devices, …). Logs in as the read-only
+  # tigerduck_monitor role (monitoring/postgres/monitor-role.sh).
+  - name: TigerDuck DB
+    uid: tigerduck-db
+    type: grafana-postgresql-datasource
+    url: tigerduck-db:5432
+    user: tigerduck_monitor
+    editable: false
+    jsonData:
+      database: tigerduck
+      sslmode: disable
+      postgresVersion: 1700
+      maxOpenConns: 5
+      maxIdleConns: 2
+    secureJsonData:
+      password: $TIGERDUCK_MONITOR_DB_PASSWORD
