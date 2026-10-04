@@ -164,6 +164,7 @@ docker compose exec backend curl -sS localhost:40000/health
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
+- 經 Cloudflare Access 進來時顯示登入者 email 與 Sign out 連結，按下會結束其 Access session；dev / LAN 直連沒有 Access session，連結不會出現
 
 詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
 
@@ -338,6 +339,7 @@ tigerduck-backend/
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── app/                     # FastAPI：main / config / db (asyncpg) / logs / status / routes / static
+│   ├── tests/                   # pytest，不需要資料庫
 │   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA（build 進 image 的 web/dist）
 ├── scripts/                     # backfill / seed 等一次性腳本
 ├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
@@ -353,7 +355,7 @@ tigerduck-backend/
 ## 貢獻
 
 歡迎 PR 與 Issue。送出前請確認：
-1. `uv run pytest` 全綠
+1. `uv run pytest` 全綠；有動到 portal 的 Python 的話，`cd portal && uv run pytest` 也要綠
 2. portal 前端有動到的話，`cd portal/web && npm run build` 也要過（`tsc -b` 的型別檢查是重點）
 3. 有改 schema 的話附上 alembic revision
 4. 以 `feature/your-feature` 或 `fix/your-fix` 命名分支，PR 目標分支 `dev`
