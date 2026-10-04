@@ -23,6 +23,7 @@ from server.push.payload import (
     build_custom_push_popup_apns,
     build_custom_push_popup_fcm,
     build_fcm_alert_request,
+    thread_id_for,
 )
 
 _RESERVED = {"title", "body"}
@@ -51,10 +52,13 @@ _ANDROID_CHANNELS = {
 
 # FCM allows at most 4 active collapse keys per device at once. The
 # schedule channel is keyed per activity in `_collapse_key` instead.
+#
+# Class and homework reminders have none, like bulletins: on iOS a collapse
+# id replaces the notification already on screen as well as an undelivered
+# one, so a shared one left a single reminder of either kind showing, and
+# never a stack of them.
 _COLLAPSE_KEYS = {
     "sync_trigger": "sync",
-    "course": "reminder",
-    "assignment": "reminder",
 }
 
 
@@ -217,7 +221,6 @@ def build_apns_for_job(
             bulletin_id=int(payload["bulletin_id"]),
             source_url="",
             canonical_org="server",
-            thread_id=channel,
             ttl_seconds=ttl_seconds,
             now=now,
             kind="custom_push_bulletin",
@@ -231,7 +234,7 @@ def build_apns_for_job(
             "badge": 1,
             "sound": "default",
             "mutable-content": 1,
-            "thread-id": channel,
+            "thread-id": thread_id_for(channel),
         },
         **_extras(payload),
     }
