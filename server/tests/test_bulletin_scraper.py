@@ -8,6 +8,9 @@ index and UPSERT semantics.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -96,6 +99,34 @@ def test_parse_list_html_handles_missing_tbody() -> None:
     html = _SAMPLE_LIST_HTML.replace("<tbody>", "").replace("</tbody>", "")
     rows = parse_list_html(html)
     assert len(rows) == 2
+
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_parse_list_html_reads_the_live_list_page() -> None:
+    # A copy of the real list page (bulletin_list_url, saved 2026-10-05,
+    # its search form's req_token blanked) and the 30 rows the Modest
+    # parser of selectolax 0.4 read from it. Lexbor has to read the same
+    # rows: a bulletin whose row it drops stops being seen, and after
+    # bulletin_stale_cycles scrapes it is marked deleted and leaves the app.
+    html = (_FIXTURES / "bulletin_list_page.html").read_text(encoding="utf-8")
+    expected = json.loads(
+        (_FIXTURES / "bulletin_list_page.rows.json").read_text(encoding="utf-8")
+    )
+
+    rows = parse_list_html(html)
+
+    assert [
+        {
+            "external_id": r.external_id,
+            "title": r.title,
+            "source_url": r.source_url,
+            "raw_publisher": r.raw_publisher,
+            "posted_at": r.posted_at.isoformat() if r.posted_at else None,
+        }
+        for r in rows
+    ] == expected
 
 
 # ---- trafilatura sanity ----------------------------------------------------
