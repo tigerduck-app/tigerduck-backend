@@ -6,6 +6,7 @@ for development and production; `use_sandbox` picks the APNs host.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -47,16 +48,30 @@ class AioApnsSender:
         # aioapns' `key` parameter wants the PEM *content*, not a file path.
         # Passing the path makes PyJWT try to parse the path string as PEM
         # and fail with MalformedFraming.
-        key_pem = key_path.read_text(encoding="utf-8")
+        self._key_pem = key_path.read_text(encoding="utf-8")
+        self._settings = settings
+        self._client = self._build_client()
 
-        self._client = APNs(
-            key=key_pem,
-            key_id=settings.apns_key_id,
-            team_id=settings.apns_team_id,
+    def _build_client(self) -> APNs:
+        client = APNs(
+            key=self._key_pem,
+            key_id=self._settings.apns_key_id,
+            team_id=self._settings.apns_team_id,
             # per-request topic overrides this default
-            topic=settings.apns_bundle_id,
-            use_sandbox=settings.apns_env == "development",
+            topic=self._settings.apns_bundle_id,
+            use_sandbox=self._settings.apns_env == "development",
         )
+        # aioapns closes a connection after INACTIVITY_TIME (10s) idle. Give
+        # this pool's connections the configured lifetime instead — on our
+        # pool's protocol class, not aioapns's own, so nothing else using
+        # the library changes.
+        base = client.pool.protocol_class
+        client.pool.protocol_class = type(
+            base.__name__,
+            (base,),
+            {"INACTIVITY_TIME": self._settings.apns_connection_idle_seconds},
+        )
+        return client
 
     async def send(self, request: ApnsRequest) -> SendResult:
         if request.kind is PushKind.live_activity:
@@ -74,7 +89,25 @@ class AioApnsSender:
             apns_topic=request.topic,
             collapse_key=request.collapse_id,
         )
-        result = await self._client.send_notification(notification)
+        client = self._client
+        timeout = self._settings.apns_send_timeout_seconds
+        try:
+            result = await asyncio.wait_for(
+                client.send_notification(notification), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            # Most likely a connection that died without a FIN, which aioapns
+            # would keep handing out; replace the client so the next send
+            # reconnects. Not "unregistered", so the pipeline retries the
+            # delivery.
+            self._client = self._build_client()
+            client.pool.close()
+            logger.warning("apns.send_timeout", timeout_seconds=timeout)
+            return SendResult(
+                success=False,
+                status="TIMEOUT",
+                description=f"APNs send exceeded {timeout}s",
+            )
         return SendResult(
             success=result.is_successful,
             status=result.status,

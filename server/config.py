@@ -90,6 +90,17 @@ class Settings(BaseSettings):
     # "development" talks to api.sandbox.push.apple.com (debug builds via Xcode)
     # "production" talks to api.push.apple.com (TestFlight / App Store)
     apns_env: Literal["development", "production"] = "development"
+    # How long an unused APNs connection stays open. Apple asks providers to
+    # reuse a connection rather than reconnect per batch (and may block one
+    # that keeps opening and closing as a denial-of-service); aioapns on its
+    # own closes after 10s, shorter than every scheduler tick that sends.
+    apns_connection_idle_seconds: int = 600
+    # Cap on a single APNs send. aioapns waits for the answer with no
+    # timeout, and a connection that died silently is only noticed when TCP
+    # gives up, minutes later — a stall the non-overlapping push tick would
+    # wait out. On timeout the connection is dropped and the next send opens
+    # a new one.
+    apns_send_timeout_seconds: float = 15.0
 
     # --- FCM (Android) ---
     # Firebase project id — only required when delivering real pushes.
