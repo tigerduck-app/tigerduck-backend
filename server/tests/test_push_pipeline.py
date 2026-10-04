@@ -248,6 +248,28 @@ async def test_one_tick_sends_every_job_that_is_due(
     assert {job.status for job in jobs} == {"sent"}
 
 
+async def test_a_job_due_again_mid_tick_is_left_pending_for_the_next(
+    db_session, prepared_engine, test_settings
+):
+    # A tick that drains for longer than the retry round delay meets a job
+    # it already sent once and returned to pending. Claimed and then passed
+    # over, it sat in `processing` until stale recovery — minutes late, and
+    # a round down. A zero delay makes it due again at once.
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    settings = test_settings.model_copy(update={"push_retry_round_delay_seconds": 0})
+    apple = ScriptedSender([SendResult(success=False, status="500", description="x")])
+    processed = await run_push_tick(_worker(prepared_engine, settings, apple=apple))
+
+    await db_session.refresh(job)
+    assert processed == 1
+    assert len(apple.requests) == 1
+    assert (job.status, job.locked_by) == ("pending", None)
+
+
 async def test_future_or_unavailable_jobs_not_claimed(
     db_session, prepared_engine, test_settings
 ):
