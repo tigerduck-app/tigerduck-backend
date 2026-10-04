@@ -193,7 +193,9 @@ into the backend container via `docker-compose.yml`.
   (`LIVE_ACTIVITY_JOB_PRIORITY` in `push/dedupe.py`); other jobs keep the
   default 100, and the pipeline claims the lowest first.
 - The push tick runs every 5s (`push_pipeline_tick_seconds`) and drains
-  every due job, a batch at a time. `POST /push-tick` (X-Push-Token)
+  every due job, a batch at a time. Between jobs it checks for a due job
+  that outranks the next one, and if one is waiting hands the rest of the
+  batch back and claims again. `POST /push-tick` (X-Push-Token)
   forces one: it waits up to 20s, then answers `done: false` and lets the
   tick finish on its own.
 - The `course` and `assignment` channels deliver to iPhone and iPad only
