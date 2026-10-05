@@ -1,0 +1,107 @@
+# Server-side academic sync (Moodle assignments, NTUST courses, …) and the
+# NTUST accounts it signs in with.
+collector_name: tigerduck_sync
+
+metrics:
+  - metric_name: tigerduck_sync_jobs
+    type: gauge
+    help: Sync jobs by type and status.
+    key_labels: [job_type, status]
+    values: [count]
+    query: |
+      SELECT job_type, status, count(*) AS count
+      FROM sync_jobs
+      GROUP BY 1, 2
+
+  # Only jobs the worker would claim: its policy enabled and inside its
+  # active window (server/syncjobs/executor.py). A switched-off or
+  # out-of-season type keeps pending jobs that aren't late, just parked.
+  - metric_name: tigerduck_sync_jobs_overdue
+    type: gauge
+    help: Claimable pending jobs more than 10 minutes past their run_after.
+    key_labels: [job_type]
+    values: [count]
+    query: |
+      SELECT p.job_type, count(j.id) AS count
+      FROM sync_policies p
+      LEFT JOIN sync_jobs j ON j.job_type = p.job_type
+          AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'
+          AND p.enabled
+          AND (p.active_from IS NULL OR p.active_from <= now())
+          AND (p.active_until IS NULL OR p.active_until > now())
+      GROUP BY 1
+
+  # How long the longest-running job of each type has been locked, with no
+  # threshold baked in: compare it with tigerduck_stale_lock_seconds{queue="sync"},
+  # which the backend exports from the setting its worker actually uses.
+  - metric_name: tigerduck_sync_oldest_lock_age_seconds
+    type: gauge
+    help: Seconds the longest-running sync job of each type has been locked, 0 when none.
+    key_labels: [job_type]
+    values: [age]
+    query: |
+      SELECT p.job_type, COALESCE(extract(epoch FROM now() - min(j.locked_at)), 0) AS age
+      FROM sync_policies p
+      LEFT JOIN sync_jobs j ON j.job_type = p.job_type AND j.status = 'running'
+      GROUP BY 1
+
+  - metric_name: tigerduck_sync_runs_last_hour
+    type: gauge
+    help: Sync runs started in the last hour, by type and outcome.
+    key_labels: [job_type, status]
+    values: [count]
+    query: |
+      SELECT j.job_type, r.status, count(*) AS count
+      FROM sync_runs r
+      JOIN sync_jobs j ON j.id = r.sync_job_id
+      WHERE r.started_at > now() - interval '1 hour'
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_sync_run_max_duration_last_hour_seconds
+    type: gauge
+    help: Longest finished sync run in the last hour.
+    key_labels: [job_type]
+    values: [seconds]
+    query: |
+      SELECT j.job_type, max(extract(epoch FROM r.finished_at - r.started_at)) AS seconds
+      FROM sync_runs r
+      JOIN sync_jobs j ON j.id = r.sync_job_id
+      WHERE r.started_at > now() - interval '1 hour' AND r.finished_at IS NOT NULL
+      GROUP BY 1
+
+  # Among jobs the worker would claim, how long since the most out-of-date
+  # one last succeeded. Climbs when sync silently stops making progress.
+  - metric_name: tigerduck_sync_oldest_success_age_seconds
+    type: gauge
+    help: Age of the oldest last success among claimable pending jobs, per type.
+    key_labels: [job_type]
+    values: [age]
+    query: |
+      SELECT j.job_type,
+             COALESCE(max(extract(epoch FROM now() - COALESCE(j.last_success_at, j.created_at))), 0) AS age
+      FROM sync_jobs j
+      JOIN sync_policies p ON p.job_type = j.job_type
+      WHERE j.status = 'pending'
+        AND p.enabled
+        AND (p.active_from IS NULL OR p.active_from <= now())
+        AND (p.active_until IS NULL OR p.active_until > now())
+      GROUP BY 1
+
+  - metric_name: tigerduck_sync_policy_enabled
+    type: gauge
+    help: Whether each sync type is switched on in sync_policies (1) or off (0).
+    key_labels: [job_type]
+    values: [enabled]
+    query: |
+      SELECT job_type, CASE WHEN enabled THEN 1 ELSE 0 END AS enabled
+      FROM sync_policies
+
+  - metric_name: tigerduck_external_accounts
+    type: gauge
+    help: Linked external accounts by provider and credential status. Anything but active needs the student to sign in again.
+    key_labels: [provider, credential_status]
+    values: [count]
+    query: |
+      SELECT provider, credential_status, count(*) AS count
+      FROM external_accounts
+      GROUP BY 1, 2

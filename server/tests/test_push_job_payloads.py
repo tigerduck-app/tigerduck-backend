@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.payload import PushKind
 
@@ -37,6 +39,61 @@ def test_apns_request_shape():
     assert request.message["moodle_assignment_id"] == "555"
     assert request.message["due_at"] == PAYLOAD["due_at"]
     assert request.expiration > int(NOW.timestamp())
+
+
+@pytest.mark.parametrize(
+    ("channel", "thread"),
+    [
+        ("course", "course"),
+        ("assignment", "assignment"),
+        ("bulletin", "other"),
+        ("custom", "other"),
+        ("system", "other"),
+    ],
+)
+def test_alert_stacks_with_its_kind(channel, thread):
+    # Class and homework reminders stack apart; everything else shares one.
+    request = build_apns_for_job(
+        payload=PAYLOAD,
+        channel=channel,
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert request.message["aps"]["thread-id"] == thread
+
+
+@pytest.mark.parametrize("channel", ["course", "assignment"])
+def test_reminders_do_not_replace_one_another(channel):
+    # A collapse id would make each reminder replace the one on screen.
+    request = build_apns_for_job(
+        payload=PAYLOAD,
+        channel=channel,
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert request.collapse_id is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"kind": "custom_push_bulletin", "bulletin_id": 7, "title": "t", "body": "b"},
+        {"kind": "custom_push_popup", "notification_id": "n-1", "title": "t", "body": "b"},
+    ],
+)
+def test_custom_pushes_stack_with_other(payload):
+    # The portal's pushes go through their own builders, not the standard
+    # alert, and land in the same stack as everything else.
+    request = build_apns_for_job(
+        payload=payload,
+        channel="custom",
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert request.message["aps"]["thread-id"] == "other"
 
 
 def test_fcm_request_shape():

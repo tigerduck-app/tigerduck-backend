@@ -20,7 +20,7 @@ from server.auth.models import (
     User,
     UserDevice,
 )
-from server.push.dedupe import activity_end_key
+from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY, activity_end_key
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key
 from server.push.submission_cancel import cancel_for_submitted
@@ -241,6 +241,8 @@ async def test_running_live_activity_gets_an_end_job(db_session):
     assert job.channel == "schedule"
     assert job.status == PushJobStatus.pending.value
     assert job.fire_at == NOW
+    # Claimed ahead of other due pushes, like every Live Activity job.
+    assert job.priority == LIVE_ACTIVITY_JOB_PRIORITY
     assert job.device_id == device.id
     assert job.payload["kind"] == "live_activity_end"
     assert job.payload["activity_id"] == f"{ACTIVITY_SCENARIO}::42"
@@ -436,6 +438,8 @@ async def test_accelerating_a_pending_end_job_preserves_its_payload(db_session):
     assert pending_job.status == PushJobStatus.pending.value
     assert pending_job.fire_at == NOW
     assert pending_job.payload == rich_payload
+    # Filed at the column default, it now goes out ahead of other due pushes.
+    assert pending_job.priority == LIVE_ACTIVITY_JOB_PRIORITY
 
 
 async def test_missing_assignment_row_does_not_file_an_undeliverable_job(db_session):

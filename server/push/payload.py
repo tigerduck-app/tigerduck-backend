@@ -16,7 +16,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
+
+
+# iOS stacks a push with every other one that carries the same `thread-id`.
+# Class and homework reminders get a stack each; everything else the server
+# sends — bulletins, operator pushes, account notices — shares one. School
+# mail, posted on the device, has a stack of its own. The Android app sorts
+# the same notifications into the same stacks.
+THREAD_COURSE = "course"
+THREAD_ASSIGNMENT = "assignment"
+THREAD_OTHER = "other"
+
+_THREADS_BY_CHANNEL = {"course": THREAD_COURSE, "assignment": THREAD_ASSIGNMENT}
+
+
+def thread_id_for(channel: str) -> str:
+    """The `thread-id` for an alert on push channel `channel`."""
+    return _THREADS_BY_CHANNEL.get(channel, THREAD_OTHER)
 
 
 # Swift's JSONDecoder uses `.deferredToDate` by default, which encodes/
@@ -115,7 +132,6 @@ def build_alert_request(
     bulletin_id: int,
     source_url: str,
     canonical_org: str,
-    thread_id: str = "bulletin",
     ttl_seconds: int = 7 * 24 * 3600,
     now: datetime | None = None,
     kind: str = "bulletin",
@@ -124,8 +140,9 @@ def build_alert_request(
     """Build a standard alert-push APNs request for a bulletin notification.
 
     `apns-topic` is the plain bundle id (no `.push-type.liveactivity`
-    suffix), otherwise iOS drops the push silently. `thread-id` groups
-    bulletins under one notification stack on the lock screen.
+    suffix), otherwise iOS drops the push silently. `thread-id` puts
+    bulletins in the stack for everything but class and homework
+    reminders; see `THREAD_OTHER`.
 
     Extra keys at the top level (`bulletin_id`, `source_url`,
     `canonical_org`, `kind`, `force_ring`) ride along for the client's
@@ -142,7 +159,7 @@ def build_alert_request(
         "alert": {"title": title, "body": body},
         "badge": 1,
         "mutable-content": 1,
-        "thread-id": thread_id,
+        "thread-id": THREAD_OTHER,
     }
     if force_ring:
         aps["sound"] = "default"
@@ -175,6 +192,9 @@ class FcmRequest:
     data: dict[str, str]
     ttl_seconds: int = 7 * 24 * 3600
     collapse_key: str | None = None
+    # Android delivery priority. "high" wakes a dozing device and is meant
+    # for messages the user sees; "normal" is for silent background work.
+    priority: Literal["high", "normal"] = "high"
 
 
 def build_fcm_alert_request(
@@ -245,7 +265,7 @@ def build_custom_push_popup_apns(
         "alert": {"title": title, "body": body},
         "badge": 1,
         "mutable-content": 1,
-        "thread-id": "custom-push-popup",
+        "thread-id": THREAD_OTHER,
     }
     if force_ring:
         aps["sound"] = "default"

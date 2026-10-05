@@ -17,7 +17,7 @@ What ships today:
 - Live Activity update / end pushes, built in `push/job_payloads.py`
 - FCM fan-out (Android push)
 - Bulletin pipeline (scrape → dedup → LLM classify → match → dispatch)
-- APScheduler-in-lifespan (single worker — see `docs/scheduler.md`)
+- APScheduler-in-lifespan (single worker)
 
 ## STRUCTURE
 ```text
@@ -31,34 +31,43 @@ server/
 ├── security.py                # shared-secret dependency (X-Push-Token)
 ├── system_settings.py         # operator-tunable settings read at runtime
 ├── logging_setup.py           # structlog console/JSON
+├── i18n.py                    # localized push copy from the app-translation bundles
+├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
+├── academic_calendar/         # semester terms + school holidays (models, schemas)
 ├── routes/
 │   ├── auth.py                # /v3/auth/*
 │   ├── user_devices.py        # /v3/devices/*
 │   ├── sync/                  # /v3/sync/*
 │   ├── sync_jobs.py           # /v3/sync-jobs/* (+ admin router)
 │   ├── academics.py           # /v3/courses, /v3/assignments
-│   ├── overrides.py           # /v3/sync/overrides
+│   ├── overrides.py           # /v3/sync/{courses,assignments}/{id}/override
 │   ├── holiday_overrides.py   # /v3/sync/holiday-overrides
 │   ├── academic_calendar.py   # /v3/calendar/*
 │   ├── bulletins_feed.py      # /v3/bulletins/*
 │   ├── bulletins_v3.py        # subscriptions + read-state
 │   ├── schedule_v3.py         # /v3/schedule/*
 │   ├── live_activities_v3.py  # /v3/live-activities/register
-│   └── settings_docs.py       # operator-facing settings docs
+│   └── settings_docs.py       # /v3/settings/*: the user's settings docs (revision CAS)
 ├── push/
 │   ├── pipeline.py            # push_jobs -> push_deliveries worker (THE send path)
-│   ├── job_payloads.py        # build_apns_for_job / build_fcm_for_job
-│   ├── payload.py             # alert + custom-push builders, ApnsRequest/FcmRequest
+│   ├── job_payloads.py        # build_apns_for_job / build_fcm_for_job, incl. the
+│   │                          #   portal's pushes (push_jobs on channel `custom`)
+│   ├── payload.py             # alert + custom-push builders, thread-ids, ApnsRequest/FcmRequest
+│   ├── dedupe.py              # Live Activity job keys + LIVE_ACTIVITY_JOB_PRIORITY
 │   ├── apns_client.py         # AioApnsSender + RecordingSender (factory)
-│   ├── fcm_client.py          # FCM v1 sender + RecordingFcmSender
+│   ├── fcm_client.py          # firebase-admin sender + RecordingFcmSender
 │   ├── router.py              # platform routing for outbound pushes
 │   ├── reminders.py           # assignment reminder scan
+│   ├── client_versions.py     # app versions that still schedule assignment reminders locally
+│   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
 │   ├── course_reminders.py    # course reminder scan
-│   ├── custom_push_*.py       # operator-authored pushes: targeting + dispatch
+│   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
+│   ├── custom_push_dispatcher.py  # drains the legacy custom_push_dispatches table on a
+│   │                              #   tick; nothing writes that table any more
 │   └── retention.py           # prune terminal push_jobs
 ├── bulletins/
 │   ├── scraper.py             # NTUST HTML → metadata
@@ -88,10 +97,10 @@ cp .env.example .env          # defaults to TIGERDUCK_ENV=development
 
 `./start.sh` reads `TIGERDUCK_ENV` from `.env`. When it's `development`
 the script appends `-f docker-compose.dev.yml`, which publishes
-backend `:40000` + portal `:40010` to the host (via a non-internal
-bridge — see the dev override file for why) and drops the prod-only
-`proxy-net`. See `docs/local-dev-backend.md` for the full first-time
-setup.
+backend `:40000` + portal `:40010` + Grafana `:40020` (no sign-in) +
+Prometheus `:40021` to the host (via a non-internal bridge — see the dev
+override file for why) and drops the prod-only `proxy-net`. See the
+README's Deployment section for the full first-time setup.
 
 Health checks from outside the container (only work in dev where the
 ports are published):
@@ -114,9 +123,13 @@ cp .env.example .env          # set TIGERDUCK_ENV=production + real secrets
 ```
 
 nginx-proxy-manager (on `proxy-net`) routes `api.tigerduck.app` to
-`http://tigerduck-internal:40000`. No ports are published to the host;
-postgres is private to `tigerduck-db` and unreachable from outside the
-backend container.
+`http://tigerduck-internal:40000`. No ports are published to the host.
+Postgres sits on the internal-only `tigerduck-db` network, shared with
+the backend, the portal, the one-shot `monitor-role`, `postgres-exporter`,
+`sql-exporter` and Grafana; nothing outside those services reaches it.
+Grafana is the only monitoring service on `proxy-net`, served at
+`<portal host>/grafana` behind Cloudflare Access (it checks the Access
+JWT itself).
 
 `llama-server` stays NATIVE on the host (Docker on Mac can't get Metal
 GPU). The backend reaches it via `host.docker.internal:40001`. See
@@ -133,7 +146,13 @@ docker compose exec backend \
 ### Tests (host-side, not inside the container)
 ```bash
 uv sync
-uv run pytest server/tests/ -v   # LLM + pipeline tests; DB-backed ones need postgres up
+uv run pytest server/tests/ -v
+# DB-backed tests need a Postgres the host can reach: localhost:5432
+# (tigerduck / tigerduck) by default, or TIGERDUCK_TEST_DATABASE_URL (see
+# tests/conftest.py). The stack's postgres is not it: it publishes no port.
+# They create and drop their own tigerduck_test database, e.g. on
+#   docker run -d --rm -p 127.0.0.1:5432:5432 -e POSTGRES_USER=tigerduck \
+#     -e POSTGRES_PASSWORD=tigerduck -e POSTGRES_DB=tigerduck postgres:17-alpine
 ```
 
 ## CONFIG
@@ -170,6 +189,25 @@ into the backend container via `docker-compose.yml`.
   carries an occurrence because the client's `source_id` already does
   (`{course_no}_{yyyyMMdd}_{period}`); a re-sync of the same occurrence
   finds its own sent job and leaves it alone.
+- Every Live Activity start and end is filed at `push_jobs.priority` 10
+  (`LIVE_ACTIVITY_JOB_PRIORITY` in `push/dedupe.py`); other jobs keep the
+  default 100, and the pipeline claims the lowest first.
+- The push tick runs every 5s (`push_pipeline_tick_seconds`) and drains
+  every due job, a batch at a time. Between jobs it checks for a due job
+  that outranks the next one, and if one is waiting hands the rest of the
+  batch back and claims again. `POST /push-tick` (X-Push-Token)
+  forces one: it waits up to 20s, then answers `done: false` and lets the
+  tick finish on its own.
+- The `course` and `assignment` channels deliver to iPhone and iPad only
+  (`APPLE_HANDHELD_PLATFORMS`); Android posts its own class reminders.
+  The reminder scans file nothing for a user with no such device and
+  cancel what they filed. A device whose token is gone for now (APNs
+  dropped it, the app has not registered a new one) keeps its filed
+  reminders; only new ones wait for a token.
+- An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
+  `push/payload.py`): `course`, `assignment`, or `other` for the rest.
+  Class and homework reminders carry no collapse id: on iOS a shared one
+  replaces the notification already on screen, so only one would show.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
@@ -181,7 +219,8 @@ into the backend container via `docker-compose.yml`.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
-  Never spin up a second replica — see `docs/scheduler.md`.
+  Never spin up a second replica: each would run every job, and every
+  push would go out twice.
 
 ## ANTI-PATTERNS
 - Do not handle Moodle/NTUST credentials outside `server/auth/`.
@@ -207,6 +246,9 @@ into the backend container via `docker-compose.yml`.
   it (Cloudflare Zero Trust in prod, nothing in dev). Add an
   auth-proxy if a gate becomes necessary, rather than re-introducing
   an admin list / session store inside the portal.
+- Do not authorize anything on `Cf-Access-Authenticated-User-Email`. The
+  portal reads it (`portal/app/access.py`) only to show who signed in and
+  offer the Access sign-out; a client that bypasses Access can set it.
 - Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow

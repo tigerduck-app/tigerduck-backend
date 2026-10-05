@@ -137,7 +137,19 @@ async def docker_containers(timeout_s: float = 3.0) -> list[dict[str, Any]]:
     missing, engine unreachable) surface as a single synthetic row so
     the page still tells the operator something is wrong.
     """
-    names = ["tigerduck-db", "tigerduck-internal", "tigerduck-portal"]
+    names = [
+        "tigerduck-db",
+        "tigerduck-internal",
+        "tigerduck-portal",
+        # Monitoring (monitoring/ in the repo). The one-shot
+        # tigerduck-monitor-role exits after each start, so it's left out.
+        "tigerduck-grafana",
+        "tigerduck-prometheus",
+        "tigerduck-loki",
+        "tigerduck-alloy",
+        "tigerduck-postgres-exporter",
+        "tigerduck-sql-exporter",
+    ]
     if not Path(DOCKER_SOCK).exists():
         return [
             {
@@ -147,52 +159,49 @@ async def docker_containers(timeout_s: float = 3.0) -> list[dict[str, Any]]:
             }
         ]
 
-    rows: list[dict[str, Any]] = []
     transport = httpx.AsyncHTTPTransport(uds=DOCKER_SOCK)
+
+    async def inspect(client: httpx.AsyncClient, name: str) -> dict[str, Any] | None:
+        try:
+            r = await client.get(f"/containers/{name}/json")
+        except httpx.HTTPError as exc:
+            return {
+                "name": name,
+                "state": "unreachable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        if r.status_code == 404:
+            return None
+        if r.status_code >= 400:
+            return {
+                "name": name,
+                "state": "error",
+                "detail": f"engine HTTP {r.status_code}",
+            }
+        payload = r.json()
+        state = payload.get("State", {})
+        return {
+            "name": name,
+            "state": state.get("Status", "?"),
+            "health": (state.get("Health") or {}).get("Status"),
+            "started_at": state.get("StartedAt"),
+            "restart_count": payload.get("RestartCount", 0),
+            "image": payload.get("Config", {}).get("Image", ""),
+        }
+
     try:
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://docker",
             timeout=timeout_s,
         ) as client:
-            for name in names:
-                try:
-                    r = await client.get(f"/containers/{name}/json")
-                except httpx.HTTPError as exc:
-                    rows.append(
-                        {
-                            "name": name,
-                            "state": "unreachable",
-                            "detail": f"{type(exc).__name__}: {exc}",
-                        }
-                    )
-                    continue
-                if r.status_code == 404:
-                    continue
-                if r.status_code >= 400:
-                    rows.append(
-                        {
-                            "name": name,
-                            "state": "error",
-                            "detail": f"engine HTTP {r.status_code}",
-                        }
-                    )
-                    continue
-                payload = r.json()
-                state = payload.get("State", {})
-                rows.append(
-                    {
-                        "name": name,
-                        "state": state.get("Status", "?"),
-                        "health": (state.get("Health") or {}).get("Status"),
-                        "started_at": state.get("StartedAt"),
-                        "restart_count": payload.get("RestartCount", 0),
-                        "image": payload.get("Config", {}).get("Image", ""),
-                    }
-                )
+            # All at once: with nine containers, asking one after another
+            # would take 9 × timeout_s when the engine hangs, which is when
+            # the status page gets opened. Order is kept for display.
+            results = await asyncio.gather(*(inspect(client, n) for n in names))
     finally:
         await transport.aclose()
-    return rows
+    return [row for row in results if row is not None]
 
 
 def _resolve_secret_path(path_str: str) -> Path | None:

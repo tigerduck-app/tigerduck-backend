@@ -14,6 +14,15 @@ export type EnvInfo = {
   host_lan_ips: string[];
   fcm_config: FcmConfig;
   apns_config: ApnsConfig;
+  // null when the request reached the portal directly (dev, LAN).
+  access: AccessSession | null;
+};
+
+// The Cloudflare Access user the request came through as, and the
+// Cloudflare-served path that signs them out.
+export type AccessSession = {
+  email: string;
+  logout_url: string;
 };
 
 export type FilePresence = {
@@ -75,7 +84,8 @@ export type ApnsConfig = {
 };
 
 export type StatusPayload = {
-  env: EnvInfo;
+  // /api/status repeats the env fields but not the per-request session.
+  env: Omit<EnvInfo, "access">;
   containers: ContainerInfo[];
   postgres: PostgresHealth;
   llm: LlmHealth;

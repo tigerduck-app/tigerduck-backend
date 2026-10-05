@@ -16,6 +16,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.metrics import instrument_scheduler
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
 from server.push.course_reminders import scan_course_reminders
@@ -56,7 +57,7 @@ def build_scheduler(
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
-    * `push_pipeline_tick` — user push_jobs delivery pipeline every 30s
+    * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
@@ -211,4 +212,6 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=30,
         )
+    # After every add_job, so each job's series start at zero.
+    instrument_scheduler(scheduler)
     return scheduler

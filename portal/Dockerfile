@@ -1,10 +1,12 @@
+# syntax=docker/dockerfile:1.7
+
 # TigerDuck portal — observation + admin UI sitting alongside the backend.
 #
 # Multistage:
-#   1. web-builder (node 20) — installs npm deps, runs Vite + tsc to
+#   1. web-builder (node 22) — installs npm deps, runs Vite + tsc to
 #      emit hashed bundles into web/dist/
-#   2. runtime (python 3.13) — installs FastAPI + asyncpg, copies the
-#      app/ source and the prebuilt web/dist/ from stage 1
+#   2. runtime (python 3.13) — installs the deps pinned in uv.lock,
+#      copies the app/ source and the prebuilt web/dist/ from stage 1
 #
 # We DO NOT ship node into the runtime image. The portal serves the
 # already-compiled bundle as static files; React Router does in-browser
@@ -22,7 +24,8 @@
 # ---------------------------------------------------------------------------
 # Stage 1: build the React bundle.
 # ---------------------------------------------------------------------------
-FROM node:20-alpine AS web-builder
+# Node 22, the version CI builds the SPA with.
+FROM node:22-alpine AS web-builder
 
 WORKDIR /web
 
@@ -42,8 +45,9 @@ FROM python:3.13-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_PYTHON_DOWNLOADS=never \
+    PATH="/app/.venv/bin:${PATH}"
 
 # postgresql-client gives us pg_dump (export) + pg_restore (import).
 RUN apt-get update \
@@ -55,15 +59,15 @@ RUN apt-get update \
 WORKDIR /app
 
 # Install python deps separately from app code so the layer is cacheable.
-COPY pyproject.toml ./
-RUN pip install --upgrade pip \
-    && pip install \
-        fastapi==0.115.* \
-        "uvicorn[standard]==0.32.*" \
-        python-multipart==0.0.* \
-        httpx==0.28.* \
-        asyncpg==0.30.* \
-        pydantic-settings==2.7.*
+# They come from uv.lock, the lockfile CI runs the portal's tests against,
+# so the image runs the versions the tests ran on. uv is mounted for this
+# step only and does not ship in the image. It is uv:latest, like the
+# backend image and CI: uv.lock's format follows the uv that wrote it, and
+# a pinned older uv may refuse a lockfile a newer one wrote.
+COPY pyproject.toml uv.lock ./
+RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/bin/uv \
+    --mount=type=cache,target=/root/.cache/uv \
+    UV_LINK_MODE=copy uv sync --frozen --no-dev --no-install-project
 
 COPY app ./app
 # Built SPA bundle from stage 1. main.py looks for it at

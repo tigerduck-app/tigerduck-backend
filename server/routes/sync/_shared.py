@@ -19,7 +19,7 @@ _CLIENT_SYNC_PUSHBACK_SECONDS = 7200  # 2 hours
 _push_tick_lock = asyncio.Lock()
 async def _trigger_push_tick(request: Request) -> None:
     """Run the push pipeline tick immediately so sync_trigger pushes
-    are delivered within seconds instead of waiting up to 30s."""
+    are delivered at once instead of at the next scheduled tick."""
     worker = getattr(request.app.state, "push_worker", None)
     if worker is None:
         return

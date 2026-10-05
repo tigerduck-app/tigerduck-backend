@@ -32,6 +32,7 @@ from server.bulletins.llm.base import LLMError, LLMProvider
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.scraper import fetch_list
 from server.config import Settings
+from server.metrics import observe_bulletin_scrape
 from server.push.router import PushRouter
 
 logger = structlog.get_logger(__name__)
@@ -113,6 +114,9 @@ async def scrape_job(
         outcome = await upsert_list_rows(session, rows, now=ts)
         await _mark_stale_deleted(session, settings, ts)
         await session.commit()
+    # Only once the rows are stored: a scrape whose write failed and rolled
+    # back hasn't worked, however well the page parsed.
+    observe_bulletin_scrape(len(rows))
 
     logger.info(
         "bulletins.scrape_job.done",

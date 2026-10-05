@@ -55,11 +55,14 @@ class Settings(BaseSettings):
         # Default matches the backend's pydantic-settings fallback when
         # TIGERDUCK_ENV is unset — both sides agree the key-missing case
         # is "development". Prod deploys must set TIGERDUCK_ENV=production
-        # explicitly (covered in MIGRATE.md / docs/local-dev-backend.md).
+        # explicitly (see .env.example and the README's Deployment section).
         env_mode = env.get("TIGERDUCK_ENV", "development")
         # Match _compose-files.sh's URL choices so the status page and
-        # the start.sh stdout never disagree.
-        if env_mode == "development":
+        # the start.sh stdout never disagree. It loads the dev override
+        # (published localhost ports) only on an exact "development" and
+        # treats a missing key as prod, so the URLs read the raw value
+        # rather than env_mode's default.
+        if env.get("TIGERDUCK_ENV") == "development":
             default_backend = "http://localhost:40000"
             default_portal = "http://localhost:40010"
         else:

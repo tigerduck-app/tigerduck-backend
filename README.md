@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/github/license/tigerduck-app/tigerduck-backend?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.142-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Postgres](https://img.shields.io/badge/Postgres-17-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 
@@ -29,9 +29,9 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ## 功能模組
 
 ### 🔐 帳號與認證（`server/auth/`）
-- **登入** — App 端完成 NTUST SSO 後，後端用 Moodle token 驗證身分（不代打 SSO，避免觸發學校 IP rate limit）
+- **登入** — App 通常自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。App 改送密碼時，由後端代為 SSO，依 IP 與學號限流；密碼只用於這次登入，不會儲存
 - **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session，60 秒內的單次 grace 重試容忍掉線 client
-- **憑證保管** — NTUST 密碼以 AES-256-GCM + per-row AAD 加密存放（支援金鑰輪替），僅供伺服器端 Moodle token 刷新使用
+- **憑證保管** — 只存 Moodle token，以 AES-256-GCM + per-row AAD 加密（支援金鑰輪替），供伺服器端代抓使用；不保存 NTUST 密碼
 - **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）
 
 ### 🔄 使用者同步（`server/sync/`）
@@ -41,7 +41,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ### 🎓 Server-Side Academic Sync（`server/syncjobs/`）
 - **排程代抓** — `sync_policies`（admin 可調）× `sync_jobs`（登入時 provision）× `sync_runs`（審計）；executor 用 advisory lock + `FOR UPDATE SKIP LOCKED` 認領，多 worker 安全
-- **密碼鐵律** — 每次 SSO 嘗試前先 durably commit attempt marker，密碼最多用一次；認證類失敗絕不重試，直接停用同步並排一筆 reauth 系統通知
+- **憑證失效** — 代抓只用已存的 Moodle token，不會拿密碼重新登入。token 遺失或被拒屬於認證類失敗，絕不重試：直接停用該使用者所有同步工作，並排一筆 reauth 系統通知；App 用 `PATCH /v3/auth/credentials` 送新 token 後同步自動恢復
 - **作業鏡像** — 抓 Moodle 作業權威 upsert / 軟刪除，寫入 changelog 讓所有裝置同步
 - **繳交狀態** — 每次作業同步後，向 Moodle 查詢時間窗內（預設 48 小時）到期作業的繳交狀態；新繳交的作業撤回待送提醒、結束倒數中的即時動態
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now`（per-user cooldown，policy 停用時拒絕）
@@ -55,29 +55,34 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ### 📲 推播（`server/push/`）
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
-- **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘）；繳交 / 退選 / 課表變更會取消過期提醒
+- **tick** — 每 5 秒一次，每次把所有到期的 job 清完。Live Activity 的 start / end 以 priority 10 排在其他 job（預設 100）前面
+- **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
 - **校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在校曆假日（`academic_holidays`）不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error = holiday`。作業類 Live Activity 不受假日影響
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
-- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end
-- **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token
-- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Shared-Secret`；公告讀取開放
+- **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
+- **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
+- **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token；sync trigger 用 normal priority、TTL 12 小時；每個 HTTP request 上限 10 秒
+- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Push-Token`；公告讀取開放
+
+推播的完整流程圖在 [`docs/push-notification-flows.drawio`](docs/push-notification-flows.drawio)（用 draw.io / diagrams.net 開啟）。
 
 ### ⏰ 排程
-- **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send（見 [`docs/scheduler.md`](docs/scheduler.md)）
+- **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send
 - **tick 設計** — 公告 scrape / process / dispatch（匿名 + 使用者層）、sync jobs、推播 pipeline、作業 / 課程提醒掃描、retention 各自 interval trigger，互不阻塞；跨 worker 安全由 DB 鎖保證（advisory lock + `SKIP LOCKED`）
 
 ## 技術棧
 
 | 層 | 用什麼 |
 |---|---|
-| Web | FastAPI 0.115 + Uvicorn + structlog（JSON log）|
+| Web | FastAPI 0.142 + Uvicorn + structlog（JSON log）|
 | 管理介面 | FastAPI 供 API + React 19 / Vite 8 / Tailwind 4 / TypeScript 7 SPA |
 | ORM | SQLAlchemy 2.x async + Alembic |
 | DB | Postgres 17（容器化、internal-only network）|
 | 排程 | APScheduler 3.x（IntervalTrigger）|
-| 推播 | `aioapns`（APNs）、`google-auth` + `httpx`（FCM v1）|
+| 推播 | `aioapns`（APNs）、`firebase-admin`（FCM）|
 | LLM | OpenAI-compatible client → llama-server (host)、`response_format: json_object` + JSON schema |
 | 部署 | Docker Compose + nginx-proxy-manager 反代 |
+| 監控 | Prometheus + Grafana + Loki（Grafana Alloy）、postgres-exporter、sql_exporter |
 
 ## 系統架構
 
@@ -109,7 +114,8 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 - **`tigerduck-db` 網路**：internal-only bridge，postgres 完全沒有外網路由
 - **`proxy-net`**：與 nginx-proxy-manager 共用；backend + portal 都加入
-- **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 能 publish 到 host port
+- **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 / Grafana 40020 / Prometheus 40021 能 publish 到 host port
+- **`tigerduck-monitoring`**：internal-only bridge，給 Prometheus、Loki 和它們收資料的對象用；監控服務裡只有 Grafana 掛 `proxy-net`，見[監控](#監控grafana)
 - **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
 - **portal**：stateless 只讀的操作介面，本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy
 
@@ -137,16 +143,16 @@ cp .env.example .env
 
 # 2. 把 APNs 私鑰丟到 server/secrets/AuthKey_<KEY_ID>.p8（已 gitignored）
 
-# 3. 啟動 stack（postgres + backend）
-./start.sh                       # docker compose up -d --build + 跟 log
+# 3. 啟動整個 stack（postgres、backend、portal、監控）
+./start.sh                       # docker compose up -d --build，再印出狀態摘要
 
 # 4. 健康檢查
-docker compose exec backend curl -sS localhost:40000/health
+docker compose exec backend python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:40000/health').read().decode())"
 ```
 
 ### 操作腳本
 
-四個腳本都會讀 `.env` 裡的 `TIGERDUCK_ENV`，遇到 `development` 就額外載入 `docker-compose.dev.yml`（把 backend 40000 / portal 40010 publish 到 host，並用一條非 internal 的橋接網路規避 proxy-net 在本機沒有 NPM 的問題）。換句話說：把 mode 寫在 `.env`，腳本自己會挑對的 compose 檔。
+四個腳本都會讀 `.env` 裡的 `TIGERDUCK_ENV`，遇到 `development` 就額外載入 `docker-compose.dev.yml`（把 backend 40000 / portal 40010 / Grafana 40020 / Prometheus 40021 publish 到 host，並用一條非 internal 的橋接網路規避 proxy-net 在本機沒有 NPM 的問題）。換句話說：把 mode 寫在 `.env`，腳本自己會挑對的 compose 檔。
 
 | 腳本 | 用途 |
 |---|---|
@@ -160,12 +166,60 @@ docker compose exec backend curl -sS localhost:40000/health
 `tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。前端是 `portal/web` 的 React SPA，由 Dockerfile 的 node build stage 打包成 `web/dist` 後由 FastAPI 靜態供應，`/api/*` 才是 JSON 端點。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
 
 - 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
-- 看每個 container 的 log（5 個 tab：Backend / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Android / Apple 是針對 backend log 做關鍵字過濾
+- 看每個 container 的 log（6 個 tab：Backend / Announcement / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Announcement / Android / Apple 是針對 backend log 做關鍵字過濾
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
+- 經 Cloudflare Access 進來時顯示登入者 email 與 Sign out 連結，按下會結束其 Access session；dev / LAN 直連沒有 Access session，連結不會出現
 
-詳細設計見 [`docs/portal-design.md`](docs/portal-design.md)。
+### 監控（Grafana）
+
+Grafana、Prometheus、Loki 跟整個 stack 一起起來，設定都在 `monitoring/`。portal 不留歷史，這套補上：誰在線上、同步與推播的健康狀況隨時間的變化、request 量、所有 container 的 log。
+
+| | Development | Production |
+|---|---|---|
+| Grafana | `http://localhost:40020`（以及 `./start.sh` 印出的 LAN IP），不用登入 | `https://portal.<your-domain>/grafana/`，由 Cloudflare Access 登入 |
+| Prometheus | `http://localhost:40021` | 只在內部網路，從 Grafana 查 |
+
+Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單可以互相切換。
+
+| Dashboard | 內容 |
+|---|---|
+| Userbase | 已註冊使用者（以學號計）與裝置（iPhone + iPad / macOS / Android），對照 14 天內活躍的數量，折線圖上方附目前數字。由資料庫重建，歷史可回溯到上線那天 |
+| Overview | 線上 / 活躍裝置、每個 scrape target 的健康、request 量與錯誤、推播延遲、逾期的同步工作、上次公告爬取時間、最近的錯誤 |
+| Devices | portal Devices 分頁的所有內容（裝置表、平台 / App / OS / 型號分布、清單），加上線上（N 分鐘內出現過）與活躍（14 天內出現過）裝置的趨勢。可依平台、App 版本、兩個時間窗篩選，並有搜尋框 |
+| Moodle sync | 同步政策、每位學生的同步工作、執行次數與耗時、失敗原因、需要重新登入的 NTUST 帳號、每位使用者的活動紀錄 |
+| Push | push_jobs 佇列、各 provider 的投遞、APNs / FCM 發送耗時、失敗、自訂推播 |
+| Bulletins | 爬取新鮮度、LLM 待處理與失敗、各單位新公告、配對與推播 |
+| Logs | 所有 container 的 log（Loki，保留 30 天），可依 service 與 level 篩選、全文搜尋 |
+| Backend API | 各 route 與狀態碼的 request、延遲、排程 job 的執行次數與耗時、SQLAlchemy pool、CPU 與記憶體 |
+| Postgres | 依狀態與來源的連線數、即時 session、lock、transaction、資料表大小 |
+
+數據來源：
+
+- **postgres-exporter**：Postgres server 本身的統計。
+- **sql-exporter**：每 30 秒用 SQL 取一次 app 層的數字（線上裝置、推播佇列、同步工作⋯），讓它們有歷史。查詢都在 `monitoring/sql-exporter/collectors/`。
+- **Backend `:9000/metrics`**（`server/metrics.py`）：HTTP、排程、DB pool、APNs / FCM / LLM 耗時。這個 port 只綁在 backend 於內部 `tigerduck-monitoring` 網路上的位址（`TIGERDUCK_METRICS_HOST`），`proxy-net` 上的東西都連不到；對外的 `:40000` 永遠不回應 `/metrics`。
+- **Grafana 的 SQL datasource**：表格類 panel 直接讀資料庫，用唯讀的 `tigerduck_monitor` role；這個 role 由一次性的 `monitor-role` service 在每次 `./start.sh` 時建立或更新。它有自己的密碼（`TIGERDUCK_MONITOR_DB_PASSWORD`，沒設的話 `./start.sh` 會產生一組寫進 `.env`），並有 30 秒的 statement timeout，重的查詢不會卡住 migration 要等的 lock。
+- **Alloy → Loki**：透過 docker socket 收每個 container 的輸出。
+
+從 Prometheus 畫的圖從第一次部署監控那天開始累積；SQL panel 則是資料表裡有什麼就顯示什麼。
+
+**正式環境設定**
+
+1. 在 `.env` 設 `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` 與 `TIGERDUCK_CF_ACCESS_AUD`（portal 那個 Access application 的 AUD tag）。Grafana 沒有自己的登入：它讀 Access 加在每個 request 上的 `Cf-Access-Jwt-Assertion` token，驗過簽章、issuer 與 audience 後直接登入。沒經過 Access 就到達 Grafana 的 request（LAN 直連 NPM、`proxy-net` 上的其他 container）會被拒絕；這兩個值沒設的話，誰都進不去。portal host 不是 `portal.tigerduck.app` 的話，另外設 `TIGERDUCK_GRAFANA_ROOT_URL=https://<portal host>/grafana/`。
+2. 把 portal host 的 `/grafana` 導到 `tigerduck-grafana:3000`，保留 `/grafana` 前綴：
+   - nginx-proxy-manager：在 portal 的 proxy host 加一個 Custom Location `/grafana` → `http`、`tigerduck-grafana`、`3000`，host 後面不要加路徑。要用 Grafana Live 的話，在該 location 的 advanced config 加上 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`
+   - cloudflared 直接指向 portal 的話：在 portal 那條規則之前加一條 ingress rule，`hostname: portal.<your-domain>`、`path: ^/grafana`、`service: http://tigerduck-grafana:3000`。
+3. Cloudflare Access 不用改：portal host 上的 application 已經涵蓋 `/grafana`（只要它的 path 留空）。從 portal 登出也會一併登出 Grafana。
+
+**修改方式**
+
+- `monitoring/grafana/dashboards/` 裡的 dashboard 由 `monitoring/grafana/build_dashboards.py` 產生，多個 panel 共用的篩選與查詢只定義一次；無法在 UI 直接存檔。改那支腳本後執行 `python3 monitoring/grafana/build_dashboards.py`（只需要 Python 3），Grafana 30 秒內會讀到新的 JSON。在 UI 試出來的 panel 要搬回腳本裡。在 UI 從頭新建的 dashboard 會存在 Grafana 的 volume 裡。
+- 想替 app 數字加歷史：在 `monitoring/sql-exporter/collectors/*.collector.yml` 加一條查詢。
+- Prometheus 會在 `prometheus.yml` 改動後 30 秒內自動重讀，Grafana 的 dashboard 也是。`monitoring/` 底下其他設定只在啟動時讀：改了之後重啟對應的 service，例如 `docker compose restart grafana`（或 `sql-exporter`、`loki`、`alloy`）。
+- Prometheus 與 Loki 都保留 30 天。
+- 版本都已鎖定：每個監控 image 都以 tag + digest 固定，Grafana 的 plugin 版本寫在 `GF_PLUGINS_PREINSTALL`，重啟不會拉新版。升級方式寫在 `docker-compose.yml` 的註解裡。
 
 ### LLM（host 端）
 
@@ -257,9 +311,9 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `GET` | `/v3/bulletins` | 公告列表（cursor 分頁） | JWT |
-| `GET` | `/v3/bulletins/{id}` | 公告詳情 | JWT |
-| `GET` | `/v3/bulletins/taxonomy` | org / tag 標籤對照 | JWT |
+| `GET` | `/v3/bulletins` | 公告列表（cursor 分頁） | 無 |
+| `GET` | `/v3/bulletins/{id}` | 公告詳情 | 無 |
+| `GET` | `/v3/bulletins/taxonomy` | org / tag 標籤對照 | 無 |
 | `GET` | `/v3/bulletin-subscriptions` | 此裝置的訂閱規則列表 | JWT |
 | `PUT` | `/v3/bulletin-subscriptions` | 批次覆寫此裝置的訂閱規則 | JWT |
 | `POST` | `/v3/bulletin-subscriptions` | 新增此裝置的訂閱規則 | JWT |
@@ -302,7 +356,9 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 ## 開發
 
 ```bash
-# host 端跑單元測試（不需要 docker）
+# host 端跑測試。不需要起 stack，但要有一個 Postgres：預設連 localhost:5432
+# （tigerduck / tigerduck），測試自己建 tigerduck_test 資料庫；
+# 別的位置用 TIGERDUCK_TEST_DATABASE_URL 指定（見 server/tests/conftest.py）
 uv sync
 uv run pytest
 
@@ -322,10 +378,11 @@ tigerduck-backend/
 │   ├── config.py                # pydantic-settings，所有設定走 TIGERDUCK_* env
 │   ├── db.py / models.py        # SQLAlchemy async engine、DeviceRegistration
 │   ├── security.py              # shared-secret dependency
+│   ├── metrics.py               # Prometheus metrics，開在 :9000（不是對外的 :40000）
 │   ├── _ssl_compat.py           # OpenSSL 3 寬容模式（NTUST TLS chain 是壞的）
 │   ├── auth/                    # v3 身分層：crypto（憑證加密）/ tokens / service / rate_limit / moodle / models
 │   ├── sync/                    # v3 使用者同步：upload / changelog / serializers / retention / models
-│   ├── syncjobs/                # 伺服器代抓：executor / credentials（密碼鐵律）/ moodle_client / assignments / provisioning
+│   ├── syncjobs/                # 伺服器代抓：executor / credentials（Moodle token、失效處理）/ moodle_client / assignments / provisioning
 │   ├── routes/                  # v3：auth / user_devices / sync / academics / overrides / settings_docs / bulletins_feed / bulletins_v3 / sync_jobs / schedule_v3 / live_activities_v3
 │   ├── push/                    # apns_client / fcm_client / router / pipeline（兩階段投遞）/ reminders / course_reminders / job_payloads
 │   ├── scheduler/               # APScheduler runtime、dispatch、retention
@@ -334,14 +391,17 @@ tigerduck-backend/
 │   ├── secrets/                 # APNs .p8（gitignored）
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest（單元 + 整合）
-├── portal/                      # 管理介面 — 另一個 FastAPI app（見 docs/portal-design.md）
+├── portal/                      # 管理介面 — 另一個 FastAPI app
 │   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── app/                     # FastAPI：main / config / db (asyncpg) / logs / status / routes / static
+│   ├── tests/                   # pytest，不需要資料庫
 │   └── web/                     # React 19 + Vite 8 + Tailwind 4 SPA（build 進 image 的 web/dist）
+├── monitoring/                  # Grafana（provisioning + dashboards）、Prometheus、Loki、Alloy、sql-exporter collectors
+├── docs/                        # push-notification-flows.drawio（推播流程圖）
 ├── scripts/                     # backfill / seed 等一次性腳本
 ├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
-├── docker-compose.yml           # 基底（backend + postgres + portal，都掛 proxy-net）
+├── docker-compose.yml           # 基底（backend + postgres + portal 掛 proxy-net，加上監控服務）
 ├── docker-compose.dev.yml       # TIGERDUCK_ENV=development 時自動載入，publish ports + 換成 host bridge
 ├── _compose-files.sh            # 共用：根據 TIGERDUCK_ENV 算出要載入哪些 compose 檔
 ├── Dockerfile / entrypoint.sh   # backend 容器
@@ -353,7 +413,7 @@ tigerduck-backend/
 ## 貢獻
 
 歡迎 PR 與 Issue。送出前請確認：
-1. `uv run pytest` 全綠
+1. `uv run pytest` 全綠；有動到 portal 的 Python 的話，`cd portal && uv run pytest` 也要綠
 2. portal 前端有動到的話，`cd portal/web && npm run build` 也要過（`tsc -b` 的型別檢查是重點）
 3. 有改 schema 的話附上 alembic revision
 4. 以 `feature/your-feature` 或 `fix/your-fix` 命名分支，PR 目標分支 `dev`

@@ -127,6 +127,14 @@ class PushJob(Base):
             "priority",
             postgresql_where=sa.text("status = 'pending'"),
         ),
+        # The stale-lock sweep that opens every push tick. Only the few jobs
+        # mid-delivery are in `processing`, out of 7 days of mostly finished
+        # rows.
+        Index(
+            "idx_push_jobs_stale_lock",
+            "locked_at",
+            postgresql_where=sa.text("status = 'processing'"),
+        ),
     )
 class PushDelivery(Base):
     """One push_job sent to one specific token. Provider / token columns are

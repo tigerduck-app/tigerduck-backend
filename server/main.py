@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 
-from server import __version__
+from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
@@ -55,6 +55,35 @@ from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetch
 from server.syncjobs.policies import ensure_default_policies
 
 logger = structlog.get_logger(__name__)
+
+# How long `POST /push-tick` waits for its tick before answering that it
+# is still sending. Under the portal's 30s timeout on the call.
+_PUSH_TICK_WAIT_SECONDS = 20.0
+
+# Ticks `/push-tick` answered before they ended. The loop holds only weak
+# references to tasks, so one nothing else references could be collected
+# mid-send.
+_running_ticks: set[asyncio.Task] = set()
+
+
+def _forget_tick(task: asyncio.Task) -> None:
+    _running_ticks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("push.force_tick_failed", exc_info=task.exception())
+
+
+# How long shutdown waits for such a tick. Under Docker's 10s stop grace
+# period, so the wait is not itself cut short by SIGKILL.
+_SHUTDOWN_TICK_WAIT_SECONDS = 8.0
+
+
+async def _finish_running_ticks(timeout: float) -> None:
+    """Let ticks `/push-tick` answered early finish before shutdown closes
+    the router and database they send through. A delivery cut off
+    mid-send leaves its job in `processing` until stale recovery, minutes
+    later."""
+    if _running_ticks:
+        await asyncio.wait(set(_running_ticks), timeout=timeout)
 
 
 # How long startup is willing to wait for the LLM endpoint. 60s comfortably
@@ -178,6 +207,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.scheduler = scheduler
     app.state.settings = settings
 
+    # Started once everything above is up, so the metrics endpoint comes up
+    # with the API: uvicorn does not accept requests until this startup
+    # finishes, LLM probe included, and a scrape should not say otherwise.
+    metrics.bind_engine(engine)
+    metrics.publish_settings(settings)
+    metrics_server = metrics.start_metrics_server(
+        settings.metrics_port, settings.metrics_host
+    )
+
     scheduler.start()
     logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
 
@@ -185,6 +223,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        await _finish_running_ticks(_SHUTDOWN_TICK_WAIT_SECONDS)
+        # shutdown() blocks until the server thread's poll loop notices,
+        # up to half a second; keep the event loop free while it does.
+        await asyncio.to_thread(metrics.stop_metrics_server, metrics_server)
+        metrics.bind_engine(None)
         await router.close()
         await engine.dispose()
         logger.info("server.shutdown")
@@ -220,6 +263,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await call_next(request)
 
+    # Added after the 410 middleware so it wraps it (Starlette runs the
+    # last-added middleware outermost) and counts those answers too.
+    app.add_middleware(metrics.HttpMetricsMiddleware)
+
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
@@ -238,13 +285,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"pong": "tigerduck"}
 
     @app.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
-    async def force_push_tick() -> dict:
+    async def force_push_tick() -> JSONResponse:
+        """Run a push tick, and answer with its outcome if it ends in time.
+
+        A tick drains every due job, which after a large send outlasts the
+        portal's 30s wait on this call. So the tick runs as its own task:
+        one that ends within `_PUSH_TICK_WAIT_SECONDS` is reported done, or
+        failed with its error; one still sending is reported as such
+        (`done: false`) and carries on, never cut off and never reported as
+        a success it has not had.
+        """
         worker = getattr(app.state, "push_worker", None)
         if worker is None:
-            return {"ok": False, "error": "push_worker not available"}
-        from server.push.pipeline import run_push_tick
-        await run_push_tick(worker)
-        return {"ok": True}
+            return JSONResponse({"ok": False, "error": "push_worker not available"})
+        from server.push import pipeline
+
+        task = asyncio.create_task(pipeline.run_push_tick(worker))
+        try:
+            processed = await asyncio.wait_for(
+                asyncio.shield(task), timeout=_PUSH_TICK_WAIT_SECONDS
+            )
+        except TimeoutError:
+            _running_ticks.add(task)
+            task.add_done_callback(_forget_tick)
+            return JSONResponse({"ok": True, "done": False})
+        except Exception as exc:
+            logger.exception("push.force_tick_failed")
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return JSONResponse({"ok": True, "done": True, "processed": processed})
 
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
     # them before issuing requests. The cipher is None when credential keys

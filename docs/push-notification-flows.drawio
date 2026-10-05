@@ -1,0 +1,308 @@
+<mxfile host="Electron" pages="3">
+  <diagram name="1. Overview: every path to APNs and FCM" id="overview">
+    <mxGraphModel dx="673" dy="340" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1950" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="overview-n-1" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontStyle=1;fontSize=18;" value="Push notifications: every path to APNs and FCM" vertex="1">
+          <mxGeometry height="30" width="900" x="20" y="10" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-n-2" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=11;whiteSpace=wrap;" value="Signed-in devices go through &lt;b&gt;push_jobs&lt;/b&gt; and the push pipeline. Signed-out (anonymous) devices only get bulletins, through the older dispatcher at the bottom. macOS receives no server pushes." vertex="1">
+          <mxGeometry height="20" width="1300" x="20" y="42" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-n-3" parent="1" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#1a1a1a;" value="Who files a push job" vertex="1">
+          <mxGeometry height="1080" width="330" x="20" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-ios-4" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;b&gt;iPhone / iPad app&lt;/b&gt;&lt;br&gt;&lt;b&gt;POST /v3/schedule/sync&lt;/b&gt;&lt;br&gt;upcoming class / assignment events → one &lt;i&gt;schedule&lt;/i&gt; start job each, at the event&#39;s time (inClass, classPreparing, assignmentUrgent). Jobs missing from the upload are cancelled.&lt;br&gt;&lt;b&gt;POST /v3/live-activities/register&lt;/b&gt;&lt;br&gt;an activity&#39;s update token → its &lt;i&gt;end&lt;/i&gt; job at countdown_target (priority 10)" vertex="1">
+          <mxGeometry height="150" width="310" x="10" y="36" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-upl-5" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;b&gt;Any signed-in app (iOS or Android)&lt;/b&gt;&lt;br&gt;data uploads and overrides (courses, assignments, settings) → &lt;i&gt;sync_trigger&lt;/i&gt; for the account&#39;s other devices, at most one per 5 min, then an immediate tick" vertex="1">
+          <mxGeometry height="92" width="310" x="10" y="196" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-exe-6" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Server sync executor&lt;/b&gt; (every 30s)&lt;br&gt;Moodle / NTUST sync found changes → &lt;i&gt;sync_trigger&lt;/i&gt;&lt;br&gt;school rejected the stored credential → &lt;i&gt;reauth_required&lt;/i&gt;" vertex="1">
+          <mxGeometry height="76" width="310" x="10" y="298" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-ar-7" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Assignment reminder scan&lt;/b&gt;&lt;br&gt;per due assignment and offset → &lt;i&gt;assignment&lt;/i&gt; job (assignment_reminder)" vertex="1">
+          <mxGeometry height="60" width="310" x="10" y="384" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-cr-8" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Course reminder scan&lt;/b&gt;&lt;br&gt;per class occurrence and offset (skips holidays) → &lt;i&gt;course&lt;/i&gt; job (course_reminder). Filed only for accounts with an iPhone or iPad." vertex="1">
+          <mxGeometry height="76" width="310" x="10" y="454" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-bul-9" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Bulletin pipeline&lt;/b&gt;&lt;br&gt;scrape (10 min) → LLM process (60s) → user dispatch: matched signed-in users → &lt;i&gt;bulletin&lt;/i&gt; job (bulletin_id)" vertex="1">
+          <mxGeometry height="76" width="310" x="10" y="540" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-sub-10" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Assignment submitted&lt;/b&gt; (sync / upload)&lt;br&gt;cancels its pending reminders and moves the end job of its running assignmentUrgent Live Activity to &lt;i&gt;now&lt;/i&gt;" vertex="1">
+          <mxGeometry height="76" width="310" x="10" y="626" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-por-11" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#1a1a1a;" value="&lt;b&gt;Portal (operator)&lt;/b&gt;&lt;br&gt;Custom push → &lt;i&gt;custom&lt;/i&gt; job per device:&lt;br&gt;&amp;nbsp;• popup → custom_push_popup (notification_id)&lt;br&gt;&amp;nbsp;• keep record → custom_push_bulletin (bulletin_id)&lt;br&gt;Tests: start a Live Activity, end one now, send reauth_required&lt;br&gt;“Run now” → immediate tick" vertex="1">
+          <mxGeometry height="120" width="310" x="10" y="712" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-local-12" parent="overview-n-3" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#1a1a1a;" value="&lt;b&gt;Not from the server&lt;/b&gt;&lt;br&gt;Android schedules class and assignment reminders locally.&lt;br&gt;iOS before 2.1.0 schedules assignment reminders locally.&lt;br&gt;The iOS app also ends an expired Live Activity itself when it is running (1s after the countdown, and on foreground)." vertex="1">
+          <mxGeometry height="100" width="310" x="10" y="842" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-jobs-13" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=12;fontSize=11;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;b&gt;push_jobs&lt;/b&gt;&lt;br&gt;channel: schedule · system · assignment · course · bulletin · custom&lt;br&gt;priority: Live Activity 10, others 100" vertex="1">
+          <mxGeometry height="110" width="250" x="420" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-pipe-14" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#1a1a1a;" value="&lt;div&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/div&gt;&lt;b&gt;Push pipeline tick&lt;/b&gt;&lt;br&gt;every 5s, plus an immediate tick after uploads and portal sends&lt;br&gt;&lt;br&gt;1. recover jobs stuck in &lt;i&gt;processing&lt;/i&gt; &amp;gt; 5 min&lt;br&gt;2. claim due jobs, lowest priority first, a batch at a time, until none are left&lt;br&gt;3. &lt;b&gt;materialize&lt;/b&gt;: pick each recipient device and token (rules on the right)&lt;br&gt;4. send through the router, one push_deliveries row per token&lt;br&gt;5. settle: sent / partial_failed / failed; transient failure retried after 60s, 120s (3 attempts); APNs 410 / Unregistered or FCM unregistered → token invalidated" vertex="1">
+          <mxGeometry height="260" width="290" x="400" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-rules-15" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#1a1a1a;" value="&lt;div&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/div&gt;&lt;b&gt;Who each channel reaches&lt;/b&gt; (token kind)&lt;br&gt;&lt;br&gt;&lt;b&gt;schedule start&lt;/b&gt; → that iPhone/iPad&#39;s &lt;i&gt;push_to_start&lt;/i&gt; token. Skipped if the activity is already registered; a class start on a school holiday is cancelled.&lt;br&gt;&lt;br&gt;&lt;b&gt;schedule end&lt;/b&gt; → the &lt;i&gt;live_activity_update&lt;/i&gt; token whose scope is that activity id.&lt;br&gt;&lt;br&gt;&lt;b&gt;system / sync_trigger&lt;/b&gt; → &lt;i&gt;standard&lt;/i&gt; token of every device with cloud sync on, except the device whose change caused it.&lt;br&gt;&lt;br&gt;&lt;b&gt;system / reauth_required&lt;/b&gt; → every device but macOS, copy in each device&#39;s language.&lt;br&gt;&lt;br&gt;&lt;b&gt;assignment&lt;/b&gt; → iPhone/iPad on app ≥ 2.1.0 with cloud sync and assignment reminders on.&lt;br&gt;&lt;br&gt;&lt;b&gt;course&lt;/b&gt; → iPhone/iPad only.&lt;br&gt;&lt;br&gt;&lt;b&gt;bulletin&lt;/b&gt; → devices with bulletin pushes on.&lt;br&gt;&lt;br&gt;&lt;b&gt;custom&lt;/b&gt; → the device the portal filed it for.&lt;br&gt;&lt;br&gt;&lt;b&gt;macOS&lt;/b&gt; → never." vertex="1">
+          <mxGeometry height="520" width="320" x="740" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-apns-16" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;div&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/div&gt;&lt;b&gt;APNs&lt;/b&gt; (HTTP/2, JWT .p8)&lt;br&gt;one connection kept open 600s idle, TCP keepalive after 60s, 15s cap per send&lt;br&gt;&lt;br&gt;&lt;b&gt;alert&lt;/b&gt; · topic = bundle id · priority 10 · TTL 24h&lt;br&gt;&amp;nbsp;bulletin, reminders, reauth: title/body, badge, sound, thread-id&lt;br&gt;&amp;nbsp;custom popup: title/body at top level, sound only if force_ring&lt;br&gt;&amp;nbsp;custom bulletin: bulletin_id, sound only if force_ring&lt;br&gt;&lt;br&gt;&lt;b&gt;background&lt;/b&gt; · priority 5 · TTL 5 min&lt;br&gt;&amp;nbsp;sync_trigger: content-available&lt;br&gt;&lt;br&gt;&lt;b&gt;liveactivity&lt;/b&gt; · topic = bundle.push-type.liveactivity · priority 10&lt;br&gt;&amp;nbsp;start: event start, attributes-type + activityId, alert, stale-date, input-push-token&lt;br&gt;&amp;nbsp;end: event end, dismissal-date = now" vertex="1">
+          <mxGeometry height="330" width="340" x="1150" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-fcm-17" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;div&gt;&lt;b&gt;&lt;br&gt;&lt;/b&gt;&lt;/div&gt;&lt;b&gt;FCM&lt;/b&gt; (firebase-admin, HTTP v1)&lt;br&gt;10s per request, 30s cap per send&lt;br&gt;&lt;br&gt;Data-only messages: the app builds every notification itself.&lt;br&gt;&lt;br&gt;&lt;b&gt;high priority&lt;/b&gt; · TTL 24h&lt;br&gt;&amp;nbsp;bulletin, reauth, custom: title, body, android_channel_id + payload keys&lt;br&gt;&amp;nbsp;channel ids: bulletin → bulletins_sound, reauth → system,&lt;br&gt;&amp;nbsp;custom → bulletins_silent, or bulletins_sound if force_ring&lt;br&gt;&lt;br&gt;&lt;b&gt;normal priority&lt;/b&gt; · TTL 12h · collapse key “sync”&lt;br&gt;&amp;nbsp;sync_trigger&lt;br&gt;&lt;br&gt;No Live Activities, no class or assignment reminders." vertex="1">
+          <mxGeometry height="290" width="340" x="1150" y="600" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-iphone-18" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;b&gt;iPhone / iPad&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;alert&lt;/b&gt; → shown by iOS; tap opens the bulletin / popup&lt;br&gt;&lt;b&gt;background&lt;/b&gt; → app wakes and syncs&lt;br&gt;&lt;b&gt;liveactivity start&lt;/b&gt; → ActivityKit shows the activity, then wakes the app with its update token → app calls /live-activities/register&lt;br&gt;&lt;b&gt;liveactivity end&lt;/b&gt; → activity dismissed" vertex="1">
+          <mxGeometry height="200" width="330" x="1580" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-android-19" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" value="&lt;b&gt;Android&lt;/b&gt; (FcmService, routes on &lt;i&gt;kind&lt;/i&gt;)&lt;br&gt;&lt;br&gt;&lt;b&gt;sync_trigger&lt;/b&gt; → one queued background sync (network required); one landing mid-sync queues a single follow-up&lt;br&gt;&lt;b&gt;custom_push_popup&lt;/b&gt; → popup notification (de-duplicated by notification_id)&lt;br&gt;&lt;b&gt;custom_push_bulletin&lt;/b&gt; → notification opening the stored bulletin&lt;br&gt;&lt;b&gt;reauth_required&lt;/b&gt; → sign-in notification&lt;br&gt;&lt;b&gt;anything else&lt;/b&gt; → bulletin notification if it has a bulletin_id, otherwise dropped" vertex="1">
+          <mxGeometry height="220" width="330" x="1580" y="600" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-20" edge="1" parent="1" source="overview-ios-4" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="191" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-21" edge="1" parent="1" source="overview-upl-5" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="322" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-22" edge="1" parent="1" source="overview-exe-6" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="416" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-23" edge="1" parent="1" source="overview-ar-7" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="494" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-24" edge="1" parent="1" source="overview-cr-8" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="572" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-25" edge="1" parent="1" source="overview-bul-9" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="658" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-26" edge="1" parent="1" source="overview-sub-10" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="744" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-27" edge="1" parent="1" source="overview-por-11" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-jobs-13" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="375" y="852" />
+              <mxPoint x="375" y="415" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-e-28" edge="1" parent="1" source="overview-jobs-13" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="overview-pipe-14" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-29" edge="1" parent="1" source="overview-pipe-14" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5576923076923077;entryDx=0;entryDy=0;" target="overview-rules-15" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-30" edge="1" parent="1" source="overview-rules-15" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.16346153846153846;exitDx=0;exitDy=0;entryX=0;entryY=0.7424242424242424;entryDx=0;entryDy=0;" target="overview-apns-16" value="Apple tokens">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-31" edge="1" parent="1" source="overview-rules-15" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.7403846153846154;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-fcm-17" value="Android tokens">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-32" edge="1" parent="1" source="overview-apns-16" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.30303030303030304;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-iphone-18" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-33" edge="1" parent="1" source="overview-fcm-17" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.3793103448275862;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-android-19" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-34" edge="1" parent="1" source="overview-iphone-18" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;dashed=1;dashPattern=6 3;strokeColor=#6c8ebf;fontColor=#6c8ebf;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.8387096774193549;entryY=0;entryDx=0;entryDy=0;" target="overview-ios-4" value="register update token">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1745" y="72" />
+              <mxPoint x="290" y="72" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="overview-n-35" parent="1" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#1a1a1a;" value="Signed-out (anonymous) devices: older path, bypasses push_jobs" vertex="1">
+          <mxGeometry height="260" width="1890" x="20" y="1200" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-anon-36" parent="overview-n-35" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" value="&lt;b&gt;device_registrations&lt;/b&gt;&lt;br&gt;POST /v3/devices/anonymous&lt;br&gt;an app never signed in, with its push token and bulletin subscription rules" vertex="1">
+          <mxGeometry height="100" width="300" x="20" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-adisp-37" parent="overview-n-35" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#1a1a1a;" value="&lt;b&gt;Bulletin dispatcher&lt;/b&gt; (every 60s)&lt;br&gt;processed bulletin → devices whose subscription rules match → bulletin_dispatches rows → router directly (no push_jobs, no pipeline)" vertex="1">
+          <mxGeometry height="100" width="330" x="400" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-acust-38" parent="overview-n-35" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#1a1a1a;dashed=1;dashPattern=6 3;" value="&lt;b&gt;Custom push dispatcher&lt;/b&gt; (every 60s)&lt;br&gt;drains custom_push_dispatches. Nothing writes that table any more: the portal files push_jobs for signed-in devices instead." vertex="1">
+          <mxGeometry height="90" width="330" x="400" y="150" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-aout-39" parent="overview-n-35" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#1a1a1a;" value="→ &lt;b&gt;APNs alert&lt;/b&gt; (bulletin_id) / &lt;b&gt;FCM high-priority data&lt;/b&gt; (bulletin_id)&lt;br&gt;the same requests as signed-in bulletins" vertex="1">
+          <mxGeometry height="60" width="380" x="820" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-40" edge="1" parent="1" source="overview-anon-36" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-adisp-37" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-41" edge="1" parent="1" source="overview-adisp-37" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="overview-aout-39" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="overview-e-42" edge="1" parent="1" source="overview-acust-38" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;dashed=1;dashPattern=6 3;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" target="overview-aout-39" value="">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="795" y="1395" />
+              <mxPoint x="795" y="1305" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="2. Live Activity lifecycle" id="la">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="la-n-1" value="Apple Live Activity: start to dismissal" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontStyle=1;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="900" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="la-n-2" value="One class (or urgent assignment) = one activity id “{scenario}::{sourceId}”. Start and end are separate push_jobs; the end only exists once the phone registers the activity." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="20" y="42" width="1500" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="la-n-3" value="iPhone app" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="20" y="80" width="430" height="750" as="geometry" />
+        </mxCell>
+        <mxCell id="la-n-4" value="Server (API + pipeline)" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="470" y="80" width="430" height="750" as="geometry" />
+        </mxCell>
+        <mxCell id="la-n-5" value="APNs" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="920" y="80" width="430" height="750" as="geometry" />
+        </mxCell>
+        <mxCell id="la-n-6" value="iPhone (ActivityKit / iOS)" style="swimlane;startSize=26;fontStyle=1;fontSize=13;align=left;spacingLeft=10;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="1370" y="80" width="430" height="750" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-7" value="&lt;b&gt;1. Register for push-to-start&lt;/b&gt;&lt;br&gt;on launch: push-to-start token for TigerDuckActivityAttributes → /v3/devices (token_kind push_to_start)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-3">
+          <mxGeometry x="15" y="40" width="400" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-8" value="&lt;b&gt;2. Upload the schedule&lt;/b&gt;&lt;br&gt;POST /v3/schedule/sync: each upcoming class / assignment event with its snapshot and fire time" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-3">
+          <mxGeometry x="15" y="150" width="400" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-9" value="&lt;b&gt;3. File start jobs&lt;/b&gt;&lt;br&gt;one schedule job per event at fire_at, priority 10, dedupe schedule:{device}:…; jobs no longer in the upload are cancelled" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-4">
+          <mxGeometry x="15" y="150" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-10" value="&lt;b&gt;4. At fire_at the tick sends the start&lt;/b&gt; (≤ 5s late)&lt;br&gt;• class start on a school holiday → cancelled&lt;br&gt;• activity already registered by the phone → skipped&lt;br&gt;• else APNs liveactivity &lt;b&gt;event: start&lt;/b&gt; to the push_to_start token: attributes-type, activityId, content-state.snapshot, alert, stale-date = countdown, input-push-token: 1" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-4">
+          <mxGeometry x="15" y="290" width="400" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-11" value="&lt;b&gt;5. Deliver the start&lt;/b&gt;&lt;br&gt;collapse id per activity, priority 10" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-5">
+          <mxGeometry x="15" y="290" width="400" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-12" value="&lt;b&gt;6. Activity appears&lt;/b&gt;&lt;br&gt;lock screen + Dynamic Island, alert shown. iOS issues the activity&#39;s update token and wakes TigerDuck in the background, even when it isn&#39;t running or the phone is locked" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-6">
+          <mxGeometry x="15" y="290" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-13" value="&lt;b&gt;7. Register the activity&lt;/b&gt;&lt;br&gt;observer sees the activity and its update token → POST /v3/live-activities/register (activity id, token, snapshot, countdown_target). Works behind a locked screen: the session, device id and endpoint are readable after first unlock" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-3">
+          <mxGeometry x="15" y="460" width="400" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-14" value="&lt;b&gt;8. File the end job&lt;/b&gt;&lt;br&gt;live_activity_update token stored (scope = activity id); end job at countdown_target, priority 10 (an earlier sent end on the same id is moved aside)" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-4">
+          <mxGeometry x="15" y="460" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-15" value="&lt;b&gt;9. At countdown_target the tick sends the end&lt;/b&gt; (≤ 5s late, ahead of other due jobs)&lt;br&gt;APNs liveactivity &lt;b&gt;event: end&lt;/b&gt;, dismissal-date = now, to the update token" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-4">
+          <mxGeometry x="15" y="610" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-16" value="&lt;b&gt;10. Deliver the end&lt;/b&gt;&lt;br&gt;same collapse id: an end replaces an undelivered start" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-5">
+          <mxGeometry x="15" y="610" width="400" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="la-s-17" value="&lt;b&gt;11. Activity dismissed&lt;/b&gt;&lt;br&gt;about 1–3s after the class ends" style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#ffffff;strokeColor=#666666;fontColor=#1a1a1a;" vertex="1" parent="la-n-6">
+          <mxGeometry x="15" y="610" width="400" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-18" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;dashed=1;dashPattern=6 3;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.18181818181818182;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-7" target="la-s-9">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="460" y="165" />
+              <mxPoint x="460" y="250" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="la-e-19" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.4090909090909091;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-8" target="la-s-9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-20" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-9" target="la-s-10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-21" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.23333333333333334;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-10" target="la-s-11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-22" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.3181818181818182;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-11" target="la-s-12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-23" value="wakes app" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;dashed=1;dashPattern=6 3;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-12" target="la-s-13">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1585" y="530" />
+              <mxPoint x="235" y="530" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="la-e-24" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.4230769230769231;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-13" target="la-s-14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-25" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-14" target="la-s-15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-26" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.3181818181818182;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-15" target="la-s-16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-e-27" value="" style="edgeStyle=none;rounded=1;html=1;fontSize=10;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.4375;entryDx=0;entryDy=0;" edge="1" parent="1" source="la-s-16" target="la-s-17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="la-other-28" value="&lt;b&gt;Other ways an activity ends early or is cleaned up&lt;/b&gt;&lt;br&gt;&lt;br&gt;• &lt;b&gt;Assignment submitted&lt;/b&gt;: the end job of its assignmentUrgent activity is moved to now (server).&lt;br&gt;• &lt;b&gt;Portal “end now”&lt;/b&gt;: moves a pending end job to now and runs the pipeline.&lt;br&gt;• &lt;b&gt;App running at the countdown&lt;/b&gt;: the app ends the activity itself 1s after it.&lt;br&gt;• &lt;b&gt;App opened later&lt;/b&gt;: on foreground the app ends any activity past its countdown.&lt;br&gt;• &lt;b&gt;No end ever arrives&lt;/b&gt; (phone offline past the TTL, push dropped, never registered): the activity greys out at stale-date and stays until the app is opened or iOS ends it (8 hours); the widget reads “class over” instead of a countdown." style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#f8cecc;strokeColor=#b85450;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="20" y="850" width="860" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="la-timing-29" value="&lt;b&gt;Timing that decides how fast it clears&lt;/b&gt;&lt;br&gt;&lt;br&gt;pipeline tick every 5s · Live Activity jobs claimed first (priority 10) · one tick drains every due job · APNs connection reused (no handshake per send) · end sent within 5s of the countdown (measured 1–3s), dismissed about 2s later; a locked phone registered about 10s after the start." style="rounded=1;whiteSpace=wrap;html=1;fontSize=11;align=left;verticalAlign=top;spacingLeft=6;spacingTop=2;fillColor=#d5e8d4;strokeColor=#82b366;fontColor=#1a1a1a;" vertex="1" parent="1">
+          <mxGeometry x="920" y="850" width="860" height="130" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="3. Every scenario" id="table">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="table-n-1" value="Every scenario that reaches APNs or FCM" style="text;html=1;strokeColor=none;fillColor=none;align=left;fontStyle=1;fontSize=18;" vertex="1" parent="1">
+          <mxGeometry x="20" y="10" width="900" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="table-n-2" value="&lt;table style=&quot;border-collapse:collapse;font-size:11px;width:100%;&quot;&gt;&lt;tr&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;Scenario&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;Trigger&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;push_jobs channel / kind&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;Who receives it&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;APNs request&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;FCM message&lt;/th&gt;&lt;th style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#dae8fc;text-align:left;&quot;&gt;On the device&lt;/th&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;&lt;b&gt;Live Activity start&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;iOS /schedule/sync event reaches its fire time&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;schedule / schedule&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;that iPhone/iPad (push_to_start token)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;liveactivity event start&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;—&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;activity appears; app woken to register it&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;&lt;b&gt;Live Activity end&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;/live-activities/register; countdown_target reached (or submitted / portal end-now)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;schedule / live_activity_end&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;that iPhone/iPad (update token for the activity)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;liveactivity event end, dismissal-date now&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;—&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;activity dismissed&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;&lt;b&gt;Sync trigger&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;another device uploaded changes, or the server sync found changes&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;system / sync_trigger&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;devices with cloud sync on, except the source device&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;background, content-available, priority 5, TTL 5 min&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;data, normal priority, TTL 12h, collapse “sync”&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;iOS app syncs; Android runs one queued sync&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;&lt;b&gt;Sign-in expired&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;school rejected the stored credential (or portal test)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;system / reauth_required&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;every device but macOS, in its language&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;alert&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;data, high priority&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;sign-in notification&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;&lt;b&gt;Assignment reminder&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;reminder scan, per due assignment and offset&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;assignment / assignment_reminder&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;iPhone/iPad ≥ 2.1.0, cloud sync + assignment reminders on&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;alert&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;— (Android schedules its own)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;reminder notification&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;&lt;b&gt;Class reminder&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;course reminder scan, per class and offset (not on holidays)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;course / course_reminder&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;iPhone/iPad only&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;alert&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;— (Android schedules its own)&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;reminder notification&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;&lt;b&gt;Bulletin (signed in)&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;processed bulletin matches the user&#39;s subscriptions&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;bulletin / bulletin&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;the user&#39;s devices with bulletin pushes on&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;alert with bulletin_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;data, high priority, bulletin_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;bulletin notification, opens the bulletin&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;&lt;b&gt;Bulletin (signed out)&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;processed bulletin matches an anonymous device&#39;s rules&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;no push_jobs: bulletin_dispatches&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;anonymous device_registrations&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;alert with bulletin_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;data, high priority, bulletin_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;bulletin notification&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;&lt;b&gt;Custom popup&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;portal custom push without “keep record”&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;custom / custom_push_popup&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;the targeted devices&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;alert, title/body at top level, sound only if force_ring&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;data, high priority, notification_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#ffffff;&quot;&gt;popup notification&lt;/td&gt;&lt;/tr&gt;&lt;tr&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;&lt;b&gt;Custom bulletin&lt;/b&gt;&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;portal custom push with “keep record”&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;custom / custom_push_bulletin&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;the targeted devices&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;alert with bulletin_id, sound only if force_ring&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;data, high priority, bulletin_id&lt;/td&gt;&lt;td style=&quot;border:1px solid #999;padding:4px 6px;vertical-align:top;color:#1a1a1a;background:#f5f5f5;&quot;&gt;notification opening the stored bulletin&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;" style="text;html=1;whiteSpace=wrap;overflow=fill;align=left;verticalAlign=top;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="20" y="50" width="1840" height="760" as="geometry" />
+        </mxCell>
+        <mxCell id="table-n-3" value="macOS gets none of these. “—” means the platform is never sent that scenario." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=11;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="20" y="820" width="1200" height="20" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

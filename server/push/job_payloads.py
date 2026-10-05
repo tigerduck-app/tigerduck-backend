@@ -19,10 +19,16 @@ from server.push.payload import (
     PushKind,
     _normalize_snapshot_for_apns,
     _to_unix_seconds,
+    build_alert_request,
+    build_custom_push_popup_apns,
+    build_custom_push_popup_fcm,
+    build_fcm_alert_request,
+    thread_id_for,
 )
 
 _RESERVED = {"title", "body"}
 _DEFAULT_TTL_SECONDS = 24 * 3600
+_SYNC_TRIGGER_FCM_TTL_SECONDS = 12 * 3600
 
 # Keys a schedule job's payload carries alongside the client's snapshot:
 # written by `/schedule/sync` and `/live-activities/register`, read by the
@@ -46,10 +52,13 @@ _ANDROID_CHANNELS = {
 
 # FCM allows at most 4 active collapse keys per device at once. The
 # schedule channel is keyed per activity in `_collapse_key` instead.
+#
+# Class and homework reminders have none, like bulletins: on iOS a collapse
+# id replaces the notification already on screen as well as an undelivered
+# one, so a shared one left a single reminder of either kind showing, and
+# never a stack of them.
 _COLLAPSE_KEYS = {
     "sync_trigger": "sync",
-    "course": "reminder",
-    "assignment": "reminder",
 }
 
 
@@ -144,6 +153,11 @@ def build_apns_for_job(
                 attributes_type or _DEFAULT_ACTIVITY_ATTRIBUTES_TYPE
             )
             aps["attributes"] = {"activityId": activity_id}
+            # Ask iOS (18+, the app's minimum) for the new activity's update
+            # token. Without it the system neither issues one nor wakes an
+            # app that is not running, so the app never registers the
+            # activity and the server never files its end push.
+            aps["input-push-token"] = 1
             aps["alert"] = {
                 "title": str(snapshot.get("title") or ""),
                 "body": str(snapshot.get("subtitle") or ""),
@@ -180,16 +194,47 @@ def build_apns_for_job(
             collapse_id=collapse,
         )
 
-    # Standard alert (existing logic)
+    # The portal's custom pushes: the same requests the retired custom-push
+    # dispatchers built, which is what the apps' handlers were written
+    # against — top-level title/body for the popup's tap handler, and a
+    # sound only when the operator asked for one.
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
+    force_ring = str(payload.get("force_ring")).lower() in {"true", "1"}
+    if payload.get("kind") == "custom_push_popup":
+        return build_custom_push_popup_apns(
+            device_token=token_value,
+            bundle_id=bundle_id,
+            title=title,
+            body=body,
+            notification_id=str(payload.get("notification_id") or ""),
+            force_ring=force_ring,
+            ttl_seconds=ttl_seconds,
+            now=now,
+        )
+    if payload.get("kind") == "custom_push_bulletin":
+        return build_alert_request(
+            device_token=token_value,
+            bundle_id=bundle_id,
+            title=title,
+            body=body,
+            bulletin_id=int(payload["bulletin_id"]),
+            source_url="",
+            canonical_org="server",
+            ttl_seconds=ttl_seconds,
+            now=now,
+            kind="custom_push_bulletin",
+            force_ring=force_ring,
+        )
+
+    # Standard alert (existing logic)
     message = {
         "aps": {
             "alert": {"title": title, "body": body},
             "badge": 1,
             "sound": "default",
             "mutable-content": 1,
-            "thread-id": channel,
+            "thread-id": thread_id_for(channel),
         },
         **_extras(payload),
     }
@@ -219,12 +264,48 @@ def build_fcm_for_job(
             title="",
             body="",
             data={"kind": "sync_trigger"},
-            ttl_seconds=300,
+            # Long enough to outlast Doze. FCM holds a normal-priority
+            # message for a dozing phone until its next maintenance window,
+            # which comes hours apart once Doze deepens, and drops it if the
+            # TTL runs out first. The collapse key keeps one per phone, so
+            # a long TTL queues one sync, not a backlog.
+            ttl_seconds=_SYNC_TRIGGER_FCM_TTL_SECONDS,
             collapse_key=collapse,
+            # The app shows nothing for a sync trigger. FCM demotes an app
+            # whose high-priority messages keep showing nothing, and the
+            # demotion reaches the messages that do show; Firebase files
+            # background sync under normal priority.
+            priority="normal",
         )
 
     title = str(payload.get("title") or "")
     body = str(payload.get("body") or "")
+    # The portal's custom pushes, built as on APNs by the builders the
+    # retired dispatchers used: a lowercase `force_ring` FcmService reads,
+    # and the silent channel unless the operator asked for a sound.
+    force_ring = str(payload.get("force_ring")).lower() in {"true", "1"}
+    if payload.get("kind") == "custom_push_popup":
+        return build_custom_push_popup_fcm(
+            fcm_token=token_value,
+            title=title,
+            body=body,
+            notification_id=str(payload.get("notification_id") or ""),
+            force_ring=force_ring,
+            ttl_seconds=ttl_seconds,
+        )
+    if payload.get("kind") == "custom_push_bulletin":
+        return build_fcm_alert_request(
+            fcm_token=token_value,
+            title=title,
+            body=body,
+            bulletin_id=int(payload["bulletin_id"]),
+            source_url="",
+            canonical_org="server",
+            ttl_seconds=ttl_seconds,
+            kind="custom_push_bulletin",
+            force_ring=force_ring,
+        )
+
     data = {
         "title": title,
         "body": body,

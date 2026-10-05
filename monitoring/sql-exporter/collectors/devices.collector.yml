@@ -1,0 +1,132 @@
+# Devices, users and sign-in sessions.
+collector_name: tigerduck_devices
+
+metrics:
+  - metric_name: tigerduck_devices
+    type: gauge
+    help: Registered devices in user_devices, not deleted.
+    key_labels: [platform]
+    values: [count]
+    query: |
+      SELECT platform, count(*) AS count
+      FROM user_devices
+      WHERE deleted_at IS NULL
+      GROUP BY platform
+
+  # last_seen_at moves on every sync poll (/v3/sync/revision), snapshot,
+  # upload and registration, so a short window reads as "online now" and a
+  # long one as "still using the app".
+  - metric_name: tigerduck_devices_seen
+    type: gauge
+    help: Devices whose last request to the backend falls inside the window.
+    key_labels: [platform, window]
+    values: [count]
+    query: |
+      SELECT d.platform, w.label AS window,
+             count(*) FILTER (WHERE d.last_seen_at > now() - w.span) AS count
+      FROM user_devices d
+      CROSS JOIN (VALUES
+          ('5m', interval '5 minutes'), ('15m', interval '15 minutes'),
+          ('1h', interval '1 hour'), ('24h', interval '24 hours'),
+          ('7d', interval '7 days'), ('14d', interval '14 days'),
+          ('30d', interval '30 days')
+      ) AS w(label, span)
+      WHERE d.deleted_at IS NULL
+      GROUP BY d.platform, w.label
+
+  - metric_name: tigerduck_devices_by_app_version
+    type: gauge
+    help: Registered devices by app version.
+    key_labels: [platform, app_version]
+    values: [count]
+    query: |
+      SELECT platform, COALESCE(app_version, 'unknown') AS app_version, count(*) AS count
+      FROM user_devices
+      WHERE deleted_at IS NULL
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_devices_by_os_version
+    type: gauge
+    help: Registered devices by OS version.
+    key_labels: [platform, os_version]
+    values: [count]
+    query: |
+      SELECT platform, COALESCE(os_version, 'unknown') AS os_version, count(*) AS count
+      FROM user_devices
+      WHERE deleted_at IS NULL
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_devices_setting_enabled
+    type: gauge
+    help: Registered devices with each per-device switch turned on.
+    key_labels: [platform, setting]
+    values: [count]
+    query: |
+      SELECT d.platform, s.setting, count(*) FILTER (WHERE s.enabled) AS count
+      FROM user_devices d
+      CROSS JOIN LATERAL (VALUES
+          ('server_push', d.server_push_enabled),
+          ('cloud_sync', d.cloud_sync_enabled),
+          ('bulletin_push', d.bulletin_push_enabled),
+          ('live_activity', d.sync_live_activity),
+          ('assignment_reminders', d.sync_assignment_reminders),
+          ('sync_courses', d.sync_courses),
+          ('sync_assignments', d.sync_assignments)
+      ) AS s(setting, enabled)
+      WHERE d.deleted_at IS NULL
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_push_tokens
+    type: gauge
+    help: Device push tokens by provider, kind and status.
+    key_labels: [provider, token_kind, status]
+    values: [count]
+    query: |
+      SELECT provider, token_kind, status, count(*) AS count
+      FROM device_push_tokens
+      GROUP BY 1, 2, 3
+
+  # The pre-v3 table. Still read by the anonymous bulletin dispatcher and
+  # custom-push targeting, so it isn't dead weight yet.
+  - metric_name: tigerduck_legacy_device_registrations
+    type: gauge
+    help: Rows in the legacy device_registrations table.
+    key_labels: [platform]
+    values: [count]
+    query: |
+      SELECT COALESCE(platform, 'unknown') AS platform, count(*) AS count
+      FROM device_registrations
+      GROUP BY 1
+
+  - metric_name: tigerduck_users
+    type: gauge
+    help: Users by status, split into signed-in students and anonymous users.
+    key_labels: [status, kind]
+    values: [count]
+    query: |
+      SELECT status,
+             CASE WHEN student_id IS NULL THEN 'anonymous' ELSE 'student' END AS kind,
+             count(*) AS count
+      FROM users
+      WHERE deleted_at IS NULL
+      GROUP BY 1, 2
+
+  - metric_name: tigerduck_auth_sessions_live
+    type: gauge
+    help: Refresh-token sessions that are neither revoked nor expired.
+    values: [count]
+    query: |
+      SELECT count(*) AS count
+      FROM auth_sessions
+      WHERE revoked_at IS NULL AND expires_at > now()
+
+  # A rotated refresh token presented again: either a client bug or a
+  # stolen token. Either way worth seeing.
+  - metric_name: tigerduck_auth_reuse_detected_24h
+    type: gauge
+    help: Refresh-token reuse detections in the last 24 hours.
+    values: [count]
+    query: |
+      SELECT count(*) AS count
+      FROM auth_sessions
+      WHERE reuse_detected_at > now() - interval '24 hours'

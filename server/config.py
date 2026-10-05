@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
     api_shared_secret: str = ""
 
+    # --- Metrics ---
+    # Port the Prometheus /metrics endpoint is served on. It is kept off the
+    # API port on purpose: :40000 is forwarded to the internet by
+    # nginx-proxy-manager. 0 disables the endpoint.
+    metrics_port: int = 9000
+    # Address (or name) the metrics port binds to. docker-compose.yml sets
+    # the backend's alias on the internal monitoring network, which resolves
+    # to its address on that network only; binding every interface would
+    # also expose it to everything on proxy-net and tigerduck-db.
+    metrics_host: str = "0.0.0.0"
+
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
     # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
@@ -90,6 +101,17 @@ class Settings(BaseSettings):
     # "development" talks to api.sandbox.push.apple.com (debug builds via Xcode)
     # "production" talks to api.push.apple.com (TestFlight / App Store)
     apns_env: Literal["development", "production"] = "development"
+    # How long an unused APNs connection stays open. Apple asks providers to
+    # reuse a connection rather than reconnect per batch (and may block one
+    # that keeps opening and closing as a denial-of-service); aioapns on its
+    # own closes after 10s, shorter than every scheduler tick that sends.
+    apns_connection_idle_seconds: int = 600
+    # Cap on a single APNs send. aioapns waits for the answer with no
+    # timeout, and a connection that died silently is only noticed when TCP
+    # gives up, minutes later — a stall the non-overlapping push tick would
+    # wait out. On timeout the connection is dropped and the next send opens
+    # a new one.
+    apns_send_timeout_seconds: float = 15.0
 
     # --- FCM (Android) ---
     # Firebase project id — only required when delivering real pushes.
@@ -98,11 +120,16 @@ class Settings(BaseSettings):
     # Path to the service-account JSON downloaded from the Firebase console.
     # When the file is missing the router falls back to RecordingFcmSender.
     fcm_credentials_path: Path = SERVER_DIR / "secrets" / "fcm_service_account.json"
-    # Hard cap on a single FCM send. firebase-admin's sync `messaging.send`
-    # has no per-call timeout, so without this a stuck token-mint or
-    # unreachable googleapis lookup blocks the bulletin_dispatch tick
-    # indefinitely and APScheduler skips every following tick.
-    fcm_send_timeout_seconds: float = 15.0
+    # Timeout of each HTTP request firebase-admin makes (its `httpTimeout`
+    # app option; 120s when unset). Google asks for at least 10s.
+    fcm_http_timeout_seconds: float = 10.0
+    # Hard cap on a single FCM send, waited on from the event loop. Without
+    # it a stuck token-mint or unreachable googleapis lookup blocks the
+    # bulletin_dispatch tick indefinitely and APScheduler skips every
+    # following tick. Keep it above twice fcm_http_timeout_seconds:
+    # firebase-admin retries a timed-out request once, and a send this cap
+    # abandons keeps running on its thread and may still be delivered.
+    fcm_send_timeout_seconds: float = 30.0
 
 
     # --- Sync change log retention ---
@@ -135,7 +162,11 @@ class Settings(BaseSettings):
     moodle_fetch_timeout_seconds: float = 20.0
 
     # --- User push pipeline (Phase 4) ---
-    push_pipeline_tick_seconds: int = 30
+    # How often the pipeline looks for due jobs: the most a job waits past
+    # its fire_at when the queue is empty. A Live Activity's end is one of
+    # them, so this is how long a finished class can stay on screen. Each
+    # tick drains every due job, `push_pipeline_batch_size` at a time.
+    push_pipeline_tick_seconds: int = 5
     push_pipeline_batch_size: int = 10
     push_job_stale_lock_minutes: int = 5
     # Delay before a job with still-pending deliveries gets another round.

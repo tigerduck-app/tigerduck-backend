@@ -1,0 +1,2004 @@
+{
+  "uid": "tigerduck-devices",
+  "title": "Devices",
+  "description": "Everything on the portal's Devices tab, plus who is online and active.",
+  "tags": [
+    "tigerduck"
+  ],
+  "timezone": "browser",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 41,
+  "version": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "platform",
+        "label": "Platform",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "tigerduck-db"
+        },
+        "query": "SELECT DISTINCT platform FROM user_devices WHERE deleted_at IS NULL ORDER BY 1",
+        "definition": "SELECT DISTINCT platform FROM user_devices WHERE deleted_at IS NULL ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": []
+      },
+      {
+        "name": "app_version",
+        "label": "App version",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "tigerduck-db"
+        },
+        "query": "SELECT DISTINCT COALESCE(app_version, 'unknown') FROM user_devices WHERE deleted_at IS NULL AND platform IN (${platform:sqlstring}) ORDER BY 1",
+        "definition": "SELECT DISTINCT COALESCE(app_version, 'unknown') FROM user_devices WHERE deleted_at IS NULL AND platform IN (${platform:sqlstring}) ORDER BY 1",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2,
+        "sort": 1,
+        "hide": 0,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": []
+      },
+      {
+        "name": "online_window",
+        "label": "Online = seen within",
+        "type": "custom",
+        "query": "5 minutes : 5m,15 minutes : 15m,1 hour : 1h,24 hours : 24h",
+        "multi": false,
+        "includeAll": false,
+        "options": [
+          {
+            "text": "5 minutes",
+            "value": "5m",
+            "selected": false
+          },
+          {
+            "text": "15 minutes",
+            "value": "15m",
+            "selected": true
+          },
+          {
+            "text": "1 hour",
+            "value": "1h",
+            "selected": false
+          },
+          {
+            "text": "24 hours",
+            "value": "24h",
+            "selected": false
+          }
+        ],
+        "current": {
+          "selected": true,
+          "text": "15 minutes",
+          "value": "15m"
+        }
+      },
+      {
+        "name": "active_window",
+        "label": "Active = seen within",
+        "type": "custom",
+        "query": "7 days : 7d,14 days : 14d,30 days : 30d",
+        "multi": false,
+        "includeAll": false,
+        "options": [
+          {
+            "text": "7 days",
+            "value": "7d",
+            "selected": false
+          },
+          {
+            "text": "14 days",
+            "value": "14d",
+            "selected": true
+          },
+          {
+            "text": "30 days",
+            "value": "30d",
+            "selected": false
+          }
+        ],
+        "current": {
+          "selected": true,
+          "text": "14 days",
+          "value": "14d"
+        }
+      },
+      {
+        "name": "search",
+        "label": "Search",
+        "type": "textbox",
+        "query": "",
+        "description": "Device ID, client ID, student ID or model",
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ]
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "tigerduck"
+      ],
+      "asDropdown": true,
+      "title": "TigerDuck",
+      "includeVars": false,
+      "keepTime": true,
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Now",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Online",
+      "description": "Devices whose last request (sync poll, upload, registration) is within the 'Online = seen within' window.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"online\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n AND ud.last_seen_at > now() - '${online_window}'::interval",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active",
+      "description": "Devices seen within the 'Active = seen within' window (14 days by default).",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"active\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n AND ud.last_seen_at > now() - '${active_window}'::interval",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 3,
+      "gridPos": {
+        "x": 3,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active 24h",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"24h\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n AND ud.last_seen_at > now() - interval '24 hours'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 4,
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Devices",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 5,
+      "gridPos": {
+        "x": 9,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Students",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(DISTINCT u.id) AS \"students\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n AND u.student_id IS NOT NULL",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 6,
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Push on",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) FILTER (WHERE ud.server_push_enabled)::float / NULLIF(count(*), 0) AS \"push on\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 15,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Sessions",
+      "description": "Refresh-token sessions neither revoked nor expired. Not affected by the filters.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"sessions\" FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > now()",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 8,
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Token reuse",
+      "description": "A rotated refresh token presented again: a client bug or a stolen token. Not affected by the filters.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"reuse\" FROM auth_sessions WHERE reuse_detected_at > now() - interval '24 hours'",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 9,
+      "gridPos": {
+        "x": 21,
+        "y": 1,
+        "w": 3,
+        "h": 4
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Over time",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Online devices",
+      "description": "Sampled every 30 seconds. Starts when monitoring was first deployed.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (platform) (tigerduck_devices_seen{window=\"$online_window\", platform=~\"${platform:regex}\"})",
+          "legendFormat": "{{platform}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 11,
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Active devices",
+      "description": "Daily, weekly and monthly active devices.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (window) (tigerduck_devices_seen{window=~\"24h|7d|$active_window|30d\", platform=~\"${platform:regex}\"})",
+          "legendFormat": "seen within {{window}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 12,
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Registered devices",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (platform) (tigerduck_devices{platform=~\"${platform:regex}\"})",
+          "legendFormat": "{{platform}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 13,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "App version adoption",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (app_version) (tigerduck_devices_by_app_version{platform=~\"${platform:regex}\"})",
+          "legendFormat": "{{app_version}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "percent",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 14,
+      "gridPos": {
+        "x": 8,
+        "y": 14,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Sign-in sessions created per hour",
+      "description": "Logins plus refresh-token rotations. Access tokens last 15 minutes, so an app in use rotates a few times an hour: a rough activity signal.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT $__timeGroupAlias(created_at, '1h', 0), count(*) AS \"sessions\"\nFROM auth_sessions\nWHERE $__timeFilter(created_at)\nGROUP BY 1\nORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 70,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 15,
+      "gridPos": {
+        "x": 16,
+        "y": 14,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Breakdown",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "piechart",
+      "title": "Platform",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT ud.platform AS \"platform\", count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n GROUP BY 1 ORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "id": 17,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 6,
+        "h": 8
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "App version",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT ud.platform || ' ' || COALESCE(ud.app_version, '?') AS \"version\", count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n GROUP BY 1 ORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "minVizWidth": 8,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 14
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      },
+      "id": 18,
+      "gridPos": {
+        "x": 6,
+        "y": 23,
+        "w": 6,
+        "h": 8
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "OS version",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT CASE WHEN ud.os_version ILIKE ud.platform || '%' THEN ud.os_version ELSE ud.platform || ' ' || COALESCE(ud.os_version, '?') END AS \"os\", count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n GROUP BY 1 ORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "minVizWidth": 8,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 14
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      },
+      "id": 19,
+      "gridPos": {
+        "x": 12,
+        "y": 23,
+        "w": 6,
+        "h": 8
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Device model",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT COALESCE(ud.device_model, 'unknown') AS \"model\", count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n GROUP BY 1 ORDER BY 2 DESC LIMIT 15",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "minVizWidth": 8,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 14
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      },
+      "id": 20,
+      "gridPos": {
+        "x": 18,
+        "y": 23,
+        "w": 6,
+        "h": 8
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Switches turned on",
+      "description": "Per-device switches from the app's settings.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT s.setting AS \"setting\", count(*) FILTER (WHERE s.enabled) AS \"devices\"\nFROM user_devices ud JOIN users u ON u.id = ud.user_id\nCROSS JOIN LATERAL (VALUES\n    ('server push', ud.server_push_enabled), ('cloud sync', ud.cloud_sync_enabled),\n    ('bulletin push', ud.bulletin_push_enabled), ('live activity', ud.sync_live_activity),\n    ('assignment reminders', ud.sync_assignment_reminders), ('sync courses', ud.sync_courses),\n    ('sync course colors', ud.sync_course_colors), ('sync course names', ud.sync_course_names),\n    ('sync assignments', ud.sync_assignments)\n) AS s(setting, enabled)\nWHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n\nGROUP BY 1\nORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "minVizWidth": 8,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 14
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      },
+      "id": 21,
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Push tokens",
+      "description": "push_to_start tokens start Live Activities; standard tokens carry every other push.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT t.provider || ' ' || t.token_kind || ' (' || t.status || ')' AS \"token\", count(*) AS \"tokens\"\nFROM device_push_tokens t\nJOIN user_devices ud ON ud.id = t.device_id\nJOIN users u ON u.id = ud.user_id\nWHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n\nGROUP BY 1\nORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "color": {
+            "mode": "continuous-BlPu"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "sizing": "manual",
+        "minVizHeight": 16,
+        "maxVizHeight": 24,
+        "minVizWidth": 8,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 14
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": true
+        }
+      },
+      "id": 22,
+      "gridPos": {
+        "x": 8,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "Locale",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT COALESCE(ud.locale, 'unknown') AS \"locale\", count(*) AS \"devices\" FROM user_devices ud JOIN users u ON u.id = ud.user_id WHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n GROUP BY 1 ORDER BY 2 DESC",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "values": true,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "id": 23,
+      "gridPos": {
+        "x": 16,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "Devices",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Devices",
+      "description": "The portal's device list, plus switches and last-seen. Filtered by the variables above; the search box matches device ID, client ID, student ID and model.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT\n    CASE WHEN ud.last_seen_at > now() - '${online_window}'::interval THEN 'online'\n         WHEN ud.last_seen_at > now() - '${active_window}'::interval THEN 'active'\n         ELSE 'inactive' END AS \"status\",\n    ud.last_seen_at AS \"last seen\",\n    COALESCE(u.student_id, u.id::text) AS \"user\",\n    ud.platform AS \"platform\",\n    ud.device_model AS \"model\",\n    ud.app_version AS \"app\",\n    ud.os_version AS \"os\",\n    ud.locale AS \"locale\",\n    ud.server_push_enabled AS \"push\",\n    ud.cloud_sync_enabled AS \"cloud sync\",\n    ud.bulletin_push_enabled AS \"bulletins\",\n    ud.sync_live_activity AS \"live activity\",\n    ud.sync_assignment_reminders AS \"reminders\",\n    EXISTS (SELECT 1 FROM device_push_tokens t WHERE t.device_id = ud.id AND t.status = 'active'\n            AND t.provider = 'apns' AND t.token_kind = 'standard') AS \"apns\",\n    EXISTS (SELECT 1 FROM device_push_tokens t WHERE t.device_id = ud.id AND t.status = 'active'\n            AND t.token_kind = 'push_to_start') AS \"pts\",\n    EXISTS (SELECT 1 FROM device_push_tokens t WHERE t.device_id = ud.id AND t.status = 'active'\n            AND t.provider = 'fcm') AS \"fcm\",\n    (SELECT t.environment FROM device_push_tokens t WHERE t.device_id = ud.id AND t.status = 'active'\n     ORDER BY (t.token_kind = 'standard') DESC, t.id LIMIT 1) AS \"apns env\",\n    ud.last_login_at AS \"last login\",\n    ud.created_at AS \"registered\",\n    ud.id::text AS \"device id\",\n    ud.client_device_id AS \"client id\"\nFROM user_devices ud JOIN users u ON u.id = ud.user_id\nWHERE \nud.deleted_at IS NULL\n  AND ud.platform IN (${platform:sqlstring})\n  AND COALESCE(ud.app_version, 'unknown') IN (${app_version:sqlstring})\n  AND (${search:sqlstring} = ''\n       OR concat_ws(' ', ud.id::text, ud.client_device_id, u.student_id, ud.device_model)\n          ILIKE '%' || ${search:sqlstring} || '%')\n\nORDER BY ud.last_seen_at DESC NULLS LAST\nLIMIT 1000",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last seen"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last login"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "sent": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "succeeded": {
+                        "color": "green",
+                        "index": 1
+                      },
+                      "processed": {
+                        "color": "green",
+                        "index": 2
+                      },
+                      "active": {
+                        "color": "green",
+                        "index": 3
+                      },
+                      "success": {
+                        "color": "green",
+                        "index": 4
+                      },
+                      "online": {
+                        "color": "green",
+                        "index": 5
+                      },
+                      "info": {
+                        "color": "green",
+                        "index": 6
+                      },
+                      "2xx": {
+                        "color": "green",
+                        "index": 7
+                      },
+                      "failed": {
+                        "color": "red",
+                        "index": 8
+                      },
+                      "error": {
+                        "color": "red",
+                        "index": 9
+                      },
+                      "invalid": {
+                        "color": "red",
+                        "index": 10
+                      },
+                      "critical": {
+                        "color": "purple",
+                        "index": 11
+                      },
+                      "5xx": {
+                        "color": "red",
+                        "index": 12
+                      },
+                      "partial_failed": {
+                        "color": "orange",
+                        "index": 13
+                      },
+                      "warn": {
+                        "color": "orange",
+                        "index": 14
+                      },
+                      "4xx": {
+                        "color": "orange",
+                        "index": 15
+                      },
+                      "missed": {
+                        "color": "orange",
+                        "index": 16
+                      },
+                      "skipped": {
+                        "color": "yellow",
+                        "index": 17
+                      },
+                      "running": {
+                        "color": "yellow",
+                        "index": 18
+                      },
+                      "processing": {
+                        "color": "yellow",
+                        "index": 19
+                      },
+                      "pending": {
+                        "color": "blue",
+                        "index": 20
+                      },
+                      "debug": {
+                        "color": "blue",
+                        "index": 21
+                      },
+                      "3xx": {
+                        "color": "blue",
+                        "index": 22
+                      },
+                      "cancelled": {
+                        "color": "#8e8e8e",
+                        "index": 23
+                      },
+                      "disabled": {
+                        "color": "#8e8e8e",
+                        "index": 24
+                      },
+                      "unknown": {
+                        "color": "#8e8e8e",
+                        "index": 25
+                      },
+                      "inactive": {
+                        "color": "#8e8e8e",
+                        "index": 26
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byType",
+              "options": "boolean"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "custom.align",
+                "value": "center"
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "true": {
+                        "text": "on",
+                        "color": "green",
+                        "index": 0
+                      },
+                      "false": {
+                        "text": "off",
+                        "color": "#8e8e8e",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "status"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "push"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cloud sync"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bulletins"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 80
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "live activity"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 95
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reminders"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 85
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "apns"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 60
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pts"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 50
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "fcm"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 50
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 25,
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 24,
+        "h": 14
+      }
+    },
+    {
+      "type": "table",
+      "title": "Device lists",
+      "description": "Named cohorts for custom pushes, managed from the portal's Lists tab.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT l.name AS \"list\", l.description AS \"description\", count(m.device_id) AS \"members\",\n       l.created_at AS \"created\", l.updated_at AS \"updated\"\nFROM device_lists l\nLEFT JOIN device_list_members m ON m.list_id = l.id\nGROUP BY l.id\nORDER BY l.name",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 26,
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Devices registered per day",
+      "description": "",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "WITH days AS (\n    SELECT generate_series(date_trunc('day', $__timeFrom()::timestamptz, 'Asia/Taipei'), $__timeTo()::timestamptz, interval '1 day') AS day\n),\ncounts AS (\nSELECT date_trunc('day', ud.created_at, 'Asia/Taipei') AS day, ud.platform AS metric, count(*) AS value\nFROM user_devices ud JOIN users u ON u.id = ud.user_id\nWHERE $__timeFilter(ud.created_at) AND ud.platform IN (${platform:sqlstring})\nGROUP BY 1, 2\n),\nmetrics AS (SELECT DISTINCT metric FROM counts)\nSELECT d.day AS \"time\", m.metric, COALESCE(c.value, 0) AS value\nFROM days d\nCROSS JOIN metrics m\nLEFT JOIN counts c ON c.day = d.day AND c.metric = m.metric\nORDER BY 1",
+          "format": "time_series",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 70,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 27,
+      "gridPos": {
+        "x": 12,
+        "y": 54,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Legacy registrations",
+      "description": "Rows in the pre-v3 device_registrations table, still read by the anonymous bulletin dispatcher and custom-push targeting.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "tigerduck-db"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "tigerduck-db"
+          },
+          "rawSql": "SELECT count(*) AS \"rows\" FROM device_registrations",
+          "format": "table",
+          "rawQuery": true,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "textMode": "auto",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 28,
+      "gridPos": {
+        "x": 0,
+        "y": 60,
+        "w": 4,
+        "h": 4
+      }
+    }
+  ]
+}

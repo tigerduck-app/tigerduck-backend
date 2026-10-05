@@ -1,0 +1,28 @@
+# sql_exporter: turns app-level SQL counts (devices online, push queue,
+# sync jobs, bulletins) into Prometheus gauges so they get a history.
+# Grafana's SQL panels show the current rows; these show how the numbers
+# moved over time.
+#
+# The DSN comes from SQLEXPORTER_TARGET_DSN (docker-compose.yml), logged in
+# as the read-only tigerduck_monitor role.
+
+global:
+  scrape_timeout_offset: 500ms
+  # Prometheus scrapes every 15s; the counts don't need to be that fresh,
+  # and caching them keeps the queries off the database most of the time.
+  min_interval: 30s
+  max_connections: 2
+  max_idle_connections: 1
+  max_connection_lifetime: 10m
+
+target:
+  # No `name`: with one, the exporter adds its own `up` series, which
+  # Prometheus's `up` for this job would then be doubled by.
+  # Placeholder: the real DSN (with the password) arrives in
+  # SQLEXPORTER_TARGET_DSN and replaces this. The YAML parser rejects an
+  # empty value before the environment is applied.
+  data_source_name: postgres://set-by-SQLEXPORTER_TARGET_DSN
+  collectors: [tigerduck_*]
+
+collector_files:
+  - /etc/sql_exporter/collectors/*.collector.yml

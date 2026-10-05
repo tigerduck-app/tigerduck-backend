@@ -8,6 +8,9 @@ index and UPSERT semantics.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
@@ -98,6 +101,34 @@ def test_parse_list_html_handles_missing_tbody() -> None:
     assert len(rows) == 2
 
 
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_parse_list_html_reads_the_live_list_page() -> None:
+    # A copy of the real list page (bulletin_list_url, saved 2026-10-05,
+    # its search form's req_token blanked) and the 30 rows the Modest
+    # parser of selectolax 0.4 read from it. Lexbor has to read the same
+    # rows: a bulletin whose row it drops stops being seen, and after
+    # bulletin_stale_cycles scrapes it is marked deleted and leaves the app.
+    html = (_FIXTURES / "bulletin_list_page.html").read_text(encoding="utf-8")
+    expected = json.loads(
+        (_FIXTURES / "bulletin_list_page.rows.json").read_text(encoding="utf-8")
+    )
+
+    rows = parse_list_html(html)
+
+    assert [
+        {
+            "external_id": r.external_id,
+            "title": r.title,
+            "source_url": r.source_url,
+            "raw_publisher": r.raw_publisher,
+            "posted_at": r.posted_at.isoformat() if r.posted_at else None,
+        }
+        for r in rows
+    ] == expected
+
+
 # ---- trafilatura sanity ----------------------------------------------------
 
 
@@ -112,6 +143,24 @@ def test_extract_markdown_pulls_body_from_minimal_html() -> None:
     md = extract_markdown(html)
     assert md is not None
     assert "公告標題" in md
+
+
+def test_extract_markdown_writes_underline_as_markdown_not_html() -> None:
+    # The apps render body_md as markdown and show inline HTML as literal
+    # text, and content_hash dedup hashes this output, so its shape must
+    # not drift. trafilatura 2.3 writes <u>…</u> here, which is why
+    # pyproject.toml holds it below 2.3.
+    html = """
+    <html><body><article>
+    <p>申請注意事項如下，請同學務必詳閱並於期限內完成線上申請與列印。</p>
+    <p>系統於申請時間截止後即<u>無法登入</u>，亦<u>無法列印及編輯</u>，逾期恕不受理。</p>
+    <p>本助學金只開放上學期申請，申請後會進行財產查核，查核通過者將抵扣學雜費。</p>
+    </article></body></html>
+    """
+    md = extract_markdown(html)
+    assert md is not None
+    assert "無法登入" in md
+    assert "<u>" not in md
 
 
 # ---- Hashing ---------------------------------------------------------------

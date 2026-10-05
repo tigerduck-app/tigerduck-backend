@@ -396,6 +396,43 @@ async def test_pending_jobs_cancelled_once_no_device_can_receive_them(
     assert await scan_assignment_reminders(factory, test_settings) == 2
 
 
+async def test_pending_jobs_outlive_a_token_gone_between_scans(
+    db_session, prepared_engine, test_settings
+):
+    # APNs dropped the token, or the app has not registered a new one yet.
+    # Cancelled, a reminder due before the next scan was lost even when the
+    # app registered a token in time: a scan files no key already due.
+    user = await _make_user(db_session, with_device=False)
+    device = await _add_device(db_session, user)
+    db_session.add(_assignment(user, aid=1, due_in_hours=30))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    assert await scan_assignment_reminders(factory, test_settings) == 2
+
+    token = (
+        await db_session.execute(
+            select(DevicePushToken).where(DevicePushToken.device_id == device.id)
+        )
+    ).scalar_one()
+    token.status = "invalidated"
+    # Added meanwhile, an assignment is not filed: nothing could receive it.
+    db_session.add(_assignment(user, aid=2, due_in_hours=30))
+    await db_session.commit()
+
+    assert await scan_assignment_reminders(factory, test_settings) == 0
+    jobs = await _jobs(db_session, user.id)
+    assert [(j.payload["moodle_assignment_id"], j.status) for j in jobs] == [
+        (1, "pending"),
+        (1, "pending"),
+    ]
+
+    # Signed out: there is no device left to wait for.
+    device.deleted_at = datetime.now(UTC)
+    await db_session.commit()
+    await scan_assignment_reminders(factory, test_settings)
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["cancelled"] * 2
+
+
 async def test_a_reminder_that_found_no_recipient_is_not_filed_again(
     db_session, prepared_engine, test_settings
 ):
