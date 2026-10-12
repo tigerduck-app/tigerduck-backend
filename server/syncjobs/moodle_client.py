@@ -317,6 +317,10 @@ class HttpAssignmentFetcher:
             "wstoken": token,
             "wsfunction": "mod_assign_get_assignments",
             "moodlewsrestformat": "json",
+            # Moodle then leaves out every course where the user cannot
+            # submit, such as one they are a TA in: its assignments are
+            # graded there, not handed in, so they get no reminders.
+            "capabilities[0]": "mod/assign:submit",
         }
         try:
             async with httpx.AsyncClient(

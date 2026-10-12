@@ -91,6 +91,20 @@ async def test_fetch_assignments_parses_fields():
     assert hw4.due_at is None and hw4.allow_from_at is None
 
 
+async def test_fetch_assignments_asks_only_for_courses_the_user_can_submit_to():
+    """A course the user is a TA in has assignments they grade, not submit;
+    with the capability filter Moodle leaves that course out."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=ASSIGNMENTS_BODY)
+
+    await _fetcher(handler).fetch_assignments(token="tok-1")
+    [request] = seen
+    assert request.url.params["capabilities[0]"] == "mod/assign:submit"
+
+
 async def test_fetch_assignments_invalid_token():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
