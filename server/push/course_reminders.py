@@ -17,7 +17,8 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import BigInteger, any_, bindparam, func, select, text
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
@@ -362,7 +363,14 @@ async def scan_course_reminders(
                         UserCourseSkippedDate.user_course_id,
                         UserCourseSkippedDate.skipped_on,
                     ).where(
-                        UserCourseSkippedDate.user_course_id.in_(course_ids),
+                        # One array parameter: an IN list binds one per
+                        # course, every user's, and asyncpg takes 32,767.
+                        UserCourseSkippedDate.user_course_id
+                        == any_(
+                            bindparam(
+                                "course_ids", course_ids, type_=ARRAY(BigInteger)
+                            )
+                        ),
                         UserCourseSkippedDate.deleted_at.is_(None),
                     )
                 )

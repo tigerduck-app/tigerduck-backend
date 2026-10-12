@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
@@ -482,3 +482,44 @@ async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
     assert await scan_course_reminders(factory, settings) == 3000
     assert len(await _jobs(db_session, user.id)) == 3000
     assert await scan_course_reminders(factory, settings) == 0
+
+
+async def test_a_scan_looks_up_skipped_dates_for_more_courses_than_a_statement_binds(
+    db_session, prepared_engine, test_settings
+):
+    """The scan looks up the skipped dates of every user's current courses,
+    and asyncpg allows 32,767 bind parameters per statement. Bound one per
+    course, the lookup failed the whole scan from 32,768 courses on."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    skipped_course = _course(user, course_key="CS1000001", schedule_json=schedule)
+    kept_course = _course(user, course_key="CS1000002", schedule_json=schedule)
+    other_user = User(student_id="b11203059")
+    db_session.add_all([skipped_course, kept_course, other_user])
+    await db_session.flush()
+    db_session.add(
+        UserCourseSkippedDate(
+            user_id=user.id, user_course_id=skipped_course.id, skipped_on=local.date()
+        )
+    )
+    await db_session.execute(
+        insert(UserCourse),
+        [
+            {
+                "user_id": other_user.id,
+                "semester": "1141",
+                "course_key": f"CS{n:07d}",
+                "course_no": f"CS{n:07d}",
+                "course_name": "資料結構",
+                "schedule_json": schedule,
+            }
+            for n in range(32_767)
+        ],
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+
+    assert await scan_course_reminders(factory, settings) == 1
+    [job] = await _jobs(db_session, user.id)
+    assert job.payload["user_course_id"] == kept_course.id
