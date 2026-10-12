@@ -396,48 +396,44 @@ async def test_full_sync_keys_only_the_newest_mark_of_a_soft_deleted_assignment(
     ]
 
 
-async def test_full_sync_lists_course_overrides_newest_term_first(client) -> None:
+async def test_full_sync_lists_course_overrides_in_creation_order(client) -> None:
     """A course taken again has an override per term under one course
-    number, and Android 2.3.1 applies the first one it reads for it."""
+    number. The released apps keep the later row's name and Android 2.3.1
+    the first row's colour, so the rows come in the order they were made,
+    whatever their terms."""
     login = await do_login(client)
     user_id = uuid.UUID(login["user"]["id"])
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
-        courses = [
-            UserCourse(
+        courses = {
+            semester: UserCourse(
                 user_id=user_id,
                 semester=semester,
-                course_key=f"client:{semester}:{course_no}",
-                course_no=course_no,
+                course_key=f"client:{semester}:CS3001301",
+                course_no="CS3001301",
                 course_name="作業系統",
-                moodle_id=f"{semester}{course_no}",
+                moodle_id=f"{semester}CS3001301",
             )
-            for semester, course_no in [
-                ("1131", "CS3001301"),
-                ("1141", "CS3001301"),
-                ("", "CS3001301"),
-                ("1132", "CS3001301"),
-                ("1141", "CS2001301"),
-            ]
-        ]
-        session.add_all(courses)
+            for semester in ["1131", "1132", "1141", ""]
+        }
+        session.add_all(courses.values())
         await session.flush()
-        session.add_all(
-            UserCourseOverride(
-                user_id=user_id, user_course_id=course.id, color_hex="#FF8800"
+        for semester in ["1141", "1131", "", "1132"]:
+            session.add(
+                UserCourseOverride(
+                    user_id=user_id,
+                    user_course_id=courses[semester].id,
+                    color_hex="#FF8800",
+                )
             )
-            for course in courses
-        )
+            await session.flush()
         await session.commit()
 
     response = await client.get("/v3/sync/full", headers=bearer(login))
     assert response.status_code == 200
-    assert [
-        (o["semester"], o["course_no"]) for o in response.json()["course_overrides"]
-    ] == [
-        ("1141", "CS2001301"),
-        ("1141", "CS3001301"),
-        ("1132", "CS3001301"),
-        ("1131", "CS3001301"),
-        ("", "CS3001301"),
+    assert [o["semester"] for o in response.json()["course_overrides"]] == [
+        "1141",
+        "1131",
+        "",
+        "1132",
     ]
