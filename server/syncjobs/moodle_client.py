@@ -13,6 +13,8 @@ hangs off it:
                           safe to retry with backoff.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → transient transport/parse error; retry.
+* `MoodleNoCourseList`  → an answer without the user's courses; retry, and
+                          past the attempts again at the policy interval.
 """
 
 from __future__ import annotations
@@ -47,6 +49,13 @@ class MoodleRateLimited(MoodleClientError):
 
 class MoodleUnreachable(MoodleClientError):
     pass
+
+
+class MoodleNoCourseList(MoodleUnreachable):
+    """An assignment answer that cannot list the user's courses: no course
+    list, or none left beside a course warning. Its cause, such as a site
+    policy the user has not accepted, can last until the user acts on the
+    Moodle site, so the executor never gives up on the job for it."""
 
 
 class SsoAuthFailed(MoodleClientError):
@@ -353,7 +362,7 @@ class HttpAssignmentFetcher:
         # out, so an answer that cannot list the user's courses must fail.
         courses = body.get("courses")
         if not isinstance(courses, list):
-            raise MoodleUnreachable("unexpected_shape")
+            raise MoodleNoCourseList("unexpected_shape")
         # A course Moodle refused (an unaccepted site policy, for one) comes
         # back as a warning. One the user cannot submit to is left out
         # silently, so a TA-only account's empty answer still applies.
@@ -361,7 +370,7 @@ class HttpAssignmentFetcher:
         if not courses and isinstance(warnings, list) and any(
             isinstance(w, dict) and w.get("item") == "course" for w in warnings
         ):
-            raise MoodleUnreachable("no_course_access")
+            raise MoodleNoCourseList("no_course_access")
 
         fetched: list[FetchedAssignment] = []
         for course in courses:

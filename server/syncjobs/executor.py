@@ -17,12 +17,15 @@ Failure taxonomy → outcome:
 * `MoodleUnreachable`/`SsoUnavailable`/unexpected
                                  → retriable, backoff, last_error
                                    'sync_failed:<detail>'.
+* `MoodleNoCourseList`           → the same, but past max_attempts the job
+                                   runs again after its policy interval.
 * `SubmissionStatusDbError`      → retriable, backoff, last_error
                                    'sync_failed:submission_status'; the
                                    assignment list sync it followed has
                                    already committed.
-Retriable failures exceeding max_attempts land in status 'failed' until
-pull-to-refresh or re-login revives them.
+Other retriable failures exceeding max_attempts land in status 'failed'
+until `POST /v3/sync-jobs/run-now` or the portal's retry revives them;
+re-login revives only a 'disabled' job.
 """
 
 from __future__ import annotations
@@ -62,6 +65,7 @@ from server.syncjobs.moodle_client import (
     AssignmentFetcher,
     CourseFetcher,
     MoodleClientError,
+    MoodleNoCourseList,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -397,6 +401,15 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED
         )
+    except MoodleNoCourseList as exc:
+        # A failed job waits for an operator: no released app calls
+        # run-now, and re-login revives only a disabled job.
+        await _handle_moodle_failure(
+            worker, job_id=job_id, run_id=run_id,
+            error=f"{ERROR_SYNC_FAILED}:{exc}",
+            is_token_invalid=False,
+            keep_retrying=True,
+        )
     except MoodleUnreachable as exc:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
@@ -609,6 +622,7 @@ async def _handle_moodle_failure(
     error: str,
     detail: str | None = None,
     is_token_invalid: bool,
+    keep_retrying: bool = False,
 ) -> None:
     """Check availability windows before disabling a sync job.
 
@@ -653,7 +667,7 @@ async def _handle_moodle_failure(
     else:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id,
-            error=error,
+            error=error, keep_retrying=keep_retrying,
         )
 
 
@@ -665,9 +679,14 @@ async def _record_failure(
     error: str,
     disable: bool = False,
     detail: str | None = None,
+    keep_retrying: bool = False,
 ) -> None:
     """Record a failure in a FRESH session — the work session may have
-    rolled back (or be poisoned by a DB error)."""
+    rolled back (or be poisoned by a DB error).
+
+    With `keep_retrying`, a job past its max_attempts is not left 'failed'
+    but runs again after its policy interval with its attempts reset, as
+    after a success, so a later transient error gets its full retries."""
     async with session_scope(worker.session_factory) as session:
         job = (
             await session.execute(
@@ -702,7 +721,28 @@ async def _record_failure(
             return
 
         job.attempts += 1
-        if job.attempts >= job.max_attempts:
+        if job.attempts >= job.max_attempts and keep_retrying:
+            policy = (
+                await session.execute(
+                    select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
+                )
+            ).scalar_one_or_none()
+            interval = (
+                policy.default_interval_seconds
+                if policy
+                else _DEFAULT_INTERVAL_SECONDS
+            )
+            logger.warning(
+                "syncjobs.run_retry_at_interval",
+                job_id=job_id,
+                attempts=job.attempts,
+                interval_seconds=interval,
+                error=error,
+            )
+            job.status = SyncJobStatus.pending.value
+            job.run_after = now + timedelta(seconds=interval)
+            job.attempts = 0
+        elif job.attempts >= job.max_attempts:
             job.status = SyncJobStatus.failed.value
             logger.warning(
                 "syncjobs.run_failed_terminal",
