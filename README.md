@@ -43,6 +43,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **排程代抓** — `sync_policies`（admin 可調）× `sync_jobs`（登入時 provision）× `sync_runs`（審計）；executor 用 advisory lock + `FOR UPDATE SKIP LOCKED` 認領，多 worker 安全
 - **憑證失效** — 代抓只用已存的 Moodle token，不會拿密碼重新登入。token 遺失或被拒屬於認證類失敗，絕不重試：直接停用該使用者所有同步工作，並排一筆 reauth 系統通知；App 用 `PATCH /v3/auth/credentials` 送新 token 後同步自動恢復
 - **作業鏡像** — 抓 Moodle 作業權威 upsert / 軟刪除，寫入 changelog 讓所有裝置同步
+- **助教課程** — 只抓使用者能繳交作業的課程（`mod/assign:submit`）：擔任助教的課程不抓，下次代抓會軟刪除已存的作業並撤回其提醒
 - **繳交狀態** — 每次作業同步後，向 Moodle 查詢時間窗內（預設 48 小時）到期作業的繳交狀態；新繳交的作業撤回待送提醒、結束倒數中的即時動態
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now`（per-user cooldown，policy 停用時拒絕）
 
