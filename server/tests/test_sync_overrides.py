@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -41,7 +42,12 @@ def bearer(login: dict) -> dict:
 
 
 async def seed_assignment(
-    client, user_id: str, *, moodle_course_id: int, moodle_assignment_id: int = 9001
+    client,
+    user_id: str,
+    *,
+    moodle_course_id: int,
+    moodle_assignment_id: int = 9001,
+    deleted_at: datetime | None = None,
 ) -> int:
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
@@ -50,6 +56,7 @@ async def seed_assignment(
             moodle_course_id=moodle_course_id,
             moodle_assignment_id=moodle_assignment_id,
             title="HW3",
+            deleted_at=deleted_at,
         )
         session.add(assignment)
         await session.commit()
@@ -81,6 +88,104 @@ async def test_override_prefers_server_synced_row_over_upload_placeholder(client
         ).scalar_one()
         assert override.user_assignment_id == synced_id
         assert override.local_status == "locally_completed"
+
+
+async def assignment_marks(client) -> list[tuple[int, str]]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        rows = await session.execute(
+            select(
+                UserAssignmentOverride.user_assignment_id,
+                UserAssignmentOverride.local_status,
+            ).order_by(UserAssignmentOverride.user_assignment_id)
+        )
+        return [tuple(row) for row in rows]
+
+
+async def test_override_marks_an_assignment_whose_rows_are_all_soft_deleted(
+    client,
+) -> None:
+    """The fetch leaves out a course the user is a TA in, but the apps still
+    show its assignments. A mark on one used to 404, and the apps' outbox
+    retried it on every full sync; the server-synced row takes it now."""
+    login = await do_login(client)
+    gone = datetime.now(UTC)
+    await seed_assignment(
+        client, login["user"]["id"], moodle_course_id=0, deleted_at=gone
+    )
+    synced_id = await seed_assignment(
+        client, login["user"]["id"], moodle_course_id=7002, deleted_at=gone
+    )
+
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "ignored"},
+    )
+    assert response.status_code == 200, response.text
+    assert await assignment_marks(client) == [(synced_id, "ignored")]
+    full = (await client.get("/v3/sync/full", headers=bearer(login))).json()
+    assert [
+        (o["moodle_assignment_id"], o["local_status"])
+        for o in full["assignment_overrides"]
+    ] == [(9001, "ignored")]
+
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "none"},
+    )
+    assert response.status_code == 200, response.text
+    assert await assignment_marks(client) == []
+
+
+async def test_clearing_a_mark_clears_every_row_of_the_assignment(client) -> None:
+    """A placeholder's mark outlives the fetch that soft-deletes the
+    placeholder, and `/sync/full` keys it again once no row is live. A clear
+    that left it would have the old mark come back."""
+    login = await do_login(client)
+    placeholder_id = await seed_assignment(
+        client, login["user"]["id"], moodle_course_id=0, deleted_at=datetime.now(UTC)
+    )
+    synced_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add_all(
+            [
+                UserAssignmentOverride(
+                    user_id=uuid.UUID(login["user"]["id"]),
+                    user_assignment_id=placeholder_id,
+                    local_status="ignored",
+                ),
+                UserAssignmentOverride(
+                    user_id=uuid.UUID(login["user"]["id"]),
+                    user_assignment_id=synced_id,
+                    local_status="locally_completed",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "none"},
+    )
+    assert response.status_code == 200, response.text
+    assert await assignment_marks(client) == []
+
+
+async def test_override_of_an_assignment_the_user_never_had_is_404(client) -> None:
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+
+    response = await client.patch(
+        "/v3/sync/assignments/9002/override",
+        headers=bearer(login),
+        json={"local_status": "ignored"},
+    )
+    assert response.status_code == 404
+    assert await assignment_marks(client) == []
 
 
 async def seed_course(

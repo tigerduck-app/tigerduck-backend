@@ -172,6 +172,9 @@ async def _read_full_snapshot(session, user_id, device_id):
     )
 
     _pk_to_moodle = {a.id: a.moodle_assignment_id for a in assignments}
+    _pk_to_moodle |= await _keys_for_marks_on_deleted_rows(
+        session, user_id, assignment_overrides, _pk_to_moodle
+    )
     _course_pk_to_moodle = {c.id: c.moodle_id for c in courses}
     _course_pk_to_no = {c.id: c.course_no for c in courses}
     _course_pk_to_semester = {c.id: c.semester for c in courses}
@@ -238,3 +241,46 @@ async def _read_full_snapshot(session, user_id, device_id):
         # No bulletin sections: subscriptions belong to one device and read
         # state is never shared, so neither is part of TigerSync.
     }
+
+
+async def _keys_for_marks_on_deleted_rows(
+    session, user_id, overrides, live_keys: dict[int, int]
+) -> dict[int, int]:
+    """Moodle assignment ids for marks whose row the server soft-deleted.
+
+    Both apps read a mark they cannot key as cleared, yet a fetch soft-deletes
+    rows the apps still show, such as a TA's course. Such a mark is keyed only
+    while no live row has its assignment, and only the newest one: beside a
+    live row, an older mark may be one the user has cleared there since.
+    """
+    orphaned = {o.user_assignment_id for o in overrides} - live_keys.keys()
+    if not orphaned:
+        return {}
+    deleted_keys = dict(
+        (
+            await session.execute(
+                select(UserAssignment.id, UserAssignment.moodle_assignment_id).where(
+                    UserAssignment.user_id == user_id,
+                    UserAssignment.id.in_(orphaned),
+                )
+            )
+        ).all()
+    )
+    live_ids = set(live_keys.values())
+    newest: dict[int, UserAssignmentOverride] = {}
+    for override in overrides:
+        moodle_id = deleted_keys.get(override.user_assignment_id)
+        if moodle_id is None or moodle_id in live_ids:
+            continue
+        kept = newest.get(moodle_id)
+        if kept is None or _marked_at(override) > _marked_at(kept):
+            newest[moodle_id] = override
+    return {o.user_assignment_id: moodle_id for moodle_id, o in newest.items()}
+
+
+_NEVER = datetime.min.replace(tzinfo=UTC)
+
+
+def _marked_at(override: UserAssignmentOverride) -> tuple[datetime, int]:
+    # Without a status time the row carries no mark, so any mark outranks it.
+    return (override.local_status_updated_at or _NEVER, override.id)

@@ -14,7 +14,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,17 +99,20 @@ async def patch_assignment_override(
     now = datetime.now(UTC)
 
     if payload.local_status == "none":
-        # Hard-delete the override row instead of keeping status="none".
-        existing = (
-            await session.execute(
-                select(UserAssignmentOverride).where(
-                    UserAssignmentOverride.user_id == auth.user_id,
-                    UserAssignmentOverride.user_assignment_id == assignment.id,
-                )
+        # Hard-delete the override row instead of keeping status="none", on
+        # every row of the assignment: `/sync/full` keys a mark left on a
+        # soft-deleted row once no row is live, which would bring it back.
+        await session.execute(
+            delete(UserAssignmentOverride).where(
+                UserAssignmentOverride.user_id == auth.user_id,
+                UserAssignmentOverride.user_assignment_id.in_(
+                    select(UserAssignment.id).where(
+                        UserAssignment.user_id == auth.user_id,
+                        UserAssignment.moodle_assignment_id == moodle_assignment_id,
+                    )
+                ),
             )
-        ).scalar_one_or_none()
-        if existing is not None:
-            await session.delete(existing)
+        )
 
         await append_change(
             session,
@@ -295,6 +298,10 @@ async def _get_assignment_by_moodle_id(
     # live for the same assignment until the next fetch soft-deletes the
     # placeholder. Prefer the server-synced row — overrides attached to it
     # survive that fetch.
+    #
+    # With no live row, a soft-deleted one takes the mark: the server's fetch
+    # leaves out a course the user cannot submit to, which the apps still
+    # show, and `/sync/full` keys a mark on such a row while none is live.
     row = (
         (
             await session.execute(
@@ -302,9 +309,9 @@ async def _get_assignment_by_moodle_id(
                 .where(
                     UserAssignment.moodle_assignment_id == moodle_assignment_id,
                     UserAssignment.user_id == user_id,
-                    UserAssignment.deleted_at.is_(None),
                 )
                 .order_by(
+                    UserAssignment.deleted_at.is_not(None).asc(),
                     (UserAssignment.moodle_course_id == 0).asc(),
                     UserAssignment.id,
                 )
