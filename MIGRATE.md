@@ -46,9 +46,16 @@ settings, so the normal upgrade is all it needs.
 - **Deploy before the apps.** Ship this backend before any app version
   that ignores courses. Older apps keep working: the new request fields are
   optional and they skip the new response fields.
-- **Rolling back.** 3.2.0 runs on the new schema because it never reads
-  these columns, so redeploy the old code and leave the schema alone.
-  `alembic downgrade f3c8a1d5b927` deletes every saved ignore setting.
+- **Rolling back.** The 3.2.0 code cannot start on a database at
+  `ddf188f91a15`: its startup `alembic upgrade head` cannot find that
+  revision. To go back and keep the saved settings, run
+  `docker compose exec backend alembic stamp f3c8a1d5b927` while 3.3.0 is
+  still running, then deploy 3.2.0. The new columns stay, and 3.2.0 never
+  reads them. Before starting 3.3.0 again, build it and run
+  `docker compose run --rm --entrypoint alembic backend stamp ddf188f91a15`,
+  or its startup migration fails on the columns that already exist.
+  `alembic downgrade f3c8a1d5b927` instead drops the columns and every
+  saved ignore setting.
 
 ---
 
