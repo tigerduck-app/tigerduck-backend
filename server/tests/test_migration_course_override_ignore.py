@@ -1,4 +1,5 @@
-"""The ignore-assignments migration, run by Alembic on a database of its own.
+"""The ignore-assignments migration, run by Alembic on a database of its own
+the way a deploy runs it.
 
 The rest of the suite builds its schema with `Base.metadata.create_all`,
 which says nothing about the migration production runs at startup
@@ -11,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -49,15 +51,21 @@ async def migration_db_url(test_settings: Settings) -> AsyncIterator[str]:
     await _drop_db(admin_url, db_name)
 
 
-def _alembic(database_url: str, *args: str) -> None:
-    result = subprocess.run(
+def _run_alembic(
+    database_url: str, *args: str, timeout: float = 300
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [sys.executable, "-m", "alembic", *args],
         cwd=REPO_ROOT,
         env={**os.environ, "TIGERDUCK_DATABASE_URL": database_url},
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=timeout,
     )
+
+
+def _alembic(database_url: str, *args: str) -> None:
+    result = _run_alembic(database_url, *args)
     assert result.returncode == 0, result.stderr
 
 
@@ -173,5 +181,33 @@ async def test_upgrade_after_a_rollback_by_stamp_keeps_the_settings(
         _alembic(migration_db_url, "downgrade", DOWN_REVISION)
         async with engine.connect() as conn:
             assert not NEW_COLUMNS & await _override_columns(conn)
+    finally:
+        await engine.dispose()
+
+
+async def test_upgrade_behind_a_held_lock_gives_up_instead_of_waiting(
+    migration_db_url: str,
+) -> None:
+    """The backend migrates as it starts. Behind a lock another transaction
+    holds, such as a backup's, the upgrade used to wait for good; it now
+    fails after `lock_timeout` and the restarted container tries again."""
+    _alembic(migration_db_url, "upgrade", DOWN_REVISION)
+    engine = create_async_engine(migration_db_url)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(
+                text("LOCK TABLE user_course_overrides IN ACCESS SHARE MODE")
+            )
+            started = time.monotonic()
+            result = _run_alembic(migration_db_url, "upgrade", REVISION, timeout=60)
+            waited = time.monotonic() - started
+            await conn.rollback()
+        assert result.returncode != 0
+        assert "lock timeout" in result.stderr
+        assert waited < 30
+
+        _alembic(migration_db_url, "upgrade", REVISION)
+        async with engine.connect() as conn:
+            assert NEW_COLUMNS <= await _override_columns(conn)
     finally:
         await engine.dispose()
