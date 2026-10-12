@@ -1,7 +1,8 @@
 """Phase 4a: generate assignment due-date reminder push_jobs.
 
 Scan-based (default every 300s): eligible = not deleted, not submitted,
-local_status not in (locally_completed/ignored/archived), due within the
+local_status not in (locally_completed/ignored/archived), not in a course
+whose assignments the user ignores (`_ignored_courses`), due within the
 scan window, the user's `notification` settings document has
 assignments enabled (no document → enabled with the server default
 offsets), and the user has a device the pipeline would deliver the
@@ -10,7 +11,8 @@ offset) with the due-date epoch embedded in the dedupe key —
 `ux_push_jobs_dedupe_active` also covers sent states (security fix 1.2),
 so a due-date change must mint a NEW key; the scan cancels pending jobs
 whose key is no longer valid (due changed, assignment completed/ignored/
-deleted, reminders disabled, or no device left to receive them).
+deleted, its course's assignments ignored, reminders disabled, or no
+device left to receive them).
 
 A key stays valid even after its fire time has passed (the pipeline is
 about to deliver it) — only keys that no longer correspond to an
@@ -43,6 +45,8 @@ from server.push.notification_copy import has_reminder_copy_inputs
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
+    UserCourse,
+    UserCourseOverride,
     UserSettingsDocument,
 )
 
@@ -129,6 +133,54 @@ def _numbers(raw: list) -> list[float]:
     return [float(value) for value in raw if isinstance(value, (int, float))]
 
 
+async def _ignored_courses(
+    session: AsyncSession, user_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, tuple[set[int], set[str]]]:
+    """user_id → (numeric Moodle course ids, course numbers) of the courses
+    whose assignments the user ignores (`ignore_assignments`).
+
+    The server fetches assignments itself and keys them by the numeric
+    course id, which the override holds once a client has sent it. A row a
+    client uploaded is a placeholder with course id 0 that carries the
+    course number instead, so only placeholders are matched by number. A
+    course number is the same in every semester: the placeholder of a course
+    taken again after it was ignored is skipped too, until the server's own
+    fetch soft-deletes the placeholder.
+    """
+    ignored: dict[uuid.UUID, tuple[set[int], set[str]]] = {}
+    if not user_ids:
+        return ignored
+    rows = await session.execute(
+        select(
+            UserCourseOverride.user_id,
+            UserCourseOverride.moodle_course_id,
+            UserCourse.course_no,
+        )
+        .join(UserCourse, UserCourse.id == UserCourseOverride.user_course_id)
+        .where(
+            UserCourseOverride.user_id.in_(user_ids),
+            UserCourseOverride.ignore_assignments.is_(True),
+        )
+    )
+    for user_id, moodle_course_id, course_no in rows:
+        course_ids, course_nos = ignored.setdefault(user_id, (set(), set()))
+        if moodle_course_id is not None:
+            course_ids.add(moodle_course_id)
+        if course_no:
+            course_nos.add(course_no)
+    return ignored
+
+
+def _in_ignored_course(
+    assignment: UserAssignment,
+    ignored: dict[uuid.UUID, tuple[set[int], set[str]]],
+) -> bool:
+    course_ids, course_nos = ignored.get(assignment.user_id, (set(), set()))
+    if assignment.moodle_course_id in course_ids:
+        return True
+    return assignment.moodle_course_id == 0 and assignment.course_no in course_nos
+
+
 async def _users_with_a_recipient(
     session: AsyncSession,
     user_ids: set[uuid.UUID],
@@ -209,12 +261,14 @@ async def scan_assignment_reminders(
             )
         ).all()
 
-        eligible = [
+        not_marked = [
             assignment
             for assignment, override in rows
             if override is None
             or override.local_status not in _EXCLUDED_LOCAL_STATUSES
         ]
+        ignored = await _ignored_courses(session, {a.user_id for a in not_marked})
+        eligible = [a for a in not_marked if not _in_ignored_course(a, ignored)]
         user_ids = {a.user_id for a in eligible}
 
         # Pending reminder jobs of EVERY user — also covers users whose
