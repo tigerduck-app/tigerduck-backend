@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
@@ -33,6 +32,7 @@ from server.auth.models import (
 )
 from server.config import Settings
 from server.db import session_scope
+from server.push.reminders import file_jobs
 from server.sync.models import (
     UserCourse,
     UserCourseOverride,
@@ -439,11 +439,7 @@ async def scan_course_reminders(
 
         # Filed only where a device can receive it now.
         to_file = [value for value in values if value["user_id"] in reachable]
-        if to_file:
-            result = await session.execute(
-                pg_insert(PushJob).values(to_file).on_conflict_do_nothing()
-            )
-            created = result.rowcount or 0
+        created = await file_jobs(session, to_file)
 
         for job in pending_jobs:
             if (job.user_id, job.dedupe_key) in valid_keys:

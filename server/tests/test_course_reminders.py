@@ -461,3 +461,24 @@ async def test_another_users_opt_in_does_not_leak(
     assert await scan_course_reminders(factory, settings) == 1
     assert await _jobs(db_session, quiet_user.id) == []
     assert len(await _jobs(db_session, loud_user.id)) == 1
+
+
+async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
+    db_session, prepared_engine, test_settings
+):
+    """asyncpg allows 32,767 bind parameters per statement and a reminder
+    row binds 11. Filed in one insert, 2,979 reminders failed the scan, and
+    with it every reminder it should have filed or cancelled."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add_all(
+        _course(user, course_key=f"CS{n:07d}", schedule_json=schedule)
+        for n in range(3000)
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+
+    assert await scan_course_reminders(factory, settings) == 3000
+    assert len(await _jobs(db_session, user.id)) == 3000
+    assert await scan_course_reminders(factory, settings) == 0

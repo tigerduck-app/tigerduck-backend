@@ -586,3 +586,21 @@ async def test_ignoring_a_course_leaves_other_users_alone(
 
     assert await _jobs(db_session, user_a.id) == []
     assert len(await _jobs(db_session, user_b.id)) == 2
+
+
+async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
+    db_session, prepared_engine, test_settings
+):
+    """asyncpg allows 32,767 bind parameters per statement and a reminder
+    row binds 11. Filed in one insert, 2,979 reminders failed the scan, and
+    with it every reminder it should have filed or cancelled."""
+    user = await _make_user(db_session)
+    db_session.add_all(
+        _assignment(user, aid=aid, due_in_hours=30) for aid in range(1, 1501)
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    assert await scan_assignment_reminders(factory, test_settings) == 3000
+    assert len(await _jobs(db_session, user.id)) == 3000
+    assert await scan_assignment_reminders(factory, test_settings) == 0
