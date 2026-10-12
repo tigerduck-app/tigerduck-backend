@@ -188,7 +188,8 @@ class UserCourseOverride(Base):
     )
 
     # Every assignment of the course counts as ignored, including ones
-    # Moodle adds later, so the reminder scan skips them all.
+    # Moodle adds later. The reminder scan finds the ones the server fetched
+    # by `moodle_course_id`, and the apps' placeholders by course number.
     ignore_assignments: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa.false(), default=False
     )

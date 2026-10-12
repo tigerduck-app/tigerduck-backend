@@ -23,8 +23,10 @@ def upgrade() -> None:
     Moodle course that is.
 
     `ignore_assignments` is a merge triplet like `color_hex`: the value, when
-    it was set and by which device. While it is true the reminder scan files
-    nothing for the course's assignments and cancels what it filed.
+    it was set and by which device. While it is true the reminder scan skips
+    the course's assignments and cancels what it filed for them. It finds the
+    ones the server fetched by `moodle_course_id`, so until a client has sent
+    that it skips only the placeholders the apps upload.
 
     `moodle_course_id` is the course's numeric Moodle id. The override is
     reached by the course's Moodle idnumber, which the assignments the server
