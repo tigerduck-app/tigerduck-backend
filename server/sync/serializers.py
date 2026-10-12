@@ -54,15 +54,20 @@ def course_override_to_dict(
     *,
     moodle_id: str | None = None,
     course_no: str | None = None,
+    semester: str | None = None,
 ) -> dict:
     return {
         "user_course_id": o.user_course_id,
         "moodle_id": moodle_id,
         "course_no": course_no,
+        "semester": semester,
         "custom_names": o.custom_names or {},
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
         "color_hex": o.color_hex,
         "color_hex_updated_at": _iso(o.color_hex_updated_at),
+        "ignore_assignments": o.ignore_assignments,
+        "ignore_assignments_updated_at": _iso(o.ignore_assignments_updated_at),
+        "moodle_course_id": o.moodle_course_id,
     }
 
 

@@ -56,7 +56,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 📲 Push (`server/push/`)
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
 - **Tick** — Every 5 seconds, and each one drains every due job. Live Activity starts and ends are filed at priority 10, ahead of every other job (default 100)
-- **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
+- **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on, none for a course whose assignments the user ignores) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
 - **School holidays** — Course reminders and the class Live Activities (`classPreparing` / `inClass`) are not sent on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error = holiday`. Assignment Live Activities ignore holidays
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **Notification stacks** — iOS `thread-id` is `course`, `assignment` or `other`. Class and homework reminders carry no shared collapse id, so they stack instead of replacing one another
@@ -285,7 +285,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `DELETE` | `/v3/sync/courses` | Delete all courses | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
 | `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color/name override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain) | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
 
 ### Courses / Assignments

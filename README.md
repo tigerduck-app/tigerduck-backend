@@ -56,7 +56,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 📲 推播（`server/push/`）
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
 - **tick** — 每 5 秒一次，每次把所有到期的 job 清完。Live Activity 的 start / end 以 priority 10 排在其他 job（預設 100）前面
-- **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
+- **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad；使用者忽略作業的課程不送）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
 - **校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在校曆假日（`academic_holidays`）不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error = holiday`。作業類 Live Activity 不受假日影響
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
@@ -285,7 +285,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `DELETE` | `/v3/sync/courses` | 刪除全部課程 | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | 刪除單一課程 | JWT |
 | `POST` | `/v3/sync/assignments/upload` | 上傳作業 | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱覆寫（outbox drain） | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain） | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain） | JWT |
 
 ### 課表 / 作業
