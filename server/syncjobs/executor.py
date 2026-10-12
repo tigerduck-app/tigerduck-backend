@@ -685,8 +685,9 @@ async def _record_failure(
     rolled back (or be poisoned by a DB error).
 
     With `keep_retrying`, a job past its max_attempts is not left 'failed'
-    but runs again after its policy interval with its attempts reset, as
-    after a success, so a later transient error gets its full retries."""
+    but runs again after its policy interval, with its attempts and
+    priority reset as after a success: a later transient error gets its
+    full retries, and a run-now's priority does not outlast it."""
     async with session_scope(worker.session_factory) as session:
         job = (
             await session.execute(
@@ -742,6 +743,7 @@ async def _record_failure(
             job.status = SyncJobStatus.pending.value
             job.run_after = now + timedelta(seconds=interval)
             job.attempts = 0
+            job.priority = policy.priority if policy else _DEFAULT_PRIORITY
         elif job.attempts >= job.max_attempts:
             job.status = SyncJobStatus.failed.value
             logger.warning(

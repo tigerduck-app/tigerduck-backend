@@ -496,8 +496,9 @@ async def test_an_answer_without_the_courses_never_fails_the_job_for_good(
     until the user acts on the Moodle site. A failed job waits for an
     operator: no released app calls run-now, and re-login revives only a
     disabled job. Past its attempts the job runs at its policy interval,
-    with its attempts reset for the errors that may come next."""
-    user, _, job = await _setup_user_job(db_session)
+    with its attempts reset for the errors that may come next, and at its
+    policy's priority rather than the 1 a run-now gave it."""
+    user, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
     answers = [body] * job.max_attempts + [503, {"courses": [], "warnings": []}]
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -512,13 +513,14 @@ async def test_an_answer_without_the_courses_never_fails_the_job_for_good(
         transport=httpx.MockTransport(answer),
     )
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
-    interval = (
+    interval, priority = (
         await db_session.execute(
-            select(SyncPolicy.default_interval_seconds).where(
+            select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
                 SyncPolicy.job_type == job.job_type
             )
         )
-    ).scalar_one()
+    ).one()
+    assert priority != 1
 
     async def run_due() -> None:
         job.run_after = datetime.now(UTC) - timedelta(seconds=1)
@@ -530,6 +532,7 @@ async def test_an_answer_without_the_courses_never_fails_the_job_for_good(
         await run_due()
     assert job.status == "pending"
     assert job.attempts == 0
+    assert job.priority == priority
     assert job.last_error == f"sync_failed:{code}"
     assert job.run_after > datetime.now(UTC) + timedelta(seconds=interval - 60)
 
