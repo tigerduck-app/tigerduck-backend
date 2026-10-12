@@ -187,6 +187,25 @@ class UserCourseOverride(Base):
         nullable=True,
     )
 
+    # Every assignment of the course counts as ignored, including ones
+    # Moodle adds later, so the reminder scan skips them all.
+    ignore_assignments: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false(), default=False
+    )
+    ignore_assignments_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ignore_assignments_device_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # The course's numeric Moodle id, sent by the client. A course the apps
+    # upload is keyed by its Moodle idnumber, but the assignments the server
+    # fetches itself carry only this number, so the reminder scan matches an
+    # ignored course to them by it.
+    moodle_course_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
