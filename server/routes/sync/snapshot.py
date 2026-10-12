@@ -138,8 +138,13 @@ async def _read_full_snapshot(session, user_id, device_id):
             UserCourseTombstone.deleted_at > func.now() - text("interval '30 days'"),
         )
     )
+    # Newest term first: a course taken again has an override per term under
+    # one course number, and Android 2.3.1 applies the first one it reads.
     course_overrides = await rows(
-        select(UserCourseOverride).where(UserCourseOverride.user_id == user_id)
+        select(UserCourseOverride)
+        .join(UserCourse, UserCourse.id == UserCourseOverride.user_course_id)
+        .where(UserCourseOverride.user_id == user_id)
+        .order_by(UserCourse.semester.desc(), UserCourse.id.desc())
     )
     skipped = await rows(
         select(UserCourseSkippedDate).where(
