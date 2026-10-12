@@ -18,6 +18,8 @@ from server.push.reminders import (
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
+    UserCourse,
+    UserCourseOverride,
     UserSettingsDocument,
 )
 
@@ -469,3 +471,136 @@ async def test_a_reminder_that_found_no_recipient_is_not_filed_again(
     assert [(j.status, j.last_error) for j in await _jobs(db_session, user.id)] == [
         ("failed", "no_active_tokens")
     ]
+
+
+async def _ignore_course(
+    session, user, *, moodle_course_id=7001, course_no="CS1001301", semester="1141"
+):
+    """`user` ignores every assignment of a course of theirs, as the course
+    override PATCH records it."""
+    course = UserCourse(
+        user_id=user.id,
+        semester=semester,
+        course_key=f"client:{semester}:{course_no}",
+        course_no=course_no,
+        course_name="資料結構",
+        moodle_id=f"{semester}{course_no}",
+    )
+    session.add(course)
+    await session.flush()
+    override = UserCourseOverride(
+        user_id=user.id,
+        user_course_id=course.id,
+        ignore_assignments=True,
+        moodle_course_id=moodle_course_id,
+    )
+    session.add(override)
+    await session.flush()
+    return override
+
+
+async def test_ignored_course_gets_no_jobs_by_its_moodle_course_id(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    await _ignore_course(db_session, user, moodle_course_id=7001)
+    db_session.add(_assignment(user, aid=1, moodle_course_id=7001))
+    db_session.add(_assignment(user, aid=2, moodle_course_id=7002))
+    await db_session.commit()
+
+    created = await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert created == 2
+    jobs = await _jobs(db_session, user.id)
+    assert {j.payload["moodle_assignment_id"] for j in jobs} == {2}
+
+
+async def test_ignored_course_skips_upload_placeholders_by_course_number(
+    db_session, prepared_engine, test_settings
+):
+    """An app uploads a placeholder with course id 0 and the course number.
+    A row the server fetched is matched by id only, so without the id it
+    still gets its reminders."""
+    user = await _make_user(db_session)
+    await _ignore_course(
+        db_session, user, moodle_course_id=None, course_no="CS1001301"
+    )
+    db_session.add(
+        _assignment(user, aid=1, moodle_course_id=0, course_no="CS1001301")
+    )
+    db_session.add(
+        _assignment(user, aid=2, moodle_course_id=0, course_no="CS2002301")
+    )
+    db_session.add(
+        _assignment(user, aid=3, moodle_course_id=7001, course_no="CS1001301")
+    )
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    jobs = await _jobs(db_session, user.id)
+    assert {j.payload["moodle_assignment_id"] for j in jobs} == {2, 3}
+
+
+async def test_ignoring_a_course_cancels_its_filed_reminders_until_undone(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    db_session.add(_assignment(user, aid=1, moodle_course_id=7001))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    assert await scan_assignment_reminders(factory, test_settings) == 2
+
+    override = await _ignore_course(db_session, user, moodle_course_id=7001)
+    await db_session.commit()
+    assert await scan_assignment_reminders(factory, test_settings) == 0
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["cancelled"] * 2
+
+    # No longer ignored: the reminders still ahead are filed again.
+    override.ignore_assignments = False
+    await db_session.commit()
+    assert await scan_assignment_reminders(factory, test_settings) == 2
+    statuses = sorted(j.status for j in await _jobs(db_session, user.id))
+    assert statuses == ["cancelled"] * 2 + ["pending"] * 2
+
+
+async def test_ignoring_a_course_leaves_other_users_alone(
+    db_session, prepared_engine, test_settings
+):
+    """Two users in the same Moodle course; only the one who ignores it
+    loses its reminders."""
+    user_a = await _make_user(db_session, student_id="b11203058")
+    user_b = await _make_user(db_session, student_id="b11203059")
+    await _ignore_course(db_session, user_a, moodle_course_id=7001)
+    db_session.add(_assignment(user_a, aid=1, moodle_course_id=7001))
+    db_session.add(_assignment(user_b, aid=1, moodle_course_id=7001))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _jobs(db_session, user_a.id) == []
+    assert len(await _jobs(db_session, user_b.id)) == 2
+
+
+async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
+    db_session, prepared_engine, test_settings
+):
+    """asyncpg allows 32,767 bind parameters per statement and a reminder
+    row binds 11. Filed in one insert, 2,979 reminders failed the scan, and
+    with it every reminder it should have filed or cancelled."""
+    user = await _make_user(db_session)
+    db_session.add_all(
+        _assignment(user, aid=aid, due_in_hours=30) for aid in range(1, 1501)
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    assert await scan_assignment_reminders(factory, test_settings) == 3000
+    assert len(await _jobs(db_session, user.id)) == 3000
+    assert await scan_assignment_reminders(factory, test_settings) == 0

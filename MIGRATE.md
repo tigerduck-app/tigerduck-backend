@@ -18,6 +18,7 @@ launching uvicorn, so the common case is just: pull, then `./start.sh`
 # Same host, same DB volume — the normal upgrade.
 cd tigerduck-backend
 git pull
+git submodule update --init             # app-translation, built into the backend image
 docker compose pull postgres            # only if Postgres image was bumped
 ./start.sh                              # rebuilds + restarts the stack; the backend migrates on start
 ```
@@ -28,6 +29,54 @@ development and production hosts without remembering `-f` flags.
 
 The named volume `tigerduck_pgdata` survives `up -d --build` and even
 `down` (without `-v`), so data is preserved.
+
+---
+
+## Upgrading to 3.3.0
+
+3.3.0 lets a user ignore every assignment of a course: the apps send the
+setting through the course override PATCH, the full sync returns it, and
+the reminder scan skips those assignments. It has one migration and no new
+settings. On top of the normal upgrade:
+
+- **Update the submodule.** Run `git submodule update --init` after
+  `git pull`. This release pins `app-translation` to a newer commit, and
+  the backend image is built from the checkout.
+- **Let a backup or restore finish.** This release rebuilds the portal
+  image, so `./start.sh` replaces the portal container and stops whatever
+  backup download or restore it is running. Start the upgrade once none is.
+- **Migration.** `ddf188f91a15` adds `ignore_assignments` (not null,
+  default false), `ignore_assignments_updated_at`,
+  `ignore_assignments_device_id` and `moodle_course_id` to
+  `user_course_overrides`. It applies on backend start. Postgres adds these
+  columns without rewriting the table. From this release a migration waits
+  at most 10 seconds for a lock: if another transaction holds it longer,
+  the backend exits, restarts and tries again.
+- **Deploy before the apps.** Ship this backend before any app version
+  that ignores courses. Older apps keep working: the new request fields are
+  optional and they skip the new response fields.
+- **Rolling back.** The 3.2.0 code cannot start on a database at
+  `ddf188f91a15`: its startup `alembic upgrade head` cannot find that
+  revision. To go back and keep the saved settings, stamp the database
+  back to `f3c8a1d5b927`, then deploy 3.2.0. The new columns stay, and
+  3.2.0 never reads them. Stamp with the image you have:
+  - 3.3.0 running: `docker compose exec backend alembic stamp f3c8a1d5b927`.
+  - 3.3.0 restarting in a loop, which `exec` cannot reach:
+    `docker compose run --rm --entrypoint alembic backend stamp f3c8a1d5b927`.
+  - 3.2.0 already built:
+    `docker compose run --rm --entrypoint alembic backend stamp --purge f3c8a1d5b927`.
+    Without `--purge` it fails with "Can't locate revision ddf188f91a15",
+    since 3.2.0 does not have that migration.
+
+  Returning to 3.3.0 needs no stamp: its migration skips the columns that
+  already exist.
+
+  `alembic downgrade f3c8a1d5b927` instead drops the columns and every
+  saved ignore setting. Stop the backend first
+  (`docker compose stop backend`) and run it with
+  `docker compose run --rm --entrypoint alembic backend downgrade f3c8a1d5b927`:
+  under a running 3.3.0 every full sync answers 500 and every reminder scan
+  fails until 3.2.0 is deployed.
 
 ---
 
@@ -104,6 +153,7 @@ up to `head`.
 ```bash
 cd tigerduck-backend
 git pull
+git submodule update --init
 ./start.sh
 ```
 
@@ -145,7 +195,8 @@ use `pg_dump` / `pg_restore`.
 
    ```bash
    # On the new host
-   git clone git@github.com:tigerduck-app/tigerduck-backend.git
+   # The backend image is built with the app-translation submodule.
+   git clone --recurse-submodules git@github.com:tigerduck-app/tigerduck-backend.git
    cd tigerduck-backend
    cp .env.example .env   # fill in secrets, POSTGRES_PASSWORD, etc.
    # Use the compose files ./start.sh would (the dev override when

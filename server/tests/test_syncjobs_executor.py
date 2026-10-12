@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 import structlog
 from sqlalchemy import select, text
@@ -31,6 +32,7 @@ from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedSubmission,
+    HttpAssignmentFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -425,6 +427,120 @@ async def test_network_failure_backs_off_then_terminal_after_max_attempts(
         await db_session.refresh(job)
     assert job.status == "failed"
     assert job.attempts == 3
+
+
+async def test_an_answer_that_lost_every_course_keeps_the_assignments(
+    db_session, prepared_engine, test_settings
+):
+    """Moodle answers no course and a course warning when it refuses every
+    course (an unaccepted site policy, for one). Applied as an empty fetch,
+    that answer soft-deleted all of the user's assignments."""
+    user, _, job = await _setup_user_job(db_session)
+    db_session.add(
+        UserAssignment(
+            user_id=user.id, moodle_course_id=7001, moodle_assignment_id=1, title="HW1"
+        )
+    )
+    await db_session.commit()
+    body = {
+        "courses": [],
+        "warnings": [
+            {
+                "item": "course",
+                "itemid": 7001,
+                "warningcode": "1",
+                "message": "No access rights in course context",
+            }
+        ],
+    }
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "sync_failed:no_course_access"
+    row = (
+        await db_session.execute(
+            select(UserAssignment)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.deleted_at is None
+
+
+@pytest.mark.parametrize(
+    "body, code",
+    [
+        (
+            {
+                "courses": [],
+                "warnings": [{"item": "course", "itemid": 7001, "warningcode": "1"}],
+            },
+            "no_course_access",
+        ),
+        ({"warnings": []}, "unexpected_shape"),
+    ],
+    ids=["no-course-access", "unexpected-shape"],
+)
+async def test_an_answer_without_the_courses_never_fails_the_job_for_good(
+    db_session, prepared_engine, test_settings, body, code
+):
+    """Its cause, such as a site policy the user has not accepted, can last
+    until the user acts on the Moodle site. A failed job waits for an
+    operator: no released app calls run-now, and re-login revives only a
+    disabled job. Past its attempts the job runs at its policy interval,
+    with its attempts reset for the errors that may come next, and at its
+    policy's priority rather than the 1 a run-now gave it."""
+    user, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
+    answers = [body] * job.max_attempts + [503, {"courses": [], "warnings": []}]
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        next_answer = answers.pop(0)
+        if isinstance(next_answer, int):
+            return httpx.Response(next_answer)
+        return httpx.Response(200, json=next_answer)
+
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(answer),
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    interval, priority = (
+        await db_session.execute(
+            select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
+                SyncPolicy.job_type == job.job_type
+            )
+        )
+    ).one()
+    assert priority != 1
+
+    async def run_due() -> None:
+        job.run_after = datetime.now(UTC) - timedelta(seconds=1)
+        await db_session.commit()
+        await run_sync_tick(worker)
+        await db_session.refresh(job)
+
+    for _ in range(job.max_attempts):
+        await run_due()
+    assert job.status == "pending"
+    assert job.attempts == 0
+    assert job.priority == priority
+    assert job.last_error == f"sync_failed:{code}"
+    assert job.run_after > datetime.now(UTC) + timedelta(seconds=interval - 60)
+
+    await run_due()
+    assert (job.status, job.attempts) == ("pending", 1)
+    await run_due()
+    assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
+    assert answers == []
 
 
 async def test_rate_limited_records_school_rate_limited(

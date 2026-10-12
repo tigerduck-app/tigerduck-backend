@@ -43,6 +43,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Scheduled fetching** — `sync_policies` (admin-tunable) × `sync_jobs` (provisioned at login) × `sync_runs` (audit); the executor claims work under an advisory lock + `FOR UPDATE SKIP LOCKED`, safe across multiple workers
 - **Invalid credentials** — Fetching uses the stored Moodle token only and never signs in again with a password. A missing or rejected token is an auth-class failure and is never retried: every sync job of the user is disabled and a reauth system notification is queued; once the app sends a fresh token through `PATCH /v3/auth/credentials`, sync resumes on its own
 - **Assignment mirror** — Fetches Moodle assignments, authoritatively upserts / soft-deletes, and writes the changelog so every device converges
+- **TA courses** — Fetches only the courses where the user can submit (`mod/assign:submit`): a course the user is a TA in is left out, and the next fetch soft-deletes its stored assignments and withdraws their reminders
 - **Submission status** — After each assignment sync, asks Moodle whether the assignments due within the window (48 hours by default) are submitted; a newly submitted one has its pending reminder withdrawn and its Live Activity countdown ended
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now` (per-user cooldown; refused while the policy is disabled)
 
@@ -56,7 +57,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 📲 Push (`server/push/`)
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
 - **Tick** — Every 5 seconds, and each one drains every due job. Live Activity starts and ends are filed at priority 10, ahead of every other job (default 100)
-- **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
+- **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on, none for a course whose assignments the user ignores) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
 - **School holidays** — Course reminders and the class Live Activities (`classPreparing` / `inClass`) are not sent on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error = holiday`. Assignment Live Activities ignore holidays
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **Notification stacks** — iOS `thread-id` is `course`, `assignment` or `other`. Class and homework reminders carry no shared collapse id, so they stack instead of replacing one another
@@ -134,7 +135,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 ### Quick start
 
 ```bash
-git clone https://github.com/tigerduck-app/tigerduck-backend.git
+git clone --recurse-submodules https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
 # 1. Copy the template. Defaults to development mode (which auto-loads
@@ -285,7 +286,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `DELETE` | `/v3/sync/courses` | Delete all courses | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
 | `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color/name override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain) | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
 
 ### Courses / Assignments

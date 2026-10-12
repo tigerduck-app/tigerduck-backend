@@ -1,4 +1,5 @@
-"""Override endpoints: assignment local_status + course color/name/delete.
+"""Override endpoints: assignment local_status + course color/name/delete,
+and ignoring all of a course's assignments.
 
 Clients call these when the user swipes to mark done / ignored / delete.
 The change is written to the per-user override table and appended to the
@@ -12,8 +13,8 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field, StrictBool, StrictInt
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,12 +66,19 @@ class CourseOverrideRequest(BaseModel):
     color_hex: str | None = None
     custom_name: str | None = None
     locale: str | None = None
+    # Strict: a lax bool takes "yes" or 1 as true.
+    ignore_assignments: StrictBool | None = None
+    # The numeric Moodle course id, stored as BIGINT; the path's `moodle_id`
+    # is the course's idnumber. Kept until a later request sends another.
+    # Strict, or true would be stored as course 1.
+    moodle_course_id: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class CourseOverrideResponse(BaseModel):
     id: int
     color_hex: str | None
     custom_names: dict[str, str]
+    ignore_assignments: bool
     updated_at: str
 
 
@@ -93,17 +101,35 @@ async def patch_assignment_override(
     now = datetime.now(UTC)
 
     if payload.local_status == "none":
-        # Hard-delete the override row instead of keeping status="none".
-        existing = (
-            await session.execute(
-                select(UserAssignmentOverride).where(
-                    UserAssignmentOverride.user_id == auth.user_id,
-                    UserAssignmentOverride.user_assignment_id == assignment.id,
+        # Clear the mark on every row of the assignment: `/sync/full` keys a
+        # mark left on a soft-deleted row once no row is live, which would
+        # bring it back. A row holding a note keeps it; the rest go.
+        of_assignment = (
+            UserAssignmentOverride.user_id == auth.user_id,
+            UserAssignmentOverride.user_assignment_id.in_(
+                select(UserAssignment.id).where(
+                    UserAssignment.user_id == auth.user_id,
+                    UserAssignment.moodle_assignment_id == moodle_assignment_id,
                 )
+            ),
+        )
+        has_note = or_(
+            UserAssignmentOverride.note.is_not(None),
+            UserAssignmentOverride.note_updated_at.is_not(None),
+        )
+        await session.execute(
+            update(UserAssignmentOverride)
+            .where(*of_assignment, has_note)
+            .values(
+                local_status=AssignmentLocalStatus.none.value,
+                local_status_updated_at=now,
+                local_status_device_id=auth.device_id,
+                updated_at=now,
             )
-        ).scalar_one_or_none()
-        if existing is not None:
-            await session.delete(existing)
+        )
+        await session.execute(
+            delete(UserAssignmentOverride).where(*of_assignment, ~has_note)
+        )
 
         await append_change(
             session,
@@ -177,19 +203,17 @@ async def patch_assignment_override(
 
 
 @router.patch(
-    "/courses/{moodle_course_id}/override",
+    "/courses/{moodle_id}/override",
 )
 async def patch_course_override(
-    moodle_course_id: str,
+    moodle_id: str,
     payload: CourseOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
     now = datetime.now(UTC)
 
-    course = await _get_course_by_moodle_id(
-        session, auth.user_id, moodle_course_id
-    )
+    course = await _get_course_by_moodle_id(session, auth.user_id, moodle_id)
 
     existing = (
         await session.execute(
@@ -225,18 +249,31 @@ async def patch_course_override(
         existing.custom_name_device_id = auth.device_id
         changed_fields.append("custom_name")
 
+    if payload.ignore_assignments is not None:
+        existing.ignore_assignments = payload.ignore_assignments
+        existing.ignore_assignments_updated_at = now
+        existing.ignore_assignments_device_id = auth.device_id
+        changed_fields.append("ignore_assignments")
+
+    if payload.moodle_course_id is not None:
+        existing.moodle_course_id = payload.moodle_course_id
+
     existing.updated_at = now
     await session.flush()
 
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type=ChangeEntityType.course_override.value,
-        entity_id=str(course.id),
-        operation="upsert",
-        payload={"fields": changed_fields},
-        device_id=auth.device_id,
-    )
+    # Only a field other devices show sends them to a full sync; the numeric
+    # id is for the server's reminder scan alone.
+    if changed_fields:
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.course_override.value,
+            entity_id=str(course.id),
+            operation="upsert",
+            payload={"fields": changed_fields},
+            device_id=auth.device_id,
+        )
+        await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     from server.syncjobs.log_entries import log_sync
 
@@ -245,21 +282,28 @@ async def patch_course_override(
         parts.append(f"color={payload.color_hex}")
     if payload.custom_name is not None:
         parts.append(f"name={payload.custom_name!r}")
+    if payload.ignore_assignments is not None:
+        parts.append(f"ignore_assignments={payload.ignore_assignments}")
+    if payload.moodle_course_id is not None:
+        parts.append(f"moodle_course_id={payload.moodle_course_id}")
     await log_sync(
         session,
         user_id=auth.user_id,
         source="override",
-        message=f"Course override: moodle_id={moodle_course_id} → {', '.join(parts)}",
+        message=f"Course override: moodle_id={moodle_id} → {', '.join(parts)}",
         device_id=auth.device_id,
-        detail={"moodle_course_id": moodle_course_id, "fields": changed_fields},
+        detail={
+            "moodle_id": moodle_id,
+            "moodle_course_id": payload.moodle_course_id,
+            "fields": changed_fields,
+        },
     )
-
-    await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     return CourseOverrideResponse(
         id=existing.id,
         color_hex=existing.color_hex,
         custom_names=existing.custom_names or {},
+        ignore_assignments=existing.ignore_assignments,
         updated_at=now.isoformat(),
     )
 
@@ -273,6 +317,10 @@ async def _get_assignment_by_moodle_id(
     # live for the same assignment until the next fetch soft-deletes the
     # placeholder. Prefer the server-synced row — overrides attached to it
     # survive that fetch.
+    #
+    # With no live row, a soft-deleted one takes the mark: the server's fetch
+    # leaves out a course the user cannot submit to, which the apps still
+    # show, and `/sync/full` keys a mark on such a row while none is live.
     row = (
         (
             await session.execute(
@@ -280,9 +328,9 @@ async def _get_assignment_by_moodle_id(
                 .where(
                     UserAssignment.moodle_assignment_id == moodle_assignment_id,
                     UserAssignment.user_id == user_id,
-                    UserAssignment.deleted_at.is_(None),
                 )
                 .order_by(
+                    UserAssignment.deleted_at.is_not(None).asc(),
                     (UserAssignment.moodle_course_id == 0).asc(),
                     UserAssignment.id,
                 )
