@@ -287,8 +287,8 @@ async def test_course_override_takes_a_moodle_course_id_alone(client) -> None:
     assert await course_override_changes(client) == [{"fields": []}]
 
 
-@pytest.mark.parametrize("moodle_course_id", [0, -1])
-async def test_course_override_rejects_a_moodle_course_id_below_one(
+@pytest.mark.parametrize("moodle_course_id", [0, -1, 2**63])
+async def test_course_override_rejects_a_moodle_course_id_out_of_range(
     client, moodle_course_id
 ) -> None:
     login = await do_login(client)

@@ -67,9 +67,9 @@ class CourseOverrideRequest(BaseModel):
     custom_name: str | None = None
     locale: str | None = None
     ignore_assignments: bool | None = None
-    # The numeric Moodle course id; the path's `moodle_id` is the course's
-    # idnumber. Kept until a later request sends another.
-    moodle_course_id: int | None = Field(default=None, ge=1)
+    # The numeric Moodle course id, stored as BIGINT; the path's `moodle_id`
+    # is the course's idnumber. Kept until a later request sends another.
+    moodle_course_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class CourseOverrideResponse(BaseModel):
