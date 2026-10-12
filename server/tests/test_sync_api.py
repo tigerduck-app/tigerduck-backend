@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 from server.sync.changelog import append_change
-from server.sync.models import UserAssignment, UserCourse, UserSettingsDocument
+from server.sync.models import (
+    UserAssignment,
+    UserCourse,
+    UserCourseOverride,
+    UserSettingsDocument,
+)
 from server.sync.models import UserSyncState
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -177,3 +183,65 @@ async def test_full_sync_snapshot(client) -> None:
     # Bulletins are not part of TigerSync: subscriptions are per device.
     assert "bulletin_subscriptions" not in body
     assert "bulletin_states" not in body
+
+
+async def test_full_sync_course_overrides_carry_the_ignore_setting(client) -> None:
+    """A client keys an ignored course by its semester and course number,
+    and sends the numeric Moodle id again when the server lacks it."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    ignored_at = datetime(2026, 10, 1, 8, 0, tzinfo=UTC)
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        ignored = UserCourse(
+            user_id=user_id,
+            semester="1141",
+            course_key="client:1141:CS3001301",
+            course_no="CS3001301",
+            course_name="作業系統",
+            moodle_id="1141CS3001301",
+        )
+        coloured = UserCourse(
+            user_id=user_id,
+            semester="1132",
+            course_key="client:1132:CS2001301",
+            course_no="CS2001301",
+            course_name="資料結構",
+            moodle_id="1132CS2001301",
+        )
+        session.add_all([ignored, coloured])
+        await session.flush()
+        session.add_all(
+            [
+                UserCourseOverride(
+                    user_id=user_id,
+                    user_course_id=ignored.id,
+                    ignore_assignments=True,
+                    ignore_assignments_updated_at=ignored_at,
+                    moodle_course_id=4242,
+                ),
+                UserCourseOverride(
+                    user_id=user_id,
+                    user_course_id=coloured.id,
+                    color_hex="#FF8800",
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/v3/sync/full", headers=bearer(login))
+    assert response.status_code == 200
+    overrides = {o["course_no"]: o for o in response.json()["course_overrides"]}
+    assert overrides["CS3001301"]["semester"] == "1141"
+    assert overrides["CS3001301"]["moodle_id"] == "1141CS3001301"
+    assert overrides["CS3001301"]["ignore_assignments"] is True
+    assert (
+        overrides["CS3001301"]["ignore_assignments_updated_at"]
+        == ignored_at.isoformat()
+    )
+    assert overrides["CS3001301"]["moodle_course_id"] == 4242
+    assert overrides["CS2001301"]["semester"] == "1132"
+    assert overrides["CS2001301"]["ignore_assignments"] is False
+    assert overrides["CS2001301"]["ignore_assignments_updated_at"] is None
+    assert overrides["CS2001301"]["moodle_course_id"] is None
