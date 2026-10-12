@@ -246,15 +246,19 @@ async def patch_course_override(
     existing.updated_at = now
     await session.flush()
 
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type=ChangeEntityType.course_override.value,
-        entity_id=str(course.id),
-        operation="upsert",
-        payload={"fields": changed_fields},
-        device_id=auth.device_id,
-    )
+    # Only a field other devices show sends them to a full sync; the numeric
+    # id is for the server's reminder scan alone.
+    if changed_fields:
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.course_override.value,
+            entity_id=str(course.id),
+            operation="upsert",
+            payload={"fields": changed_fields},
+            device_id=auth.device_id,
+        )
+        await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     from server.syncjobs.log_entries import log_sync
 
@@ -279,8 +283,6 @@ async def patch_course_override(
             "fields": changed_fields,
         },
     )
-
-    await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     return CourseOverrideResponse(
         id=existing.id,

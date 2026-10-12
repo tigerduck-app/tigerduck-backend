@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import select
 
+from server.auth.models import PushJob
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 from server.sync.models import (
@@ -366,9 +367,24 @@ async def test_course_override_without_ignore_assignments_keeps_it(client) -> No
     assert (await course_override_changes(client))[-1] == {"fields": ["color_hex"]}
 
 
+async def sync_triggers(client) -> int:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return len(
+            (
+                await session.execute(
+                    select(PushJob).where(PushJob.scenario == "sync_trigger")
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
 async def test_course_override_takes_a_moodle_course_id_alone(client) -> None:
     """A client that learns the numeric id after ignoring the course sends
-    only the id; that changes no field another device shows."""
+    only the id; that changes no field another device shows, so no device
+    is sent to a full sync."""
     login = await do_login(client)
     await seed_course(
         client,
@@ -389,7 +405,53 @@ async def test_course_override_takes_a_moodle_course_id_alone(client) -> None:
     assert override.moodle_course_id == 4242
     assert override.ignore_assignments is False
     assert override.ignore_assignments_updated_at is None
-    assert await course_override_changes(client) == [{"fields": []}]
+    assert await course_override_changes(client) == []
+    assert await sync_triggers(client) == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"ignore_assignments": None, "moodle_course_id": None}, {"custom_name": "OS"}],
+    ids=["empty", "nulls", "name-without-locale"],
+)
+async def test_course_override_that_changes_nothing_starts_no_sync(client, body) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json=body,
+    )
+    assert response.status_code == 200, response.text
+    assert await course_override_changes(client) == []
+    assert await sync_triggers(client) == 0
+
+
+async def test_course_override_change_starts_a_sync(client) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": True, "moodle_course_id": 4242},
+    )
+    assert response.status_code == 200, response.text
+    assert await course_override_changes(client) == [{"fields": ["ignore_assignments"]}]
+    assert await sync_triggers(client) == 1
 
 
 @pytest.mark.parametrize("moodle_course_id", [0, -1, 2**63])
