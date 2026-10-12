@@ -18,7 +18,14 @@ from datetime import UTC, date, datetime
 from typing import Literal
 
 import structlog
-from pydantic import BaseModel, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +74,10 @@ class UploadCourseOverride(BaseModel):
     custom_name_updated_at: datetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
     color_hex_updated_at: datetime | None = None
+    ignore_assignments: StrictBool | None = None
+    ignore_assignments_updated_at: AwareDatetime | None = None
+    # The course's numeric Moodle id; it fills a missing one, never replaces.
+    moodle_course_id: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class UploadSkippedDate(BaseModel):
@@ -261,6 +272,24 @@ async def process_initial_upload(
                 device_id=device_id,
                 now=now,
             )
+        # Only with its own time, unlike the fields above: an import sends a
+        # value for every course, and a false stamped `now` would clear an
+        # ignore another device set since.
+        if (
+            item.ignore_assignments is not None
+            and item.ignore_assignments_updated_at is not None
+        ):
+            changed |= apply_field(
+                override,
+                "ignore_assignments",
+                item.ignore_assignments,
+                client_ts=item.ignore_assignments_updated_at,
+                device_id=device_id,
+                now=now,
+            )
+        if item.moodle_course_id is not None and override.moodle_course_id is None:
+            override.moodle_course_id = item.moodle_course_id
+            changed = True
         if changed:
             counts["course_overrides"] += 1
             await log("course_override", str(course.id))
