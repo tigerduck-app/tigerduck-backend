@@ -117,3 +117,61 @@ async def test_upgrade_adds_the_ignore_columns_and_downgrade_drops_them(
             assert color == "#FF8800"
     finally:
         await engine.dispose()
+
+
+async def test_upgrade_after_a_rollback_by_stamp_keeps_the_settings(
+    migration_db_url: str,
+) -> None:
+    """Rolling back to 3.2.0 stamps the database to the previous revision
+    and keeps the columns (MIGRATE.md). The next start of this release
+    upgrades again: it used to fail on the existing columns, and the
+    container restarted in a loop."""
+    _alembic(migration_db_url, "upgrade", REVISION)
+    engine = create_async_engine(migration_db_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    WITH u AS (INSERT INTO users DEFAULT VALUES RETURNING id),
+                    c AS (
+                        INSERT INTO user_courses
+                            (user_id, semester, course_key, course_no, course_name)
+                        SELECT id, '1141', 'CS3001301', 'CS3001301', 'OS' FROM u
+                        RETURNING id, user_id
+                    )
+                    INSERT INTO user_course_overrides
+                        (user_id, user_course_id, ignore_assignments, moodle_course_id)
+                    SELECT user_id, id, true, 4242 FROM c
+                    """
+                )
+            )
+
+        _alembic(migration_db_url, "stamp", DOWN_REVISION)
+        _alembic(migration_db_url, "upgrade", REVISION)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT ignore_assignments, moodle_course_id"
+                        " FROM user_course_overrides"
+                    )
+                )
+            ).one()
+            assert tuple(row) == (True, 4242)
+            foreign_keys = await conn.scalar(
+                text(
+                    "SELECT count(*) FROM pg_constraint WHERE conname ="
+                    " 'user_course_overrides_ignore_assignments_device_id_fkey'"
+                )
+            )
+            assert foreign_keys == 1
+
+        # The downgrade, too, runs over a schema it already changed.
+        _alembic(migration_db_url, "downgrade", DOWN_REVISION)
+        _alembic(migration_db_url, "stamp", REVISION)
+        _alembic(migration_db_url, "downgrade", DOWN_REVISION)
+        async with engine.connect() as conn:
+            assert not NEW_COLUMNS & await _override_columns(conn)
+    finally:
+        await engine.dispose()
