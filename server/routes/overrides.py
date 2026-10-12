@@ -1,4 +1,5 @@
-"""Override endpoints: assignment local_status + course color/name/delete.
+"""Override endpoints: assignment local_status + course color/name/delete,
+and ignoring all of a course's assignments.
 
 Clients call these when the user swipes to mark done / ignored / delete.
 The change is written to the per-user override table and appended to the
@@ -12,7 +13,7 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,12 +66,17 @@ class CourseOverrideRequest(BaseModel):
     color_hex: str | None = None
     custom_name: str | None = None
     locale: str | None = None
+    ignore_assignments: bool | None = None
+    # The numeric Moodle course id; the path's `moodle_id` is the course's
+    # idnumber. Kept until a later request sends another.
+    moodle_course_id: int | None = Field(default=None, ge=1)
 
 
 class CourseOverrideResponse(BaseModel):
     id: int
     color_hex: str | None
     custom_names: dict[str, str]
+    ignore_assignments: bool
     updated_at: str
 
 
@@ -177,19 +183,17 @@ async def patch_assignment_override(
 
 
 @router.patch(
-    "/courses/{moodle_course_id}/override",
+    "/courses/{moodle_id}/override",
 )
 async def patch_course_override(
-    moodle_course_id: str,
+    moodle_id: str,
     payload: CourseOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
     now = datetime.now(UTC)
 
-    course = await _get_course_by_moodle_id(
-        session, auth.user_id, moodle_course_id
-    )
+    course = await _get_course_by_moodle_id(session, auth.user_id, moodle_id)
 
     existing = (
         await session.execute(
@@ -225,6 +229,15 @@ async def patch_course_override(
         existing.custom_name_device_id = auth.device_id
         changed_fields.append("custom_name")
 
+    if payload.ignore_assignments is not None:
+        existing.ignore_assignments = payload.ignore_assignments
+        existing.ignore_assignments_updated_at = now
+        existing.ignore_assignments_device_id = auth.device_id
+        changed_fields.append("ignore_assignments")
+
+    if payload.moodle_course_id is not None:
+        existing.moodle_course_id = payload.moodle_course_id
+
     existing.updated_at = now
     await session.flush()
 
@@ -245,13 +258,21 @@ async def patch_course_override(
         parts.append(f"color={payload.color_hex}")
     if payload.custom_name is not None:
         parts.append(f"name={payload.custom_name!r}")
+    if payload.ignore_assignments is not None:
+        parts.append(f"ignore_assignments={payload.ignore_assignments}")
+    if payload.moodle_course_id is not None:
+        parts.append(f"moodle_course_id={payload.moodle_course_id}")
     await log_sync(
         session,
         user_id=auth.user_id,
         source="override",
-        message=f"Course override: moodle_id={moodle_course_id} → {', '.join(parts)}",
+        message=f"Course override: moodle_id={moodle_id} → {', '.join(parts)}",
         device_id=auth.device_id,
-        detail={"moodle_course_id": moodle_course_id, "fields": changed_fields},
+        detail={
+            "moodle_id": moodle_id,
+            "moodle_course_id": payload.moodle_course_id,
+            "fields": changed_fields,
+        },
     )
 
     await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
@@ -260,6 +281,7 @@ async def patch_course_override(
         id=existing.id,
         color_hex=existing.color_hex,
         custom_names=existing.custom_names or {},
+        ignore_assignments=existing.ignore_assignments,
         updated_at=now.isoformat(),
     )
 

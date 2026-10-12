@@ -12,6 +12,7 @@ from server.db import build_session_factory
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
+    UserChangeLog,
     UserCourse,
     UserCourseOverride,
 )
@@ -165,3 +166,146 @@ async def test_override_on_upload_placeholder_only(client) -> None:
         ).scalar_one()
         assert override.user_assignment_id == placeholder_id
         assert override.local_status == "ignored"
+
+
+async def course_override(client) -> UserCourseOverride:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return (await session.execute(select(UserCourseOverride))).scalar_one()
+
+
+async def course_override_changes(client) -> list[dict | None]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(UserChangeLog.payload)
+                    .where(UserChangeLog.entity_type == "course_override")
+                    .order_by(UserChangeLog.revision)
+                )
+            ).scalars()
+        )
+
+
+async def test_course_override_ignores_assignments_and_stops(client) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": True, "moodle_course_id": 4242},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_assignments"] is True
+    override = await course_override(client)
+    assert override.ignore_assignments is True
+    assert override.ignore_assignments_updated_at is not None
+    assert str(override.ignore_assignments_device_id) == login["device_id"]
+    assert override.moodle_course_id == 4242
+    set_at = override.ignore_assignments_updated_at
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": False},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_assignments"] is False
+    override = await course_override(client)
+    assert override.ignore_assignments is False
+    assert override.ignore_assignments_updated_at > set_at
+    # Left out of the request, the numeric id stays.
+    assert override.moodle_course_id == 4242
+    assert await course_override_changes(client) == [
+        {"fields": ["ignore_assignments"]},
+        {"fields": ["ignore_assignments"]},
+    ]
+
+
+async def test_course_override_without_ignore_assignments_keeps_it(client) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+    await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": True, "moodle_course_id": 4242},
+    )
+    set_at = (await course_override(client)).ignore_assignments_updated_at
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"color_hex": "#FF8800"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_assignments"] is True
+    override = await course_override(client)
+    assert override.ignore_assignments is True
+    assert override.ignore_assignments_updated_at == set_at
+    assert override.moodle_course_id == 4242
+    assert override.color_hex == "#FF8800"
+    assert (await course_override_changes(client))[-1] == {"fields": ["color_hex"]}
+
+
+async def test_course_override_takes_a_moodle_course_id_alone(client) -> None:
+    """A client that learns the numeric id after ignoring the course sends
+    only the id; that changes no field another device shows."""
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"moodle_course_id": 4242},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ignore_assignments"] is False
+    override = await course_override(client)
+    assert override.moodle_course_id == 4242
+    assert override.ignore_assignments is False
+    assert override.ignore_assignments_updated_at is None
+    assert await course_override_changes(client) == [{"fields": []}]
+
+
+@pytest.mark.parametrize("moodle_course_id", [0, -1])
+async def test_course_override_rejects_a_moodle_course_id_below_one(
+    client, moodle_course_id
+) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": True, "moodle_course_id": moodle_course_id},
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
