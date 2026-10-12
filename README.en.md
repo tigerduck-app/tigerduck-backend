@@ -43,6 +43,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Scheduled fetching** — `sync_policies` (admin-tunable) × `sync_jobs` (provisioned at login) × `sync_runs` (audit); the executor claims work under an advisory lock + `FOR UPDATE SKIP LOCKED`, safe across multiple workers
 - **Invalid credentials** — Fetching uses the stored Moodle token only and never signs in again with a password. A missing or rejected token is an auth-class failure and is never retried: every sync job of the user is disabled and a reauth system notification is queued; once the app sends a fresh token through `PATCH /v3/auth/credentials`, sync resumes on its own
 - **Assignment mirror** — Fetches Moodle assignments, authoritatively upserts / soft-deletes, and writes the changelog so every device converges
+- **TA courses** — Fetches only the courses where the user can submit (`mod/assign:submit`): a course the user is a TA in is left out, and the next fetch soft-deletes its stored assignments and withdraws their reminders
 - **Submission status** — After each assignment sync, asks Moodle whether the assignments due within the window (48 hours by default) are submitted; a newly submitted one has its pending reminder withdrawn and its Live Activity countdown ended
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now` (per-user cooldown; refused while the policy is disabled)
 
@@ -134,7 +135,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 ### Quick start
 
 ```bash
-git clone https://github.com/tigerduck-app/tigerduck-backend.git
+git clone --recurse-submodules https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
 # 1. Copy the template. Defaults to development mode (which auto-loads

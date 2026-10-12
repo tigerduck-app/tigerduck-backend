@@ -7,7 +7,6 @@ Create Date: 2026-10-13 02:30:00.000000
 """
 from typing import Sequence, Union
 
-import sqlalchemy as sa
 from alembic import op
 
 
@@ -16,6 +15,8 @@ revision: str = 'ddf188f91a15'
 down_revision: Union[str, Sequence[str], None] = 'f3c8a1d5b927'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+_DEVICE_FK = "user_course_overrides_ignore_assignments_device_id_fkey"
 
 
 def upgrade() -> None:
@@ -34,39 +35,34 @@ def upgrade() -> None:
     sends alongside. Nullable: a client may not know it yet.
 
     Backfilled to false, which is what every existing override meant.
+
+    Runs again over columns that already exist: rolling back to 3.2.0
+    stamps the database to f3c8a1d5b927 and keeps them (MIGRATE.md), and
+    the next start of this release upgrades again.
     """
-    op.add_column(
-        "user_course_overrides",
-        sa.Column(
-            "ignore_assignments",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
+    op.execute(
+        "ALTER TABLE user_course_overrides"
+        " ADD COLUMN IF NOT EXISTS ignore_assignments BOOLEAN NOT NULL DEFAULT false,"
+        " ADD COLUMN IF NOT EXISTS ignore_assignments_updated_at TIMESTAMP WITH TIME ZONE,"
+        " ADD COLUMN IF NOT EXISTS ignore_assignments_device_id UUID,"
+        " ADD COLUMN IF NOT EXISTS moodle_course_id BIGINT"
     )
-    op.add_column(
-        "user_course_overrides",
-        sa.Column(
-            "ignore_assignments_updated_at",
-            sa.DateTime(timezone=True),
-            nullable=True,
-        ),
-    )
-    op.add_column(
-        "user_course_overrides",
-        sa.Column("ignore_assignments_device_id", sa.UUID(), nullable=True),
-    )
-    op.create_foreign_key(
-        "user_course_overrides_ignore_assignments_device_id_fkey",
-        "user_course_overrides",
-        "user_devices",
-        ["ignore_assignments_device_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.add_column(
-        "user_course_overrides",
-        sa.Column("moodle_course_id", sa.BigInteger(), nullable=True),
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = '{_DEVICE_FK}'
+                    AND conrelid = 'user_course_overrides'::regclass
+            ) THEN
+                ALTER TABLE user_course_overrides
+                    ADD CONSTRAINT {_DEVICE_FK}
+                    FOREIGN KEY (ignore_assignments_device_id)
+                    REFERENCES user_devices (id) ON DELETE SET NULL;
+            END IF;
+        END $$
+        """
     )
 
 
@@ -77,12 +73,11 @@ def downgrade() -> None:
     it; an upgrade adds the columns back as false, the apps take that false
     on their next full sync, and the settings are gone for good.
     """
-    op.drop_column("user_course_overrides", "moodle_course_id")
-    op.drop_constraint(
-        "user_course_overrides_ignore_assignments_device_id_fkey",
-        "user_course_overrides",
-        type_="foreignkey",
+    op.execute(
+        "ALTER TABLE user_course_overrides"
+        f" DROP CONSTRAINT IF EXISTS {_DEVICE_FK},"
+        " DROP COLUMN IF EXISTS moodle_course_id,"
+        " DROP COLUMN IF EXISTS ignore_assignments_device_id,"
+        " DROP COLUMN IF EXISTS ignore_assignments_updated_at,"
+        " DROP COLUMN IF EXISTS ignore_assignments"
     )
-    op.drop_column("user_course_overrides", "ignore_assignments_device_id")
-    op.drop_column("user_course_overrides", "ignore_assignments_updated_at")
-    op.drop_column("user_course_overrides", "ignore_assignments")

@@ -13,8 +13,8 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, StrictBool, StrictInt
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,10 +66,12 @@ class CourseOverrideRequest(BaseModel):
     color_hex: str | None = None
     custom_name: str | None = None
     locale: str | None = None
-    ignore_assignments: bool | None = None
+    # Strict: a lax bool takes "yes" or 1 as true.
+    ignore_assignments: StrictBool | None = None
     # The numeric Moodle course id, stored as BIGINT; the path's `moodle_id`
     # is the course's idnumber. Kept until a later request sends another.
-    moodle_course_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    # Strict, or true would be stored as course 1.
+    moodle_course_id: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class CourseOverrideResponse(BaseModel):
@@ -99,17 +101,35 @@ async def patch_assignment_override(
     now = datetime.now(UTC)
 
     if payload.local_status == "none":
-        # Hard-delete the override row instead of keeping status="none".
-        existing = (
-            await session.execute(
-                select(UserAssignmentOverride).where(
-                    UserAssignmentOverride.user_id == auth.user_id,
-                    UserAssignmentOverride.user_assignment_id == assignment.id,
+        # Clear the mark on every row of the assignment: `/sync/full` keys a
+        # mark left on a soft-deleted row once no row is live, which would
+        # bring it back. A row holding a note keeps it; the rest go.
+        of_assignment = (
+            UserAssignmentOverride.user_id == auth.user_id,
+            UserAssignmentOverride.user_assignment_id.in_(
+                select(UserAssignment.id).where(
+                    UserAssignment.user_id == auth.user_id,
+                    UserAssignment.moodle_assignment_id == moodle_assignment_id,
                 )
+            ),
+        )
+        has_note = or_(
+            UserAssignmentOverride.note.is_not(None),
+            UserAssignmentOverride.note_updated_at.is_not(None),
+        )
+        await session.execute(
+            update(UserAssignmentOverride)
+            .where(*of_assignment, has_note)
+            .values(
+                local_status=AssignmentLocalStatus.none.value,
+                local_status_updated_at=now,
+                local_status_device_id=auth.device_id,
+                updated_at=now,
             )
-        ).scalar_one_or_none()
-        if existing is not None:
-            await session.delete(existing)
+        )
+        await session.execute(
+            delete(UserAssignmentOverride).where(*of_assignment, ~has_note)
+        )
 
         await append_change(
             session,
@@ -241,15 +261,19 @@ async def patch_course_override(
     existing.updated_at = now
     await session.flush()
 
-    await append_change(
-        session,
-        user_id=auth.user_id,
-        entity_type=ChangeEntityType.course_override.value,
-        entity_id=str(course.id),
-        operation="upsert",
-        payload={"fields": changed_fields},
-        device_id=auth.device_id,
-    )
+    # Only a field other devices show sends them to a full sync; the numeric
+    # id is for the server's reminder scan alone.
+    if changed_fields:
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.course_override.value,
+            entity_id=str(course.id),
+            operation="upsert",
+            payload={"fields": changed_fields},
+            device_id=auth.device_id,
+        )
+        await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
 
     from server.syncjobs.log_entries import log_sync
 
@@ -275,8 +299,6 @@ async def patch_course_override(
         },
     )
 
-    await _enqueue_sync_trigger(session, auth.user_id, auth.device_id)
-
     return CourseOverrideResponse(
         id=existing.id,
         color_hex=existing.color_hex,
@@ -295,6 +317,10 @@ async def _get_assignment_by_moodle_id(
     # live for the same assignment until the next fetch soft-deletes the
     # placeholder. Prefer the server-synced row — overrides attached to it
     # survive that fetch.
+    #
+    # With no live row, a soft-deleted one takes the mark: the server's fetch
+    # leaves out a course the user cannot submit to, which the apps still
+    # show, and `/sync/full` keys a mark on such a row while none is live.
     row = (
         (
             await session.execute(
@@ -302,9 +328,9 @@ async def _get_assignment_by_moodle_id(
                 .where(
                     UserAssignment.moodle_assignment_id == moodle_assignment_id,
                     UserAssignment.user_id == user_id,
-                    UserAssignment.deleted_at.is_(None),
                 )
                 .order_by(
+                    UserAssignment.deleted_at.is_not(None).asc(),
                     (UserAssignment.moodle_course_id == 0).asc(),
                     UserAssignment.id,
                 )

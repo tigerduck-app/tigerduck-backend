@@ -40,6 +40,11 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 
+# The backend migrates as it starts (`entrypoint.sh`). Behind a lock another
+# transaction holds, a backup for one, the start would wait for good; failing
+# instead lets the container restart and try again.
+MIGRATION_LOCK_TIMEOUT = "10s"
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
@@ -64,6 +69,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"server_settings": {"lock_timeout": MIGRATION_LOCK_TIMEOUT}},
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
