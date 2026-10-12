@@ -176,6 +176,69 @@ async def test_clearing_a_mark_clears_every_row_of_the_assignment(client) -> Non
     assert await assignment_marks(client) == []
 
 
+async def test_clearing_a_mark_keeps_the_notes_of_the_assignment(client) -> None:
+    """An override can also hold a note, which the initial upload sets. A
+    clear takes the mark off such a row and deletes only rows with nothing
+    else saved."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    placeholder_id = await seed_assignment(
+        client, login["user"]["id"], moodle_course_id=0, deleted_at=datetime.now(UTC)
+    )
+    synced_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    other_id = await seed_assignment(
+        client, login["user"]["id"], moodle_course_id=102, deleted_at=datetime.now(UTC)
+    )
+    noted_at = datetime(2026, 10, 1, tzinfo=UTC)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add_all(
+            [
+                UserAssignmentOverride(
+                    user_id=user_id,
+                    user_assignment_id=placeholder_id,
+                    local_status="ignored",
+                    note="bring a calculator",
+                    note_updated_at=noted_at,
+                ),
+                UserAssignmentOverride(
+                    user_id=user_id,
+                    user_assignment_id=synced_id,
+                    local_status="locally_completed",
+                    note_updated_at=noted_at,
+                ),
+                UserAssignmentOverride(
+                    user_id=user_id, user_assignment_id=other_id, local_status="ignored"
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "none"},
+    )
+    assert response.status_code == 200, response.text
+    assert await assignment_marks(client) == [
+        (placeholder_id, "none"),
+        (synced_id, "none"),
+    ]
+    async with factory() as session:
+        kept = {
+            o.user_assignment_id: o
+            for o in (await session.execute(select(UserAssignmentOverride))).scalars()
+        }
+    assert kept[placeholder_id].note == "bring a calculator"
+    assert kept[placeholder_id].note_updated_at == noted_at
+    assert kept[synced_id].note is None
+    assert kept[synced_id].note_updated_at == noted_at
+    assert str(kept[synced_id].local_status_device_id) == login["device_id"]
+    assert kept[synced_id].local_status_updated_at > noted_at
+    full = (await client.get("/v3/sync/full", headers=bearer(login))).json()
+    assert {o["local_status"] for o in full["assignment_overrides"]} == {"none"}
+
+
 async def test_override_of_an_assignment_the_user_never_had_is_404(client) -> None:
     login = await do_login(client)
     await seed_assignment(client, login["user"]["id"], moodle_course_id=101)

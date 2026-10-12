@@ -14,7 +14,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, StrictBool, StrictInt
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,19 +101,34 @@ async def patch_assignment_override(
     now = datetime.now(UTC)
 
     if payload.local_status == "none":
-        # Hard-delete the override row instead of keeping status="none", on
-        # every row of the assignment: `/sync/full` keys a mark left on a
-        # soft-deleted row once no row is live, which would bring it back.
+        # Clear the mark on every row of the assignment: `/sync/full` keys a
+        # mark left on a soft-deleted row once no row is live, which would
+        # bring it back. A row holding a note keeps it; the rest go.
+        of_assignment = (
+            UserAssignmentOverride.user_id == auth.user_id,
+            UserAssignmentOverride.user_assignment_id.in_(
+                select(UserAssignment.id).where(
+                    UserAssignment.user_id == auth.user_id,
+                    UserAssignment.moodle_assignment_id == moodle_assignment_id,
+                )
+            ),
+        )
+        has_note = or_(
+            UserAssignmentOverride.note.is_not(None),
+            UserAssignmentOverride.note_updated_at.is_not(None),
+        )
         await session.execute(
-            delete(UserAssignmentOverride).where(
-                UserAssignmentOverride.user_id == auth.user_id,
-                UserAssignmentOverride.user_assignment_id.in_(
-                    select(UserAssignment.id).where(
-                        UserAssignment.user_id == auth.user_id,
-                        UserAssignment.moodle_assignment_id == moodle_assignment_id,
-                    )
-                ),
+            update(UserAssignmentOverride)
+            .where(*of_assignment, has_note)
+            .values(
+                local_status=AssignmentLocalStatus.none.value,
+                local_status_updated_at=now,
+                local_status_device_id=auth.device_id,
+                updated_at=now,
             )
+        )
+        await session.execute(
+            delete(UserAssignmentOverride).where(*of_assignment, ~has_note)
         )
 
         await append_change(
