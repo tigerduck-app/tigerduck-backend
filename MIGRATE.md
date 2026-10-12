@@ -153,6 +153,7 @@ up to `head`.
 ```bash
 cd tigerduck-backend
 git pull
+git submodule update --init
 ./start.sh
 ```
 
@@ -194,7 +195,8 @@ use `pg_dump` / `pg_restore`.
 
    ```bash
    # On the new host
-   git clone git@github.com:tigerduck-app/tigerduck-backend.git
+   # The backend image is built with the app-translation submodule.
+   git clone --recurse-submodules git@github.com:tigerduck-app/tigerduck-backend.git
    cd tigerduck-backend
    cp .env.example .env   # fill in secrets, POSTGRES_PASSWORD, etc.
    # Use the compose files ./start.sh would (the dev override when

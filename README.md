@@ -134,7 +134,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 一鍵啟動
 
 ```bash
-git clone https://github.com/tigerduck-app/tigerduck-backend.git
+git clone --recurse-submodules https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
 # 1. 複製範本。預設是 development 模式（會自動載入 docker-compose.dev.yml）；

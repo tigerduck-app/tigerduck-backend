@@ -134,7 +134,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 ### Quick start
 
 ```bash
-git clone https://github.com/tigerduck-app/tigerduck-backend.git
+git clone --recurse-submodules https://github.com/tigerduck-app/tigerduck-backend.git
 cd tigerduck-backend
 
 # 1. Copy the template. Defaults to development mode (which auto-loads
