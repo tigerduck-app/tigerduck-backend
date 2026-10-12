@@ -13,7 +13,7 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool, StrictInt
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,10 +66,12 @@ class CourseOverrideRequest(BaseModel):
     color_hex: str | None = None
     custom_name: str | None = None
     locale: str | None = None
-    ignore_assignments: bool | None = None
+    # Strict: a lax bool takes "yes" or 1 as true.
+    ignore_assignments: StrictBool | None = None
     # The numeric Moodle course id, stored as BIGINT; the path's `moodle_id`
     # is the course's idnumber. Kept until a later request sends another.
-    moodle_course_id: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    # Strict, or true would be stored as course 1.
+    moodle_course_id: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
 
 
 class CourseOverrideResponse(BaseModel):

@@ -414,3 +414,44 @@ async def test_course_override_rejects_a_moodle_course_id_out_of_range(
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"ignore_assignments": "yes"},
+        {"ignore_assignments": "true"},
+        {"ignore_assignments": 1},
+        {"moodle_course_id": True},
+        {"moodle_course_id": "4242"},
+        {"moodle_course_id": 4242.0},
+    ],
+    ids=[
+        "ignore-yes",
+        "ignore-quoted-true",
+        "ignore-one",
+        "course-id-true",
+        "course-id-quoted",
+        "course-id-float",
+    ],
+)
+async def test_course_override_refuses_a_value_of_the_wrong_type(client, body) -> None:
+    """A lax model took "yes" and 1 as true and stored true as course 1."""
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json=body,
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
