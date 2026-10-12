@@ -349,8 +349,22 @@ class HttpAssignmentFetcher:
                 raise MoodleTokenInvalid(errorcode)
             raise MoodleUnreachable(errorcode or "moodle_exception")
 
+        # The caller soft-deletes every stored assignment this answer leaves
+        # out, so an answer that cannot list the user's courses must fail.
+        courses = body.get("courses")
+        if not isinstance(courses, list):
+            raise MoodleUnreachable("unexpected_shape")
+        # A course Moodle refused (an unaccepted site policy, for one) comes
+        # back as a warning. One the user cannot submit to is left out
+        # silently, so a TA-only account's empty answer still applies.
+        warnings = body.get("warnings")
+        if not courses and isinstance(warnings, list) and any(
+            isinstance(w, dict) and w.get("item") == "course" for w in warnings
+        ):
+            raise MoodleUnreachable("no_course_access")
+
         fetched: list[FetchedAssignment] = []
-        for course in body.get("courses", []):
+        for course in courses:
             course_id = course.get("id")
             if not isinstance(course_id, int):
                 continue

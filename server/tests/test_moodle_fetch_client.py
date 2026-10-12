@@ -105,6 +105,53 @@ async def test_fetch_assignments_asks_only_for_courses_the_user_can_submit_to():
     assert request.url.params["capabilities[0]"] == "mod/assign:submit"
 
 
+COURSE_WARNING = {
+    "item": "course",
+    "itemid": 7002,
+    "warningcode": "1",
+    "message": "No access rights in course context",
+}
+
+
+def _answering(body: dict) -> HttpAssignmentFetcher:
+    return _fetcher(lambda request: httpx.Response(200, json=body))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{}, {"warnings": [COURSE_WARNING]}, {"courses": None}, {"courses": {"id": 7001}}],
+    ids=["empty", "warnings-only", "null-courses", "courses-not-a-list"],
+)
+async def test_fetch_assignments_refuses_an_answer_without_a_course_list(body):
+    """Read as no assignments, such an answer soft-deleted every assignment
+    stored for the user, and the next scan cancelled their reminders."""
+    with pytest.raises(MoodleUnreachable, match="^unexpected_shape$"):
+        await _answering(body).fetch_assignments(token="tok")
+
+
+async def test_fetch_assignments_refuses_an_answer_that_lost_every_course():
+    """Moodle names each course it refused in a warning. With no course
+    left, the answer says nothing about the user's assignments."""
+    body = {"courses": [], "warnings": [COURSE_WARNING]}
+    with pytest.raises(MoodleUnreachable, match="^no_course_access$"):
+        await _answering(body).fetch_assignments(token="tok")
+
+
+@pytest.mark.parametrize(
+    "body", [{"courses": [], "warnings": []}, {"courses": []}], ids=["warnings", "none"]
+)
+async def test_fetch_assignments_takes_an_empty_answer_without_course_warnings(body):
+    """The capability filter leaves out a TA's course without a warning, so
+    a TA-only account gets this answer, and its rows must still go."""
+    assert await _answering(body).fetch_assignments(token="tok") == []
+
+
+async def test_fetch_assignments_keeps_the_courses_returned_beside_a_course_warning():
+    body = {**ASSIGNMENTS_BODY, "warnings": [COURSE_WARNING]}
+    fetched = await _answering(body).fetch_assignments(token="tok")
+    assert [a.moodle_assignment_id for a in fetched] == [555, 556]
+
+
 async def test_fetch_assignments_invalid_token():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

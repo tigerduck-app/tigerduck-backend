@@ -7,6 +7,7 @@ import json
 import logging
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 import structlog
 from sqlalchemy import select, text
@@ -31,6 +32,7 @@ from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedSubmission,
+    HttpAssignmentFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -425,6 +427,52 @@ async def test_network_failure_backs_off_then_terminal_after_max_attempts(
         await db_session.refresh(job)
     assert job.status == "failed"
     assert job.attempts == 3
+
+
+async def test_an_answer_that_lost_every_course_keeps_the_assignments(
+    db_session, prepared_engine, test_settings
+):
+    """Moodle answers no course and a course warning when it refuses every
+    course (an unaccepted site policy, for one). Applied as an empty fetch,
+    that answer soft-deleted all of the user's assignments."""
+    user, _, job = await _setup_user_job(db_session)
+    db_session.add(
+        UserAssignment(
+            user_id=user.id, moodle_course_id=7001, moodle_assignment_id=1, title="HW1"
+        )
+    )
+    await db_session.commit()
+    body = {
+        "courses": [],
+        "warnings": [
+            {
+                "item": "course",
+                "itemid": 7001,
+                "warningcode": "1",
+                "message": "No access rights in course context",
+            }
+        ],
+    }
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_error == "sync_failed:no_course_access"
+    row = (
+        await db_session.execute(
+            select(UserAssignment)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert row.deleted_at is None
 
 
 async def test_rate_limited_records_school_rate_limited(
