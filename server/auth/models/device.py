@@ -165,7 +165,7 @@ class AuthSession(Base):
         ForeignKey("auth_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Set only when a reuse of this token took the theft path.
+    # Set when a reuse of this token takes the theft path.
     reuse_detected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -173,8 +173,8 @@ class AuthSession(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     # When the client first showed it holds this session: its access token
-    # accepted, or its refresh token rotated. Null means it may never have
-    # received them, the one case in which a lost rotation is recovered.
+    # accepted, or its refresh token rotated. Past the grace, only a
+    # successor without it is replaced when the token before it comes back.
     first_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -94,10 +94,10 @@ async def _record_first_use(session: AsyncSession, auth_session: AuthSession) ->
     """Note that the session's client holds its tokens, which a refresh of
     the previous token reads to tell a lost reply from a copy.
 
-    The row loaded above says whether this is due, so only a session's
-    first requests write. It commits at once: a handler that fails must not
-    undo it, and a handler that waits on Moodle must not hold the row lock
-    that the session's other first requests and its refresh need.
+    `require_user` calls this only while the row it loaded has no
+    `first_used_at`, so only a session's first requests write. It commits
+    at once: a handler that fails must not undo it, and one that waits on
+    Moodle must not hold the row lock the session's refresh needs.
     """
     await session.execute(
         update(AuthSession)
