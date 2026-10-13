@@ -257,8 +257,8 @@ async def _keys_for_marks_on_deleted_rows(
     rows the apps still show, such as a TA's course. Such a mark is keyed only
     while no live row has its assignment, and only the newest one: beside a
     live row, an older mark may be one the user has cleared there since. So a
-    mark on a row the server's row outlived, such as a placeholder's, stays
-    unkeyed.
+    mark the server's row outlived, such as a placeholder's from before the
+    server fetched the assignment, stays unkeyed.
     """
     orphaned = {o.user_assignment_id for o in overrides} - live_keys.keys()
     if not orphaned:
@@ -302,7 +302,7 @@ async def _keys_for_marks_on_deleted_rows(
         row = deleted_rows.get(override.user_assignment_id)
         if row is None or row.moodle_assignment_id in live_ids:
             continue
-        if _outlived_by_server_row(row):
+        if _hidden_since_marked(override, row):
             continue
         kept = newest.get(row.moodle_assignment_id)
         if kept is None or _marked_at(override) > _marked_at(kept):
@@ -310,13 +310,14 @@ async def _keys_for_marks_on_deleted_rows(
     return {o.user_assignment_id: moodle_id for moodle_id, o in newest.items()}
 
 
-def _outlived_by_server_row(row) -> bool:
-    # The server's row was live after this row went, so the mark went out
-    # unkeyed and both apps dropped it; a clear made on that row may also
-    # have left it in place.
+def _hidden_since_marked(override: UserAssignmentOverride, row) -> bool:
+    # A server row was live after this row went and after the mark was made,
+    # so the mark went out unkeyed and both apps dropped it; a clear made on
+    # that row may also have left it in place.
+    marked_at = override.local_status_updated_at or _NEVER
     return (
         row.server_row_deleted_at is not None
-        and row.server_row_deleted_at > row.deleted_at
+        and row.server_row_deleted_at > max(row.deleted_at, marked_at)
     )
 
 
