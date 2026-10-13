@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.terms import current_term_code
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -154,7 +155,7 @@ def _numbers(raw: list) -> list[float]:
 
 
 async def _ignored_courses(
-    session: AsyncSession, user_ids: set[uuid.UUID]
+    session: AsyncSession, user_ids: set[uuid.UUID], now: datetime
 ) -> dict[uuid.UUID, tuple[set[int], set[str]]]:
     """user_id → (numeric Moodle course ids, course numbers) of the courses
     whose assignments the user ignores (`ignore_assignments`).
@@ -162,19 +163,22 @@ async def _ignored_courses(
     The server fetches assignments itself and keys them by the numeric
     course id, which the override holds once a client has sent it. A row a
     client uploaded is a placeholder with course id 0 that carries the
-    course number instead, so only placeholders are matched by number. A
-    course number is the same in every semester: the placeholder of a course
-    taken again after it was ignored is skipped too, until the server's own
-    fetch soft-deletes the placeholder.
+    course number instead, so only placeholders are matched by number.
+    An id names one term's course, but a number recurs in every term the
+    course is offered and a placeholder carries no term. So numbers come
+    only from courses of the term both apps apply the setting in
+    (`current_term_code`); with no term published, from every term.
     """
     ignored: dict[uuid.UUID, tuple[set[int], set[str]]] = {}
     if not user_ids:
         return ignored
+    term = await current_term_code(session, now)
     rows = await session.execute(
         select(
             UserCourseOverride.user_id,
             UserCourseOverride.moodle_course_id,
             UserCourse.course_no,
+            UserCourse.semester,
         )
         .join(UserCourse, UserCourse.id == UserCourseOverride.user_course_id)
         .where(
@@ -182,11 +186,11 @@ async def _ignored_courses(
             UserCourseOverride.ignore_assignments.is_(True),
         )
     )
-    for user_id, moodle_course_id, course_no in rows:
+    for user_id, moodle_course_id, course_no, semester in rows:
         course_ids, course_nos = ignored.setdefault(user_id, (set(), set()))
         if moodle_course_id is not None:
             course_ids.add(moodle_course_id)
-        if course_no:
+        if course_no and (term is None or semester == term):
             course_nos.add(course_no)
     return ignored
 
@@ -287,7 +291,9 @@ async def scan_assignment_reminders(
             if override is None
             or override.local_status not in _EXCLUDED_LOCAL_STATUSES
         ]
-        ignored = await _ignored_courses(session, {a.user_id for a in not_marked})
+        ignored = await _ignored_courses(
+            session, {a.user_id for a in not_marked}, now
+        )
         eligible = [a for a in not_marked if not _in_ignored_course(a, ignored)]
         user_ids = {a.user_id for a in eligible}
 

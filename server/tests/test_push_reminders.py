@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
 from server.push.reminders import (
@@ -586,6 +587,179 @@ async def test_ignoring_a_course_leaves_other_users_alone(
 
     assert await _jobs(db_session, user_a.id) == []
     assert len(await _jobs(db_session, user_b.id)) == 2
+
+
+EARLIER_TERM = "1141"
+CURRENT_TERM = "1142"
+NEXT_TERM = "1151"
+
+
+async def _publish_terms(session, *, with_next=False):
+    """Publish a term that has ended and the term in progress. `with_next`
+    adds the next term, which the school publishes before it begins, once
+    course selection for it opens."""
+    today = datetime.now(UTC).date()
+    terms = [
+        (EARLIER_TERM, today - timedelta(days=300), today - timedelta(days=160)),
+        (CURRENT_TERM, today - timedelta(days=100), today + timedelta(days=20)),
+    ]
+    if with_next:
+        terms.append(
+            (NEXT_TERM, today + timedelta(days=45), today + timedelta(days=165))
+        )
+    session.add_all(
+        SemesterTerm(code=code, start_date=start, end_date=end)
+        for code, start, end in terms
+    )
+    await session.flush()
+
+
+def _placeholder(user, aid, course_no):
+    """An assignment an app uploaded: course id 0 and the course number."""
+    return _assignment(user, aid=aid, moodle_course_id=0, course_no=course_no)
+
+
+async def _reminded(session, user):
+    """The assignments `user` has reminders filed for."""
+    return {j.payload["moodle_assignment_id"] for j in await _jobs(session, user.id)}
+
+
+async def test_a_course_ignored_in_an_earlier_term_keeps_this_terms_placeholders(
+    db_session, prepared_engine, test_settings
+):
+    """A course keeps its number from term to term, and a placeholder
+    carries no term. Both apps apply the setting in the current term only,
+    so a course taken again after it was ignored gets its reminders."""
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    await _ignore_course(
+        db_session, user, course_no="CS1001301", semester=EARLIER_TERM
+    )
+    db_session.add(_placeholder(user, 1, "CS1001301"))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {1}
+
+
+async def test_a_course_ignored_in_the_current_term_skips_its_placeholders(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    await _ignore_course(
+        db_session,
+        user,
+        moodle_course_id=7101,
+        course_no="CS1001301",
+        semester=CURRENT_TERM,
+    )
+    await _ignore_course(
+        db_session,
+        user,
+        moodle_course_id=7002,
+        course_no="CS2002301",
+        semester=EARLIER_TERM,
+    )
+    db_session.add(_placeholder(user, 1, "CS1001301"))
+    db_session.add(_placeholder(user, 2, "CS2002301"))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {2}
+
+
+async def test_the_next_terms_courses_synced_early_do_not_change_the_term(
+    db_session, prepared_engine, test_settings
+):
+    """Course selection for the next term opens weeks before it begins, and
+    an app showing that term's timetable uploads its courses. The apps keep
+    applying the setting in the term in progress until the next one begins,
+    whatever the newest term a user has courses in."""
+    user = await _make_user(db_session)
+    await _publish_terms(db_session, with_next=True)
+    await _ignore_course(
+        db_session,
+        user,
+        moodle_course_id=7101,
+        course_no="CS1001301",
+        semester=CURRENT_TERM,
+    )
+    await _ignore_course(
+        db_session,
+        user,
+        moodle_course_id=7201,
+        course_no="CS2002301",
+        semester=NEXT_TERM,
+    )
+    db_session.add(_placeholder(user, 1, "CS1001301"))
+    db_session.add(_placeholder(user, 2, "CS2002301"))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {2}
+
+
+async def test_fetched_assignments_match_an_ignored_course_by_id_in_any_term(
+    db_session, prepared_engine, test_settings
+):
+    """A numeric Moodle id names one term's course: the rows the server
+    fetched for a course ignored in an earlier term stay skipped, and the
+    course taken again, under a new id, gets its reminders. The placeholder,
+    matched by number, is not skipped."""
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    await _ignore_course(
+        db_session,
+        user,
+        moodle_course_id=7001,
+        course_no="CS1001301",
+        semester=EARLIER_TERM,
+    )
+    db_session.add(
+        _assignment(user, aid=1, moodle_course_id=7001, course_no="CS1001301")
+    )
+    db_session.add(
+        _assignment(user, aid=2, moodle_course_id=7101, course_no="CS1001301")
+    )
+    db_session.add(_placeholder(user, 3, "CS1001301"))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {2, 3}
+
+
+async def test_with_no_term_published_placeholders_match_every_terms_ignores(
+    db_session, prepared_engine, test_settings
+):
+    """Without a calendar the server cannot tell the current term, so a
+    placeholder is matched against the courses ignored in any term. Once
+    the calendar is published, only the current term's count."""
+    user = await _make_user(db_session)
+    await _ignore_course(
+        db_session, user, course_no="CS1001301", semester=EARLIER_TERM
+    )
+    db_session.add(_placeholder(user, 1, "CS1001301"))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    assert await scan_assignment_reminders(factory, test_settings) == 0
+
+    await _publish_terms(db_session)
+    await db_session.commit()
+    assert await scan_assignment_reminders(factory, test_settings) == 2
 
 
 async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
