@@ -195,6 +195,27 @@ async def test_login_rate_limited_after_max_attempts(client) -> None:
     assert response.json()["detail"] == "too_many_login_attempts"
 
 
+async def test_password_without_token_is_refused_and_counted(client) -> None:
+    allow_moodle(client)
+    password_only = {
+        key: value
+        for key, value in LOGIN_BODY.items()
+        if key not in ("moodle_token", "moodle_private_token")
+    }
+    for _ in range(client.app.state.settings.auth_login_max_attempts):
+        response = await client.post("/v3/auth/login", json=password_only)
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "moodle_token_required"
+
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 429
+    assert response.json()["detail"] == "too_many_login_attempts"
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(User))).scalars().all() == []
+
+
 async def test_login_reactivates_soft_deleted_user(client) -> None:
     # Pre-seed a soft-deleted user owning the external account.
     factory = build_session_factory(client.app.state.engine)

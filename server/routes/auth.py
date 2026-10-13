@@ -58,43 +58,6 @@ async def login(
     payload: LoginRequest, request: Request, session: SessionDep
 ) -> LoginResponse:
     state = request.app.state
-    moodle_token = payload.moodle_token
-    moodle_private_token = payload.moodle_private_token
-    did_sso_rate_limit = False
-
-    if not moodle_token and payload.password:
-        ip_key = f"login:ip:{_client_ip(request)}"
-        sid_key = f"login:sid:{payload.student_id.lower()}"
-        if not state.login_limiter.allow(ip_key) or not state.login_limiter.allow(sid_key):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="too_many_login_attempts",
-            )
-        state.login_limiter.record(ip_key)
-        state.login_limiter.record(sid_key)
-        did_sso_rate_limit = True
-        from server.syncjobs.moodle_client import SsoTokenClient, SsoAuthFailed, SsoUnavailable
-        sso = SsoTokenClient(
-            base_url=state.settings.moodle_base_url,
-            timeout_seconds=15,
-        )
-        try:
-            obtained = await sso.obtain_token(
-                username=payload.student_id, password=payload.password
-            )
-            moodle_token = obtained.token
-            moodle_private_token = obtained.private_token
-        except SsoAuthFailed:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="invalid_credentials",
-            )
-        except SsoUnavailable as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"moodle_unavailable:{exc}",
-            )
-
     result = await service.login(
         session,
         state.settings,
@@ -102,11 +65,10 @@ async def login(
         state.login_limiter,
         state.credential_cipher,
         student_id=payload.student_id,
-        moodle_token=moodle_token,
-        moodle_private_token=moodle_private_token,
+        moodle_token=payload.moodle_token,
+        moodle_private_token=payload.moodle_private_token,
         device_info=payload.device_info,
         client_ip=_client_ip(request),
-        skip_rate_limit=did_sso_rate_limit,
     )
     return LoginResponse(
         access_token=result.access_token,
