@@ -111,10 +111,9 @@ def _attempt(status: str | None, timemodified: int, **ids: int) -> dict:
     return attempt
 
 
-def _answer(**parts: object) -> dict:
+def _answer(**lastattempt: object) -> dict:
     return {
         "lastattempt": {
-            **parts,
             "submissiongroupmemberswhoneedtosubmit": [],
             "submissionsenabled": True,
             "locked": False,
@@ -126,7 +125,8 @@ def _answer(**parts: object) -> dict:
             "timelimit": 0,
             "blindmarking": False,
             "gradingstatus": "notgraded",
-            "usergroups": [12] if "teamsubmission" in parts else [],
+            "usergroups": [12] if "teamsubmission" in lastattempt else [],
+            **lastattempt,
         },
         "warnings": [],
     }
@@ -182,6 +182,44 @@ def test_parse_reads_the_members_and_the_teams_attempt(body, expected):
         assert parsed is None
     else:
         assert (parsed.is_submitted, parsed.submitted_at) == expected
+
+
+_EXTENDED_TO = 1_757_600_000
+_OWN_NEW = _attempt("new", 0, userid=42)
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_answer(submission=_OWN_NEW), (True, False, None)),
+        (_answer(submission=_OWN_NEW, submissionsenabled=False), (False, False, None)),
+        (_answer(submission=_OWN_NEW, locked=True), (True, True, None)),
+        (
+            _answer(submission=_OWN_NEW, extensionduedate=_EXTENDED_TO),
+            (True, False, datetime.fromtimestamp(_EXTENDED_TO, tz=UTC)),
+        ),
+        # A student whose flags row exists without an extension.
+        (_answer(submission=_OWN_NEW, extensionduedate=0), (True, False, None)),
+        (_answer(), (True, False, None)),
+    ],
+    ids=[
+        "open",
+        "no-online-submission",
+        "locked",
+        "extension",
+        "flags-without-extension",
+        "never-started",
+    ],
+)
+def test_parse_reads_whether_the_student_can_still_submit(body, expected):
+    parsed = moodle_client._parse_submission_status(77, body)
+
+    assert (
+        parsed.submissions_enabled,
+        parsed.locked,
+        parsed.extension_due_at,
+    ) == expected
+    assert parsed.is_submitted is False
 
 
 @pytest.mark.asyncio

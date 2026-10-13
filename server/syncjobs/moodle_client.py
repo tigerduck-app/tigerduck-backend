@@ -177,6 +177,12 @@ class FetchedSubmission:
     moodle_assignment_id: int
     is_submitted: bool
     submitted_at: datetime | None
+    # Read by the push pipeline's pre-send check (push/presend.py), not by
+    # the probe: whether the assignment takes an online submission at all,
+    # whether the teacher locked this student's, and their extension.
+    submissions_enabled: bool = True
+    locked: bool = False
+    extension_due_at: datetime | None = None
 
 
 class AssignmentFetcher(Protocol):
@@ -309,6 +315,10 @@ def _parse_submission_status(
     Moodle omits `lastattempt` entirely for an assignment the user cannot
     submit to; that is not the same as "not submitted", so it yields None
     and the caller leaves the row alone.
+
+    `submissionsenabled` and `locked` are booleans and `extensionduedate`
+    unix seconds or null; a value of another shape reads as the default,
+    an open assignment without an extension.
     """
     last = body.get("lastattempt")
     if not isinstance(last, dict):
@@ -328,6 +338,9 @@ def _parse_submission_status(
         submitted_at=(
             _ts(submitted.get("timemodified")) if submitted is not None else None
         ),
+        submissions_enabled=last.get("submissionsenabled") is not False,
+        locked=last.get("locked") is True,
+        extension_due_at=_ts(last.get("extensionduedate")),
     )
 
 
