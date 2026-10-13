@@ -167,7 +167,9 @@ the normal upgrade:
   Returning to 3.3.1 needs no stamp: its migrations skip the columns that
   already exist. Sessions 3.3.0 made in between start with `first_used_at`
   empty, as at the first upgrade, and an override 3.3.0 changed takes its
-  `updated_at` as the time its mark reached the server.
+  `updated_at` as the time its mark reached the server. So does one whose
+  note 3.3.1 edited before the rollback, so a cleared mark under it can
+  show again, as under 3.3.0.
 
   `alembic downgrade ddf188f91a15` instead drops the new columns. First it
   writes what 3.3.0 reads in place of the session ones: a token rotated a
