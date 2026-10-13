@@ -32,6 +32,69 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.1
+
+3.3.1 stops signing a device out when its app lost a refresh reply. An app
+that sends a rotated refresh token again, while nothing has used the token
+that replaced it, gets one more rotation up to 24 hours after the first,
+instead of having every session on the device revoked as stolen. Both pairs
+work until one of them is used, so a late duplicate of a refresh no longer
+ends the session the app keeps; a duplicate that arrives within 60 seconds,
+after the app used its pair, is refused. A token revoked for another reason
+(logout, device removal, expiry) gets `401 session_revoked` and revokes
+nothing else. It has one migration and no new settings to set. On top of
+the normal upgrade:
+
+- **Update the submodule.** Run `git submodule update --init` after
+  `git pull`. This release pins `app-translation` to a newer commit.
+- **Migration.** `cc54925b7852` adds `first_used_at` and `rerotated_at` to
+  `auth_sessions` and allows the revoked reason `superseded`. Postgres adds
+  the columns without rewriting the table; the replaced check constraint
+  reads every row once under the table lock, about 0.1 seconds per million
+  sessions.
+- **Sessions from before the upgrade** start with `first_used_at` empty,
+  and one in use gets it on its next request. For 24 hours after the
+  upgrade, a session the app has not used since may still be replaced when
+  the token before it comes back.
+- **Monitoring.** `reuse_detected_at` now marks theft revocations only.
+  The grace retry no longer sets it, so the "Token reuse" panel and
+  `tigerduck_auth_reuse_detected_24h` count fewer; rows from before keep
+  theirs.
+- **No app update needed.** Both apps treat any 4xx from
+  `/v3/auth/refresh` as a lost session, the new `session_revoked` too.
+- **Turning the recovery off** without a rollback: set
+  `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS=0` in `.env` and restart
+  the backend. The 60-second grace retry stays.
+- **Rolling back.** The 3.3.0 code cannot start on a database at
+  `cc54925b7852`: its startup `alembic upgrade head` cannot find that
+  revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.
+  The new columns stay and 3.3.0 never reads them; a superseded token
+  that comes back takes its theft path. Stamp with the image you have:
+  - 3.3.1 running: `docker compose exec backend alembic stamp ddf188f91a15`.
+  - 3.3.1 restarting in a loop, which `exec` cannot reach:
+    `docker compose run --rm --entrypoint alembic backend stamp ddf188f91a15`.
+  - 3.3.0 already built:
+    `docker compose run --rm --entrypoint alembic backend stamp --purge ddf188f91a15`.
+    Without `--purge` it fails with "Can't locate revision identified by
+    'cc54925b7852'", since 3.3.0 does not have that migration.
+
+  Returning to 3.3.1 needs no stamp: its migration skips the columns that
+  already exist. Sessions 3.3.0 made in between start with `first_used_at`
+  empty, as at the first upgrade.
+
+  `alembic downgrade ddf188f91a15` instead drops both columns. First it
+  writes what 3.3.0 reads in their place: a token rotated a second time
+  gets `reuse_detected_at`, where 3.3.0 marks a grace retry, so neither
+  release rotates it again, and a superseded session becomes `rotated`
+  with no successor. Upgrading again starts every session without
+  `first_used_at`, as the first upgrade did. Stop the backend first
+  (`docker compose stop backend`) and run it with
+  `docker compose run --rm --entrypoint alembic backend downgrade ddf188f91a15`:
+  under a running 3.3.1 every authenticated request answers 500 until
+  3.3.0 is deployed.
+
+---
+
 ## Upgrading to 3.3.0
 
 3.3.0 lets a user ignore every assignment of a course: the apps send the

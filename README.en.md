@@ -30,7 +30,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 
 ### 🔐 Accounts & Auth (`server/auth/`)
 - **Login** — The app normally completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. An app that sends the password instead has the backend run SSO for it, rate-limited per IP and per student ID; the password is used for that one sign-in and not stored
-- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions, with a one-shot 60-second grace retry for clients that lost the rotation response
+- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions. A client that lost the rotation response gets one more rotation within 24 hours while the new token has never been used, and a late duplicate of a refresh leaves the pair its client kept working
 - **Credential custody** — Only the Moodle token is stored, AES-256-GCM encrypted with per-row AAD (key rotation supported), for server-side fetching; the NTUST password is not kept
 - **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens; devices report their locale and hardware model and carry their own sync and push switches (assignment reminders, Live Activity, bulletin push, …)
 

@@ -9,25 +9,16 @@ because `server/migrations/env.py` starts its own event loop.
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 import time
-from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from server.config import Settings
-from server.tests.conftest import _admin_url, _drop_create_db, _drop_db
+from server.tests.conftest import _alembic, _run_alembic
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 REVISION = "ddf188f91a15"
 DOWN_REVISION = "f3c8a1d5b927"
 NEW_COLUMNS = {
@@ -36,37 +27,6 @@ NEW_COLUMNS = {
     "ignore_assignments_device_id",
     "moodle_course_id",
 }
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def migration_db_url(test_settings: Settings) -> AsyncIterator[str]:
-    admin_url = _admin_url(test_settings)
-    db_name = "tigerduck_test_migrations"
-    await _drop_create_db(admin_url, db_name)
-    yield (
-        make_url(test_settings.database_url)
-        .set(database=db_name)
-        .render_as_string(hide_password=False)
-    )
-    await _drop_db(admin_url, db_name)
-
-
-def _run_alembic(
-    database_url: str, *args: str, timeout: float = 300
-) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "alembic", *args],
-        cwd=REPO_ROOT,
-        env={**os.environ, "TIGERDUCK_DATABASE_URL": database_url},
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-
-
-def _alembic(database_url: str, *args: str) -> None:
-    result = _run_alembic(database_url, *args)
-    assert result.returncode == 0, result.stderr
 
 
 async def _override_columns(conn: AsyncConnection) -> set[str]:
