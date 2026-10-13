@@ -17,10 +17,11 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
+from server.auth.service import settle_contest
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -99,12 +100,41 @@ async def _record_first_use(session: AsyncSession, auth_session: AuthSession) ->
     at once: a handler that fails must not undo it, and one that waits on
     Moodle must not hold the row lock the session's refresh needs.
     """
+    if auth_session.replaced_by_session_id is not None:
+        await _claim_contest(session, auth_session)
     await session.execute(
         update(AuthSession)
         .where(AuthSession.id == auth_session.id, AuthSession.first_used_at.is_(None))
         .values(first_used_at=datetime.now(UTC))
     )
     await session.commit()
+
+
+async def _claim_contest(session: AsyncSession, auth_session: AuthSession) -> None:
+    """A live session pointing at another is one of the two a second
+    rotation left (`settle_contest`); its first use supersedes the other,
+    unless the other was used first.
+
+    Both rows are locked in id order, so two first uses cannot deadlock,
+    and the loser sees itself revoked once the winner commits.
+    """
+    pair = sorted((auth_session.id, auth_session.replaced_by_session_id))
+    await session.execute(
+        select(AuthSession.id)
+        .where(AuthSession.id.in_(pair))
+        .order_by(AuthSession.id)
+        .with_for_update()
+    )
+    await session.refresh(auth_session)
+    if auth_session.revoked_at is not None:
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session_revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if auth_session.replaced_by_session_id is not None:
+        await settle_contest(session, auth_session, datetime.now(UTC))
 
 
 CurrentAuthDep = Annotated[CurrentAuth, Depends(require_user)]

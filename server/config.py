@@ -50,13 +50,14 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
-    # A rotated token presented again this soon after its rotation is
-    # rotated once more, so a client that lost the reply in transit can
-    # retry without tripping reuse detection, which logs the device out.
+    # A rotated token presented again this soon after its rotation, while
+    # its successor is in use, is taken for a late duplicate of the request
+    # that rotated it: it is refused, and nothing is revoked.
     auth_refresh_reuse_grace_seconds: int = 60
-    # Past the grace, the same holds for this long after the rotation while
-    # nothing has used the successor: the client lost the reply and was not
-    # running to retry. Either rule rotates a token once more, not twice.
+    # For this long after a rotation, and at least the grace, a rotated
+    # token presented again while nothing has used its successor is rotated
+    # once more: its client lost the reply, or a duplicate came late. The
+    # successor and the new session stay live until one of them is used.
     auth_refresh_recovery_window_seconds: int = 24 * 60 * 60
     # Login rate limit: N attempts per window, applied independently to the
     # student_id and the client IP. Protects both against credential

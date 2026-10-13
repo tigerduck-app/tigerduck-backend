@@ -226,7 +226,8 @@ async def test_grace_retry_is_one_shot(client) -> None:
 
 async def test_a_grace_retry_is_not_counted_as_reuse(client) -> None:
     """reuse_detected_at counts theft only; the retry spends the token's one
-    second rotation instead."""
+    second rotation instead, and the lost successor goes once the retry's
+    pair is used."""
     login = await do_login(client)
     token_a = login["refresh_token"]
     token_b = (await _refresh(client, token_a)).json()["refresh_token"]
@@ -237,13 +238,24 @@ async def test_a_grace_retry_is_not_counted_as_reuse(client) -> None:
     row_a = await _row(client, token_a)
     assert row_a.reuse_detected_at is None
     assert row_a.rerotated_at is not None
+    used = await client.get("/v3/devices", headers=_bearer(retry.json()))
+    assert used.status_code == 200
     assert (await _row(client, token_b)).revoked_reason == "superseded"
 
 
-async def test_a_lost_reply_is_recovered_within_the_window(client) -> None:
+@pytest.mark.parametrize(
+    "age",
+    [
+        # Android after a 502 or 504 that hid the rotation: it keeps the old
+        # token and sends it again after a 60 s pause.
+        timedelta(minutes=2),
+        timedelta(hours=23),
+    ],
+)
+async def test_a_lost_reply_is_recovered_within_the_window(client, age) -> None:
     """The client lost the rotation reply and came back with the old token
-    hours later: it gets a fresh pair, and only the successor it never
-    received is revoked."""
+    later: it gets a fresh pair, and once it uses that pair only the
+    successor it never received is revoked."""
     login = await do_login(client)
     token_a = login["refresh_token"]
     lost = await _refresh(client, token_a)
@@ -251,7 +263,7 @@ async def test_a_lost_reply_is_recovered_within_the_window(client) -> None:
     token_b = lost.json()["refresh_token"]
     # Another session on the same device, which must stay alive.
     other = await do_login(client)
-    await _rotated_ago(client, token_a, timedelta(hours=23))
+    await _rotated_ago(client, token_a, age)
 
     recovered = await _refresh(client, token_a)
 
@@ -261,16 +273,22 @@ async def test_a_lost_reply_is_recovered_within_the_window(client) -> None:
     row_a = await _row(client, token_a)
     row_b = await _row(client, token_b)
     row_c = await _row(client, token_c)
-    assert row_b.revoked_reason == "superseded"
+    # Until one of the two is used, the client may hold either.
+    assert row_b.revoked_at is None
+    assert row_c.revoked_at is None
     assert row_b.replaced_by_session_id == row_c.id
+    assert row_c.replaced_by_session_id == row_b.id
     assert row_a.replaced_by_session_id == row_c.id
     assert row_a.rerotated_at is not None
     assert row_a.reuse_detected_at is None
-    assert row_c.revoked_at is None
+
+    used = await client.get("/v3/devices", headers=_bearer(recovered.json()))
+
+    assert used.status_code == 200
+    assert (await _row(client, token_b)).revoked_reason == "superseded"
+    assert (await _row(client, token_c)).revoked_at is None
     assert (await _row(client, other["refresh_token"])).revoked_at is None
     assert await _reuse_detections(client) == 0
-    used = await client.get("/v3/devices", headers=_bearer(recovered.json()))
-    assert used.status_code == 200
     assert (await _refresh(client, token_c)).status_code == 200
 
 
@@ -332,21 +350,93 @@ async def test_reuse_after_the_successor_was_used_is_theft(client) -> None:
 
 
 async def test_a_superseded_successor_that_turns_up_is_theft(client) -> None:
-    """Its reply was not lost after all, so two clients hold the lineage.
-    The sessions here have no device, so only the chain walk from the
-    superseded token reaches the session that replaced it."""
+    """The recovered pair was used, so a token of the successor it
+    superseded comes from a second holder. The sessions here have no
+    device, so only the chain walk from that token reaches the session
+    that won."""
     login = await do_login(client)
     await _set_row(client, login["refresh_token"], device_id=None)
     token_a = login["refresh_token"]
     token_b = (await _refresh(client, token_a)).json()["refresh_token"]
     await _rotated_ago(client, token_a, timedelta(hours=2))
-    token_c = (await _refresh(client, token_a)).json()["refresh_token"]
+    recovered = await _refresh(client, token_a)
+    used = await client.get("/v3/devices", headers=_bearer(recovered.json()))
+    assert used.status_code == 200
 
     stale = await _refresh(client, token_b)
 
     assert stale.status_code == 401
     assert stale.json()["detail"] == "refresh_reuse_detected"
+    token_c = recovered.json()["refresh_token"]
     assert (await _row(client, token_c)).revoked_reason == "reuse_detected"
+
+
+async def test_a_late_duplicate_after_the_successor_is_used_is_refused(
+    client,
+) -> None:
+    """Android sends a refresh once more at once when the first send fails.
+    A first send delayed in the network can arrive after the resend's
+    reply, which the app saved and used: the late send must leave that
+    pair alone."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    token_b = resend.json()["refresh_token"]
+    used = await client.get("/v3/devices", headers=_bearer(resend.json()))
+    assert used.status_code == 200
+
+    late = await _refresh(client, token_a)
+
+    assert late.status_code == 401
+    assert late.json()["detail"] == "session_revoked"
+    assert (await _row(client, token_a)).rerotated_at is None
+    assert await _reuse_detections(client) == 0
+    again = await client.get("/v3/devices", headers=_bearer(resend.json()))
+    assert again.status_code == 200
+    assert (await _refresh(client, token_b)).status_code == 200
+
+
+async def test_a_late_duplicate_before_the_successor_is_used_loses_to_it(
+    client,
+) -> None:
+    """The same late send, arriving before the app used the resend's pair,
+    gets a pair the app never reads; the app's first use of its own pair
+    supersedes that one."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    token_b = resend.json()["refresh_token"]
+    late = await _refresh(client, token_a)
+    assert late.status_code == 200
+
+    used = await client.get("/v3/devices", headers=_bearer(resend.json()))
+
+    assert used.status_code == 200
+    unread = late.json()["refresh_token"]
+    assert (await _row(client, unread)).revoked_reason == "superseded"
+    assert (await _row(client, token_b)).revoked_at is None
+    assert await _reuse_detections(client) == 0
+    assert (await _refresh(client, token_b)).status_code == 200
+
+
+async def test_the_pair_that_lost_turns_up_as_theft(client) -> None:
+    """Once one of the two pairs is used, a token of the other comes from a
+    second holder. Without a device, the chain walk from it has to reach
+    the session that won."""
+    login = await do_login(client)
+    await _set_row(client, login["refresh_token"], device_id=None)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    late = await _refresh(client, token_a)
+    used = await client.get("/v3/devices", headers=_bearer(resend.json()))
+    assert used.status_code == 200
+
+    stale = await _refresh(client, late.json()["refresh_token"])
+
+    assert stale.status_code == 401
+    assert stale.json()["detail"] == "refresh_reuse_detected"
+    token_b = resend.json()["refresh_token"]
+    assert (await _row(client, token_b)).revoked_reason == "reuse_detected"
 
 
 async def test_a_token_the_previous_release_retried_is_not_rotated_again(
@@ -366,9 +456,11 @@ async def test_a_token_the_previous_release_retried_is_not_rotated_again(
     assert reuse.json()["detail"] == "refresh_reuse_detected"
 
 
-async def _until_a_query_waits_for_a_lock(engine: AsyncEngine) -> None:
-    async with engine.connect() as conn:
-        for _ in range(200):
+async def _until_queries_wait_for_a_lock(engine: AsyncEngine, count: int = 1) -> None:
+    for _ in range(200):
+        # A transaction of its own each time: Postgres keeps the
+        # pg_stat_activity it read first until the transaction ends.
+        async with engine.connect() as conn:
             waiting = await conn.scalar(
                 text(
                     "SELECT count(*) FROM pg_stat_activity"
@@ -376,10 +468,10 @@ async def _until_a_query_waits_for_a_lock(engine: AsyncEngine) -> None:
                     " AND wait_event_type = 'Lock'"
                 )
             )
-            if waiting:
-                return
-            await asyncio.sleep(0.05)
-    raise AssertionError("no query waited for the lock")
+        if waiting >= count:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"fewer than {count} queries waited for a lock")
 
 
 async def test_a_rotation_of_the_successor_in_flight_is_waited_for(client) -> None:
@@ -404,13 +496,42 @@ async def test_a_rotation_of_the_successor_in_flight_is_waited_for(client) -> No
             )
         )
         reuse = asyncio.create_task(_refresh(client, token_a))
-        await _until_a_query_waits_for_a_lock(engine)
+        await _until_queries_wait_for_a_lock(engine)
         await rotation.commit()
     response = await reuse
 
     assert response.status_code == 401
     assert response.json()["detail"] == "refresh_reuse_detected"
     assert (await _row(client, token_b)).revoked_reason == "rotated"
+
+
+async def test_two_first_uses_of_the_two_pairs_let_one_win(client) -> None:
+    """A second holder uses the other pair at the same moment: one request
+    supersedes the other session, and the other request gets a 401."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    late = await _refresh(client, token_a)
+    row_b = await _row(client, resend.json()["refresh_token"])
+    row_c = await _row(client, late.json()["refresh_token"])
+
+    engine = client.app.state.engine
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": min(row_b.id, row_c.id)},
+        )
+        uses = [
+            asyncio.create_task(client.get("/v3/devices", headers=_bearer(pair)))
+            for pair in (resend.json(), late.json())
+        ]
+        await _until_queries_wait_for_a_lock(engine, count=2)
+        await holder.commit()
+    statuses = sorted([(await use).status_code for use in uses])
+
+    assert statuses == [200, 401]
+    rows = [await _row(client, pair["refresh_token"]) for pair in (resend.json(), late.json())]
+    assert sorted(str(row.revoked_reason) for row in rows) == ["None", "superseded"]
 
 
 async def _logged_out(client) -> str:
