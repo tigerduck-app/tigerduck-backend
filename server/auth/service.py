@@ -261,6 +261,8 @@ async def _rotate(
     old.revoked_reason = SessionRevokedReason.rotated.value
     old.replaced_by_session_id = new_session.id
     old.last_used_at = now
+    if old.first_used_at is None:
+        old.first_used_at = now
 
     access_token = issue_access_token(
         settings.auth_jwt_secret,

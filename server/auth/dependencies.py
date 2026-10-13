@@ -3,19 +3,22 @@
 Besides verifying the JWT itself, this checks the backing auth_session is
 not revoked — so logout, device deletion, and refresh-reuse detection cut
 access immediately instead of "within 15 minutes when the JWT expires".
-One PK lookup per authenticated request; the session object is shared with
-the route handler via FastAPI's per-request dependency cache.
+One PK lookup per authenticated request, plus one write on a session's
+first; the session object is shared with the route handler via FastAPI's
+per-request dependency cache.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
 from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
 from server.auth.tokens import InvalidAccessToken, decode_access_token
@@ -74,6 +77,8 @@ async def require_user(
             detail="session_user_mismatch",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if auth_session.first_used_at is None:
+        await _record_first_use(session, auth_session)
     if device_id:
         await session.execute(
             update(UserDevice)
@@ -83,6 +88,23 @@ async def require_user(
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id
     )
+
+
+async def _record_first_use(session: AsyncSession, auth_session: AuthSession) -> None:
+    """Note that the session's client holds its tokens, which a refresh of
+    the previous token reads to tell a lost reply from a copy.
+
+    The row loaded above says whether this is due, so only a session's
+    first requests write. It commits at once: a handler that fails must not
+    undo it, and a handler that waits on Moodle must not hold the row lock
+    that the session's other first requests and its refresh need.
+    """
+    await session.execute(
+        update(AuthSession)
+        .where(AuthSession.id == auth_session.id, AuthSession.first_used_at.is_(None))
+        .values(first_used_at=datetime.now(UTC))
+    )
+    await session.commit()
 
 
 CurrentAuthDep = Annotated[CurrentAuth, Depends(require_user)]
