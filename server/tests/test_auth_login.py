@@ -216,6 +216,16 @@ async def test_password_without_token_is_refused_and_counted(client) -> None:
         assert (await session.execute(select(User))).scalars().all() == []
 
 
+@pytest.mark.parametrize("password", [None, "x" * 300], ids=["null", "long"])
+async def test_token_login_ignores_the_password(client, password) -> None:
+    allow_moodle(client)
+    response = await client.post(
+        "/v3/auth/login", json={**LOGIN_BODY, "password": password}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["student_id"] == "B11015000"
+
+
 async def test_login_reactivates_soft_deleted_user(client) -> None:
     # Pre-seed a soft-deleted user owning the external account.
     factory = build_session_factory(client.app.state.engine)
