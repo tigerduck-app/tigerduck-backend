@@ -562,8 +562,7 @@ async def _classes_quiet(
     """Why classes do not meet for `user_id` on `day`, or None when they do.
 
     The rule `course_reminders.scan_course_reminders` applies to the class
-    reminder alerts, but a start does not say which term its class is in,
-    so here any published term running on the day will do, as in the apps.
+    reminder alerts, and the apps' `isClassDay`.
 
     * `outside_term`: no published term runs on the day.
     * `holiday`: a holiday covers the day and the user has not opted in to

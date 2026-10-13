@@ -22,7 +22,11 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
-from server.academic_calendar.terms import load_term_dates, outside_term
+from server.academic_calendar.terms import (
+    current_term_code,
+    load_term_dates,
+    outside_term,
+)
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -208,22 +212,38 @@ async def _users_with_a_recipient(
     return set(rows.scalars().all())
 
 
+async def _current_terms(
+    session: AsyncSession, window_start: datetime, window_end: datetime, tz: tzinfo
+) -> dict[date, str | None]:
+    """Each local day of the window, mapped to the term both apps take as
+    current on it (`current_term_code`)."""
+    by_day: dict[date, str | None] = {}
+    day = window_start.astimezone(tz).date()
+    while day <= window_end.astimezone(tz).date():
+        # Noon keeps the day the same in the school's zone.
+        by_day[day] = await current_term_code(
+            session, datetime.combine(day, time(12), tzinfo=tz)
+        )
+        day += timedelta(days=1)
+    return by_day
+
+
 async def scan_course_reminders(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
 ) -> int:
     """One scan pass. Returns the number of push_jobs created.
 
-    Eligible courses: not deleted, enrolled, non-empty schedule, in the
-    user's LATEST semester (lexicographic max of "1141"-style strings —
-    older semesters must not keep firing weekly reminders), not hidden by
-    override. Occurrence dates listed in user_course_skipped_dates are
-    excluded, and so are days outside the courses' term
-    (`academic_calendar.terms.outside_term`). Cancellation mirrors
-    assignment reminders: pending jobs whose dedupe key no longer maps to
-    an eligible (course, occurrence, offset) tuple are cancelled, under
-    SKIP LOCKED so a job the pipeline is claiming concurrently is left
-    alone.
+    Eligible courses: not deleted, enrolled, non-empty schedule, not hidden
+    by override, and of the term both apps show on the occurrence's day
+    (`current_term_code`); with no term published, of the user's LATEST
+    semester (lexicographic max of "1141"-style strings — older semesters
+    must not keep firing weekly reminders). Occurrence dates listed in
+    user_course_skipped_dates are excluded, and so are days no published
+    term runs on (`outside_term`). Cancellation mirrors assignment
+    reminders: pending jobs whose dedupe key no longer maps to an eligible
+    (course, occurrence, offset) tuple are cancelled, under SKIP LOCKED so
+    a job the pipeline is claiming concurrently is left alone.
 
     Two deliberate semantics worth naming:
     * The global pending scan is unbounded by user but bounded by
@@ -260,7 +280,8 @@ async def scan_course_reminders(
             )
         ).all()
 
-        # Latest semester per user, preferring portal-sourced courses:
+        # Latest semester per user, which stands in for the term while none
+        # is published. It prefers portal-sourced courses:
         # `user_added` rows carry a free-form client semester string that
         # could lexicographically outrank the real current semester (e.g.
         # "9999") and silently mute every portal course's reminders.
@@ -279,15 +300,20 @@ async def scan_course_reminders(
                 bucket[course.user_id] = course.semester
         latest_semester = {**fallback_latest, **portal_latest}
 
-        # Days classes do not meet: outside the term, or on a holiday unless
-        # the user put it back. Apple guards twice — the app also stays
-        # quiet — but the backend half is what stops a push being *sent*,
-        # which is the only half that works when the app is not running to
-        # suppress anything. The class Live Activity starts apply the same
-        # rule when they fire — `pipeline._classes_quiet`; a change here
-        # belongs there too. A start does not say which term its class is
-        # in, so there any published term running on the day will do.
+        # The term whose courses meet on each day of the window: the one
+        # both apps show that day. The next term's courses, synced weeks
+        # ahead once course selection serves them, wait for it to begin,
+        # and the term before keeps its own until then.
         terms = await load_term_dates(session)
+        term_on = await _current_terms(session, now, window_end, tz) if terms else {}
+
+        # Days classes do not meet: no published term runs on them, or a
+        # holiday the user did not put back covers them. Apple guards twice
+        # — the app also stays quiet — but the backend half is what stops a
+        # push being *sent*, which is the only half that works when the app
+        # is not running to suppress anything. The class Live Activity
+        # starts apply the same rule when they fire —
+        # `pipeline._classes_quiet`; a change here belongs there too.
         holiday_ranges = (
             await session.execute(
                 select(
@@ -318,13 +344,21 @@ async def scan_course_reminders(
             # they never saw should not overrule that.
             return not (opted_in.get(user_id, set()) & set(covering))
 
-        eligible = [
-            (course, override)
-            for course, override in rows
-            if course.semester == latest_semester[course.user_id]
-            # Removed courses are hard-deleted, so any course still
-            # present is eligible.
-        ]
+        # Removed courses are hard-deleted, so any course still present is
+        # eligible.
+        if term_on:
+            current_terms = set(term_on.values())
+            eligible = [
+                (course, override)
+                for course, override in rows
+                if course.semester in current_terms
+            ]
+        else:
+            eligible = [
+                (course, override)
+                for course, override in rows
+                if course.semester == latest_semester[course.user_id]
+            ]
         user_ids = {course.user_id for course, _ in eligible}
 
         # SKIP LOCKED: don't fight the pipeline's claim — see
@@ -416,8 +450,10 @@ async def scan_course_reminders(
                 occurrence_day = occurrence.astimezone(tz).date()
                 if (course.id, occurrence_day) in skipped:
                     continue
+                if term_on and term_on[occurrence_day] != course.semester:
+                    continue
                 # "還要上課？" puts back a holiday, never a day outside the term.
-                if outside_term(occurrence_day, terms, semester=course.semester):
+                if outside_term(occurrence_day, terms):
                     continue
                 if is_quiet(course.user_id, occurrence_day):
                     continue

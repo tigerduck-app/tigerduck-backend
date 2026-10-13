@@ -1,8 +1,13 @@
-"""The term the apps operate on, read from the published calendar."""
+"""The published calendar as the apps read it: the term they take as
+current, and the days a term runs on.
+
+A term runs from its first day of classes through its last, both inclusive,
+as Taipei school days (`AcademicCalendar` on Apple and Android).
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -15,6 +20,9 @@ from server.academic_calendar.models import SemesterTerm
 # time. Fixed rather than `course_reminder_timezone`, so that a bad value
 # there cannot stop the assignment reminder scan, which reads the term.
 _SCHOOL_TZ = ZoneInfo("Asia/Taipei")
+
+#: A term's first and last day of classes, both inclusive.
+TermDates = tuple[date, date]
 
 
 async def current_term_code(session: AsyncSession, now: datetime) -> str | None:
@@ -41,34 +49,20 @@ async def current_term_code(session: AsyncSession, now: datetime) -> str | None:
     )
 
 
-#: A term's first and last day of classes, both inclusive.
-TermDates = tuple[date, date]
-
-
-async def load_term_dates(session: AsyncSession) -> dict[str, TermDates]:
-    """Every published term's dates, by its code."""
+async def load_term_dates(session: AsyncSession) -> list[TermDates]:
+    """Every published term's first and last day of classes."""
     rows = await session.execute(
-        select(SemesterTerm.code, SemesterTerm.start_date, SemesterTerm.end_date)
+        select(SemesterTerm.start_date, SemesterTerm.end_date)
     )
-    return {code: (start, end) for code, start, end in rows.all()}
+    return [(start, end) for start, end in rows.all()]
 
 
-def outside_term(
-    day: date, terms: Mapping[str, TermDates], *, semester: str | None = None
-) -> bool:
-    """Whether `day` falls outside the term, so no class of `semester` meets.
+def outside_term(day: date, terms: Collection[TermDates]) -> bool:
+    """Whether no published term runs on `day`, so no class meets.
 
-    A term with dates runs from its first day of classes through its last,
-    and its courses meet only then: the next term's courses, synced before
-    it starts, stay quiet while the term before still runs. A term with no
-    dates yet, or no `semester`, falls back to the apps' rule, any published
-    term running on the day. With no term published no day is outside, as
-    in the apps, so a calendar nobody filled in silences nothing.
+    The apps' `AcademicCalendar.isInSession`, negated: before the first
+    term, in a break and after the last term. With no term published no day
+    is outside, as in the apps, so a calendar nobody filled in silences
+    nothing.
     """
-    if not terms:
-        return False
-    own = terms.get(semester) if semester is not None else None
-    if own is not None:
-        start, end = own
-        return not (start <= day <= end)
-    return not any(start <= day <= end for start, end in terms.values())
+    return bool(terms) and not any(start <= day <= end for start, end in terms)

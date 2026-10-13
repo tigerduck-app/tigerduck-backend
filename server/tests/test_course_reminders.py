@@ -466,8 +466,9 @@ async def test_another_users_opt_in_does_not_leak(
 
 # --- term dates ---
 #
-# A class meets only while its term runs, from its first day of classes
-# through its last, as both apps count it.
+# Each day's reminders go to the courses of the term both apps show that
+# day, the one that began most recently, and only while a published term
+# runs, from its first day of classes through its last.
 
 
 def _term(code, start, end):
@@ -482,94 +483,113 @@ def _two_class_days():
     return first, [{"day": day.isoweekday(), "periods": [1]} for day in days]
 
 
-def _class_days(jobs):
-    return [
-        datetime.fromisoformat(job.payload["starts_at"])
-        .astimezone(ZoneInfo("Asia/Taipei"))
-        .date()
-        for job in jobs
-    ]
+def _class_day(job):
+    starts_at = datetime.fromisoformat(job.payload["starts_at"])
+    return starts_at.astimezone(ZoneInfo("Asia/Taipei")).date()
 
 
 async def _scan_two_class_days(
-    db_session, prepared_engine, test_settings, *, semester, terms
+    db_session, prepared_engine, test_settings, *, semesters, terms
 ):
-    """Scans a `semester` class held on two days in a row, with `terms` built
-    from the first day; returns that day and the days reminders went to."""
+    """Scans one course of each of `semesters`, all held on two days in a
+    row, with `terms` built from the first day. Returns that day and the
+    (semester, day) of each reminder filed."""
     user = await _make_user(db_session)
     first, schedule = _two_class_days()
-    db_session.add(_course(user, semester=semester, schedule_json=schedule))
+    db_session.add_all(
+        _course(
+            user, course_key=f"CS{semester}", semester=semester, schedule_json=schedule
+        )
+        for semester in semesters
+    )
     db_session.add_all(terms(first.date()))
     await db_session.commit()
 
     settings = _scan_settings(test_settings, first)
     factory = build_session_factory(prepared_engine)
     created = await scan_course_reminders(factory, settings)
-    days = _class_days(await _jobs(db_session, user.id))
-    assert created == len(days)
-    return first.date(), days
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs)
+    filed = sorted((job.payload["semester"], _class_day(job)) for job in jobs)
+    return first.date(), filed
 
 
 async def test_a_term_rings_through_its_last_day_and_not_after(
     db_session, prepared_engine, test_settings
 ):
-    first, days = await _scan_two_class_days(
+    first, filed = await _scan_two_class_days(
         db_session,
         prepared_engine,
         test_settings,
-        semester="1151",
+        semesters=["1151"],
         terms=lambda first: [_term("1151", first - timedelta(days=120), first)],
     )
-    assert days == [first]
+    assert filed == [("1151", first)]
 
 
 async def test_a_term_rings_from_its_first_day_and_not_before(
     db_session, prepared_engine, test_settings
 ):
-    """Its courses are synced, but the term opens the second day."""
-    first, days = await _scan_two_class_days(
+    """Its courses are synced, but the term opens on the second day."""
+    first, filed = await _scan_two_class_days(
         db_session,
         prepared_engine,
         test_settings,
-        semester="1152",
+        semesters=["1152"],
         terms=lambda first: [
             _term("1152", first + timedelta(days=1), first + timedelta(days=120))
         ],
     )
-    assert days == [first + timedelta(days=1)]
+    assert filed == [("1152", first + timedelta(days=1))]
 
 
-async def test_the_next_terms_courses_stay_quiet_while_the_term_before_runs(
+async def test_course_selection_leaves_the_next_terms_courses_for_its_start(
     db_session, prepared_engine, test_settings
 ):
-    """Synced as soon as course selection serves them, the next term's
-    courses are the user's latest while the term before still runs."""
-    _, days = await _scan_two_class_days(
+    """Course selection serves the next term weeks before it opens, and the
+    app syncs those courses at once. The term running keeps its reminders."""
+    first, filed = await _scan_two_class_days(
         db_session,
         prepared_engine,
         test_settings,
-        semester="1152",
+        semesters=["1151", "1152"],
         terms=lambda first: [
-            _term("1151", first - timedelta(days=120), first + timedelta(days=14)),
+            _term("1151", first - timedelta(days=100), first + timedelta(days=14)),
             _term("1152", first + timedelta(days=40), first + timedelta(days=160)),
         ],
     )
-    assert days == []
+    assert filed == [("1151", first), ("1151", first + timedelta(days=1))]
 
 
-async def test_a_term_without_dates_rings_only_while_a_published_term_runs(
+async def test_the_next_term_takes_over_on_its_first_day(
     db_session, prepared_engine, test_settings
 ):
-    """No dates for 1152 yet: its classes ring on the days a published term
-    runs, as the apps show them, and not after the last one."""
-    first, days = await _scan_two_class_days(
+    first, filed = await _scan_two_class_days(
         db_session,
         prepared_engine,
         test_settings,
-        semester="1152",
+        semesters=["1151", "1152"],
+        terms=lambda first: [
+            _term("1151", first - timedelta(days=120), first),
+            _term("1152", first + timedelta(days=1), first + timedelta(days=120)),
+        ],
+    )
+    assert filed == [("1151", first), ("1152", first + timedelta(days=1))]
+
+
+async def test_a_term_without_dates_gets_no_reminders(
+    db_session, prepared_engine, test_settings
+):
+    """1152 has no dates yet, so the apps still show 1151, the last term
+    published: its courses ring while it runs, and nothing after it."""
+    first, filed = await _scan_two_class_days(
+        db_session,
+        prepared_engine,
+        test_settings,
+        semesters=["1151", "1152"],
         terms=lambda first: [_term("1151", first - timedelta(days=120), first)],
     )
-    assert days == [first]
+    assert filed == [("1151", first)]
 
 
 async def test_an_opted_in_holiday_in_the_break_stays_quiet(
@@ -606,8 +626,8 @@ async def test_an_opted_in_holiday_in_the_break_stays_quiet(
 async def test_dates_published_after_a_reminder_was_filed_cancel_it(
     db_session, prepared_engine, test_settings
 ):
-    """With no term published every class rings, as before; dates published
-    since that leave the class out cancel the reminder already filed."""
+    """With no term published the latest synced term rings, as before; dates
+    published since that leave the class out cancel the reminder filed."""
     user = await _make_user(db_session)
     local, schedule = _occurrence_in(26)
     db_session.add(_course(user, semester="1152", schedule_json=schedule))
