@@ -29,6 +29,7 @@ from server.auth.models import (
     PushJob,
     UserDevice,
 )
+from server.auth.service import PROVIDER_NTUST_SSO
 from server.push.notification_copy import REAUTH_SCENARIO
 from server.syncjobs.models import SyncJob, SyncJobStatus
 
@@ -97,6 +98,30 @@ async def load_credential_blob(
         raise CredentialInvalid("decrypt_failed") from exc
     credential.last_used_at = datetime.now(UTC)
     return account, blob
+
+
+async def load_moodle_token(
+    session: AsyncSession, cipher: CredentialCipher, *, user_id: uuid.UUID
+) -> str:
+    """The Moodle token stored for `user_id`, for a reader that holds no sync
+    job: the push pipeline's pre-send check (`push/presend.py`). Raises
+    CredentialInvalid when there is none it may use; marking a credential
+    invalid stays with the user's sync job."""
+    account_id = await session.scalar(
+        select(ExternalAccount.id).where(
+            ExternalAccount.user_id == user_id,
+            ExternalAccount.provider == PROVIDER_NTUST_SSO,
+        )
+    )
+    if account_id is None:
+        raise CredentialInvalid("account_missing")
+    _, blob = await load_credential_blob(
+        session, cipher, external_account_id=account_id
+    )
+    token = (blob.get("token_cache") or {}).get("moodle_token")
+    if not isinstance(token, str) or not token:
+        raise CredentialInvalid("moodle_token_missing")
+    return token
 
 
 async def mark_credentials_invalid(

@@ -20,11 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from server.auth.models import User
+from server.auth.crypto import CredentialCipher, build_credential_aad
+from server.auth.models import ExternalAccount, ExternalAccountCredential, User
 from server.config import Settings
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
 from server.sync.models import UserAssignment
+from server.syncjobs.moodle_client import FetchedSubmission
 from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
@@ -253,3 +255,70 @@ async def make_assignment(db_session: AsyncSession):
         return row
 
     return _make
+
+
+@pytest_asyncio.fixture
+async def store_moodle_token(db_session: AsyncSession, test_settings: Settings):
+    """Factory: store a Moodle token for a user the way login does, for the
+    push pipeline's pre-send check to read back with the test keys
+    (`CredentialCipher.from_settings(test_settings)`)."""
+    cipher = CredentialCipher.from_settings(test_settings)
+
+    async def _store(
+        user_id: uuid.UUID, *, token: str = "moodle-token", status: str = "active"
+    ) -> ExternalAccount:
+        account = ExternalAccount(
+            user_id=user_id,
+            provider="ntust_sso",
+            external_user_id=f"student-{user_id}",
+            credential_status=status,
+        )
+        db_session.add(account)
+        await db_session.flush()
+        blob = cipher.encrypt(
+            {"token_cache": {"moodle_token": token}},
+            build_credential_aad(account.id, "ntust_sso"),
+        )
+        db_session.add(
+            ExternalAccountCredential(
+                external_account_id=account.id,
+                encryption_key_id=blob.key_id,
+                ciphertext=blob.ciphertext,
+                nonce=blob.nonce,
+                aad=blob.aad,
+            )
+        )
+        await db_session.flush()
+        return account
+
+    return _store
+
+
+class SubmissionStatusStub:
+    """Moodle as the push pipeline's pre-send check sees it.
+
+    Each call plays the next step of `script`, the last one repeating: the
+    fields of a FetchedSubmission for every id asked, None to answer
+    nothing, or an exception to raise. With no script every assignment is
+    open. Records the ids and tokens it was asked with.
+    """
+
+    def __init__(self, *script: dict | BaseException | None) -> None:
+        self.script = list(script) or [{"is_submitted": False, "submitted_at": None}]
+        self.asked: list[int] = []
+        self.tokens: list[str] = []
+
+    async def fetch_submission_status(
+        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+    ) -> dict[int, FetchedSubmission]:
+        self.asked.extend(assignment_ids)
+        self.tokens.append(token)
+        step = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(step, BaseException):
+            raise step
+        if step is None:
+            return {}
+        return {
+            aid: FetchedSubmission(moodle_assignment_id=aid, **step)
+            for aid in assignment_ids
+        }
