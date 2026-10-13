@@ -208,17 +208,36 @@ async def refresh(
         )
 
     token_hash = hash_refresh_token(settings.auth_refresh_hmac_key, refresh_token)
-    # Row lock: two concurrent refreshes with the same token serialize here;
+    found = (
+        await session.execute(
+            select(AuthSession.id, AuthSession.replaced_by_session_id).where(
+                AuthSession.refresh_token_hash == token_hash
+            )
+        )
+    ).one_or_none()
+    if found is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_refresh_token",
+        )
+    # Row locks: two concurrent refreshes with the same token serialize here;
     # the loser then sees revoked_at set and flows through the grace path
     # instead of forking the rotation chain or 500ing on the unique index.
-    auth_session = (
-        await session.execute(
-            select(AuthSession)
-            .where(AuthSession.refresh_token_hash == token_hash)
-            .with_for_update()
-        )
-    ).scalar_one_or_none()
-    if auth_session is None:
+    # The session it points at is locked with it, in id order as
+    # `_claim_contest` takes the pair, so a refresh and a first use of the two
+    # sessions a second rotation left cannot deadlock. A pointer set after the
+    # read names a newer session, which still comes after in id order.
+    pair = sorted(
+        {found.id, found.replaced_by_session_id} - {None}
+    )
+    await session.execute(
+        select(AuthSession.id)
+        .where(AuthSession.id.in_(pair))
+        .order_by(AuthSession.id)
+        .with_for_update()
+    )
+    auth_session = await session.get(AuthSession, found.id, populate_existing=True)
+    if auth_session is None:  # deleted with its user between the read and the lock
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_refresh_token",

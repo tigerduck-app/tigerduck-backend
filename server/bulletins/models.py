@@ -15,7 +15,7 @@ Tables
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 
 from sqlalchemy import (
@@ -49,6 +49,10 @@ class BulletinDispatchStatus(StrEnum):
     sent = "sent"
     failed = "failed"
     cancelled = "cancelled"
+
+
+#: How long a bulletin whose fan-out or match failed waits before the next try.
+FAILED_BULLETIN_RETRY_DELAY = timedelta(minutes=15)
 
 
 class Bulletin(Base):
@@ -93,6 +97,14 @@ class Bulletin(Base):
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # After a failed anonymous fan-out or user match, the pass skips the
+    # bulletin until then, so the bulletins after it take its batch slot.
+    fanout_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    match_retry_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     dispatch_filter_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

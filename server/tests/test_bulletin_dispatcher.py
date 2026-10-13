@@ -4,12 +4,15 @@ fan-out fails."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import func, insert, literal, select
 
 from server.bulletins import dispatcher
 from server.bulletins.dispatcher import dispatch_pending_bulletins
 from server.bulletins.models import (
+    FAILED_BULLETIN_RETRY_DELAY,
     Bulletin,
     BulletinDispatch,
     BulletinDispatchStatus,
@@ -120,7 +123,8 @@ async def test_a_bulletin_whose_fan_out_fails_holds_up_no_other(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
     """Each tick starts with the oldest bulletin. One whose fan-out raises is
-    left for the next tick to retry, and the bulletins after it go out."""
+    left to retry once its delay has passed, and the bulletins after it go
+    out."""
     await _subscribe_devices(db_session, 1)
     failing = _bulletin("910001", content_tags=[ContentTag.exam.value])
     later = _bulletin("910002")
@@ -149,5 +153,46 @@ async def test_a_bulletin_whose_fan_out_fails_holds_up_no_other(
     android = RecordingFcmSender()
     await dispatch_pending_bulletins(factory, _router(android), test_settings)
 
+    assert android.requests == []
+
+    await dispatch_pending_bulletins(
+        factory, _router(android), test_settings,
+        now=datetime.now(UTC) + FAILED_BULLETIN_RETRY_DELAY,
+    )
+
     assert [r.data["bulletin_id"] for r in android.requests] == [str(failing.id)]
     assert await _notified(db_session, failing)
+
+
+async def test_a_failing_bulletin_leaves_its_batch_slot_to_the_next(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """With a batch of one, a bulletin that fails would take the slot of every
+    tick; skipped until its retry, it lets the next bulletin out."""
+    await _subscribe_devices(db_session, 1)
+    failing = _bulletin("910001", content_tags=[ContentTag.exam.value])
+    later = _bulletin("910002")
+    db_session.add_all([failing, later])
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    real_match = dispatcher.match_device_ids
+
+    async def match_device_ids(session, *, canonical_org, content_tags):
+        if ContentTag.exam.value in content_tags:
+            raise RuntimeError("matching failed")
+        return await real_match(
+            session, canonical_org=canonical_org, content_tags=content_tags
+        )
+
+    monkeypatch.setattr(dispatcher, "match_device_ids", match_device_ids)
+    android = RecordingFcmSender()
+    first = await dispatch_pending_bulletins(
+        factory, _router(android), test_settings, batch_limit=1
+    )
+    second = await dispatch_pending_bulletins(
+        factory, _router(android), test_settings, batch_limit=1
+    )
+
+    assert (first.bulletins_handled, second.bulletins_handled) == (0, 1)
+    assert [r.data["bulletin_id"] for r in android.requests] == [str(later.id)]
+    assert not await _notified(db_session, failing)

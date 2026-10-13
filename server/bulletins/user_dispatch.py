@@ -25,13 +25,17 @@ from datetime import UTC, datetime
 from itertools import batched
 
 import structlog
-from sqlalchemy import exists, select
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.models import PushJob, UserDevice
 from server.bulletins.matcher import Rule, rule_hits
-from server.bulletins.models import Bulletin, BulletinProcessingState
+from server.bulletins.models import (
+    FAILED_BULLETIN_RETRY_DELAY,
+    Bulletin,
+    BulletinProcessingState,
+)
 from server.bulletins.taxonomy import SubscriptionMode
 from server.config import Settings
 from server.db import INSERT_CHUNK_ROWS, session_scope
@@ -67,6 +71,7 @@ async def _match_new_bulletins(
                             BulletinUserMatchRun.bulletin_id == Bulletin.id
                         )
                     ),
+                    or_(Bulletin.match_retry_at.is_(None), Bulletin.match_retry_at <= now),
                 )
                 .order_by(Bulletin.id)
                 .limit(settings.bulletin_user_dispatch_batch_size)
@@ -120,6 +125,13 @@ async def _match_new_bulletins(
                 "bulletins.user_dispatch.match_failed",
                 bulletin_id=bulletin.id,
                 error=str(exc)[:200],
+            )
+            # An UPDATE, not the row object, which the savepoint's rollback
+            # expired. Skipped for a while, it leaves its slot to later ones.
+            await session.execute(
+                update(Bulletin)
+                .where(Bulletin.id == bulletin.id)
+                .values(match_retry_at=now + FAILED_BULLETIN_RETRY_DELAY)
             )
     return len(bulletins)
 

@@ -331,8 +331,48 @@ async def test_a_bulletin_the_database_refuses_holds_up_no_other(
         text("ALTER TABLE bulletin_user_match_runs DROP CONSTRAINT refuse_failing")
     )
     await db_session.commit()
+    # Skipped until its retry, which a later tick reaches.
+    assert await dispatch_user_bulletins(factory, test_settings) == 0
+    await db_session.execute(
+        text("UPDATE bulletins SET match_retry_at = now() - interval '1 second' WHERE id = :id"),
+        {"id": failing.id},
+    )
+    await db_session.commit()
     assert await dispatch_user_bulletins(factory, test_settings) == 1
     assert await _pushed(db_session) == {filed.id, failing.id, later.id}
+
+
+async def test_a_refused_bulletin_leaves_its_batch_slot_to_the_next(
+    db_session, prepared_engine, test_settings
+):
+    """With a batch of one, a bulletin the database refuses would take the
+    slot of every tick; skipped until its retry, the next one is matched."""
+    await _user_with_sub(db_session)
+    failing = _bulletin("b-1")
+    later = _bulletin("b-2")
+    db_session.add_all([failing, later])
+    await db_session.flush()
+    await db_session.execute(
+        text(
+            "ALTER TABLE bulletin_user_match_runs ADD CONSTRAINT refuse_failing"
+            f" CHECK (bulletin_id <> {failing.id})"
+        )
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = test_settings.model_copy(update={"bulletin_user_dispatch_batch_size": 1})
+
+    try:
+        await dispatch_user_bulletins(factory, settings)
+        await dispatch_user_bulletins(factory, settings)
+
+        assert await _pushed(db_session) == {later.id}
+        assert await db_session.get(BulletinUserMatchRun, failing.id) is None
+    finally:
+        await db_session.execute(
+            text("ALTER TABLE bulletin_user_match_runs DROP CONSTRAINT refuse_failing")
+        )
+        await db_session.commit()
 
 
 async def test_signed_out_device_rules_are_not_matched(

@@ -384,26 +384,29 @@ async def process_initial_upload(
             )
             session.add(override)
             await session.flush()
-        changed = False
+        changed = set()
         for field_name, value, ts in (
             ("local_status", item.local_status, item.local_status_updated_at),
             ("note", item.note, item.note_updated_at),
         ):
             if value is None:
                 continue
-            changed |= apply_field(
+            if apply_field(
                 override,
                 field_name,
                 value,
                 client_ts=ts or now,
                 device_id=device_id,
                 now=now,
-            )
+            ):
+                changed.add(field_name)
         if changed:
             # Read under the sync lock, after any fetch the upload waited for:
             # `/sync/full` compares it with those fetches' soft-deletes, and
             # the column's now() would be when the transaction began.
             override.updated_at = datetime.now(UTC)
+            if "local_status" in changed:
+                override.local_status_received_at = override.updated_at
             counts["assignment_overrides"] += 1
             await log("assignment_override", str(assignment.id))
 
