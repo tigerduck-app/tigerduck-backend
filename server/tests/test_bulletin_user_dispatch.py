@@ -5,13 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, insert, literal, select
 
 from server.auth.models import PushJob, User, UserDevice
 from server.bulletins.models import Bulletin
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
-from server.db import build_session_factory
-from server.bulletins.user_dispatch import dispatch_user_bulletins
+from server.bulletins.user_dispatch import (
+    _match_new_bulletins,
+    dispatch_user_bulletins,
+)
+from server.db import build_session_factory, session_scope
 from server.sync.models import (
     BulletinUserMatch,
     BulletinUserMatchRun,
@@ -218,6 +221,61 @@ async def test_push_job_targets_only_the_matching_devices(
     match = (await db_session.execute(select(BulletinUserMatch))).scalar_one()
     job = await db_session.get(PushJob, match.push_job_id)
     assert job.payload["target_device_ids"] == [str(phone_sub.device_id)]
+
+
+async def _subscribe_users(session, count: int) -> None:
+    """`count` users, each with an iPhone whose rule matches every TAG
+    bulletin. Postgres generates them: built in Python, the rows take
+    seconds."""
+    await session.execute(
+        insert(User).from_select(
+            ["id"],
+            select(func.gen_random_uuid()).select_from(func.generate_series(1, count)),
+        )
+    )
+    device = {
+        "id": func.gen_random_uuid(),
+        "user_id": User.id,
+        "client_device_id": literal("iphone"),
+        "platform": literal("ios"),
+    }
+    await session.execute(
+        insert(UserDevice).from_select(list(device), select(*device.values()))
+    )
+    subscription = {
+        "user_id": UserDevice.user_id,
+        "device_id": UserDevice.id,
+        "orgs": literal([], UserBulletinSubscription.orgs.type),
+        "tags": literal([TAG], UserBulletinSubscription.tags.type),
+        "mode": literal("AND"),
+    }
+    await session.execute(
+        insert(UserBulletinSubscription).from_select(
+            list(subscription), select(*subscription.values())
+        )
+    )
+
+
+async def test_a_bulletin_matches_more_users_than_one_insert_binds(
+    db_session, prepared_engine, test_settings
+):
+    """asyncpg allows 32,767 bind parameters per statement and a match row
+    binds 5. Filed in one insert, the matches of a bulletin for 6,554 users
+    failed the tick, every tick, and with it the pushes of every bulletin.
+
+    Runs the match pass alone: pushing to that many users takes seconds.
+    """
+    await _subscribe_users(db_session, 6_554)
+    bulletin = _bulletin()
+    db_session.add(bulletin)
+    await db_session.commit()
+
+    async with session_scope(build_session_factory(prepared_engine)) as session:
+        await _match_new_bulletins(session, test_settings, datetime.now(UTC))
+
+    count = select(func.count()).select_from(BulletinUserMatch)
+    assert await db_session.scalar(count) == 6_554
+    assert await db_session.get(BulletinUserMatchRun, bulletin.id) is not None
 
 
 async def test_signed_out_device_rules_are_not_matched(

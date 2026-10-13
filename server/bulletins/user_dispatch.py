@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from itertools import batched
 
 import structlog
 from sqlalchemy import exists, select
@@ -33,7 +34,7 @@ from server.bulletins.matcher import Rule, rule_hits
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.taxonomy import SubscriptionMode
 from server.config import Settings
-from server.db import session_scope
+from server.db import INSERT_CHUNK_ROWS, session_scope
 from server.sync.models import (
     BulletinUserMatch,
     BulletinUserMatchRun,
@@ -44,6 +45,9 @@ logger = structlog.get_logger(__name__)
 
 CHANNEL = "bulletin"
 SCENARIO = "bulletin_matched"
+
+# user -> device -> that device's rules, as (subscription id, rule)
+_RulesByUser = dict[uuid.UUID, dict[uuid.UUID, list[tuple[int, Rule]]]]
 
 
 async def _match_new_bulletins(
@@ -93,8 +97,7 @@ async def _match_new_bulletins(
         .scalars()
         .all()
     )
-    # user -> device -> that device's rules
-    per_user: dict[uuid.UUID, dict[uuid.UUID, list[tuple[int, Rule]]]] = {}
+    per_user: _RulesByUser = {}
     for sub in subs:
         rule = Rule(
             orgs=frozenset(sub.orgs or ()),
@@ -106,55 +109,64 @@ async def _match_new_bulletins(
         )
 
     for bulletin in bulletins:
-        values: list[dict] = []
-        if bulletin.canonical_org is not None:
-            for user_id, devices in per_user.items():
-                # device -> the first of its rules that matched
-                hits: dict[uuid.UUID, int] = {}
-                for device_id, rules in devices.items():
-                    hit_sub_id = next(
-                        (
-                            sub_id
-                            for sub_id, rule in rules
-                            if rule_hits(
-                                rule,
-                                canonical_org=bulletin.canonical_org,
-                                content_tags=bulletin.content_tags or [],
-                            )
-                        ),
-                        None,
-                    )
-                    if hit_sub_id is not None:
-                        hits[device_id] = hit_sub_id
-                if hits:
-                    first_sub_id = min(hits.values())
-                    values.append(
-                        {
-                            "bulletin_id": bulletin.id,
-                            "user_id": user_id,
-                            "subscription_id": first_sub_id,
-                            # Pass B aims the push at exactly these devices.
-                            "match_reason": {
-                                "subscription_id": first_sub_id,
-                                "device_ids": sorted(str(d) for d in hits),
-                            },
-                            "matched_at": now,
-                        }
-                    )
-        if values:
-            await session.execute(
-                pg_insert(BulletinUserMatch)
-                .values(values)
-                .on_conflict_do_nothing(
-                    index_elements=["bulletin_id", "user_id"]
-                )
-            )
-        await session.execute(
-            pg_insert(BulletinUserMatchRun)
-            .values(bulletin_id=bulletin.id, matched_at=now)
-            .on_conflict_do_nothing()
-        )
+        await _file_matches(session, bulletin, per_user, now)
     return len(bulletins)
+
+
+async def _file_matches(
+    session: AsyncSession,
+    bulletin: Bulletin,
+    per_user: _RulesByUser,
+    now: datetime,
+) -> None:
+    """File `bulletin`'s matches, `INSERT_CHUNK_ROWS` at a time (a match row
+    binds 5 parameters), and its run marker."""
+    values: list[dict] = []
+    if bulletin.canonical_org is not None:
+        for user_id, devices in per_user.items():
+            # device -> the first of its rules that matched
+            hits: dict[uuid.UUID, int] = {}
+            for device_id, rules in devices.items():
+                hit_sub_id = next(
+                    (
+                        sub_id
+                        for sub_id, rule in rules
+                        if rule_hits(
+                            rule,
+                            canonical_org=bulletin.canonical_org,
+                            content_tags=bulletin.content_tags or [],
+                        )
+                    ),
+                    None,
+                )
+                if hit_sub_id is not None:
+                    hits[device_id] = hit_sub_id
+            if hits:
+                first_sub_id = min(hits.values())
+                values.append(
+                    {
+                        "bulletin_id": bulletin.id,
+                        "user_id": user_id,
+                        "subscription_id": first_sub_id,
+                        # Pass B aims the push at exactly these devices.
+                        "match_reason": {
+                            "subscription_id": first_sub_id,
+                            "device_ids": sorted(str(d) for d in hits),
+                        },
+                        "matched_at": now,
+                    }
+                )
+    for chunk in batched(values, INSERT_CHUNK_ROWS):
+        await session.execute(
+            pg_insert(BulletinUserMatch)
+            .values(list(chunk))
+            .on_conflict_do_nothing(index_elements=["bulletin_id", "user_id"])
+        )
+    await session.execute(
+        pg_insert(BulletinUserMatchRun)
+        .values(bulletin_id=bulletin.id, matched_at=now)
+        .on_conflict_do_nothing()
+    )
 
 
 async def _push_pending_matches(session: AsyncSession, now: datetime) -> int:
