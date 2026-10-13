@@ -5,10 +5,15 @@ the way a deploy runs it."""
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from server.auth import service
+from server.auth.tokens import hash_refresh_token
+from server.config import Settings
+from server.db import build_session_factory
 from server.tests.conftest import _alembic
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -31,6 +36,34 @@ INSERT INTO auth_sessions
      replaced_by_session_id, reuse_detected_at)
 SELECT user_id, 'retried', now() + interval '90 days', now(), 'rotated', id, now()
 FROM successor
+"""
+
+
+# A token recovered two hours ago: its lost successor superseded, and the
+# session that replaced it not used yet.
+_RECOVERED_LINEAGE = """
+WITH u AS (INSERT INTO users DEFAULT VALUES RETURNING id),
+replacement AS (
+    INSERT INTO auth_sessions (user_id, refresh_token_hash, issued_at, expires_at)
+    SELECT id, 'replacement', now() - interval '2 hours', now() + interval '90 days'
+    FROM u
+    RETURNING id, user_id
+),
+lost AS (
+    INSERT INTO auth_sessions
+        (user_id, refresh_token_hash, issued_at, expires_at, revoked_at,
+         revoked_reason, replaced_by_session_id)
+    SELECT user_id, 'lost', now() - interval '3 hours', now() + interval '90 days',
+           now() - interval '2 hours', 'superseded', id
+    FROM replacement
+)
+INSERT INTO auth_sessions
+    (user_id, refresh_token_hash, issued_at, expires_at, revoked_at,
+     revoked_reason, replaced_by_session_id, first_used_at, rerotated_at)
+SELECT user_id, :token_hash, now() - interval '4 hours', now() + interval '90 days',
+       now() - interval '2 hours', 'rotated', id, now() - interval '3 hours',
+       now() - interval '2 hours'
+FROM replacement
 """
 
 
@@ -155,5 +188,48 @@ async def test_upgrade_after_a_rollback_by_stamp_keeps_what_was_recorded(
             assert not NEW_COLUMNS & await _session_columns(conn)
             [check] = await _reason_checks(conn)
             assert "superseded" not in check
+    finally:
+        await engine.dispose()
+
+
+async def test_a_token_rotated_twice_stays_spent_across_a_downgrade(
+    migration_db_url: str, test_settings: Settings
+) -> None:
+    """The downgrade drops rerotated_at. If nothing took its place, the same
+    token presented after the next upgrade would be rotated a third time
+    while its replacement is unused."""
+    _alembic(migration_db_url, "upgrade", REVISION)
+    engine = create_async_engine(migration_db_url)
+    try:
+        token_hash = hash_refresh_token(test_settings.auth_refresh_hmac_key, "token-a")
+        async with engine.begin() as conn:
+            await conn.execute(text(_RECOVERED_LINEAGE), {"token_hash": token_hash})
+
+        _alembic(migration_db_url, "downgrade", DOWN_REVISION)
+        async with engine.connect() as conn:
+            marked = await conn.scalar(
+                text(
+                    "SELECT reuse_detected_at IS NOT NULL FROM auth_sessions"
+                    " WHERE refresh_token_hash = :token_hash"
+                ),
+                {"token_hash": token_hash},
+            )
+            # Where the previous release marks a grace retry, which it reads
+            # as spent.
+            assert marked
+        _alembic(migration_db_url, "upgrade", REVISION)
+
+        async with build_session_factory(engine)() as session:
+            with pytest.raises(HTTPException) as refused:
+                await service.refresh(session, test_settings, refresh_token="token-a")
+        assert refused.value.detail == "refresh_reuse_detected"
+        async with engine.connect() as conn:
+            replacement = await conn.scalar(
+                text(
+                    "SELECT revoked_reason FROM auth_sessions"
+                    " WHERE refresh_token_hash = 'replacement'"
+                )
+            )
+            assert replacement == "reuse_detected"
     finally:
         await engine.dispose()

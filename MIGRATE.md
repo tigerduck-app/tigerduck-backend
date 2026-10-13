@@ -79,10 +79,13 @@ no new settings to set. On top of the normal upgrade:
   already exist. Sessions 3.3.0 made in between start with `first_used_at`
   empty, as at the first upgrade.
 
-  `alembic downgrade ddf188f91a15` instead drops both columns and records
-  each superseded session as `rotated` with no successor, the way 3.3.0
-  does. Stop the backend first (`docker compose stop backend`) and run it
-  with
+  `alembic downgrade ddf188f91a15` instead drops both columns. First it
+  writes what 3.3.0 reads in their place: a token rotated a second time
+  gets `reuse_detected_at`, where 3.3.0 marks a grace retry, so neither
+  release rotates it again, and a superseded session becomes `rotated`
+  with no successor. Upgrading again starts every session without
+  `first_used_at`, as the first upgrade did. Stop the backend first
+  (`docker compose stop backend`) and run it with
   `docker compose run --rm --entrypoint alembic backend downgrade ddf188f91a15`:
   under a running 3.3.1 every authenticated request answers 500 until
   3.3.0 is deployed.

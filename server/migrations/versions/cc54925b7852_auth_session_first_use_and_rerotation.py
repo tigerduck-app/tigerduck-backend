@@ -62,10 +62,29 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drops what the two columns recorded. A superseded successor goes
-    back to how the previous release records one: `rotated` with no
-    successor, which takes the theft path if it is ever presented.
+    """Drops what the two columns recorded, after writing what the
+    previous release reads in their place. A token rotated a second time
+    keeps that in `reuse_detected_at`, where the previous release marks a
+    grace retry; without it the token could be rotated again, under that
+    release or after an upgrade. A superseded successor becomes `rotated`
+    with no successor, which takes the theft path if it is presented.
     """
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_attribute
+                WHERE attrelid = 'auth_sessions'::regclass
+                    AND attname = 'rerotated_at'
+                    AND NOT attisdropped
+            ) THEN
+                UPDATE auth_sessions SET reuse_detected_at = rerotated_at
+                WHERE rerotated_at IS NOT NULL AND reuse_detected_at IS NULL;
+            END IF;
+        END $$
+        """
+    )
     op.execute(
         "UPDATE auth_sessions"
         " SET revoked_reason = 'rotated', replaced_by_session_id = NULL"
