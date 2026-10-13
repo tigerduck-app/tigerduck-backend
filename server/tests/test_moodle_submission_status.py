@@ -20,7 +20,9 @@ from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
     MoodleRateLimited,
+    MoodleRefused,
     MoodleTokenInvalid,
+    MoodleUnavailable,
     MoodleUnreachable,
 )
 
@@ -220,6 +222,140 @@ def test_parse_reads_whether_the_student_can_still_submit(body, expected):
         parsed.extension_due_at,
     ) == expected
     assert parsed.is_submitted is False
+
+
+# The push pipeline's pre-send check asks about one assignment at a time
+# and must tell Moodle failing for everyone, which opens its breaker, from
+# an answer about one token or assignment, which does not.
+
+_SECRET_TOKEN = "secret-wstoken-value"
+
+
+def _moodle_error(errorcode: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"exception": "moodle_exception", "errorcode": errorcode, "message": "x"},
+    )
+
+
+def _checking(site_info, status=None):
+    """A handler answering site-info with `site_info(request)` and the
+    submission status with `status(request)`, by default an open one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("wsfunction") == "core_webservice_get_site_info":
+            return site_info(request)
+        if status is not None:
+            return status(request)
+        return httpx.Response(200, json=_answer(submission=_OWN_NEW))
+
+    return handler
+
+
+def _ok(request):
+    return httpx.Response(200, json=_site_info())
+
+
+def _html(status: int) -> httpx.Response:
+    """A proxy's error page, or Moodle's maintenance page."""
+    return httpx.Response(status, text="<html>Moodle is unavailable</html>")
+
+
+def _raise(error):
+    def respond(request):
+        raise error("failed", request=request)
+
+    return respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler,raised",
+    [
+        (_checking(_raise(httpx.ConnectError)), MoodleUnavailable),
+        (_checking(_raise(httpx.ReadTimeout)), MoodleUnavailable),
+        (_checking(_raise(httpx.PoolTimeout)), MoodleUnavailable),
+        (_checking(_ok, _raise(httpx.ReadTimeout)), MoodleUnavailable),
+        (_checking(lambda r: _html(503)), MoodleUnavailable),
+        (_checking(lambda r: _html(200)), MoodleUnavailable),
+        (_checking(lambda r: httpx.Response(429)), MoodleRateLimited),
+        (_checking(lambda r: _moodle_error("invalidtoken")), MoodleTokenInvalid),
+        (_checking(lambda r: _moodle_error("wsaccessusersuspended")), MoodleRefused),
+        (_checking(lambda r: _moodle_error("accessexception")), MoodleRefused),
+        (_checking(_ok, lambda r: _moodle_error("invalidrecord")), MoodleRefused),
+    ],
+    ids=[
+        "connection-refused",
+        "read-timeout",
+        "pool-timeout",
+        "timeout-on-the-assignment",
+        "http-503",
+        "html-page",
+        "http-429",
+        "invalid-token",
+        "suspended-account",
+        "expired-token",
+        "invalid-assignment",
+    ],
+)
+async def test_the_pre_send_check_tells_moodle_down_from_its_answer(handler, raised):
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(raised) as excinfo:
+        await fetcher.check_submission_status(
+            token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=5.0
+        )
+
+    assert _SECRET_TOKEN not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_answer(submission=_OWN_NEW), False),
+        (_team("submitted", None), True),
+        ({"warnings": []}, None),
+    ],
+    ids=["open", "submitted", "no-lastattempt"],
+)
+async def test_the_pre_send_check_reads_one_assignment(body, expected):
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE,
+        timeout_seconds=5.0,
+        transport=_transport(_checking(_ok, lambda r: httpx.Response(200, json=body))),
+    )
+
+    answer = await fetcher.check_submission_status(
+        token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=5.0
+    )
+
+    assert (None if answer is None else answer.is_submitted) == expected
+
+
+@pytest.mark.asyncio
+async def test_the_pre_send_check_times_its_requests_by_its_own_budget(monkeypatch):
+    """Not by the fetcher's timeout: whichever of the two settings is
+    shorter, a request that runs out of time is a timeout of the check."""
+    timeouts = []
+    real_client = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(moodle_client.httpx, "AsyncClient", client)
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=20.0, transport=_transport(_checking(_ok))
+    )
+
+    await fetcher.check_submission_status(
+        token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=3.0
+    )
+
+    assert timeouts == [3.0]
 
 
 @pytest.mark.asyncio

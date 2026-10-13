@@ -182,9 +182,9 @@ class Settings(BaseSettings):
     # until this long after its fire time, and then cancelled.
     push_presend_retry_seconds: int = 60
     push_presend_grace_minutes: int = 10
-    # Budget for the check's Moodle call, under moodle_fetch_timeout_seconds:
-    # the fetcher answers its own timeout with no result, which looks like
-    # one assignment's missing answer, while this one opens the tick's breaker.
+    # Budget for the check's Moodle call and the timeout of each of its
+    # requests, independent of moodle_fetch_timeout_seconds. Running out of
+    # it opens the tick's breaker.
     push_presend_timeout_seconds: float = 5.0
 
     # --- Submission status probe (v2.1.0) ---

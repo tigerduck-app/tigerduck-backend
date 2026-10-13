@@ -295,12 +295,13 @@ async def store_moodle_token(db_session: AsyncSession, test_settings: Settings):
 
 
 class SubmissionStatusStub:
-    """Moodle as the push pipeline's pre-send check sees it.
+    """Moodle as the push pipeline's pre-send check sees it
+    (`SubmissionStatusChecker`).
 
     Each call plays the next step of `script`, the last one repeating: the
-    fields of a FetchedSubmission for every id asked, None to answer
-    nothing, or an exception to raise. With no script every assignment is
-    open. Records the ids and tokens it was asked with.
+    fields of the FetchedSubmission to answer with, None to answer nothing,
+    or an exception to raise. With no script every assignment is open.
+    Records the ids and tokens it was asked with.
     """
 
     def __init__(self, *script: dict | BaseException | None) -> None:
@@ -308,17 +309,14 @@ class SubmissionStatusStub:
         self.asked: list[int] = []
         self.tokens: list[str] = []
 
-    async def fetch_submission_status(
-        self, *, token: str, assignment_ids: list[int], max_concurrency: int
-    ) -> dict[int, FetchedSubmission]:
-        self.asked.extend(assignment_ids)
+    async def check_submission_status(
+        self, *, token: str, assignment_id: int, timeout_seconds: float
+    ) -> FetchedSubmission | None:
+        self.asked.append(assignment_id)
         self.tokens.append(token)
         step = self.script.pop(0) if len(self.script) > 1 else self.script[0]
         if isinstance(step, BaseException):
             raise step
         if step is None:
-            return {}
-        return {
-            aid: FetchedSubmission(moodle_assignment_id=aid, **step)
-            for aid in assignment_ids
-        }
+            return None
+        return FetchedSubmission(moodle_assignment_id=assignment_id, **step)

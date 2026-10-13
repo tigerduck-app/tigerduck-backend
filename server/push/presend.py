@@ -53,11 +53,12 @@ from server.push.sync_trigger import enqueue_sync_trigger
 from server.sync.models import UserAssignment, UserAssignmentOverride
 from server.syncjobs.credentials import CredentialInvalid, load_moodle_token
 from server.syncjobs.moodle_client import (
-    AssignmentFetcher,
     FetchedSubmission,
     MoodleRateLimited,
+    MoodleRefused,
     MoodleTokenInvalid,
-    MoodleUnreachable,
+    MoodleUnavailable,
+    SubmissionStatusChecker,
     _without_token,
 )
 from server.syncjobs.submissions import apply_submission_status
@@ -83,11 +84,12 @@ class PresendCheck:
 class MoodleBreaker:
     """Whether Moodle failed for everyone during this push tick.
 
-    The first check that fails the way every other check would too (Moodle
-    rate limiting us, or past the check's timeout) opens it, and the tick's
-    remaining checks come out `unverified` without asking: an outage then
-    costs one timeout a tick, not one a job. A fast refusal, such as a dead
-    token or a suspended account, is one user's answer and leaves it shut.
+    The first check that fails the way every other check would too (no
+    connection, a timeout, HTTP 5xx, a body that is not JSON, or rate
+    limiting) opens it, and the tick's remaining checks come out
+    `unverified` without asking: an outage then costs one failed call a
+    tick, not one a job. Moodle's own refusal in a JSON answer, such as a
+    dead token or a suspended account, is one user's and leaves it shut.
     """
 
     opened_by: str | None = None
@@ -324,7 +326,7 @@ def _due_epoch(job: PushJob, alive: list[UserAssignment]) -> int | None:
 
 
 async def _ask_moodle(
-    fetcher: AssignmentFetcher,
+    fetcher: SubmissionStatusChecker,
     *,
     timeout: float,
     token: str,
@@ -333,21 +335,24 @@ async def _ask_moodle(
     breaker: MoodleBreaker,
 ) -> PresendCheck:
     try:
+        # The whole call's budget, and each request's timeout as well, so
+        # it holds whatever moodle_fetch_timeout_seconds says.
         async with asyncio.timeout(timeout):
-            answers = await fetcher.fetch_submission_status(
-                token=token, assignment_ids=[assignment_id], max_concurrency=1
+            answer = await fetcher.check_submission_status(
+                token=token, assignment_id=assignment_id, timeout_seconds=timeout
             )
     except TimeoutError:
         return _open(breaker, "timeout")
+    except MoodleUnavailable:
+        return _open(breaker, "unavailable")
     except MoodleRateLimited:
         return _open(breaker, "rate_limited")
-    except MoodleUnreachable:
-        # Raised for site-info's answer to this token, such as
-        # wsaccessusersuspended or accessexception. A Moodle that is down
-        # reaches here as no answer or as the timeout above.
-        return _unverified("refused")
     except MoodleTokenInvalid:
         return _unverified("token_invalid")
+    except MoodleRefused:
+        # Moodle's answer about this token or assignment, such as
+        # wsaccessusersuspended or accessexception: the others are asked.
+        return _unverified("refused")
     except Exception as exc:
         # This frame holds the token, and exc_info renders every message in
         # the chain, so the chain is scrubbed first, as the probe's own
@@ -358,7 +363,6 @@ async def _ask_moodle(
             exc_info=_without_token(exc, token),
         )
         return _unverified("error")
-    answer = answers.get(assignment_id)
     if answer is None:
         return _unverified("no_answer")
     if answer.is_submitted:

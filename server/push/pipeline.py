@@ -78,7 +78,7 @@ from server.push.presend import (
 )
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
-from server.syncjobs.moodle_client import AssignmentFetcher
+from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
 
@@ -105,7 +105,7 @@ class PushPipelineWorker:
     # The pre-send check's way to Moodle. Without either, no assignment
     # reminder or countdown start can be confirmed, so none is sent.
     cipher: CredentialCipher | None = None
-    fetcher: AssignmentFetcher | None = None
+    fetcher: SubmissionStatusChecker | None = None
 
 
 def _is_unregistered(status: str | None, description: str | None) -> bool:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 import structlog
 from prometheus_client import REGISTRY
@@ -45,9 +46,10 @@ from server.sync.models import (
 )
 from server.syncjobs.moodle_client import (
     FetchedSubmission,
+    HttpAssignmentFetcher,
     MoodleRateLimited,
+    MoodleRefused,
     MoodleTokenInvalid,
-    MoodleUnreachable,
 )
 from server.tests.conftest import SubmissionStatusStub
 
@@ -81,10 +83,9 @@ class HangingMoodle:
     def __init__(self):
         self.asked = []
 
-    async def fetch_submission_status(self, *, token, assignment_ids, max_concurrency):
-        self.asked.extend(assignment_ids)
+    async def check_submission_status(self, *, token, assignment_id, timeout_seconds):
+        self.asked.append(assignment_id)
         await asyncio.sleep(30)
-        return {}
 
 
 class MoodleWhile:
@@ -96,13 +97,10 @@ class MoodleWhile:
         self.answer = answer
         self.asked = []
 
-    async def fetch_submission_status(self, *, token, assignment_ids, max_concurrency):
-        self.asked.extend(assignment_ids)
+    async def check_submission_status(self, *, token, assignment_id, timeout_seconds):
+        self.asked.append(assignment_id)
         await self.meanwhile()
-        return {
-            aid: FetchedSubmission(moodle_assignment_id=aid, **self.answer)
-            for aid in assignment_ids
-        }
+        return FetchedSubmission(moodle_assignment_id=assignment_id, **self.answer)
 
 
 def _worker(prepared_engine, test_settings, moodle, *, apple=None, **settings):
@@ -204,13 +202,15 @@ def _countdown_start(user, device, assignment_id, due_at):
     )
 
 
-async def _open_assignment(make_assignment, store_moodle_token, user, aid):
+async def _open_assignment(
+    make_assignment, store_moodle_token, user, aid, token="moodle-token"
+):
     """An assignment due tomorrow, and the token to ask Moodle about it."""
     due_at = _tomorrow()
     row = await make_assignment(
         user_id=user.id, moodle_assignment_id=aid, due_at=due_at
     )
-    await store_moodle_token(user.id)
+    await store_moodle_token(user.id, token=token)
     return row, due_at
 
 
@@ -823,12 +823,13 @@ async def test_a_server_without_credential_keys_sends_no_reminder(
 
 
 async def _three_due_reminders(session, make_assignment, store_moodle_token):
-    """Three users' reminders, claimed in this order."""
+    """Three users' reminders, claimed in this order, each asked about with
+    a token of its own (`tok-41`, ...)."""
     jobs = []
     for index, aid in enumerate((41, 42, 43)):
         user, _ = await _iphone_user(session, name=f"b1120305{index}")
         _, due_at = await _open_assignment(
-            make_assignment, store_moodle_token, user, aid
+            make_assignment, store_moodle_token, user, aid, token=f"tok-{aid}"
         )
         jobs.append(_reminder(user, aid, due_at, fire_at=_ago(3 - index)))
     session.add_all(jobs)
@@ -877,6 +878,107 @@ async def test_a_moodle_that_hangs_costs_one_timeout_a_tick(
         assert (await _reload(db_session, job)).status == "pending"
 
 
+def _moodle_answering(handler):
+    """The real fetcher, talking to `handler` instead of Moodle."""
+    return HttpAssignmentFetcher(
+        base_url="https://moodle.example.test",
+        timeout_seconds=20.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+_SITE_INFO = {"userid": 42, "sitename": "test"}
+_OPEN_ANSWER = {
+    "lastattempt": {
+        "submissionsenabled": True,
+        "locked": False,
+        "extensionduedate": None,
+        "gradingstatus": "notgraded",
+    },
+    "warnings": [],
+}
+
+
+@pytest.mark.parametrize(
+    "failure", ["connection-refused", "read-timeout", "http-503", "html-page"]
+)
+async def test_moodle_failing_for_everyone_opens_the_breaker(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    failure,
+):
+    """No connection, a timeout of the request itself (whatever the order
+    of the two timeout settings), a 5xx or a page that is not JSON say
+    Moodle is failing as a whole: the first job's check opens the breaker,
+    and the tick's other jobs are not asked."""
+    jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
+    tokens = []
+
+    def handler(request):
+        tokens.append(request.url.params["wstoken"])
+        if failure == "connection-refused":
+            raise httpx.ConnectError("connection refused", request=request)
+        if failure == "read-timeout":
+            raise httpx.ReadTimeout("timed out", request=request)
+        if failure == "http-503":
+            return httpx.Response(503, text="<html>Service Unavailable</html>")
+        return httpx.Response(200, text="<html>Moodle is under maintenance</html>")
+
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, _moodle_answering(handler))
+    )
+
+    assert tokens == ["tok-41"]
+    for job in jobs:
+        assert (await _reload(db_session, job)).status == "pending"
+
+
+@pytest.mark.parametrize("refused", ["site-info", "submission-status"])
+async def test_moodle_refusing_one_account_holds_back_only_its_job(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    refused,
+):
+    """A Moodle exception in a JSON answer is about one token or one
+    assignment; the other jobs are still asked, and sent."""
+    jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
+    tokens = []
+
+    def handler(request):
+        token = request.url.params["wstoken"]
+        site_info = request.url.params["wsfunction"] == "core_webservice_get_site_info"
+        tokens.append(token)
+        if token == "tok-41" and site_info == (refused == "site-info"):
+            return httpx.Response(
+                200,
+                json={
+                    "exception": "moodle_exception",
+                    "errorcode": (
+                        "wsaccessusersuspended" if site_info else "invalidrecord"
+                    ),
+                    "message": "refused",
+                },
+            )
+        return httpx.Response(200, json=_SITE_INFO if site_info else _OPEN_ANSWER)
+
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, _moodle_answering(handler))
+    )
+
+    assert {"tok-42", "tok-43"} <= set(tokens)
+    assert [(await _reload(db_session, job)).status for job in jobs] == [
+        "pending",
+        "sent",
+        "sent",
+    ]
+
+
 async def test_one_users_dead_token_does_not_hold_back_the_others(
     db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
@@ -903,10 +1005,10 @@ async def test_one_users_refusal_does_not_hold_back_the_others(
     errorcode,
 ):
     """Moodle refuses a suspended student's or an expired token's site-info
-    request at once, which the fetcher raises as `MoodleUnreachable`. That
-    is the one account's answer, not Moodle down for everyone."""
+    request at once (`MoodleRefused`). That is the one account's answer, not
+    Moodle down for everyone."""
     jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
-    moodle = SubmissionStatusStub(MoodleUnreachable(errorcode), OPEN)
+    moodle = SubmissionStatusStub(MoodleRefused(errorcode), OPEN)
 
     await run_push_tick(_worker(prepared_engine, test_settings, moodle))
 
