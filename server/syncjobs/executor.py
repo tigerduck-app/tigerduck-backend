@@ -83,9 +83,7 @@ from server.syncjobs.moodle_client import (
 )
 from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
 from server.push.submission_cancel import cancel_for_submitted
-
-from server.auth.models import PushJob
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from server.push.sync_trigger import enqueue_sync_trigger
 
 logger = structlog.get_logger(__name__)
 
@@ -111,35 +109,6 @@ _CLAIM_LOCK_KEY = 0x54445F53594E43
 
 def default_worker_id() -> str:
     return f"{socket.gethostname()}:{os.getpid()}"
-
-
-async def _enqueue_sync_trigger(
-    session: AsyncSession, user_id, *, source: str | None = None
-) -> None:
-    """Tell the user's devices to sync, at most once per five minutes.
-
-    `source` gives a writer that commits after the list sync a key of its
-    own: the list sync's trigger for the same five minutes may already have
-    gone out, and a device that synced on it did so before this writer's
-    change existed.
-    """
-    now = datetime.now(UTC)
-    dedupe_key = f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}"
-    if source is not None:
-        dedupe_key = f"{dedupe_key}:{source}"
-    stmt = (
-        pg_insert(PushJob)
-        .values(
-            user_id=user_id,
-            dedupe_key=dedupe_key,
-            channel="system",
-            scenario="sync_trigger",
-            fire_at=now,
-            payload={"kind": "sync_trigger", "source_device_id": None},
-        )
-        .on_conflict_do_nothing()
-    )
-    await session.execute(stmt)
 
 
 @dataclass(frozen=True)
@@ -386,7 +355,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 run.changed_count = stats.changed_count
 
             if stats.changed_count > 0:
-                await _enqueue_sync_trigger(session, job.user_id)
+                await enqueue_sync_trigger(session, job.user_id)
 
             user_id = job.user_id
             if not probe_submissions:
@@ -471,7 +440,7 @@ async def _drop_courses_left_out(
         run.fetched_count = stats.fetched_count
         run.changed_count = stats.changed_count
     if stats.changed_count > 0:
-        await _enqueue_sync_trigger(session, user_id)
+        await enqueue_sync_trigger(session, user_id)
     await log_sync(
         session,
         user_id=user_id,
@@ -662,7 +631,7 @@ async def _refresh_submission_status(
                     moodle_assignment_ids=changed_ids,
                     now=now,
                 )
-                await _enqueue_sync_trigger(session, user_id, source="submissions")
+                await enqueue_sync_trigger(session, user_id, source="submissions")
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
     except Exception as exc:

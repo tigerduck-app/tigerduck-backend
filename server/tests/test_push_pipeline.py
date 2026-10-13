@@ -193,7 +193,7 @@ async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_cl
     `now()`, a database clock even a few milliseconds ahead of the app
     host's (a Docker VM's drifts against its host's) stamps it later than
     the claim's own `now`, and `_trigger_push_tick` firing immediately
-    after the job is queued (as it does from `_enqueue_sync_trigger`) can
+    after the job is queued (as it does from `enqueue_sync_trigger`) can
     miss the job for a whole retry round.
 
     Pinned by constructing the job on a clock that lags the claim's and on
