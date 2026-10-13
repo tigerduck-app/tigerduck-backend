@@ -274,6 +274,27 @@ async def test_a_lost_reply_is_recovered_within_the_window(client) -> None:
     assert (await _refresh(client, token_c)).status_code == 200
 
 
+async def test_a_zero_recovery_window_turns_the_recovery_off(client) -> None:
+    """MIGRATE.md offers this to switch the recovery off without a
+    rollback; the grace retry stays."""
+    client.app.state.settings.auth_refresh_recovery_window_seconds = 0
+    try:
+        login = await do_login(client)
+        token_a = login["refresh_token"]
+        await _refresh(client, token_a)
+        assert (await _refresh(client, token_a)).status_code == 200
+
+        second = await do_login(client)
+        await _refresh(client, second["refresh_token"])
+        await _rotated_ago(client, second["refresh_token"], timedelta(hours=2))
+        reuse = await _refresh(client, second["refresh_token"])
+    finally:
+        client.app.state.settings.auth_refresh_recovery_window_seconds = 24 * 60 * 60
+
+    assert reuse.status_code == 401
+    assert reuse.json()["detail"] == "refresh_reuse_detected"
+
+
 async def test_a_second_recovery_of_the_same_token_is_theft(client) -> None:
     login = await do_login(client)
     token_a = login["refresh_token"]
