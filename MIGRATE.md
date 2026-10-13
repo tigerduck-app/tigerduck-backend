@@ -65,6 +65,35 @@ the normal upgrade:
 - **Turning the recovery off** without a rollback: set
   `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS=0` in `.env` and restart
   the backend. The 60-second grace retry stays.
+- **Sync jobs outlast a school outage.** A Moodle or SSO outage, or a
+  Moodle rate limit, that lasts past a job's retries (about 15 minutes with
+  the default backoff) no longer leaves the job `failed`: it runs again
+  after its policy interval, 8 hours by default, with its attempts reset.
+  A job still ends `failed` on our own errors: an unexpected exception, a
+  database error while it records submission status, or a worker that
+  died during each of its attempts. 3.3.0 runs a job left waiting this way
+  at its next run, so a rollback has nothing to undo here.
+- **Jobs that failed before the upgrade** stay `failed`. Once the backend
+  is up, start them again:
+
+  ```bash
+  docker compose exec postgres psql -U tigerduck -d tigerduck -c \
+    "UPDATE sync_jobs SET status = 'pending', attempts = 0, run_after = now() WHERE status = 'failed'"
+  ```
+
+  The portal's Retry all failed would start them too, but it also starts
+  the `disabled` jobs, which fail again at once and can send their users
+  another sign-in reminder.
+- **Retry buttons.** On the portal's Moodle page, Retry all failed now
+  also starts the jobs waiting out an outage: pending jobs whose last run
+  failed. Retry all retried only failed and disabled jobs; it now starts
+  every Moodle job that is not running.
+- **Sync job counts.** An outage no longer raises the number of `failed`
+  jobs, on the portal's Moodle page or in "Jobs by status". It shows as
+  failed runs ("Failed runs", "Failure reasons"), and the jobs it caught
+  stay `pending` with their last error, listed after the failed ones in
+  the Jobs table. `tigerduck_sync_oldest_success_age_seconds` now counts
+  those jobs, so it keeps climbing through a long outage.
 - **Rolling back.** The 3.3.0 code cannot start on a database at
   `cc54925b7852`: its startup `alembic upgrade head` cannot find that
   revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.
