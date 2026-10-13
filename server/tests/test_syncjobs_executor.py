@@ -29,7 +29,7 @@ from server.logging_setup import configure
 from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
 from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
-from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
+from server.syncjobs.models import SyncJob, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedSubmission,
@@ -656,6 +656,65 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
         )
     ).scalar_one()
     assert triggers == 1
+    # A failed run otherwise changes nothing, so the user's activity log
+    # says what this one deleted.
+    details = (
+        await db_session.execute(
+            select(SyncLogEntry.detail).where(
+                SyncLogEntry.user_id == user.id,
+                SyncLogEntry.message.startswith("Moodle refused"),
+            )
+        )
+    ).scalars().all()
+    assert details == [{"refused_course_ids": [7001], "deleted": 1}]
+
+
+async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothing(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The deletes, their change log entries and the sync trigger commit
+    together or not at all. The run then fails as our own error, so a
+    lasting one ends the job failed for an operator rather than hiding
+    behind the refusal."""
+    user, _, job = await _setup_user_job(db_session, student_id="b00000001")
+    ta_row = UserAssignment(
+        user_id=user.id, moodle_course_id=7003, moodle_assignment_id=2, title="HW2"
+    )
+    db_session.add(ta_row)
+    await db_session.commit()
+
+    async def failing_trigger(session, user_id, *, source=None):
+        await session.execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(executor_module, "_enqueue_sync_trigger", failing_trigger)
+    body = {
+        "courses": [],
+        "warnings": [{"item": "course", "itemid": 7001, "warningcode": "1"}],
+    }
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+    )
+
+    await run_sync_tick(_worker(prepared_engine, test_settings, fetcher=fetcher))
+
+    await db_session.refresh(ta_row)
+    assert ta_row.deleted_at is None
+    changes = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(UserChangeLog)
+            .where(UserChangeLog.user_id == user.id)
+        )
+    ).scalar_one()
+    assert changes == 0
+    await db_session.refresh(job)
+    assert (job.status, job.attempts, job.last_error) == (
+        "pending",
+        1,
+        "sync_failed:DBAPIError",
+    )
 
 
 @pytest.mark.parametrize(

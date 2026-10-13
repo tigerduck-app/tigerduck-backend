@@ -456,6 +456,8 @@ async def _drop_courses_left_out(
     Committed here: the run then fails like any other unreachable Moodle,
     which rolls this session back.
     """
+    from .log_entries import log_sync
+
     stats = await apply_fetched_assignments(
         session,
         user_id=user_id,
@@ -465,6 +467,19 @@ async def _drop_courses_left_out(
     )
     if stats.changed_count > 0:
         await _enqueue_sync_trigger(session, user_id)
+    await log_sync(
+        session,
+        user_id=user_id,
+        source="executor",
+        message=(
+            f"Moodle refused {len(refused_course_ids)} courses and listed none; "
+            f"deleted {stats.changed_count} assignments of the courses it left out"
+        ),
+        detail={
+            "refused_course_ids": sorted(refused_course_ids),
+            "deleted": stats.changed_count,
+        },
+    )
     await session.commit()
 
 
