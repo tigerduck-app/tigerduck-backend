@@ -26,6 +26,7 @@ import uuid
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -557,7 +558,7 @@ def _class_day(job: PushJob, school_tz: str) -> date:
 
 async def _classes_quiet(
     session: AsyncSession, *, user_id: uuid.UUID, day: date
-) -> str | None:
+) -> Literal["outside_term", "holiday"] | None:
     """Why classes do not meet for `user_id` on `day`, or None when they do.
 
     The rule `course_reminders.scan_course_reminders` applies to the class
