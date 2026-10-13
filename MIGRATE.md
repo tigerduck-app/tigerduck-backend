@@ -34,8 +34,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.3.1
 
-3.3.1 stops signing a device out when its app lost a refresh reply. An app
-that sends a rotated refresh token again, while nothing has used the token
+3.3.1 is a fix release. Sessions survive a lost refresh reply, class
+reminders follow the published term, sync jobs keep retrying through a
+school outage, reminders and bulletin pushes scale past the database's bind
+limit, logins need a Moodle token, and several sync routes answer correctly.
+The bullets below say what each change needs at upgrade time.
+
+The session change: an app that sends a rotated refresh token again, while nothing has used the token
 that replaced it, gets one more rotation up to 24 hours after the first,
 instead of having every session on the device revoked as stolen. Both pairs
 work until one of them is used, so a late duplicate of a refresh no longer
