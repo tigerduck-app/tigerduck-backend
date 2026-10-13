@@ -188,28 +188,32 @@ async def course_override_changes(client) -> list[dict | None]:
 async def test_put_course_override_ignores_assignments(client) -> None:
     login = await do_login(client)
     course_id = await seed_course(client, login["user"]["id"])
+    # Times in the past: the merge pulls a future time back to now.
+    first = {
+        "ignore_assignments": True,
+        "ignore_assignments_updated_at": "2026-06-10T08:00:00Z",
+        "moodle_course_id": 4242,
+    }
 
-    response = await put_course_override(
-        client,
-        login,
-        course_id,
-        ignore_assignments=True,
-        ignore_assignments_updated_at="2026-10-01T08:00:00Z",
-        moodle_course_id=4242,
-    )
+    response = await put_course_override(client, login, course_id, **first)
     assert response.status_code == 200, response.text
     override = response.json()["override"]
     assert override["ignore_assignments"] is True
-    assert override["ignore_assignments_updated_at"] == "2026-10-01T08:00:00+00:00"
+    assert override["ignore_assignments_updated_at"] == "2026-06-10T08:00:00+00:00"
     assert override["moodle_course_id"] == 4242
     stored = await stored_course_override(client)
     assert str(stored.ignore_assignments_device_id) == login["device_id"]
 
-    # Merged per field like the name and colour: an older edit loses and a
-    # newer one wins. The numeric id stays until a request sends another.
+    replay = await put_course_override(client, login, course_id, **first)
+    assert replay.status_code == 200, replay.text
+    assert await course_override_changes(client) == [{"fields": ["ignore_assignments"]}]
+
+    # Merged per field like the name and colour: an older or equal edit loses
+    # and a newer one wins. The numeric id stays until a request sends another.
     for edited_at, ignored in (
-        ("2026-09-30T08:00:00Z", True),
-        ("2026-10-02T08:00:00Z", False),
+        ("2026-06-09T08:00:00Z", True),
+        ("2026-06-10T08:00:00Z", True),
+        ("2026-06-11T08:00:00Z", False),
     ):
         response = await put_course_override(
             client,
@@ -225,6 +229,21 @@ async def test_put_course_override_ignores_assignments(client) -> None:
         {"fields": ["ignore_assignments"]},
         {"fields": ["ignore_assignments"]},
     ]
+
+
+async def test_put_course_override_takes_no_ignore_setting_without_its_time(
+    client,
+) -> None:
+    """The PUT's rule for every field: a value is an edit only with its own
+    time. The sync PATCH stamps the server's time instead."""
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+
+    response = await put_course_override(client, login, course_id, ignore_assignments=True)
+    assert response.status_code == 200, response.text
+    assert response.json()["override"]["ignore_assignments"] is False
+    assert (await stored_course_override(client)).ignore_assignments_updated_at is None
+    assert await course_override_changes(client) == []
 
 
 async def test_put_course_override_takes_a_moodle_course_id_alone(client) -> None:
