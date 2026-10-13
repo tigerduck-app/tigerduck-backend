@@ -368,6 +368,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 except MoodleNoCourseAccess as exc:
                     await _drop_courses_left_out(
                         session,
+                        run=run,
                         user_id=job.user_id,
                         refused_course_ids=exc.refused_course_ids,
                         now=now,
@@ -446,6 +447,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
 async def _drop_courses_left_out(
     session: AsyncSession,
     *,
+    run: SyncRun | None,
     user_id,
     refused_course_ids: frozenset[int],
     now: datetime,
@@ -453,8 +455,8 @@ async def _drop_courses_left_out(
     """Soft-delete the rows of the courses an answer that lost every course
     left out, a TA's course among them, and keep the refused courses' rows.
 
-    Committed here: the run then fails like any other unreachable Moodle,
-    which rolls this session back.
+    Committed here, with the run's counts: the run then fails like any other
+    unreachable Moodle, which rolls this session back.
     """
     from .log_entries import log_sync
 
@@ -465,6 +467,9 @@ async def _drop_courses_left_out(
         now=now,
         refused_course_ids=refused_course_ids,
     )
+    if run is not None:
+        run.fetched_count = stats.fetched_count
+        run.changed_count = stats.changed_count
     if stats.changed_count > 0:
         await _enqueue_sync_trigger(session, user_id)
     await log_sync(

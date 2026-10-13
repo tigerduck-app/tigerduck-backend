@@ -622,6 +622,16 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
     for row in rows.values():
         await db_session.refresh(row)
     assert [name for name, row in rows.items() if row.deleted_at] == ["ta_course"]
+    # The run history, which the portal and Grafana read, counts the delete.
+    run = (
+        await db_session.execute(select(SyncRun).where(SyncRun.sync_job_id == job.id))
+    ).scalar_one()
+    assert (run.status, run.error, run.fetched_count, run.changed_count) == (
+        "failed",
+        "sync_failed:no_course_access",
+        0,
+        1,
+    )
     reminders = (
         (
             await db_session.execute(
@@ -672,10 +682,10 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
 async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothing(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
-    """The deletes, their change log entries and the sync trigger commit
-    together or not at all. The run then fails as our own error, so a
-    lasting one ends the job failed for an operator rather than hiding
-    behind the refusal."""
+    """The deletes, their change log entries, the sync trigger and the run's
+    counts commit together or not at all. The run then fails as our own
+    error, so a lasting one ends the job failed for an operator rather than
+    hiding behind the refusal."""
     user, _, job = await _setup_user_job(db_session, student_id="b00000001")
     ta_row = UserAssignment(
         user_id=user.id, moodle_course_id=7003, moodle_assignment_id=2, title="HW2"
@@ -715,6 +725,10 @@ async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothin
         1,
         "sync_failed:DBAPIError",
     )
+    run = (
+        await db_session.execute(select(SyncRun).where(SyncRun.sync_job_id == job.id))
+    ).scalar_one()
+    assert (run.status, run.fetched_count, run.changed_count) == ("failed", None, None)
 
 
 @pytest.mark.parametrize(
