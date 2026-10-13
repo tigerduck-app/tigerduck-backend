@@ -102,6 +102,11 @@ the normal upgrade:
   stay `pending` with their last error, listed after the failed ones in
   the Jobs table. `tigerduck_sync_oldest_success_age_seconds` now counts
   those jobs, so it keeps climbing through a long outage.
+- **Logins need a Moodle token.** `POST /v3/auth/login` without
+  `moodle_token` answers `400 moodle_token_required` and still counts
+  against the login limit. One with a password and no token answered 500
+  before: the backend tried to sign in with the password and failed. The
+  password the apps send is no longer read. No app update is needed.
 - **Rolling back.** The 3.3.0 code cannot start on a database at
   `cc54925b7852`: its startup `alembic upgrade head` cannot find that
   revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.

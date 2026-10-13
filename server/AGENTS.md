@@ -231,6 +231,10 @@ into the backend container via `docker-compose.yml`.
   the user's behalf; it is decrypted only in `server/syncjobs/credentials.py`,
   never logged, and dropped with the account. Anything else that needs a
   credential goes through that path.
+- Do not sign in to NTUST SSO or Moodle with a student's password. The
+  apps sign in themselves and give `POST /v3/auth/login` the Moodle
+  token; a login without one answers `400 moodle_token_required`, and
+  the `password` the apps still send is dropped unread.
 - Do not send APNs pushes from inside request handlers. Scheduling
   goes through a `push_jobs` row and is delivered by the push pipeline
   (`server/push/pipeline.py`) on its APScheduler tick.
