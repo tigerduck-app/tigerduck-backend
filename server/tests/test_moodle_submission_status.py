@@ -86,6 +86,123 @@ async def test_reports_submitted_and_unsubmitted():
     assert result[2].submitted_at is None
 
 
+# What mod_assign_get_submission_status answers. A member's own attempt
+# carries the user id, a team's the group id; in a team assignment the
+# member's own `submission` is missing, has no status, or stays `new`.
+_SUBMITTED_AT = 1_757_000_000
+
+
+def _attempt(status: str | None, timemodified: int, **ids: int) -> dict:
+    attempt = {
+        "id": 9001,
+        "userid": ids.get("userid", 0),
+        "attemptnumber": 0,
+        "timecreated": 1_756_900_000,
+        "timemodified": timemodified,
+        "timestarted": None,
+        "status": status,
+        "groupid": ids.get("groupid", 0),
+        "assignment": 77,
+        "latest": 1,
+        "plugins": [{"type": "onlinetext", "name": "Online text", "editorfields": []}],
+    }
+    if status is None:
+        del attempt["status"]
+    return attempt
+
+
+def _answer(**parts: object) -> dict:
+    return {
+        "lastattempt": {
+            **parts,
+            "submissiongroupmemberswhoneedtosubmit": [],
+            "submissionsenabled": True,
+            "locked": False,
+            "graded": False,
+            "canedit": True,
+            "caneditowner": True,
+            "cansubmit": True,
+            "extensionduedate": None,
+            "timelimit": 0,
+            "blindmarking": False,
+            "gradingstatus": "notgraded",
+            "usergroups": [12] if "teamsubmission" in parts else [],
+        },
+        "warnings": [],
+    }
+
+
+def _team(status: str, own: dict | None) -> dict:
+    parts = {"teamsubmission": _attempt(status, _SUBMITTED_AT, groupid=12)}
+    if own is not None:
+        parts["submission"] = own
+    return _answer(**parts, submissiongroup=12)
+
+
+_SUBMITTED = (True, datetime.fromtimestamp(_SUBMITTED_AT, tz=UTC))
+_OPEN = (False, None)
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (
+            _answer(submission=_attempt("submitted", _SUBMITTED_AT, userid=42)),
+            _SUBMITTED,
+        ),
+        (_team("submitted", None), _SUBMITTED),
+        (_team("submitted", _attempt("new", 0, userid=42)), _SUBMITTED),
+        (_team("submitted", _attempt(None, 0, userid=42)), _SUBMITTED),
+        (_answer(submission=_attempt("draft", _SUBMITTED_AT, userid=42)), _OPEN),
+        (_answer(submission=_attempt("new", 0, userid=42)), _OPEN),
+        (_answer(submission=_attempt("reopened", _SUBMITTED_AT, userid=42)), _OPEN),
+        (_team("new", _attempt(None, 0, userid=42)), _OPEN),
+        (_team("draft", None), _OPEN),
+        ({"feedback": {"plugins": []}, "warnings": []}, None),
+        (_answer(), _OPEN),
+    ],
+    ids=[
+        "own-submitted",
+        "team-submitted-own-missing",
+        "team-submitted-own-new",
+        "team-submitted-own-without-status",
+        "own-draft",
+        "own-new",
+        "own-reopened",
+        "team-new",
+        "team-draft",
+        "no-lastattempt",
+        "never-started",
+    ],
+)
+def test_parse_reads_the_members_and_the_teams_attempt(body, expected):
+    parsed = moodle_client._parse_submission_status(77, body)
+
+    if expected is None:
+        assert parsed is None
+    else:
+        assert (parsed.is_submitted, parsed.submitted_at) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_team_submission_reports_submitted():
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE,
+        timeout_seconds=5.0,
+        transport=_transport(
+            _handler_for({1: _team("submitted", None), 2: _team("new", None)})
+        ),
+    )
+
+    result = await fetcher.fetch_submission_status(
+        token="tok", assignment_ids=[1, 2], max_concurrency=2
+    )
+
+    assert result[1].is_submitted is True
+    assert result[1].submitted_at == datetime.fromtimestamp(_SUBMITTED_AT, tz=UTC)
+    assert result[2].is_submitted is False
+
+
 @pytest.mark.asyncio
 async def test_one_failing_assignment_does_not_lose_the_others():
     def handler(request: httpx.Request) -> httpx.Response:

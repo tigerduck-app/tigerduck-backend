@@ -298,7 +298,13 @@ async def _get_moodle_userid(
 def _parse_submission_status(
     assignment_id: int, body: dict
 ) -> FetchedSubmission | None:
-    """Read `lastattempt.submission` into a FetchedSubmission.
+    """Read `lastattempt` into a FetchedSubmission.
+
+    A team assignment keeps its state in `lastattempt.teamsubmission`; the
+    member's own `submission` is then missing or never leaves `new`. Either
+    one at `submitted` counts, with its `timemodified` as the time. Neither
+    present is a student who never started one: Moodle creates the record
+    only then, and leaves the key out until it exists.
 
     Moodle omits `lastattempt` entirely for an assignment the user cannot
     submit to; that is not the same as "not submitted", so it yields None
@@ -307,14 +313,21 @@ def _parse_submission_status(
     last = body.get("lastattempt")
     if not isinstance(last, dict):
         return None
-    submission = last.get("submission")
-    if not isinstance(submission, dict):
-        return None
-    submitted = str(submission.get("status") or "") == "submitted"
+    submitted = next(
+        (
+            attempt
+            for attempt in (last.get("submission"), last.get("teamsubmission"))
+            if isinstance(attempt, dict)
+            and str(attempt.get("status") or "") == "submitted"
+        ),
+        None,
+    )
     return FetchedSubmission(
         moodle_assignment_id=assignment_id,
-        is_submitted=submitted,
-        submitted_at=_ts(submission.get("timemodified")) if submitted else None,
+        is_submitted=submitted is not None,
+        submitted_at=(
+            _ts(submitted.get("timemodified")) if submitted is not None else None
+        ),
     )
 
 
