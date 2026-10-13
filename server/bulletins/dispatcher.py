@@ -280,9 +280,12 @@ async def _dispatch_one(
 
             classification = _classify(result, platform=device.platform)
 
+            # Each per-row update below skips the session sync: it would check every dispatch row
+            # this session holds, quadratic in the bulletin's devices (#63). Nothing reads them back.
             if classification == "sent":
                 await session.execute(
                     update(BulletinDispatch)
+                    .execution_options(synchronize_session=False)
                     .where(BulletinDispatch.id == dispatch.id)
                     .values(
                         status=BulletinDispatchStatus.sent.value,
@@ -295,6 +298,7 @@ async def _dispatch_one(
             elif classification == "bad_token":
                 await session.execute(
                     update(BulletinDispatch)
+                    .execution_options(synchronize_session=False)
                     .where(BulletinDispatch.id == dispatch.id)
                     .values(
                         status=BulletinDispatchStatus.cancelled.value,
@@ -308,6 +312,7 @@ async def _dispatch_one(
                 if next_attempts >= MAX_DISPATCH_ATTEMPTS:
                     await session.execute(
                         update(BulletinDispatch)
+                        .execution_options(synchronize_session=False)
                         .where(BulletinDispatch.id == dispatch.id)
                         .values(
                             status=BulletinDispatchStatus.failed.value,
@@ -319,6 +324,7 @@ async def _dispatch_one(
                 else:
                     await session.execute(
                         update(BulletinDispatch)
+                        .execution_options(synchronize_session=False)
                         .where(BulletinDispatch.id == dispatch.id)
                         .values(
                             attempts=next_attempts,
@@ -370,6 +376,7 @@ async def _cancel_dispatch(
 ) -> None:
     await session.execute(
         update(BulletinDispatch)
+        .execution_options(synchronize_session=False)
         .where(BulletinDispatch.id == dispatch_id)
         .values(
             status=BulletinDispatchStatus.cancelled.value,
