@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import func, insert, literal, select
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
@@ -704,3 +704,42 @@ async def test_a_scan_looks_up_skipped_dates_for_more_courses_than_a_statement_b
     assert await scan_course_reminders(factory, settings) == 1
     [job] = await _jobs(db_session, user.id)
     assert job.payload["user_course_id"] == kept_course.id
+
+
+async def test_a_scan_looks_up_more_users_than_a_statement_binds(
+    db_session, prepared_engine, test_settings
+):
+    """The scan looks up the settings and devices of every user with a
+    timetable, and asyncpg allows 32,767 bind parameters per statement.
+    Bound one per user, the lookups failed the whole scan once about that
+    many users had one."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json=schedule))
+    # 32,767 more users with that class and no device to file it for.
+    # Postgres generates them: built in Python, the rows take seconds.
+    await db_session.execute(
+        insert(User).from_select(
+            ["id"],
+            select(func.gen_random_uuid()).select_from(func.generate_series(1, 32_767)),
+        )
+    )
+    course = {
+        "user_id": User.id,
+        "semester": literal("1141"),
+        "course_key": literal("CS2006301"),
+        "course_no": literal("CS2006301"),
+        "course_name": literal("資料結構"),
+        "schedule_json": literal(schedule, UserCourse.schedule_json.type),
+    }
+    await db_session.execute(
+        insert(UserCourse).from_select(
+            list(course), select(*course.values()).where(User.id != user.id)
+        )
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+
+    assert await scan_course_reminders(factory, settings) == 1
+    assert len(await _jobs(db_session, user.id)) == 1
