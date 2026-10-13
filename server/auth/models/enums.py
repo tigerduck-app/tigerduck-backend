@@ -38,6 +38,9 @@ APPLE_HANDHELD_PLATFORMS: tuple[str, ...] = (
 class SessionRevokedReason(StrEnum):
     logout = "logout"
     rotated = "rotated"
+    # A successor its client never received, replaced when its predecessor
+    # was rotated a second time (`server/auth/service.py`).
+    superseded = "superseded"
     reuse_detected = "reuse_detected"
     expired = "expired"
     admin_revoked = "admin_revoked"
