@@ -40,7 +40,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.config import Settings
-from server.db import session_scope
+from server.db import in_array, session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.notification_copy import has_reminder_copy_inputs
 from server.sync.models import (
@@ -109,7 +109,7 @@ async def _notification_prefs(
         (
             await session.execute(
                 select(UserSettingsDocument).where(
-                    UserSettingsDocument.user_id.in_(user_ids),
+                    in_array(UserSettingsDocument.user_id, user_ids),
                     UserSettingsDocument.namespace == "notification",
                     UserSettingsDocument.deleted_at.is_(None),
                 )
@@ -182,7 +182,7 @@ async def _ignored_courses(
         )
         .join(UserCourse, UserCourse.id == UserCourseOverride.user_course_id)
         .where(
-            UserCourseOverride.user_id.in_(user_ids),
+            in_array(UserCourseOverride.user_id, user_ids),
             UserCourseOverride.ignore_assignments.is_(True),
         )
     )
@@ -231,7 +231,7 @@ async def _users_with_a_recipient(
     query = select(
         UserDevice.user_id, UserDevice.platform, UserDevice.app_version
     ).where(
-        UserDevice.user_id.in_(user_ids),
+        in_array(UserDevice.user_id, user_ids),
         UserDevice.deleted_at.is_(None),
         UserDevice.cloud_sync_enabled.is_(True),
         UserDevice.sync_assignment_reminders.is_(True),
