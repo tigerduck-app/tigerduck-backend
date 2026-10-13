@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
+from server.academic_calendar.terms import load_term_dates, outside_term
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -217,10 +218,12 @@ async def scan_course_reminders(
     user's LATEST semester (lexicographic max of "1141"-style strings —
     older semesters must not keep firing weekly reminders), not hidden by
     override. Occurrence dates listed in user_course_skipped_dates are
-    excluded. Cancellation mirrors assignment reminders: pending jobs
-    whose dedupe key no longer maps to an eligible (course, occurrence,
-    offset) tuple are cancelled, under SKIP LOCKED so a job the pipeline
-    is claiming concurrently is left alone.
+    excluded, and so are days outside the courses' term
+    (`academic_calendar.terms.outside_term`). Cancellation mirrors
+    assignment reminders: pending jobs whose dedupe key no longer maps to
+    an eligible (course, occurrence, offset) tuple are cancelled, under
+    SKIP LOCKED so a job the pipeline is claiming concurrently is left
+    alone.
 
     Two deliberate semantics worth naming:
     * The global pending scan is unbounded by user but bounded by
@@ -276,12 +279,15 @@ async def scan_course_reminders(
                 bucket[course.user_id] = course.semester
         latest_semester = {**fallback_latest, **portal_latest}
 
-        # Days classes do not meet, and the per-user exceptions that put
-        # them back. Apple guards twice — the app also stays quiet — but the
-        # backend half is what stops a push being *sent*, which is the only
-        # half that works when the app is not running to suppress anything.
-        # The class Live Activity starts apply the same rule when they fire
-        # — `pipeline._classes_quiet`; a change here belongs there too.
+        # Days classes do not meet: outside the term, or on a holiday unless
+        # the user put it back. Apple guards twice — the app also stays
+        # quiet — but the backend half is what stops a push being *sent*,
+        # which is the only half that works when the app is not running to
+        # suppress anything. The class Live Activity starts apply the same
+        # rule when they fire — `pipeline._classes_quiet`; a change here
+        # belongs there too. A start does not say which term its class is
+        # in, so there any published term running on the day will do.
+        terms = await load_term_dates(session)
         holiday_ranges = (
             await session.execute(
                 select(
@@ -409,6 +415,9 @@ async def scan_course_reminders(
             for occurrence in occurrences:
                 occurrence_day = occurrence.astimezone(tz).date()
                 if (course.id, occurrence_day) in skipped:
+                    continue
+                # "還要上課？" puts back a holiday, never a day outside the term.
+                if outside_term(occurrence_day, terms, semester=course.semester):
                     continue
                 if is_quiet(course.user_id, occurrence_day):
                     continue
