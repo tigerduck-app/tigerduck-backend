@@ -5,10 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, insert, literal, select
+from sqlalchemy import func, insert, literal, select, text
 
 from server.auth.models import PushJob, User, UserDevice
-from server.bulletins import user_dispatch
 from server.bulletins.models import Bulletin
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 from server.bulletins.user_dispatch import (
@@ -289,16 +288,22 @@ async def _pushed(session) -> set[int]:
     return set(rows.scalars())
 
 
-async def test_a_bulletin_that_fails_to_match_holds_up_no_other(
-    db_session, prepared_engine, test_settings, monkeypatch
+async def _matched(session, bulletin: Bulletin) -> int:
+    count = select(func.count()).where(BulletinUserMatch.bulletin_id == bulletin.id)
+    return await session.scalar(count)
+
+
+async def test_a_bulletin_the_database_refuses_holds_up_no_other(
+    db_session, prepared_engine, test_settings
 ):
     """A tick matches bulletins oldest first, in one transaction with the
-    pushes. One whose matching raises is rolled back alone and retried on
-    the next tick; the bulletins after it, and a match already filed, are
-    pushed."""
+    pushes. When the database refuses one bulletin's rows partway, the rows
+    it already filed are rolled back with it, it keeps no run marker for the
+    next tick to retry it, and the bulletins after it and a match already
+    filed are pushed."""
     user, sub = await _user_with_sub(db_session)
     filed = _bulletin("b-0")
-    failing = _bulletin("b-1", content_tags=[TAG, ContentTag.exam.value])
+    failing = _bulletin("b-1")
     later = _bulletin("b-2")
     db_session.add_all([filed, failing, later])
     await db_session.flush()
@@ -307,23 +312,25 @@ async def test_a_bulletin_that_fails_to_match_holds_up_no_other(
     db_session.add(
         BulletinUserMatch(bulletin_id=filed.id, user_id=user.id, subscription_id=sub.id)
     )
+    # The run marker is a bulletin's last statement, after its matches.
+    await db_session.execute(
+        text(
+            "ALTER TABLE bulletin_user_match_runs ADD CONSTRAINT refuse_failing"
+            f" CHECK (bulletin_id <> {failing.id})"
+        )
+    )
     await db_session.commit()
     factory = build_session_factory(prepared_engine)
-    real_rule_hits = user_dispatch.rule_hits
 
-    def rule_hits(rule, *, canonical_org, content_tags):
-        if ContentTag.exam.value in content_tags:
-            raise RuntimeError("matching failed")
-        return real_rule_hits(
-            rule, canonical_org=canonical_org, content_tags=content_tags
-        )
-
-    monkeypatch.setattr(user_dispatch, "rule_hits", rule_hits)
     assert await dispatch_user_bulletins(factory, test_settings) == 2
     assert await _pushed(db_session) == {filed.id, later.id}
+    assert await _matched(db_session, failing) == 0
     assert await db_session.get(BulletinUserMatchRun, failing.id) is None
 
-    monkeypatch.undo()
+    await db_session.execute(
+        text("ALTER TABLE bulletin_user_match_runs DROP CONSTRAINT refuse_failing")
+    )
+    await db_session.commit()
     assert await dispatch_user_bulletins(factory, test_settings) == 1
     assert await _pushed(db_session) == {filed.id, failing.id, later.id}
 
