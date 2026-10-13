@@ -29,7 +29,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ## 功能模組
 
 ### 🔐 帳號與認證（`server/auth/`）
-- **登入** — App 通常自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。App 改送密碼時，由後端代為 SSO，依 IP 與學號限流；密碼只用於這次登入，不會儲存
+- **登入** — App 自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。後端不會拿密碼登入：沒帶 Moodle token 的登入回 `400 moodle_token_required`，一併送來的密碼一律忽略。不論有沒有帶 token，每次嘗試都計入依 IP 與學號的登入限流
 - **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session。沒收到 rotation 回應的 client，在新 token 從未使用且未滿 24 小時時可再 rotation 一次；晚到的重複 refresh 不會讓 client 手上的那組 token 失效
 - **憑證保管** — 只存 Moodle token，以 AES-256-GCM + per-row AAD 加密（支援金鑰輪替），供伺服器端代抓使用；不保存 NTUST 密碼
 - **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）

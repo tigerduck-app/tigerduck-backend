@@ -114,6 +114,11 @@ the normal upgrade:
   stay `pending` with their last error, listed after the failed ones in
   the Jobs table. `tigerduck_sync_oldest_success_age_seconds` now counts
   those jobs, so it keeps climbing through a long outage.
+- **Logins need a Moodle token.** `POST /v3/auth/login` without
+  `moodle_token` answers `400 moodle_token_required` and still counts
+  against the login limit. A login with a password and no token answered
+  500 before, because the code meant to sign in with the password could
+  not load. The password the apps send is ignored. No app update is needed.
 - **Cleared marks stay cleared.** Under 3.2.0, clearing an assignment's
   done or ignored mark kept a mark made on it before the server's Moodle
   fetch first returned it, which the apps no longer showed. 3.3.0 shows
