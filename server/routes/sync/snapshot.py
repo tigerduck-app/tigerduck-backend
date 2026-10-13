@@ -313,10 +313,12 @@ async def _keys_for_marks_on_deleted_rows(
 def _hidden_since_received(override: UserAssignmentOverride, row) -> bool:
     # A server row was live after this row went and after the mark reached the
     # server, so the mark went out unkeyed and both apps dropped it; a clear
-    # made on that row may also have left it in place.
+    # made on that row may also have left it in place. A note edit since does
+    # not count as the mark arriving.
+    received = override.local_status_received_at or override.updated_at
     return (
         row.server_row_deleted_at is not None
-        and row.server_row_deleted_at > max(row.deleted_at, override.updated_at)
+        and row.server_row_deleted_at > max(row.deleted_at, received)
     )
 
 

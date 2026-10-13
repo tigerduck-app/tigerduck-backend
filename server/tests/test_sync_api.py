@@ -469,6 +469,34 @@ async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_ou
     ]
 
 
+async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -> None:
+    """A note uploaded for HW5's placeholder after its server's row went
+    changes the override but not when its old mark reached the server, so
+    that mark stays hidden instead of coming back as received now."""
+    login = await do_login(client)
+    await upload_placeholders(client, login, 5)
+    await mark(client, login, 5, "ignored")
+    await fetch(client, login, (7002, 5))
+    await fetch(client, login, (7001, 1))
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "note": "Bring the lab sheet",
+                    "note_updated_at": datetime.now(UTC).isoformat(),
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert await keyed_marks(client, login) == [(None, "ignored")]
+
+
 async def test_full_sync_keys_marks_made_after_the_server_row_went(client) -> None:
     """A guard on the rule above. Once the fetch has soft-deleted the server's
     rows of a TA's course, an app can upload a new placeholder: a mark made

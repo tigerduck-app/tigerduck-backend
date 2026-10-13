@@ -393,6 +393,8 @@ async def put_assignment_override(
             now=now,
         ):
             changed_fields.append(field_name)
+    if "local_status" in changed_fields:
+        override.local_status_received_at = now
 
     if changed_fields:
         await append_change(
