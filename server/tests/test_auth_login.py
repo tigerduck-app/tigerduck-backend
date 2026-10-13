@@ -195,25 +195,56 @@ async def test_login_rate_limited_after_max_attempts(client) -> None:
     assert response.json()["detail"] == "too_many_login_attempts"
 
 
-async def test_password_without_token_is_refused_and_counted(client) -> None:
-    allow_moodle(client)
-    password_only = {
+def tokenless_body(student_id: str = "B11015000", **token: object) -> dict:
+    """LOGIN_BODY, password included, with no Moodle token unless `token`
+    sets one."""
+    body = {
         key: value
         for key, value in LOGIN_BODY.items()
         if key not in ("moodle_token", "moodle_private_token")
     }
-    for _ in range(client.app.state.settings.auth_login_max_attempts):
-        response = await client.post("/v3/auth/login", json=password_only)
-        assert response.status_code == 400, response.text
-        assert response.json()["detail"] == "moodle_token_required"
+    return {**body, **token, "student_id": student_id}
 
-    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
-    assert response.status_code == 429
-    assert response.json()["detail"] == "too_many_login_attempts"
+
+@pytest.mark.parametrize(
+    "token",
+    [{}, {"moodle_token": None}, {"moodle_token": ""}],
+    ids=["missing", "null", "empty"],
+)
+async def test_password_without_token_is_refused(client, token) -> None:
+    allow_moodle(client)
+    response = await client.post("/v3/auth/login", json=tokenless_body(**token))
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "moodle_token_required"
 
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         assert (await session.execute(select(User))).scalars().all() == []
+
+
+@pytest.mark.parametrize("shared", ["student_id", "ip"])
+async def test_tokenless_attempts_count_against_the_limit(
+    client, monkeypatch, shared
+) -> None:
+    # Only the key under test repeats, so the 429 can come from it alone.
+    monkeypatch.setattr(client.app.state.settings, "auth_trust_forwarded_for", True)
+    allow_moodle(client)
+    for n in range(client.app.state.settings.auth_login_max_attempts):
+        student_id = "B11015000" if shared == "student_id" else f"B1101510{n}"
+        ip = "10.0.0.1" if shared == "ip" else f"10.0.1.{n}"
+        response = await client.post(
+            "/v3/auth/login",
+            json=tokenless_body(student_id),
+            headers={"X-Forwarded-For": ip},
+        )
+        assert response.status_code == 400, response.text
+
+    ip = "10.0.0.1" if shared == "ip" else "10.0.2.1"
+    response = await client.post(
+        "/v3/auth/login", json=LOGIN_BODY, headers={"X-Forwarded-For": ip}
+    )
+    assert response.status_code == 429
+    assert response.json()["detail"] == "too_many_login_attempts"
 
 
 @pytest.mark.parametrize("password", [None, "x" * 300], ids=["null", "long"])
