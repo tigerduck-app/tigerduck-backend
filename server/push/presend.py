@@ -40,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.auth.models import PushDelivery, PushJob, PushJobStatus
 from server.auth.schemas import ScheduleScenario
 from server.db import session_scope
-from server.push.dedupe import SCHEDULE_CHANNEL
+from server.push.dedupe import SCHEDULE_CHANNEL, schedule_prefix
 from server.push.payload import _to_unix_seconds
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import (
@@ -95,13 +95,17 @@ class MoodleBreaker:
 
 def needs_check(job: PushJob) -> bool:
     """Whether `job` is one this check guards: an assignment reminder, or the
-    start of an assignment's countdown, never its end."""
+    start of an assignment's countdown that `/schedule/sync` filed, never its
+    end. The portal's test start, under a `portal_la:` key and a made-up
+    source id, names no assignment and goes out as it is."""
     if job.channel == REMINDER_CHANNEL:
         return job.scenario.startswith("reminder_")
     return (
         job.channel == SCHEDULE_CHANNEL
         and job.scenario == ScheduleScenario.assignment_urgent.value
         and (job.payload or {}).get("kind") != "live_activity_end"
+        and job.device_id is not None
+        and job.dedupe_key.startswith(schedule_prefix(job.device_id))
     )
 
 
