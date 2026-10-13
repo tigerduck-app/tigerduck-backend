@@ -396,6 +396,93 @@ async def test_full_sync_keys_only_the_newest_mark_of_a_soft_deleted_assignment(
     ]
 
 
+async def upload_placeholders(client, login, *moodle_assignment_ids: int) -> None:
+    response = await client.post(
+        "/v3/sync/assignments/upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {
+                    "moodle_assignment_id": moodle_assignment_id,
+                    "course_no": "CS3001301",
+                    "course_name": "資料結構",
+                    "title": f"HW{moodle_assignment_id}",
+                }
+                for moodle_assignment_id in moodle_assignment_ids
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+async def mark(client, login, moodle_assignment_id: int, local_status: str) -> None:
+    response = await client.patch(
+        f"/v3/sync/assignments/{moodle_assignment_id}/override",
+        headers=bearer(login),
+        json={"local_status": local_status},
+    )
+    assert response.status_code == 200, response.text
+
+
+async def fetch(client, login, *keys: tuple[int, int]) -> None:
+    """A server fetch that returns these (course, assignment) keys and
+    soft-deletes every other live row, placeholders included."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        await apply_fetched_assignments(
+            session,
+            user_id=uuid.UUID(login["user"]["id"]),
+            fetched=[_fetched(*key) for key in keys],
+            now=datetime.now(UTC),
+        )
+        await session.commit()
+
+
+async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_outlived_it(
+    client,
+) -> None:
+    """A mark made on a placeholder goes out unkeyed from the fetch that adds
+    the server's row, so both apps drop it. A clear on the server's row used
+    to leave it in place, as for HW5 here. When a later fetch soft-deletes
+    the server's row too, as it does to a TA's course, that old mark must
+    not come back; a mark made on the server's row since, as for HW6, does."""
+    login = await do_login(client)
+    await upload_placeholders(client, login, 5, 6)
+    await mark(client, login, 5, "ignored")
+    await mark(client, login, 6, "ignored")
+    await fetch(client, login, (7002, 5), (7002, 6))
+    await mark(client, login, 6, "locally_completed")
+    await fetch(client, login, (7001, 1))
+
+    assert await keyed_marks(client, login) == [
+        (None, "ignored"),
+        (None, "ignored"),
+        (6, "locally_completed"),
+    ]
+
+
+async def test_full_sync_keys_marks_made_after_the_server_row_went(client) -> None:
+    """A guard on the rule above. Once the fetch has soft-deleted the server's
+    rows of a TA's course, an app can upload a new placeholder: a mark made
+    on it (HW7) is keyed once the next fetch soft-deletes it, and so is the
+    server's row's own mark (HW8), which the placeholder outlived. A new
+    assignment of that course never gets a server's row (HW9)."""
+    login = await do_login(client)
+    await fetch(client, login, (7002, 7), (7002, 8))
+    await mark(client, login, 8, "locally_completed")
+    await fetch(client, login, (7001, 1))
+    await upload_placeholders(client, login, 7, 8, 9)
+    await mark(client, login, 7, "ignored")
+    await mark(client, login, 9, "ignored")
+    await fetch(client, login, (7001, 1))
+
+    assert await keyed_marks(client, login) == [
+        (7, "ignored"),
+        (8, "locally_completed"),
+        (9, "ignored"),
+    ]
+
+
 async def test_full_sync_lists_course_overrides_in_creation_order(client) -> None:
     """A course taken again has an override per term under one course
     number. The released apps keep the later row's name and Android 2.3.1
