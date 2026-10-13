@@ -52,11 +52,14 @@ the normal upgrade:
 
 - **Update the submodule.** Run `git submodule update --init` after
   `git pull`. This release pins `app-translation` to a newer commit.
-- **Migration.** `cc54925b7852` adds `first_used_at` and `rerotated_at` to
+- **Migrations.** `cc54925b7852` adds `first_used_at` and `rerotated_at` to
   `auth_sessions` and allows the revoked reason `superseded`. Postgres adds
   the columns without rewriting the table; the replaced check constraint
   reads every row once under the table lock, about 0.1 seconds per million
-  sessions.
+  sessions. `bab460b19cc9` adds `local_status_received_at` to
+  `user_assignment_overrides` and fills it from `updated_at`, which writes
+  every row of that table once. `df3948adb76a` adds `fanout_retry_at` and
+  `match_retry_at` to `bulletins`.
 - **Sessions from before the upgrade** start with `first_used_at` empty,
   and one in use gets it on its next request. For 24 hours after the
   upgrade, a session the app has not used since may still be replaced when
@@ -140,10 +143,16 @@ the normal upgrade:
   that mark again once a fetch soft-deletes the assignment, as it does to
   every assignment of a course the user is a TA in. 3.3.1 does not, and the
   apps drop such a mark on their next full sync; a mark made after that
-  first fetch still shows. Nothing is migrated, so after a rollback 3.3.0
-  shows those marks again.
+  first fetch still shows. The rule compares the time each mark reached
+  the server, which `bab460b19cc9` records, so editing an assignment's
+  note does not bring its cleared mark back. After a rollback 3.3.0 shows
+  those marks again.
+- **A failing bulletin waits.** A bulletin whose push to devices or match
+  to users fails is tried again 15 minutes later instead of on the next
+  pass, so the bulletins after it are not held back while it keeps failing.
+  Nothing to do on upgrade or rollback.
 - **Rolling back.** The 3.3.0 code cannot start on a database at
-  `cc54925b7852`: its startup `alembic upgrade head` cannot find that
+  `df3948adb76a`: its startup `alembic upgrade head` cannot find that
   revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.
   The new columns stay and 3.3.0 never reads them; a superseded token
   that comes back takes its theft path. Stamp with the image you have:
@@ -153,17 +162,18 @@ the normal upgrade:
   - 3.3.0 already built:
     `docker compose run --rm --entrypoint alembic backend stamp --purge ddf188f91a15`.
     Without `--purge` it fails with "Can't locate revision identified by
-    'cc54925b7852'", since 3.3.0 does not have that migration.
+    'df3948adb76a'", since 3.3.0 does not have that migration.
 
-  Returning to 3.3.1 needs no stamp: its migration skips the columns that
+  Returning to 3.3.1 needs no stamp: its migrations skip the columns that
   already exist. Sessions 3.3.0 made in between start with `first_used_at`
-  empty, as at the first upgrade.
+  empty, as at the first upgrade, and an override 3.3.0 changed takes its
+  `updated_at` as the time its mark reached the server.
 
-  `alembic downgrade ddf188f91a15` instead drops both columns. First it
-  writes what 3.3.0 reads in their place: a token rotated a second time
-  gets `reuse_detected_at`, where 3.3.0 marks a grace retry, so neither
-  release rotates it again, and a superseded session becomes `rotated`
-  with no successor. Upgrading again starts every session without
+  `alembic downgrade ddf188f91a15` instead drops the new columns. First it
+  writes what 3.3.0 reads in place of the session ones: a token rotated a
+  second time gets `reuse_detected_at`, where 3.3.0 marks a grace retry, so
+  neither release rotates it again, and a superseded session becomes
+  `rotated` with no successor. Upgrading again starts every session without
   `first_used_at`, as the first upgrade did. Stop the backend first
   (`docker compose stop backend`) and run it with
   `docker compose run --rm --entrypoint alembic backend downgrade ddf188f91a15`:
