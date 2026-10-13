@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import batched
 
 import structlog
 from sqlalchemy import select, update
@@ -26,6 +27,7 @@ from server.bulletins.models import (
     BulletinProcessingState,
 )
 from server.config import Settings
+from server.db import INSERT_CHUNK_ROWS
 from server.models import DevicePlatform, DeviceRegistration
 from server.push.apns_client import SendResult
 from server.push.custom_push_targeting import (
@@ -86,9 +88,20 @@ async def dispatch_pending_bulletins(
         )
 
     for bulletin in bulletins:
-        sent, failed, cancelled, matched = await _dispatch_one(
-            session_factory, router, settings, bulletin.id, ts
-        )
+        try:
+            sent, failed, cancelled, matched = await _dispatch_one(
+                session_factory, router, settings, bulletin.id, ts
+            )
+        except Exception as exc:  # noqa: BLE001 — one bulletin's guard
+            # Left with notified_at unset for the next tick to retry. Raised,
+            # it would stop every later bulletin: each tick starts with the
+            # oldest.
+            logger.exception(
+                "bulletins.dispatch.bulletin_failed",
+                bulletin_id=bulletin.id,
+                error=str(exc)[:200],
+            )
+            continue
         totals[0] += sent
         totals[1] += failed
         totals[2] += cancelled
@@ -142,7 +155,7 @@ async def _dispatch_one(
                 content_tags=bulletin.content_tags or [],
             )
 
-        if device_ids:
+        for chunk in batched(device_ids, INSERT_CHUNK_ROWS):
             await session.execute(
                 pg_insert(BulletinDispatch)
                 .values(
@@ -152,7 +165,7 @@ async def _dispatch_one(
                             "device_id": did,
                             "status": BulletinDispatchStatus.pending.value,
                         }
-                        for did in device_ids
+                        for did in chunk
                     ]
                 )
                 # Re-runs after a crash are idempotent thanks to the

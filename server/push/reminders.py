@@ -40,7 +40,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.config import Settings
-from server.db import in_array, session_scope
+from server.db import INSERT_CHUNK_ROWS, in_array, session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.notification_copy import has_reminder_copy_inputs
 from server.sync.models import (
@@ -56,21 +56,17 @@ logger = structlog.get_logger(__name__)
 _EXCLUDED_LOCAL_STATUSES = {"locally_completed", "ignored", "archived"}
 CHANNEL = "assignment"
 
-# asyncpg refuses a statement with more than 32,767 bind parameters and a job
-# row binds 11, so one insert of every reminder failed from 2,979 rows on,
-# and the scan with it: nothing was filed and nothing cancelled.
-_INSERT_CHUNK_ROWS = 2000
-
 
 async def file_jobs(session: AsyncSession, rows: list[dict]) -> int:
     """Insert `rows` into push_jobs, leaving out a dedupe key already
     filed, and return how many it inserted. Both reminder scans file
-    through this."""
+    through this, `INSERT_CHUNK_ROWS` at a time: a job row binds 11
+    parameters."""
     created = 0
-    for start in range(0, len(rows), _INSERT_CHUNK_ROWS):
+    for start in range(0, len(rows), INSERT_CHUNK_ROWS):
         result = await session.execute(
             pg_insert(PushJob)
-            .values(rows[start : start + _INSERT_CHUNK_ROWS])
+            .values(rows[start : start + INSERT_CHUNK_ROWS])
             .on_conflict_do_nothing()
         )
         created += result.rowcount or 0
