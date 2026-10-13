@@ -534,6 +534,40 @@ async def test_two_first_uses_of_the_two_pairs_let_one_win(client) -> None:
     assert sorted(str(row.revoked_reason) for row in rows) == ["None", "superseded"]
 
 
+async def test_a_refresh_and_a_first_use_of_the_two_pairs_do_not_deadlock(client) -> None:
+    """A refresh of the newer of the two sessions a second rotation left meets
+    a first use of the older one, which locks the pair in id order. The
+    refresh takes the pair in the same order, so the first use's second lock
+    does not wait for it and neither request is aborted."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    late = await _refresh(client, token_a)
+    row_b = await _row(client, resend.json()["refresh_token"])
+    row_c = await _row(client, late.json()["refresh_token"])
+    older, newer = sorted((row_b, row_c), key=lambda row: row.id)
+    newer_token = (resend if newer.id == row_b.id else late).json()["refresh_token"]
+
+    engine = client.app.state.engine
+    async with engine.connect() as first_use:
+        await first_use.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": older.id},
+        )
+        refresh = asyncio.create_task(_refresh(client, newer_token))
+        await _until_queries_wait_for_a_lock(engine)
+        await first_use.execute(text("SET LOCAL lock_timeout = '3s'"))
+        await first_use.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": newer.id},
+        )
+        await first_use.commit()
+    response = await refresh
+
+    assert response.status_code == 200
+    assert (await _row(client, newer_token)).revoked_reason == "rotated"
+
+
 async def test_a_first_use_racing_the_second_rotation_still_wins(client) -> None:
     """The app's first request with the resend's pair reaches the row while
     a late duplicate is rotating again, and waits for it: once that commits,
