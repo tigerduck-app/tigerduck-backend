@@ -13,7 +13,7 @@ from datetime import UTC, date, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy import select
 
 from server.auth.dependencies import CurrentAuthDep
@@ -40,16 +40,16 @@ class CourseOverridePut(BaseModel):
     edited"; the value itself may be null to clear nullable fields."""
 
     custom_name: str | None = Field(default=None, max_length=256)
-    custom_name_updated_at: datetime | None = None
+    custom_name_updated_at: AwareDatetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
-    color_hex_updated_at: datetime | None = None
+    color_hex_updated_at: AwareDatetime | None = None
 
 
 class AssignmentOverridePut(BaseModel):
     local_status: str | None = None
-    local_status_updated_at: datetime | None = None
+    local_status_updated_at: AwareDatetime | None = None
     note: str | None = None
-    note_updated_at: datetime | None = None
+    note_updated_at: AwareDatetime | None = None
 
 
 class SkippedDatePut(BaseModel):

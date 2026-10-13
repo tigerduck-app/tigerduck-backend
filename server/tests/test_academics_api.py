@@ -9,7 +9,13 @@ from sqlalchemy import select
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.sync.models import UserAssignment, UserChangeLog, UserCourse
+from server.sync.models import (
+    UserAssignment,
+    UserAssignmentOverride,
+    UserChangeLog,
+    UserCourse,
+    UserCourseOverride,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -115,6 +121,55 @@ async def test_put_course_override_merges_per_field(client) -> None:
     # Untouched field applied. A locale-less custom_name feeds both 'zh'
     # and 'en' — the same convention as the a1b2c3d4e5f6 backfill.
     assert merged["custom_names"] == {"zh": "OS", "en": "OS"}
+
+
+NAIVE_TIME = "2026-06-08T10:00:00"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"custom_name": "OS", "custom_name_updated_at": NAIVE_TIME},
+        {"color_hex": "#FF8800", "color_hex_updated_at": NAIVE_TIME},
+    ],
+    ids=["custom-name", "color"],
+)
+async def test_put_course_override_refuses_a_time_without_a_zone(client, fields) -> None:
+    """An edit's time is compared with the server's clock, which has a zone,
+    so a time without one cannot be placed against it."""
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+
+    response = await client.put(
+        f"/v3/courses/{course_id}/override", headers=bearer(login), json=fields
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"local_status": "ignored", "local_status_updated_at": NAIVE_TIME},
+        {"note": "bring a calculator", "note_updated_at": NAIVE_TIME},
+    ],
+    ids=["local-status", "note"],
+)
+async def test_put_assignment_override_refuses_a_time_without_a_zone(
+    client, fields
+) -> None:
+    login = await do_login(client)
+    assignment_id = await seed_assignment(client, login["user"]["id"])
+
+    response = await client.put(
+        f"/v3/assignments/{assignment_id}/override", headers=bearer(login), json=fields
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserAssignmentOverride))).first() is None
 
 
 async def test_put_override_unknown_course_404(client) -> None:
