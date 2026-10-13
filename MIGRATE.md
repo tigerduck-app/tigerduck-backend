@@ -102,6 +102,15 @@ the normal upgrade:
   stay `pending` with their last error, listed after the failed ones in
   the Jobs table. `tigerduck_sync_oldest_success_age_seconds` now counts
   those jobs, so it keeps climbing through a long outage.
+- **TA courses behind a refusal.** When Moodle refused every course a user
+  can submit to (courses hidden from their students, for one), the fetch
+  kept every stored assignment, so a course the user is a TA in kept its
+  assignments from before 3.3.0 and their reminders. Such an answer now
+  soft-deletes the assignments of the courses Moodle left out without a
+  warning, as any other answer does, and keeps those of the courses it
+  refused. A TA course refused along with the rest, as under an unaccepted
+  site policy, keeps its assignments until a fetch succeeds. Nothing to do
+  on upgrade or rollback.
 - **Rolling back.** The 3.3.0 code cannot start on a database at
   `cc54925b7852`: its startup `alembic upgrade head` cannot find that
   revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.
