@@ -2,24 +2,38 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
+from sqlalchemy import ColumnElement, any_, literal
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, QueryableAttribute
 
 from server.config import Settings
 
 
 class Base(DeclarativeBase):
     """Declarative base for all ORM models."""
+
+
+def in_array(
+    column: QueryableAttribute[Any], values: Iterable[Any]
+) -> ColumnElement[bool]:
+    """`column = ANY(:values)`, with `values` bound as one array parameter.
+
+    `column.in_(values)` binds a parameter per value, and asyncpg refuses a
+    statement with more than 32,767 of them; a lookup over every user's rows
+    can pass that.
+    """
+    return column == any_(literal(list(values), ARRAY(column.type)))
 
 
 def build_engine(settings: Settings) -> AsyncEngine:
