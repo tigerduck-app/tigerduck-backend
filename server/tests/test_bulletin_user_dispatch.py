@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, insert, literal, select
 
 from server.auth.models import PushJob, User, UserDevice
+from server.bulletins import user_dispatch
 from server.bulletins.models import Bulletin
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 from server.bulletins.user_dispatch import (
@@ -276,6 +277,55 @@ async def test_a_bulletin_matches_more_users_than_one_insert_binds(
     count = select(func.count()).select_from(BulletinUserMatch)
     assert await db_session.scalar(count) == 6_554
     assert await db_session.get(BulletinUserMatchRun, bulletin.id) is not None
+
+
+async def _pushed(session) -> set[int]:
+    """The bulletins whose matches have their push job."""
+    rows = await session.execute(
+        select(BulletinUserMatch.bulletin_id).where(
+            BulletinUserMatch.pushed_at.is_not(None)
+        )
+    )
+    return set(rows.scalars())
+
+
+async def test_a_bulletin_that_fails_to_match_holds_up_no_other(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A tick matches bulletins oldest first, in one transaction with the
+    pushes. One whose matching raises is rolled back alone and retried on
+    the next tick; the bulletins after it, and a match already filed, are
+    pushed."""
+    user, sub = await _user_with_sub(db_session)
+    filed = _bulletin("b-0")
+    failing = _bulletin("b-1", content_tags=[TAG, ContentTag.exam.value])
+    later = _bulletin("b-2")
+    db_session.add_all([filed, failing, later])
+    await db_session.flush()
+    # Matched by an earlier tick and not pushed yet.
+    db_session.add(BulletinUserMatchRun(bulletin_id=filed.id))
+    db_session.add(
+        BulletinUserMatch(bulletin_id=filed.id, user_id=user.id, subscription_id=sub.id)
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    real_rule_hits = user_dispatch.rule_hits
+
+    def rule_hits(rule, *, canonical_org, content_tags):
+        if ContentTag.exam.value in content_tags:
+            raise RuntimeError("matching failed")
+        return real_rule_hits(
+            rule, canonical_org=canonical_org, content_tags=content_tags
+        )
+
+    monkeypatch.setattr(user_dispatch, "rule_hits", rule_hits)
+    assert await dispatch_user_bulletins(factory, test_settings) == 2
+    assert await _pushed(db_session) == {filed.id, later.id}
+    assert await db_session.get(BulletinUserMatchRun, failing.id) is None
+
+    monkeypatch.undo()
+    assert await dispatch_user_bulletins(factory, test_settings) == 1
+    assert await _pushed(db_session) == {filed.id, failing.id, later.id}
 
 
 async def test_signed_out_device_rules_are_not_matched(

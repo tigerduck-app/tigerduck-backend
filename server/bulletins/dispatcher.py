@@ -88,9 +88,20 @@ async def dispatch_pending_bulletins(
         )
 
     for bulletin in bulletins:
-        sent, failed, cancelled, matched = await _dispatch_one(
-            session_factory, router, settings, bulletin.id, ts
-        )
+        try:
+            sent, failed, cancelled, matched = await _dispatch_one(
+                session_factory, router, settings, bulletin.id, ts
+            )
+        except Exception as exc:  # noqa: BLE001 — one bulletin's guard
+            # Left with notified_at unset for the next tick to retry. Raised,
+            # it would stop every later bulletin: each tick starts with the
+            # oldest.
+            logger.exception(
+                "bulletins.dispatch.bulletin_failed",
+                bulletin_id=bulletin.id,
+                error=str(exc)[:200],
+            )
+            continue
         totals[0] += sent
         totals[1] += failed
         totals[2] += cancelled

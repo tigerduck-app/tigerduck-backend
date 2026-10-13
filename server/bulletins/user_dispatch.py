@@ -109,7 +109,18 @@ async def _match_new_bulletins(
         )
 
     for bulletin in bulletins:
-        await _file_matches(session, bulletin, per_user, now)
+        try:
+            # A savepoint per bulletin: one that fails files nothing, keeps
+            # no run marker for the next tick to retry it, and leaves the
+            # rest of this transaction, Pass B included, to commit.
+            async with session.begin_nested():
+                await _file_matches(session, bulletin, per_user, now)
+        except Exception as exc:  # noqa: BLE001 — one bulletin's guard
+            logger.exception(
+                "bulletins.user_dispatch.match_failed",
+                bulletin_id=bulletin.id,
+                error=str(exc)[:200],
+            )
     return len(bulletins)
 
 
