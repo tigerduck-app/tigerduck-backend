@@ -412,8 +412,9 @@ async def _run_when_due(db_session, worker, job) -> None:
     [
         (MoodleUnreachable("http_503"), "sync_failed:http_503"),
         (SsoUnavailable("http_502"), "sync_failed:http_502"),
+        (MoodleRateLimited("http_429"), "school_rate_limited"),
     ],
-    ids=["moodle-unreachable", "sso-unavailable"],
+    ids=["moodle-unreachable", "sso-unavailable", "rate-limited"],
 )
 async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     db_session, prepared_engine, test_settings, outage, last_error

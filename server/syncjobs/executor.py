@@ -16,18 +16,21 @@ Failure taxonomy → outcome:
                                    'school_rate_limited'.
 * `MoodleUnreachable`/`SsoUnavailable`
                                  → retriable, backoff, last_error
-                                   'sync_failed:<detail>'; past
-                                   max_attempts the job runs again after
-                                   its policy interval.
+                                   'sync_failed:<detail>'.
 * `SubmissionStatusDbError`      → retriable, backoff, last_error
                                    'sync_failed:submission_status'; the
                                    assignment list sync it followed has
                                    already committed.
 * unexpected                     → retriable, backoff, last_error
                                    'sync_failed:<exception type>'.
-Other retriable failures exceeding max_attempts land in status 'failed'
-until `POST /v3/sync-jobs/run-now` or the portal's retry revives them;
-re-login revives only a 'disabled' job.
+Past max_attempts, the school's errors (`MoodleRateLimited`,
+`MoodleUnreachable`, `SsoUnavailable`) put the job back on its policy
+interval with its attempts and priority reset: they end without us, and a
+failed job waits for an operator, since no released app calls
+`POST /v3/sync-jobs/run-now` and re-login revives only a 'disabled' job.
+Our own errors (the submission-status database error, an unexpected
+exception, a stale lock) can come back on every run, so they leave the job
+'failed' until run-now or the portal's retry revives it.
 """
 
 from __future__ import annotations
@@ -401,12 +404,10 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         )
     except MoodleRateLimited:
         await _record_failure(
-            worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED
+            worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED,
+            keep_retrying=True,
         )
     except (MoodleUnreachable, SsoUnavailable) as exc:
-        # The school's side recovers without us, while a failed job waits
-        # for an operator: no released app calls run-now, and re-login
-        # revives only a disabled job.
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{str(exc)[:120]}",

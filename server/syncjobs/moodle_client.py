@@ -13,8 +13,10 @@ hangs off it:
                           safe to retry with backoff.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → a transport or parse error, or an answer that
-                          cannot list the user's courses; retry, and past
-                          the attempts again at the policy interval.
+                          cannot list the user's courses; retry.
+
+Past a job's attempts the executor keeps retrying `SsoUnavailable`,
+`MoodleRateLimited` and `MoodleUnreachable`, at the job's policy interval.
 """
 
 from __future__ import annotations
