@@ -302,7 +302,7 @@ async def _keys_for_marks_on_deleted_rows(
         row = deleted_rows.get(override.user_assignment_id)
         if row is None or row.moodle_assignment_id in live_ids:
             continue
-        if _hidden_since_marked(override, row):
+        if _hidden_since_received(override, row):
             continue
         kept = newest.get(row.moodle_assignment_id)
         if kept is None or _marked_at(override) > _marked_at(kept):
@@ -310,14 +310,13 @@ async def _keys_for_marks_on_deleted_rows(
     return {o.user_assignment_id: moodle_id for moodle_id, o in newest.items()}
 
 
-def _hidden_since_marked(override: UserAssignmentOverride, row) -> bool:
-    # A server row was live after this row went and after the mark was made,
-    # so the mark went out unkeyed and both apps dropped it; a clear made on
-    # that row may also have left it in place.
-    marked_at = override.local_status_updated_at or _NEVER
+def _hidden_since_received(override: UserAssignmentOverride, row) -> bool:
+    # A server row was live after this row went and after the mark reached the
+    # server, so the mark went out unkeyed and both apps dropped it; a clear
+    # made on that row may also have left it in place.
     return (
         row.server_row_deleted_at is not None
-        and row.server_row_deleted_at > max(row.deleted_at, marked_at)
+        and row.server_row_deleted_at > max(row.deleted_at, override.updated_at)
     )
 
 

@@ -488,12 +488,14 @@ async def test_full_sync_keys_a_mark_imported_after_the_server_row_went(
     client,
 ) -> None:
     """A guard on the rule above, which hides only a mark that went out
-    unkeyed after it was made. The initial upload can put a mark on a
-    placeholder the server's row outlived; made after that row went, the
-    mark is keyed."""
+    unkeyed after it reached the server. A device marks the assignment
+    offline after the fetch hid its placeholder, and sends the mark in its
+    initial upload once the server's row went too: the upload puts it on
+    the placeholder with its earlier time, and it is keyed."""
     login = await do_login(client)
     await upload_placeholders(client, login, 5)
     await fetch(client, login, (7002, 5))
+    marked_offline = datetime.now(UTC)
     await fetch(client, login, (7001, 1))
     response = await client.post(
         "/v3/sync/initial-upload",
@@ -504,7 +506,7 @@ async def test_full_sync_keys_a_mark_imported_after_the_server_row_went(
                     "moodle_course_id": 0,
                     "moodle_assignment_id": 5,
                     "local_status": "ignored",
-                    "local_status_updated_at": datetime.now(UTC).isoformat(),
+                    "local_status_updated_at": marked_offline.isoformat(),
                 }
             ]
         },
