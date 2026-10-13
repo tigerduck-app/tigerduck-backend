@@ -24,6 +24,12 @@ class Base(DeclarativeBase):
     """Declarative base for all ORM models."""
 
 
+#: Rows per INSERT for a statement that files a row per user or device.
+#: asyncpg refuses a statement with more than 32,767 bind parameters, and a
+#: row binds one per column it sets, so 2,000 rows leave room for 16.
+INSERT_CHUNK_ROWS = 2000
+
+
 def in_array(
     column: QueryableAttribute[Any], values: Iterable[Any]
 ) -> ColumnElement[bool]:
