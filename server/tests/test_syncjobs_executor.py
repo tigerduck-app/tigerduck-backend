@@ -10,10 +10,11 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
+    DevicePushToken,
     ExternalAccount,
     ExternalAccountCredential,
     PushJob,
@@ -23,12 +24,12 @@ from server.auth.models import (
 from server.config import Settings
 from server.db import build_session_factory
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
-from server.push.reminders import _dedupe_key
+from server.push.reminders import _dedupe_key, scan_assignment_reminders
 from server.logging_setup import configure
 from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
 from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
-from server.syncjobs.models import SyncJob, SyncPolicy, SyncRun
+from server.syncjobs.models import SyncJob, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedSubmission,
@@ -543,6 +544,191 @@ async def test_an_answer_that_lost_every_course_keeps_the_assignments(
         )
     ).scalar_one()
     assert row.deleted_at is None
+
+
+async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
+    db_session, prepared_engine, test_settings
+):
+    """Moodle leaves out a course the user is a TA in without a warning. An
+    answer that refused every other course kept that course's rows, fetched
+    before the capability filter, so their reminders went on. The refused
+    course and the placeholder, which names no course, keep theirs."""
+    user, _, job = await _setup_user_job(db_session, student_id="b00000001")
+    device = UserDevice(
+        user_id=user.id,
+        client_device_id="iphone-1",
+        platform="ios",
+        app_version="2.1.0",
+    )
+    db_session.add(device)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-iphone-1",
+            token_value="tok-iphone-1",
+        )
+    )
+    due_at = datetime.now(UTC) + timedelta(hours=30)
+    rows = {
+        "refused": UserAssignment(
+            user_id=user.id,
+            moodle_course_id=7001,
+            moodle_assignment_id=1,
+            title="HW1",
+            due_at=due_at,
+        ),
+        "ta_course": UserAssignment(
+            user_id=user.id,
+            moodle_course_id=7003,
+            moodle_assignment_id=2,
+            title="HW2",
+            due_at=due_at,
+        ),
+        "placeholder": UserAssignment(
+            user_id=user.id,
+            moodle_course_id=0,
+            moodle_assignment_id=3,
+            course_no="CS0000001",
+            title="HW3",
+            due_at=due_at,
+        ),
+    }
+    db_session.add_all(rows.values())
+    await db_session.commit()
+    session_factory = build_session_factory(prepared_engine)
+    assert await scan_assignment_reminders(session_factory, test_settings) == 6
+    body = {
+        "courses": [],
+        "warnings": [{"item": "course", "itemid": 7001, "warningcode": "1"}],
+    }
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+    )
+
+    await run_sync_tick(_worker(prepared_engine, test_settings, fetcher=fetcher))
+    await scan_assignment_reminders(session_factory, test_settings)
+
+    await db_session.refresh(job)
+    assert (job.status, job.attempts, job.last_error) == (
+        "pending",
+        1,
+        "sync_failed:no_course_access",
+    )
+    for row in rows.values():
+        await db_session.refresh(row)
+    assert [name for name, row in rows.items() if row.deleted_at] == ["ta_course"]
+    # The run history, which the portal and Grafana read, counts the delete.
+    run = (
+        await db_session.execute(select(SyncRun).where(SyncRun.sync_job_id == job.id))
+    ).scalar_one()
+    assert (run.status, run.error, run.fetched_count, run.changed_count) == (
+        "failed",
+        "sync_failed:no_course_access",
+        0,
+        1,
+    )
+    reminders = (
+        (
+            await db_session.execute(
+                select(PushJob)
+                .where(PushJob.user_id == user.id, PushJob.channel == REMINDER_CHANNEL)
+                .execution_options(populate_existing=True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    statuses: dict[int, set[str]] = {}
+    for reminder in reminders:
+        statuses.setdefault(reminder.payload["moodle_assignment_id"], set()).add(
+            reminder.status
+        )
+    assert statuses == {1: {"pending"}, 2: {"cancelled"}, 3: {"pending"}}
+    # The user's devices are told to sync, and the change log has the delete.
+    entries = (
+        await db_session.execute(
+            select(UserChangeLog.operation, UserChangeLog.entity_id).where(
+                UserChangeLog.user_id == user.id
+            )
+        )
+    ).all()
+    assert entries == [("delete", str(rows["ta_course"].id))]
+    triggers = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(PushJob)
+            .where(PushJob.user_id == user.id, PushJob.scenario == "sync_trigger")
+        )
+    ).scalar_one()
+    assert triggers == 1
+    # A failed run otherwise changes nothing, so the user's activity log
+    # says what this one deleted.
+    details = (
+        await db_session.execute(
+            select(SyncLogEntry.detail).where(
+                SyncLogEntry.user_id == user.id,
+                SyncLogEntry.message.startswith("Moodle refused"),
+            )
+        )
+    ).scalars().all()
+    assert details == [{"refused_course_ids": [7001], "deleted": 1}]
+
+
+async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothing(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The deletes, their change log entries, the sync trigger and the run's
+    counts commit together or not at all. The run then fails as our own
+    error, so a lasting one ends the job failed for an operator rather than
+    hiding behind the refusal."""
+    user, _, job = await _setup_user_job(db_session, student_id="b00000001")
+    ta_row = UserAssignment(
+        user_id=user.id, moodle_course_id=7003, moodle_assignment_id=2, title="HW2"
+    )
+    db_session.add(ta_row)
+    await db_session.commit()
+
+    async def failing_trigger(session, user_id, *, source=None):
+        await session.execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(executor_module, "_enqueue_sync_trigger", failing_trigger)
+    body = {
+        "courses": [],
+        "warnings": [{"item": "course", "itemid": 7001, "warningcode": "1"}],
+    }
+    fetcher = HttpAssignmentFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=body)),
+    )
+
+    await run_sync_tick(_worker(prepared_engine, test_settings, fetcher=fetcher))
+
+    await db_session.refresh(ta_row)
+    assert ta_row.deleted_at is None
+    changes = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(UserChangeLog)
+            .where(UserChangeLog.user_id == user.id)
+        )
+    ).scalar_one()
+    assert changes == 0
+    await db_session.refresh(job)
+    assert (job.status, job.attempts, job.last_error) == (
+        "pending",
+        1,
+        "sync_failed:DBAPIError",
+    )
+    run = (
+        await db_session.execute(select(SyncRun).where(SyncRun.sync_job_id == job.id))
+    ).scalar_one()
+    assert (run.status, run.fetched_count, run.changed_count) == ("failed", None, None)
 
 
 @pytest.mark.parametrize(

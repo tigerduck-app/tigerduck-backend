@@ -14,6 +14,8 @@ hangs off it:
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → a transport or parse error, or an answer that
                           cannot list the user's courses; retry.
+* `MoodleNoCourseAccess` → a `MoodleUnreachable` for an answer that lost
+                          every course, naming the courses Moodle refused.
 
 Past a job's attempts the executor keeps retrying `SsoUnavailable`,
 `MoodleRateLimited` and `MoodleUnreachable`, at the job's policy interval.
@@ -51,6 +53,17 @@ class MoodleRateLimited(MoodleClientError):
 
 class MoodleUnreachable(MoodleClientError):
     pass
+
+
+class MoodleNoCourseAccess(MoodleUnreachable):
+    """An answer with no course, whose warnings name the courses Moodle
+    refused. Moodle leaves out a course the user cannot submit to, or is no
+    longer enrolled in, without a warning, so the answer still settles every
+    course it did not refuse."""
+
+    def __init__(self, refused_course_ids: frozenset[int]) -> None:
+        super().__init__("no_course_access")
+        self.refused_course_ids = refused_course_ids
 
 
 class SsoAuthFailed(MoodleClientError):
@@ -362,9 +375,16 @@ class HttpAssignmentFetcher:
         # back as a warning. One the user cannot submit to is left out
         # silently, so a TA-only account's empty answer still applies.
         warnings = body.get("warnings")
-        if not courses and isinstance(warnings, list) and any(
-            isinstance(w, dict) and w.get("item") == "course" for w in warnings
-        ):
+        refused = [
+            w.get("itemid")
+            for w in (warnings if isinstance(warnings, list) else [])
+            if isinstance(w, dict) and w.get("item") == "course"
+        ]
+        if not courses and refused:
+            # Without the id of every refused course, any stored course may
+            # be one of them, so the caller must keep every row.
+            if all(type(course_id) is int for course_id in refused):
+                raise MoodleNoCourseAccess(frozenset(refused))
             raise MoodleUnreachable("no_course_access")
 
         fetched: list[FetchedAssignment] = []

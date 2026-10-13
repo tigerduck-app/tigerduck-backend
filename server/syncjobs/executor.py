@@ -16,7 +16,11 @@ Failure taxonomy → outcome:
                                    'school_rate_limited'.
 * `MoodleUnreachable`/`SsoUnavailable`
                                  → retriable, backoff, last_error
-                                   'sync_failed:<detail>'.
+                                   'sync_failed:<detail>'. An answer
+                                   that lost every course
+                                   (`MoodleNoCourseAccess`) first
+                                   soft-deletes the rows of the courses
+                                   it left out.
 * `SubmissionStatusDbError`      → retriable, backoff, last_error
                                    'sync_failed:submission_status'; the
                                    assignment list sync it followed has
@@ -70,6 +74,7 @@ from server.syncjobs.moodle_client import (
     AssignmentFetcher,
     CourseFetcher,
     MoodleClientError,
+    MoodleNoCourseAccess,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -360,6 +365,15 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     fetched = await worker.fetcher.fetch_assignments(token=token)
                 except MoodleTokenInvalid:
                     raise CredentialInvalid("moodle_token_invalid")
+                except MoodleNoCourseAccess as exc:
+                    await _drop_courses_left_out(
+                        session,
+                        run=run,
+                        user_id=job.user_id,
+                        refused_course_ids=exc.refused_course_ids,
+                        now=now,
+                    )
+                    raise
                 await log_sync(session, user_id=job.user_id, source="executor",
                                message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
@@ -428,6 +442,50 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             run_id=run_id,
             error=f"{ERROR_SYNC_FAILED}:{type(exc).__name__}",
         )
+
+
+async def _drop_courses_left_out(
+    session: AsyncSession,
+    *,
+    run: SyncRun | None,
+    user_id,
+    refused_course_ids: frozenset[int],
+    now: datetime,
+) -> None:
+    """Soft-delete the rows of the courses an answer that lost every course
+    left out, a TA's course among them, and keep the refused courses' rows.
+
+    Committed here, with the run's counts: the run then fails like any other
+    unreachable Moodle, which rolls this session back.
+    """
+    from .log_entries import log_sync
+
+    stats = await apply_fetched_assignments(
+        session,
+        user_id=user_id,
+        fetched=[],
+        now=now,
+        refused_course_ids=refused_course_ids,
+    )
+    if run is not None:
+        run.fetched_count = stats.fetched_count
+        run.changed_count = stats.changed_count
+    if stats.changed_count > 0:
+        await _enqueue_sync_trigger(session, user_id)
+    await log_sync(
+        session,
+        user_id=user_id,
+        source="executor",
+        message=(
+            f"Moodle refused {len(refused_course_ids)} courses and listed none; "
+            f"deleted {stats.changed_count} assignments of the courses it left out"
+        ),
+        detail={
+            "refused_course_ids": sorted(refused_course_ids),
+            "deleted": stats.changed_count,
+        },
+    )
+    await session.commit()
 
 
 async def _mark_succeeded(
