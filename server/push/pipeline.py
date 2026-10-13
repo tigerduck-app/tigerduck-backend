@@ -576,16 +576,21 @@ async def _held_back(
     job; True when the job is not to be delivered now.
 
     A `send` verdict stands only if the rows, read again here under the
-    job's lock, still say the job is due: they were read before the Moodle
-    call. An `unverified` job goes back to pending without spending an
-    attempt, since nothing was sent, until the grace after its fire time has
-    passed; then it is cancelled.
+    job's lock, still say the job is due (they were read before the Moodle
+    call), and only within the grace after the job's fire time. An
+    `unverified` job goes back to pending without spending an attempt, since
+    nothing was sent, until that grace has passed; then it is cancelled.
     """
     now = datetime.now(UTC)
     settings = worker.settings
+    grace_end = job.fire_at + timedelta(minutes=settings.push_presend_grace_minutes)
     deferred = False
     if check.verdict == "send":
         check = await recheck_rows(session, job, now) or check
+    if check.verdict == "send" and now >= grace_end:
+        # The copy counts from the fire time ("30 minutes left"), which is
+        # wrong this late, whether the job was claimed late or retried.
+        check = PresendCheck("gone", "past_grace", check.moodle_assignment_id)
     if check.verdict == "submitted":
         _settle(
             job, status=PushJobStatus.cancelled, error="submitted_before_send", now=now
@@ -594,7 +599,7 @@ async def _held_back(
     elif check.verdict == "gone":
         _settle(job, status=PushJobStatus.cancelled, error="stale_before_send", now=now)
     elif check.verdict == "unverified":
-        if now < job.fire_at + timedelta(minutes=settings.push_presend_grace_minutes):
+        if now < grace_end:
             job.status = PushJobStatus.pending.value
             job.available_at = now + timedelta(
                 seconds=settings.push_presend_retry_seconds

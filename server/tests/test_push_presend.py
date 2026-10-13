@@ -652,6 +652,33 @@ async def test_an_unanswered_check_holds_the_reminder_then_drops_it_after_the_gr
     assert await _deliveries(db_session, job) == []
 
 
+async def test_a_reminder_confirmed_only_after_its_grace_is_not_sent(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """Its copy counts from the fire time ("30 minutes left"). Claimed late,
+    or confirmed open only after retries ran past the grace, it would be
+    wrong by the time it arrived."""
+    user, _ = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(
+        make_assignment, store_moodle_token, user, 18
+    )
+    job = _reminder(
+        user, 18, due_at, fire_at=_ago(test_settings.push_presend_grace_minutes + 1)
+    )
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, SubmissionStatusStub(OPEN), apple=apple)
+    )
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    assert apple.requests == []
+    assert await _deliveries(db_session, job) == []
+
+
 @pytest.mark.parametrize("credential", ["none", "invalid"])
 async def test_without_a_usable_token_moodle_is_not_asked_and_nothing_is_sent(
     db_session, prepared_engine, test_settings, make_assignment, credential
