@@ -534,6 +534,42 @@ async def test_two_first_uses_of_the_two_pairs_let_one_win(client) -> None:
     assert sorted(str(row.revoked_reason) for row in rows) == ["None", "superseded"]
 
 
+async def test_a_first_use_racing_the_second_rotation_still_wins(client) -> None:
+    """The app's first request with the resend's pair reaches the row while
+    a late duplicate is rotating again, and waits for it: once that commits,
+    the first use still supersedes the duplicate's pair."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    resend = await _refresh(client, token_a)
+    token_b = resend.json()["refresh_token"]
+    row_b = await _row(client, token_b)
+
+    engine = client.app.state.engine
+    async with engine.connect() as blocker:
+        await blocker.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": row_b.id},
+        )
+        late = asyncio.create_task(_refresh(client, token_a))
+        await _until_queries_wait_for_a_lock(engine)
+        use = asyncio.create_task(
+            client.get("/v3/devices", headers=_bearer(resend.json()))
+        )
+        await _until_queries_wait_for_a_lock(engine, count=2)
+        await blocker.commit()
+    late_reply = await late
+    used = await use
+
+    assert late_reply.status_code == 200
+    assert used.status_code == 200
+    unread = late_reply.json()["refresh_token"]
+    assert (await _row(client, unread)).revoked_reason == "superseded"
+    row_b = await _row(client, token_b)
+    assert row_b.revoked_at is None
+    assert row_b.replaced_by_session_id is None
+    assert (await _refresh(client, token_b)).status_code == 200
+
+
 async def _logged_out(client) -> str:
     login = await do_login(client)
     assert (await client.post("/v3/auth/logout", headers=_bearer(login))).status_code == 204

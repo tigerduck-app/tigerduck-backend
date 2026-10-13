@@ -100,6 +100,18 @@ async def _record_first_use(session: AsyncSession, auth_session: AuthSession) ->
     at once: a handler that fails must not undo it, and one that waits on
     Moodle must not hold the row lock the session's refresh needs.
     """
+    if auth_session.replaced_by_session_id is None:
+        # A second rotation that names this session as its successor holds
+        # this lock while it decides, and links the session to a rival.
+        await session.get(
+            AuthSession,
+            auth_session.id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if auth_session.revoked_at is not None:
+            await session.commit()
+            raise _session_revoked()
     if auth_session.replaced_by_session_id is not None:
         await _claim_contest(session, auth_session)
     await session.execute(
@@ -128,13 +140,17 @@ async def _claim_contest(session: AsyncSession, auth_session: AuthSession) -> No
     await session.refresh(auth_session)
     if auth_session.revoked_at is not None:
         await session.commit()
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="session_revoked",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _session_revoked()
     if auth_session.replaced_by_session_id is not None:
         await settle_contest(session, auth_session, datetime.now(UTC))
+
+
+def _session_revoked() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="session_revoked",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 CurrentAuthDep = Annotated[CurrentAuth, Depends(require_user)]
