@@ -443,9 +443,10 @@ async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_ou
 ) -> None:
     """A mark made on a placeholder goes out unkeyed from the fetch that adds
     the server's row, so both apps drop it. A clear on the server's row used
-    to leave it in place, as for HW5 here. When a later fetch soft-deletes
-    the server's row too, as it does to a TA's course, that old mark must
-    not come back; a mark made on the server's row since, as for HW6, does."""
+    to leave it in place, which is HW5's state here: that old mark, and none
+    on the server's row. When a later fetch soft-deletes the server's row
+    too, as it does to a TA's course, that mark must not come back; a mark
+    made on the server's row since, as for HW6, does."""
     login = await do_login(client)
     await upload_placeholders(client, login, 5, 6)
     await mark(client, login, 5, "ignored")
