@@ -35,6 +35,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
+from server.academic_calendar.terms import load_term_dates, outside_term
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -71,9 +72,10 @@ _CLAIM_LOCK_KEY = 0x54445F50555348
 
 _UNREGISTERED_APNS_DESCRIPTIONS = {"baddevicetoken", "unregistered"}
 
-# The schedule scenarios that announce a class. A school holiday silences
-# these and not `assignmentUrgent`: a deadline on a day off is still a
-# deadline — the same split the app's own scenario resolver makes.
+# The schedule scenarios that announce a class. A school holiday or a day
+# outside the term silences these and not `assignmentUrgent`: a deadline on
+# a day off is still a deadline — the same split the app's own scenario
+# resolver makes.
 _CLASS_SCENARIOS = frozenset(
     {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
 )
@@ -376,20 +378,27 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             token_query = token_query.where(DevicePushToken.scope_key == activity_id)
         elif (
             job.scenario in _CLASS_SCENARIOS
-            and await _classes_quiet(
-                session, user_id=job.user_id, day=_class_day(job, school_tz)
+            and (
+                quiet := await _classes_quiet(
+                    session, user_id=job.user_id, day=_class_day(job, school_tz)
+                )
             )
             and not await _has_deliveries(session, job)
         ):
             # The class this would announce does not meet. The app files a
-            # class's starts up to a day ahead without consulting the school
-            # calendar, so the holiday is decided here, when the start
-            # fires — which also lets a holiday published since, or a
-            # "還要上課？" toggle flipped since, reach a job already waiting.
-            # Cancelled rather than failed, and only before the first
+            # class's starts up to a day ahead, older builds without asking
+            # the school calendar, so the day is decided again here, when the
+            # start fires — which also lets a term or holiday published since,
+            # or a "還要上課？" toggle flipped since, reach a job already
+            # waiting. Cancelled rather than failed, and only before the first
             # delivery, for the reasons given for a running activity below.
-            _settle(job, status=PushJobStatus.cancelled, error="holiday", now=now)
-            logger.info("push.activity_holiday", job_id=job.id, activity_id=activity_id)
+            _settle(job, status=PushJobStatus.cancelled, error=quiet, now=now)
+            logger.info(
+                "push.activity_quiet_day",
+                job_id=job.id,
+                activity_id=activity_id,
+                reason=quiet,
+            )
             return False
         elif not await _has_deliveries(session, job) and (
             await _activity_already_registered(
@@ -548,14 +557,21 @@ def _class_day(job: PushJob, school_tz: str) -> date:
 
 async def _classes_quiet(
     session: AsyncSession, *, user_id: uuid.UUID, day: date
-) -> bool:
-    """Whether classes do not meet for `user_id` on `day`.
+) -> str | None:
+    """Why classes do not meet for `user_id` on `day`, or None when they do.
 
     The rule `course_reminders.scan_course_reminders` applies to the class
-    reminder alerts: a holiday covers the day and the user has not opted in
-    to any holiday that does. Opting in to one un-silences the day even
-    when a second, overlapping holiday covers it too.
+    reminder alerts, but a start does not say which term its class is in,
+    so here any published term running on the day will do, as in the apps.
+
+    * `outside_term`: no published term runs on the day.
+    * `holiday`: a holiday covers the day and the user has not opted in to
+      any holiday that does. Opting in to one un-silences the day even when
+      a second, overlapping holiday covers it too, but not a day outside
+      the term.
     """
+    if outside_term(day, await load_term_dates(session)):
+        return "outside_term"
     covering = (
         (
             await session.execute(
@@ -569,7 +585,7 @@ async def _classes_quiet(
         .all()
     )
     if not covering:
-        return False
+        return None
     opted_in = (
         await session.execute(
             select(UserHolidayOverride.id)
@@ -581,7 +597,7 @@ async def _classes_quiet(
             .limit(1)
         )
     ).first()
-    return opted_in is None
+    return "holiday" if opted_in is None else None
 
 
 async def _has_deliveries(session: AsyncSession, job: PushJob) -> bool:
