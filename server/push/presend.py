@@ -129,11 +129,7 @@ async def check_before_send(
         assignment_id = _assignment_id(job)
         if assignment_id is None:
             return _gone("no_assignment_id")
-        rows = await _assignment_rows(session, job.user_id, assignment_id)
-        due_epoch = _due_epoch(job, [row for row, _ in rows if row.deleted_at is None])
-        settled = await _database_verdict(
-            session, job, assignment_id, rows, due_epoch, now
-        )
+        settled, due_epoch = await _rows_verdict(session, job, assignment_id, now)
         if settled is not None:
             return settled
         fetcher = worker.fetcher
@@ -155,6 +151,20 @@ async def check_before_send(
         due_epoch=due_epoch,
         breaker=breaker,
     )
+
+
+async def recheck_rows(
+    session: AsyncSession, job: PushJob, now: datetime
+) -> PresendCheck | None:
+    """The rows' verdict again, read under the job's row lock right before
+    delivery, or None while the job is still due. The verdict that let the
+    job through was read before the Moodle call, and a submission the probe
+    or an app records during that call must not be sent past."""
+    assignment_id = _assignment_id(job)
+    if assignment_id is None:
+        return _gone("no_assignment_id")
+    settled, _ = await _rows_verdict(session, job, assignment_id, now)
+    return settled
 
 
 async def record_submitted(
@@ -238,6 +248,17 @@ async def _assignment_rows(
             )
         ).all()
     )
+
+
+async def _rows_verdict(
+    session: AsyncSession, job: PushJob, assignment_id: int, now: datetime
+) -> tuple[PresendCheck | None, int | None]:
+    """What the user's rows of the assignment settle, or None to ask Moodle,
+    and when the job's assignment is due (`_due_epoch`)."""
+    rows = await _assignment_rows(session, job.user_id, assignment_id)
+    due_epoch = _due_epoch(job, [row for row, _ in rows if row.deleted_at is None])
+    verdict = await _database_verdict(session, job, assignment_id, rows, due_epoch, now)
+    return verdict, due_epoch
 
 
 async def _database_verdict(

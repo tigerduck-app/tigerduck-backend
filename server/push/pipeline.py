@@ -72,6 +72,7 @@ from server.push.presend import (
     MoodleBreaker,
     PresendCheck,
     check_before_send,
+    recheck_rows,
     record_submitted,
 )
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
@@ -563,13 +564,17 @@ async def _held_back(
     """Act on the pre-send check's verdict in the transaction that holds the
     job; True when the job is not to be delivered now.
 
-    An `unverified` job goes back to pending without spending an attempt,
-    since nothing was sent, until the grace after its fire time has passed;
-    then it is cancelled.
+    A `send` verdict stands only if the rows, read again here under the
+    job's lock, still say the job is due: they were read before the Moodle
+    call. An `unverified` job goes back to pending without spending an
+    attempt, since nothing was sent, until the grace after its fire time has
+    passed; then it is cancelled.
     """
     now = datetime.now(UTC)
     settings = worker.settings
     deferred = False
+    if check.verdict == "send":
+        check = await recheck_rows(session, job, now) or check
     if check.verdict == "submitted":
         _settle(
             job, status=PushJobStatus.cancelled, error="submitted_before_send", now=now

@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import structlog
 from prometheus_client import REGISTRY
-from sqlalchemy import select
+from sqlalchemy import select, update
 from structlog.testing import capture_logs
 
 from server import metrics
@@ -36,8 +36,14 @@ from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key
 from server.push.router import PushRouter
-from server.sync.models import UserAssignmentOverride, UserCourse, UserCourseOverride
+from server.sync.models import (
+    UserAssignment,
+    UserAssignmentOverride,
+    UserCourse,
+    UserCourseOverride,
+)
 from server.syncjobs.moodle_client import (
+    FetchedSubmission,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -78,6 +84,24 @@ class HangingMoodle:
         self.asked.extend(assignment_ids)
         await asyncio.sleep(30)
         return {}
+
+
+class MoodleWhile:
+    """Moodle whose answer comes back once `meanwhile` has run: something
+    elsewhere changes the database while the call is out."""
+
+    def __init__(self, meanwhile, answer=OPEN):
+        self.meanwhile = meanwhile
+        self.answer = answer
+        self.asked = []
+
+    async def fetch_submission_status(self, *, token, assignment_ids, max_concurrency):
+        self.asked.extend(assignment_ids)
+        await self.meanwhile()
+        return {
+            aid: FetchedSubmission(moodle_assignment_id=aid, **self.answer)
+            for aid in assignment_ids
+        }
 
 
 def _worker(prepared_engine, test_settings, moodle, *, apple=None, **settings):
@@ -386,6 +410,54 @@ async def test_an_extension_before_the_due_time_still_reminds(
     await run_push_tick(_worker(prepared_engine, test_settings, moodle))
 
     assert (await _reload(db_session, job)).status == "sent"
+
+
+@pytest.mark.parametrize("meanwhile", ["probe-finds-it-submitted", "marked-done"])
+async def test_what_the_rows_learn_during_the_moodle_call_is_not_sent_past(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    meanwhile,
+):
+    """The probe or an app records the submission, or the user marks the
+    assignment done, while Moodle is being asked: the rows are read again
+    under the job's lock before anything is sent."""
+    user, _ = await _iphone_user(db_session)
+    row, due_at = await _open_assignment(
+        make_assignment, store_moodle_token, user, 16
+    )
+    job = _reminder(user, 16, due_at)
+    db_session.add(job)
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    async def change_the_rows():
+        async with factory() as session:
+            if meanwhile == "probe-finds-it-submitted":
+                await session.execute(
+                    update(UserAssignment)
+                    .where(UserAssignment.id == row.id)
+                    .values(provider_is_submitted=True)
+                )
+            else:
+                await _mark(session, row, "locally_completed")
+            await session.commit()
+
+    apple = ScriptedSender()
+    moodle = MoodleWhile(change_the_rows)
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle, apple=apple))
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == (
+        "cancelled",
+        "submitted_before_send"
+        if meanwhile == "probe-finds-it-submitted"
+        else "stale_before_send",
+    )
+    assert await _deliveries(db_session, job) == []
+    assert _reminders_and_starts(apple) == []
 
 
 # --- The database's word ----------------------------------------------------
