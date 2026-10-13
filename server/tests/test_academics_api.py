@@ -51,6 +51,7 @@ async def seed_course(client, user_id: str, semester: str = "1141") -> int:
             course_key=f"CS{semester}",
             course_no=f"CS{semester}",
             course_name="作業系統",
+            moodle_id=f"{semester}CS{semester}",
         )
         session.add(course)
         await session.commit()
@@ -121,6 +122,165 @@ async def test_put_course_override_merges_per_field(client) -> None:
     # Untouched field applied. A locale-less custom_name feeds both 'zh'
     # and 'en' — the same convention as the a1b2c3d4e5f6 backfill.
     assert merged["custom_names"] == {"zh": "OS", "en": "OS"}
+
+
+async def put_course_override(client, login: dict, course_id: int, **fields):
+    return await client.put(
+        f"/v3/courses/{course_id}/override", headers=bearer(login), json=fields
+    )
+
+
+def course_keys(override: dict) -> dict:
+    return {key: override[key] for key in ("moodle_id", "course_no", "semester")}
+
+
+async def test_course_routes_key_each_override_by_its_course(client) -> None:
+    """Both apps key a course's override by the course's moodle_id, or by
+    its semester and course_no, which the full sync sends with it."""
+    login = await do_login(client)
+    first_id = await seed_course(client, login["user"]["id"], "1141")
+    second_id = await seed_course(client, login["user"]["id"], "1132")
+
+    for course_id in (first_id, second_id):
+        response = await put_course_override(
+            client,
+            login,
+            course_id,
+            color_hex="#FF8800",
+            color_hex_updated_at="2026-06-08T10:00:00Z",
+        )
+        assert response.status_code == 200, response.text
+    assert course_keys(response.json()["override"]) == {
+        "moodle_id": "1132CS1132",
+        "course_no": "CS1132",
+        "semester": "1132",
+    }
+
+    listing = await client.get("/v3/courses", headers=bearer(login))
+    assert {
+        o["user_course_id"]: course_keys(o) for o in listing.json()["overrides"]
+    } == {
+        first_id: {"moodle_id": "1141CS1141", "course_no": "CS1141", "semester": "1141"},
+        second_id: {"moodle_id": "1132CS1132", "course_no": "CS1132", "semester": "1132"},
+    }
+
+
+async def stored_course_override(client) -> UserCourseOverride:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return (await session.execute(select(UserCourseOverride))).scalar_one()
+
+
+async def course_override_changes(client) -> list[dict | None]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(UserChangeLog.payload)
+                    .where(UserChangeLog.entity_type == "course_override")
+                    .order_by(UserChangeLog.revision)
+                )
+            ).scalars()
+        )
+
+
+async def test_put_course_override_ignores_assignments(client) -> None:
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+
+    response = await put_course_override(
+        client,
+        login,
+        course_id,
+        ignore_assignments=True,
+        ignore_assignments_updated_at="2026-10-01T08:00:00Z",
+        moodle_course_id=4242,
+    )
+    assert response.status_code == 200, response.text
+    override = response.json()["override"]
+    assert override["ignore_assignments"] is True
+    assert override["ignore_assignments_updated_at"] == "2026-10-01T08:00:00+00:00"
+    assert override["moodle_course_id"] == 4242
+    stored = await stored_course_override(client)
+    assert str(stored.ignore_assignments_device_id) == login["device_id"]
+
+    # Merged per field like the name and colour: an older edit loses and a
+    # newer one wins. The numeric id stays until a request sends another.
+    for edited_at, ignored in (
+        ("2026-09-30T08:00:00Z", True),
+        ("2026-10-02T08:00:00Z", False),
+    ):
+        response = await put_course_override(
+            client,
+            login,
+            course_id,
+            ignore_assignments=False,
+            ignore_assignments_updated_at=edited_at,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["override"]["ignore_assignments"] is ignored
+    assert response.json()["override"]["moodle_course_id"] == 4242
+    assert await course_override_changes(client) == [
+        {"fields": ["ignore_assignments"]},
+        {"fields": ["ignore_assignments"]},
+    ]
+
+
+async def test_put_course_override_takes_a_moodle_course_id_alone(client) -> None:
+    """The id is for the server's reminder scan, so it alone changes nothing
+    another device shows and sends no device to a full sync."""
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+
+    response = await put_course_override(client, login, course_id, moodle_course_id=4242)
+    assert response.status_code == 200, response.text
+    stored = await stored_course_override(client)
+    assert stored.moodle_course_id == 4242
+    assert stored.ignore_assignments is False
+    assert stored.ignore_assignments_updated_at is None
+    assert await course_override_changes(client) == []
+
+
+EDITED_AT = "2026-10-01T08:00:00Z"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"ignore_assignments_updated_at": EDITED_AT},
+        {"ignore_assignments": None, "ignore_assignments_updated_at": EDITED_AT},
+        {"ignore_assignments": True, "ignore_assignments_updated_at": "2026-10-01T08:00:00"},
+        {"ignore_assignments": "yes", "ignore_assignments_updated_at": EDITED_AT},
+        {"ignore_assignments": 1, "ignore_assignments_updated_at": EDITED_AT},
+        {"moodle_course_id": True},
+        {"moodle_course_id": "4242"},
+        {"moodle_course_id": 0},
+        {"moodle_course_id": 2**63},
+    ],
+    ids=[
+        "time-without-value",
+        "null-value",
+        "time-without-zone",
+        "ignore-string",
+        "ignore-number",
+        "course-id-bool",
+        "course-id-string",
+        "course-id-zero",
+        "course-id-over-bigint",
+    ],
+)
+async def test_put_course_override_refuses_a_malformed_ignore_setting(
+    client, fields
+) -> None:
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+
+    response = await put_course_override(client, login, course_id, **fields)
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
 
 
 NAIVE_TIME = "2026-06-08T10:00:00"
