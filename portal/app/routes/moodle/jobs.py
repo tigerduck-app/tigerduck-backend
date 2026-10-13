@@ -12,6 +12,9 @@ class RetryAllRequest(BaseModel):
     notify: bool = False
 @router.post("/retry-all")
 async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)):
+    # A job whose last run failed on the school's side stays pending until
+    # its policy interval (server/syncjobs/executor.py), and keeps its
+    # last_error until a run succeeds.
     async with pool.acquire() as conn:
         result = await conn.execute("""
             UPDATE sync_jobs
@@ -22,7 +25,8 @@ async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depend
                 locked_at = NULL,
                 last_error = NULL
             WHERE job_type IN ('moodle_assignments', 'ntust_courses')
-              AND status IN ('disabled', 'failed')
+              AND (status IN ('disabled', 'failed')
+                   OR (status = 'pending' AND last_error IS NOT NULL))
         """)
         count = int(result.split()[-1]) if result else 0
 
@@ -57,7 +61,7 @@ async def retry_all_jobs(req: RetryAllRequest = RetryAllRequest(), pool=Depends(
                 locked_at = NULL,
                 last_error = NULL
             WHERE job_type IN ('moodle_assignments', 'ntust_courses')
-              AND status IN ('active', 'disabled', 'failed')
+              AND status IN ('pending', 'disabled', 'failed')
         """)
         count = int(result.split()[-1]) if result else 0
 

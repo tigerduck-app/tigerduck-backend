@@ -12,9 +12,11 @@ hangs off it:
 * `SsoUnavailable`      → network-class: SSO never evaluated the password,
                           safe to retry with backoff.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
-* `MoodleUnreachable`   → transient transport/parse error; retry.
-* `MoodleNoCourseList`  → an answer without the user's courses; retry, and
-                          past the attempts again at the policy interval.
+* `MoodleUnreachable`   → a transport or parse error, or an answer that
+                          cannot list the user's courses; retry.
+
+Past a job's attempts the executor keeps retrying `SsoUnavailable`,
+`MoodleRateLimited` and `MoodleUnreachable`, at the job's policy interval.
 """
 
 from __future__ import annotations
@@ -51,13 +53,6 @@ class MoodleUnreachable(MoodleClientError):
     pass
 
 
-class MoodleNoCourseList(MoodleUnreachable):
-    """An assignment answer that cannot list the user's courses: no course
-    list, or none left beside a course warning. Its cause, such as a site
-    policy the user has not accepted, can last until the user acts on the
-    Moodle site, so the executor never gives up on the job for it."""
-
-
 class SsoAuthFailed(MoodleClientError):
     pass
 
@@ -75,14 +70,15 @@ class SsoUnavailable(MoodleClientError):
 # here, instead of being spread across inline `except` clauses that have
 # drifted apart three times already.
 
-# The three the executor's retry policy actually branches on
+# Three of the errors the executor's retry policy branches on
 # (`executor.py::_execute_job`: `MoodleTokenInvalid` is converted to
 # `CredentialInvalid` by a wrapper at each Moodle call site, and
 # `_execute_job` has its own `except MoodleRateLimited` and
-# `except MoodleUnreachable` handlers). Raised from inside a probe they
-# describe the credential or the endpoint rather than one assignment's
-# data, so every remaining probe is doomed anyway: these escalate out of
-# the TaskGroup and the `except*` router re-raises them unwrapped.
+# `except (MoodleUnreachable, SsoUnavailable)` handlers). Raised from
+# inside a probe they describe the credential or the endpoint rather than
+# one assignment's data, so every remaining probe is doomed anyway: these
+# escalate out of the TaskGroup and the `except*` router re-raises them
+# unwrapped.
 #
 # This is an ordered table, not a bare tuple, and the router below is a
 # loop over it rather than three hard-coded branches. That is deliberate:
@@ -105,11 +101,10 @@ class SsoUnavailable(MoodleClientError):
 # cannot carry anything sensitive.
 #
 # Deliberately absent: `SsoAuthFailed` / `SsoUnavailable`, which describe a
-# password login this code path never performs (only `SsoTokenClient` raises
-# them, and only `routes/auth.py` handles them), and the bare
-# `MoodleClientError` base. `_execute_job` has no branch for any of the
-# three, so escalating one would cancel the whole batch to report something
-# the caller cannot act on -- and `SsoAuthFailed` specifically means
+# password login this code path never performs (only `HttpTokenObtainer`
+# raises them), and the bare `MoodleClientError` base. None of the three
+# describes the endpoint a probe calls, so one raised inside a probe is no
+# grounds to cancel the batch -- and `SsoAuthFailed` specifically means
 # "credentials rejected, NEVER retried", a verdict a single assignment's
 # probe has no business delivering. They count as unexpected and skip one
 # assignment like anything else unrecognised.
@@ -362,7 +357,7 @@ class HttpAssignmentFetcher:
         # out, so an answer that cannot list the user's courses must fail.
         courses = body.get("courses")
         if not isinstance(courses, list):
-            raise MoodleNoCourseList("unexpected_shape")
+            raise MoodleUnreachable("unexpected_shape")
         # A course Moodle refused (an unaccepted site policy, for one) comes
         # back as a warning. One the user cannot submit to is left out
         # silently, so a TA-only account's empty answer still applies.
@@ -370,7 +365,7 @@ class HttpAssignmentFetcher:
         if not courses and isinstance(warnings, list) and any(
             isinstance(w, dict) and w.get("item") == "course" for w in warnings
         ):
-            raise MoodleNoCourseList("no_course_access")
+            raise MoodleUnreachable("no_course_access")
 
         fetched: list[FetchedAssignment] = []
         for course in courses:

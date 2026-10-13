@@ -623,7 +623,8 @@ SELECT COALESCE(u.student_id, u.id::text) AS "student",
 FROM sync_jobs j
 JOIN users u ON u.id = j.user_id
 WHERE {JOB_FILTER} AND {STUDENT_FILTER}
-ORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC, j.run_after
+ORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC,
+         (j.last_error IS NOT NULL) DESC, j.run_after
 LIMIT 500
 """)], colored=["status"], from_now=["next run", "last success", "last failure"],
     desc="One row per student and sync type. Running and failed first."), 24, 10)
