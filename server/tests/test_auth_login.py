@@ -5,8 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+import structlog
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
+from server.auth import service
 from server.auth.crypto import CredentialCipher, EncryptedBlob
 from server.auth.models import (
     AuthSession,
@@ -245,6 +248,23 @@ async def test_tokenless_attempts_count_against_the_limit(
     )
     assert response.status_code == 429
     assert response.json()["detail"] == "too_many_login_attempts"
+
+
+async def test_tokenless_login_is_logged(client, monkeypatch) -> None:
+    allow_moodle(client)
+    # The module's logger may be cached with the processors of an earlier
+    # app, which capture_logs does not reach; a new one binds inside it.
+    monkeypatch.setattr(service, "logger", structlog.get_logger(service.__name__))
+    with capture_logs() as logs:
+        response = await client.post("/v3/auth/login", json=tokenless_body())
+    assert response.status_code == 400, response.text
+    assert {
+        "event": "auth.login.moodle_token_missing",
+        "student_id": "B11015000",
+        "platform": "ios",
+        "app_version": "3.0.0",
+        "log_level": "info",
+    } in logs
 
 
 @pytest.mark.parametrize("password", [None, "x" * 300], ids=["null", "long"])

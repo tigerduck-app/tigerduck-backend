@@ -101,6 +101,12 @@ async def login(
     limiter.record(ip_key)
 
     if not moodle_token:
+        logger.info(
+            "auth.login.moodle_token_missing",
+            student_id=student_id,
+            platform=device_info.platform,
+            app_version=device_info.app_version,
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="moodle_token_required",
