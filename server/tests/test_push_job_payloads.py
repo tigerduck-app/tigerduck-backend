@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -39,6 +39,38 @@ def test_apns_request_shape():
     assert request.message["moodle_assignment_id"] == "555"
     assert request.message["due_at"] == PAYLOAD["due_at"]
     assert request.expiration > int(NOW.timestamp())
+
+
+@pytest.mark.parametrize(
+    ("due_in", "held_for"),
+    [
+        (timedelta(hours=2), timedelta(hours=2)),
+        (timedelta(days=3), timedelta(hours=24)),
+    ],
+    ids=["due-within-a-day", "due-later"],
+)
+def test_an_assignment_reminder_is_held_until_its_due_time_at_most(due_in, held_for):
+    # A phone offline until after the deadline must not show "due in 2
+    # hours" when it comes back; otherwise the usual day applies.
+    request = build_apns_for_job(
+        payload={**PAYLOAD, "due_epoch": int((NOW + due_in).timestamp())},
+        channel="assignment",
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert request.expiration == int((NOW + held_for).timestamp())
+
+
+def test_only_an_assignment_reminder_is_held_to_a_due_time():
+    request = build_apns_for_job(
+        payload={**PAYLOAD, "due_epoch": int((NOW + timedelta(hours=2)).timestamp())},
+        channel="course",
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert request.expiration == int((NOW + timedelta(hours=24)).timestamp())
 
 
 @pytest.mark.parametrize(

@@ -256,6 +256,26 @@ async def test_an_open_assignment_is_reminded(
     assert [r.device_token for r in apple.requests] == ["standard-b11203058"]
 
 
+async def test_a_reminder_is_held_by_apns_until_its_due_time_at_most(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """The copy written for each recipient keeps `due_epoch`, so a phone
+    offline until after the deadline never shows the reminder."""
+    user, _ = await _iphone_user(db_session)
+    due_at = datetime.now(UTC) + timedelta(hours=2)
+    await make_assignment(user_id=user.id, moodle_assignment_id=15, due_at=due_at)
+    await store_moodle_token(user.id)
+    db_session.add(_reminder(user, 15, due_at, offset_hours=2.0))
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, SubmissionStatusStub(OPEN), apple=apple)
+    )
+
+    assert [r.expiration for r in apple.requests] == [int(due_at.timestamp())]
+
+
 async def test_a_submission_moodle_reports_cancels_the_reminder_and_its_siblings(
     db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
