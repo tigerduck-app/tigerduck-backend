@@ -349,6 +349,73 @@ async def test_initial_upload_ignore_setting_wins_over_an_older_one(client) -> N
     assert (await stored_override(client)).ignore_assignments is False
 
 
+NAIVE_TIME = "2026-10-01T08:00:00"
+UPLOADED_ASSIGNMENT = {"moodle_course_id": 101, "moodle_assignment_id": 9001, "title": "HW3"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {
+            "course_overrides": [
+                {
+                    "semester": "1141",
+                    "course_key": "client:1141:CS3001301",
+                    "custom_name": "OS",
+                    "custom_name_updated_at": NAIVE_TIME,
+                }
+            ]
+        },
+        {
+            "course_overrides": [
+                {
+                    "semester": "1141",
+                    "course_key": "client:1141:CS3001301",
+                    "color_hex": "#FF8800",
+                    "color_hex_updated_at": NAIVE_TIME,
+                }
+            ]
+        },
+        {
+            "assignments": [UPLOADED_ASSIGNMENT],
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 101,
+                    "moodle_assignment_id": 9001,
+                    "local_status": "ignored",
+                    "local_status_updated_at": NAIVE_TIME,
+                }
+            ],
+        },
+        {
+            "assignments": [UPLOADED_ASSIGNMENT],
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 101,
+                    "moodle_assignment_id": 9001,
+                    "note": "bring a calculator",
+                    "note_updated_at": NAIVE_TIME,
+                }
+            ],
+        },
+    ],
+    ids=["custom-name", "color", "local-status", "note"],
+)
+async def test_initial_upload_refuses_a_time_without_a_zone(client, body) -> None:
+    """An edit's time is compared with the server's clock, which has a zone,
+    so a time without one cannot be placed against it."""
+    login = await do_login(client)
+    await seed_course(client, login)
+
+    response = await client.post(
+        "/v3/sync/initial-upload", headers=bearer(login), json=body
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserChangeLog))).first() is None
+
+
 async def test_initial_upload_fills_only_a_missing_moodle_course_id(client) -> None:
     login = await do_login(client)
     await seed_course(client, login)

@@ -71,9 +71,9 @@ class UploadCourseOverride(BaseModel):
     semester: str
     course_key: str
     custom_name: str | None = None
-    custom_name_updated_at: datetime | None = None
+    custom_name_updated_at: AwareDatetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
-    color_hex_updated_at: datetime | None = None
+    color_hex_updated_at: AwareDatetime | None = None
     ignore_assignments: StrictBool | None = None
     ignore_assignments_updated_at: AwareDatetime | None = None
     # The course's numeric Moodle id; it fills a missing one, never replaces.
@@ -108,9 +108,9 @@ class UploadAssignmentOverride(BaseModel):
     local_status: (
         Literal["none", "locally_completed", "ignored", "archived"] | None
     ) = None
-    local_status_updated_at: datetime | None = None
+    local_status_updated_at: AwareDatetime | None = None
     note: str | None = None
-    note_updated_at: datetime | None = None
+    note_updated_at: AwareDatetime | None = None
 
 
 class UploadSettingsDocument(BaseModel):

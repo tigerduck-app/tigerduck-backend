@@ -19,7 +19,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -58,11 +58,11 @@ class BulletinStatePut(BaseModel):
     """Per-field triplets; `<field>_updated_at` present == edited."""
 
     is_read: bool | None = None
-    read_updated_at: datetime | None = None
+    read_updated_at: AwareDatetime | None = None
     is_starred: bool | None = None
-    starred_updated_at: datetime | None = None
+    starred_updated_at: AwareDatetime | None = None
     is_hidden: bool | None = None
-    hidden_updated_at: datetime | None = None
+    hidden_updated_at: AwareDatetime | None = None
 
 
 def _device_id(auth) -> uuid.UUID:
