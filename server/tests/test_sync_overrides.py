@@ -313,6 +313,25 @@ async def test_course_override_prefers_portal_row_over_moodle_shell(client) -> N
         assert override.color_hex == "#FF8800"
 
 
+async def test_course_override_of_a_course_the_server_lacks_names_it(client) -> None:
+    """An app can hold settings for a course the server no longer has: its
+    rows go once no device syncs courses. The detail tells that 404 from
+    the one a backend without the route gives."""
+    login = await do_login(client)
+
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"ignore_assignments": True},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "course_not_found"}
+    assert await course_override_changes(client) == []
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
 async def test_override_on_upload_placeholder_only(client) -> None:
     """Without a server-synced row (cloud sync off), the upload placeholder
     itself takes the override."""

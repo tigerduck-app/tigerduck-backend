@@ -1916,7 +1916,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT COALESCE(u.student_id, u.id::text) AS \"student\",\n       j.job_type AS \"job type\",\n       j.status AS \"status\",\n       j.run_after AS \"next run\",\n       j.last_success_at AS \"last success\",\n       j.last_failure_at AS \"last failure\",\n       j.attempts || '/' || j.max_attempts AS \"attempts\",\n       j.locked_by AS \"locked by\",\n       left(j.last_error, 200) AS \"last error\"\nFROM sync_jobs j\nJOIN users u ON u.id = j.user_id\nWHERE j.job_type IN (${job_type:sqlstring}) AND (${search:sqlstring} = '' OR COALESCE(u.student_id, '') ILIKE '%' || ${search:sqlstring} || '%')\nORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC, j.run_after\nLIMIT 500",
+          "rawSql": "SELECT COALESCE(u.student_id, u.id::text) AS \"student\",\n       j.job_type AS \"job type\",\n       j.status AS \"status\",\n       j.run_after AS \"next run\",\n       j.last_success_at AS \"last success\",\n       j.last_failure_at AS \"last failure\",\n       j.attempts || '/' || j.max_attempts AS \"attempts\",\n       j.locked_by AS \"locked by\",\n       left(j.last_error, 200) AS \"last error\"\nFROM sync_jobs j\nJOIN users u ON u.id = j.user_id\nWHERE j.job_type IN (${job_type:sqlstring}) AND (${search:sqlstring} = '' OR COALESCE(u.student_id, '') ILIKE '%' || ${search:sqlstring} || '%')\nORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC,\n         (j.last_error IS NOT NULL) DESC, j.run_after\nLIMIT 500",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"

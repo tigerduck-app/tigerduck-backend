@@ -12,20 +12,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import batched
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins.matcher import match_device_ids
 from server.bulletins.models import (
+    FAILED_BULLETIN_RETRY_DELAY,
     Bulletin,
     BulletinDispatch,
     BulletinDispatchStatus,
     BulletinProcessingState,
 )
 from server.config import Settings
+from server.db import INSERT_CHUNK_ROWS
 from server.models import DevicePlatform, DeviceRegistration
 from server.push.apns_client import SendResult
 from server.push.custom_push_targeting import (
@@ -76,6 +79,10 @@ async def dispatch_pending_bulletins(
                         == BulletinProcessingState.processed.value,
                         Bulletin.notified_at.is_(None),
                         Bulletin.is_deleted.is_(False),
+                        or_(
+                            Bulletin.fanout_retry_at.is_(None),
+                            Bulletin.fanout_retry_at <= ts,
+                        ),
                     )
                     .order_by(Bulletin.id)
                     .limit(batch_limit)
@@ -86,9 +93,21 @@ async def dispatch_pending_bulletins(
         )
 
     for bulletin in bulletins:
-        sent, failed, cancelled, matched = await _dispatch_one(
-            session_factory, router, settings, bulletin.id, ts
-        )
+        try:
+            sent, failed, cancelled, matched = await _dispatch_one(
+                session_factory, router, settings, bulletin.id, ts
+            )
+        except Exception as exc:  # noqa: BLE001 — one bulletin's guard
+            # Left with notified_at unset for the next tick to retry. Raised,
+            # it would stop every later bulletin: each tick starts with the
+            # oldest.
+            logger.exception(
+                "bulletins.dispatch.bulletin_failed",
+                bulletin_id=bulletin.id,
+                error=str(exc)[:200],
+            )
+            await _delay_retry(session_factory, bulletin.id, ts)
+            continue
         totals[0] += sent
         totals[1] += failed
         totals[2] += cancelled
@@ -105,6 +124,27 @@ async def dispatch_pending_bulletins(
     if totals[4]:
         logger.info("bulletins.dispatch.tick", **outcome.__dict__)
     return outcome
+
+
+async def _delay_retry(
+    session_factory: async_sessionmaker[AsyncSession], bulletin_id: int, ts: datetime
+) -> None:
+    """Skip a bulletin whose fan-out failed for a while, or one that keeps
+    failing holds a slot of every batch and the bulletins after it wait."""
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(Bulletin)
+                .where(Bulletin.id == bulletin_id)
+                .values(fanout_retry_at=ts + FAILED_BULLETIN_RETRY_DELAY)
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — the next tick tries it again
+        logger.warning(
+            "bulletins.dispatch.retry_not_delayed",
+            bulletin_id=bulletin_id,
+            error=str(exc)[:200],
+        )
 
 
 async def _dispatch_one(
@@ -142,7 +182,7 @@ async def _dispatch_one(
                 content_tags=bulletin.content_tags or [],
             )
 
-        if device_ids:
+        for chunk in batched(device_ids, INSERT_CHUNK_ROWS):
             await session.execute(
                 pg_insert(BulletinDispatch)
                 .values(
@@ -152,7 +192,7 @@ async def _dispatch_one(
                             "device_id": did,
                             "status": BulletinDispatchStatus.pending.value,
                         }
-                        for did in device_ids
+                        for did in chunk
                     ]
                 )
                 # Re-runs after a crash are idempotent thanks to the
@@ -267,9 +307,12 @@ async def _dispatch_one(
 
             classification = _classify(result, platform=device.platform)
 
+            # Each per-row update below skips the session sync: it would check every dispatch row
+            # this session holds, quadratic in the bulletin's devices (#63). Nothing reads them back.
             if classification == "sent":
                 await session.execute(
                     update(BulletinDispatch)
+                    .execution_options(synchronize_session=False)
                     .where(BulletinDispatch.id == dispatch.id)
                     .values(
                         status=BulletinDispatchStatus.sent.value,
@@ -282,6 +325,7 @@ async def _dispatch_one(
             elif classification == "bad_token":
                 await session.execute(
                     update(BulletinDispatch)
+                    .execution_options(synchronize_session=False)
                     .where(BulletinDispatch.id == dispatch.id)
                     .values(
                         status=BulletinDispatchStatus.cancelled.value,
@@ -295,6 +339,7 @@ async def _dispatch_one(
                 if next_attempts >= MAX_DISPATCH_ATTEMPTS:
                     await session.execute(
                         update(BulletinDispatch)
+                        .execution_options(synchronize_session=False)
                         .where(BulletinDispatch.id == dispatch.id)
                         .values(
                             status=BulletinDispatchStatus.failed.value,
@@ -306,6 +351,7 @@ async def _dispatch_one(
                 else:
                     await session.execute(
                         update(BulletinDispatch)
+                        .execution_options(synchronize_session=False)
                         .where(BulletinDispatch.id == dispatch.id)
                         .values(
                             attempts=next_attempts,
@@ -357,6 +403,7 @@ async def _cancel_dispatch(
 ) -> None:
     await session.execute(
         update(BulletinDispatch)
+        .execution_options(synchronize_session=False)
         .where(BulletinDispatch.id == dispatch_id)
         .values(
             status=BulletinDispatchStatus.cancelled.value,

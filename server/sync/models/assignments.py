@@ -131,6 +131,11 @@ class UserAssignmentOverride(Base):
         nullable=True,
     )
 
+    # When the mark itself last reached the server, which a note edit leaves alone; `/sync/full`
+    # compares it with fetches' soft-deletes (`_hidden_since_received`).
+    local_status_received_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     note_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

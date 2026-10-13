@@ -26,7 +26,8 @@ server/
 ├── _ssl_compat.py             # OpenSSL 3 leniency for NTUST's broken TLS chain
 ├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
-├── db.py                      # Base, async engine/session, SessionDep
+├── db.py                      # Base, async engine/session, SessionDep;
+│                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token)
 ├── system_settings.py         # operator-tunable settings read at runtime
@@ -36,7 +37,9 @@ server/
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
-├── academic_calendar/         # semester terms + school holidays (models, schemas)
+├── academic_calendar/         # semester terms + school holidays (models, schemas,
+│                              #   terms.py: the current term and the days a term
+│                              #   runs on, as the apps take them)
 ├── routes/
 │   ├── auth.py                # /v3/auth/*
 │   ├── user_devices.py        # /v3/devices/*
@@ -164,6 +167,11 @@ into the backend container via `docker-compose.yml`.
 ## CONVENTIONS
 - All DB timestamps stored as `timestamp with time zone` (UTC in, UTC out)
 - Session management: `SessionDep` in routes auto-commits/rolls-back
+- asyncpg refuses a statement with more than 32,767 bind parameters. A
+  filter on ids gathered across users goes through `in_array` (`db.py`),
+  one array parameter, rather than `in_()`, which binds one per value, and
+  rows inserted for every user or device go `INSERT_CHUNK_ROWS` (`db.py`)
+  at a time.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index.
@@ -229,6 +237,10 @@ into the backend container via `docker-compose.yml`.
   the user's behalf; it is decrypted only in `server/syncjobs/credentials.py`,
   never logged, and dropped with the account. Anything else that needs a
   credential goes through that path.
+- Do not sign in to NTUST SSO or Moodle with a student's password. The
+  apps sign in themselves and give `POST /v3/auth/login` the Moodle
+  token; a login without one answers `400 moodle_token_required`, and
+  the `password` the apps still send is ignored.
 - Do not send APNs pushes from inside request handlers. Scheduling
   goes through a `push_jobs` row and is delivered by the push pipeline
   (`server/push/pipeline.py`) on its APScheduler tick.

@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.sync.changelog import append_change
+from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -18,6 +20,11 @@ from server.sync.models import (
     UserSettingsDocument,
 )
 from server.sync.models import UserSyncState
+from server.sync.upload import (
+    InitialUploadRequest,
+    UploadAssignmentOverride,
+    process_initial_upload,
+)
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.moodle_client import FetchedAssignment
 
@@ -394,6 +401,218 @@ async def test_full_sync_keys_only_the_newest_mark_of_a_soft_deleted_assignment(
         (None, "ignored"),
         (6, "locally_completed"),
     ]
+
+
+async def upload_placeholders(client, login, *moodle_assignment_ids: int) -> None:
+    response = await client.post(
+        "/v3/sync/assignments/upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {
+                    "moodle_assignment_id": moodle_assignment_id,
+                    "course_no": "CS3001301",
+                    "course_name": "資料結構",
+                    "title": f"HW{moodle_assignment_id}",
+                }
+                for moodle_assignment_id in moodle_assignment_ids
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+async def mark(client, login, moodle_assignment_id: int, local_status: str) -> None:
+    response = await client.patch(
+        f"/v3/sync/assignments/{moodle_assignment_id}/override",
+        headers=bearer(login),
+        json={"local_status": local_status},
+    )
+    assert response.status_code == 200, response.text
+
+
+async def fetch(client, login, *keys: tuple[int, int]) -> None:
+    """A server fetch that returns these (course, assignment) keys and
+    soft-deletes every other live row, placeholders included."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        await apply_fetched_assignments(
+            session,
+            user_id=uuid.UUID(login["user"]["id"]),
+            fetched=[_fetched(*key) for key in keys],
+            now=datetime.now(UTC),
+        )
+        await session.commit()
+
+
+async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_outlived_it(
+    client,
+) -> None:
+    """A mark made on a placeholder goes out unkeyed from the fetch that adds
+    the server's row, so both apps drop it. A clear on the server's row used
+    to leave it in place, which is HW5's state here: that old mark, and none
+    on the server's row. When a later fetch soft-deletes the server's row
+    too, as it does to a TA's course, that mark must not come back; a mark
+    made on the server's row since, as for HW6, does."""
+    login = await do_login(client)
+    await upload_placeholders(client, login, 5, 6)
+    await mark(client, login, 5, "ignored")
+    await mark(client, login, 6, "ignored")
+    await fetch(client, login, (7002, 5), (7002, 6))
+    await mark(client, login, 6, "locally_completed")
+    await fetch(client, login, (7001, 1))
+
+    assert await keyed_marks(client, login) == [
+        (None, "ignored"),
+        (None, "ignored"),
+        (6, "locally_completed"),
+    ]
+
+
+async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -> None:
+    """A note uploaded for HW5's placeholder after its server's row went
+    changes the override but not when its old mark reached the server, so
+    that mark stays hidden instead of coming back as received now."""
+    login = await do_login(client)
+    await upload_placeholders(client, login, 5)
+    await mark(client, login, 5, "ignored")
+    await fetch(client, login, (7002, 5))
+    await fetch(client, login, (7001, 1))
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "note": "Bring the lab sheet",
+                    "note_updated_at": datetime.now(UTC).isoformat(),
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert await keyed_marks(client, login) == [(None, "ignored")]
+
+
+async def test_full_sync_keys_marks_made_after_the_server_row_went(client) -> None:
+    """A guard on the rule above. Once the fetch has soft-deleted the server's
+    rows of a TA's course, an app can upload a new placeholder: a mark made
+    on it (HW7) is keyed once the next fetch soft-deletes it, and so is the
+    server's row's own mark (HW8), which the placeholder outlived. A new
+    assignment of that course never gets a server's row (HW9)."""
+    login = await do_login(client)
+    await fetch(client, login, (7002, 7), (7002, 8))
+    await mark(client, login, 8, "locally_completed")
+    await fetch(client, login, (7001, 1))
+    await upload_placeholders(client, login, 7, 8, 9)
+    await mark(client, login, 7, "ignored")
+    await mark(client, login, 9, "ignored")
+    await fetch(client, login, (7001, 1))
+
+    assert await keyed_marks(client, login) == [
+        (7, "ignored"),
+        (8, "locally_completed"),
+        (9, "ignored"),
+    ]
+
+
+async def test_full_sync_keys_a_mark_imported_after_the_server_row_went(
+    client,
+) -> None:
+    """A guard on the rule above, which hides only a mark that went out
+    unkeyed after it reached the server. A device marks the assignment
+    offline after the fetch hid its placeholder, and sends the mark in its
+    initial upload once the server's row went too: the upload puts it on
+    the placeholder with its earlier time, and it is keyed."""
+    login = await do_login(client)
+    await upload_placeholders(client, login, 5)
+    await fetch(client, login, (7002, 5))
+    marked_offline = datetime.now(UTC)
+    await fetch(client, login, (7001, 1))
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "local_status": "ignored",
+                    "local_status_updated_at": marked_offline.isoformat(),
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    assert await keyed_marks(client, login) == [(5, "ignored")]
+
+
+async def wait_for_a_lock_wait(factory) -> None:
+    for _ in range(200):
+        async with factory() as session:
+            waiting = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the upload never waited for the sync lock")
+
+
+async def test_full_sync_keys_a_mark_imported_while_a_fetch_held_the_lock(
+    client,
+) -> None:
+    """An upload waits for the sync lock while a fetch soft-deletes the
+    server's row, then imports the mark. Its transaction and its own clock
+    reading both began before that soft-delete, yet the mark reached the
+    server after it, so it is keyed."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    await upload_placeholders(client, login, 5)
+    await fetch(client, login, (7002, 5))
+    factory = build_session_factory(client.app.state.engine)
+    payload = InitialUploadRequest(
+        assignment_overrides=[
+            UploadAssignmentOverride(
+                moodle_course_id=0,
+                moodle_assignment_id=5,
+                local_status="ignored",
+                local_status_updated_at=datetime.now(UTC),
+            )
+        ]
+    )
+    async with factory() as fetch_session, factory() as upload_session:
+        await lock_sync_state(fetch_session, user_id)
+        upload = asyncio.create_task(
+            process_initial_upload(
+                upload_session, user_id=user_id, device_id=None, payload=payload
+            )
+        )
+        try:
+            await wait_for_a_lock_wait(factory)
+            await apply_fetched_assignments(
+                fetch_session,
+                user_id=user_id,
+                fetched=[_fetched(7001, 1)],
+                now=datetime.now(UTC),
+            )
+            await fetch_session.commit()
+            await upload
+        finally:
+            upload.cancel()
+        await upload_session.commit()
+
+    assert await keyed_marks(client, login) == [(5, "ignored")]
 
 
 async def test_full_sync_lists_course_overrides_in_creation_order(client) -> None:

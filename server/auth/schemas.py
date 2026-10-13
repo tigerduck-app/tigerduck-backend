@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
@@ -65,8 +64,11 @@ class DeviceInfo(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    # The apps also send the student's `password`, which is ignored like any
+    # unknown field; forbidding extra fields would refuse their logins.
+    model_config = ConfigDict(extra="ignore")
+
     student_id: str = Field(min_length=1, max_length=64)
-    password: str = Field(default="", max_length=256)
     moodle_token: str | None = Field(default=None, max_length=256)
     moodle_private_token: str | None = Field(default=None, max_length=256)
     device_info: DeviceInfo
@@ -213,7 +215,7 @@ class ScheduleEventV3(BaseModel):
     # exactly one Live Activity.
     source_id: str = Field(min_length=1, max_length=128, pattern=r"^[^:]+$")
     scenario: ScheduleScenario
-    fire_at: datetime
+    fire_at: AwareDatetime
     snapshot: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -230,7 +232,7 @@ class LiveActivityRegisterV3Request(BaseModel):
     activity_id: str = Field(min_length=1, max_length=160)
     source_id: str = Field(min_length=1, max_length=128)
     update_token_hex: str = Field(min_length=1, max_length=512)
-    countdown_target: datetime
+    countdown_target: AwareDatetime
     snapshot: dict[str, Any] = Field(default_factory=dict)
     bundle_id: str = Field(default="org.ntust.app.TigerDuck", max_length=128)
     environment: str | None = Field(default=None, pattern=r"^(development|production)$")

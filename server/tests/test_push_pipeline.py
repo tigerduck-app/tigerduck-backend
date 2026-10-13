@@ -8,7 +8,11 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import select, text
 
-from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
+from server.academic_calendar.models import (
+    AcademicHoliday,
+    SemesterTerm,
+    UserHolidayOverride,
+)
 from server.auth.models import (
     DevicePushToken,
     PushDelivery,
@@ -1196,6 +1200,101 @@ async def test_assignment_start_fires_on_a_holiday(
 
     assert [r.device_token for r in apple.requests] == ["pts-tok"]
     assert job.status == "sent"
+
+
+# Nor is a class on a day no published term runs on. A start does not say
+# which term its class is in, so this asks what the apps ask before they
+# file one: whether any term runs on the class's day.
+
+
+def _taipei_day(moment):
+    return moment.astimezone(ZoneInfo("Asia/Taipei")).date()
+
+
+def _term(start, end, *, code="1151"):
+    return SemesterTerm(code=code, start_date=start, end_date=end)
+
+
+async def _tick(db_session, prepared_engine, test_settings, jobs):
+    apple = ScriptedSender([SendResult(success=True, status="200")])
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+    for job in jobs:
+        await db_session.refresh(job)
+    return apple
+
+
+@pytest.mark.parametrize("scenario", ["classPreparing", "inClass"])
+async def test_class_start_is_cancelled_after_the_term(
+    db_session, prepared_engine, test_settings, scenario
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    job = _start_job(user, device, scenario=scenario)
+    day = _taipei_day(job.fire_at)
+    db_session.add_all([job, _term(day - timedelta(days=120), day - timedelta(days=1))])
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert apple.requests == []
+    assert job.status == "cancelled"
+    assert job.last_error == "outside_term"
+
+
+async def test_only_class_starts_before_the_term_are_held(
+    db_session, prepared_engine, test_settings
+):
+    """The term opens tomorrow: tomorrow's class starts, today's does not,
+    and a deadline today still does."""
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    tomorrows = _start_job(user, device, scenario="classPreparing")
+    tomorrows.payload = {
+        **tomorrows.payload,
+        "countdownTarget": (tomorrows.fire_at + timedelta(days=1)).isoformat(),
+    }
+    todays = _start_job(user, device, scenario="inClass")
+    deadline = _start_job(user, device, scenario="assignmentUrgent")
+    opening = _taipei_day(todays.fire_at) + timedelta(days=1)
+    db_session.add_all(
+        [tomorrows, todays, deadline, _term(opening, opening + timedelta(days=120))]
+    )
+    await db_session.commit()
+
+    apple = await _tick(
+        db_session, prepared_engine, test_settings, [tomorrows, todays, deadline]
+    )
+
+    assert [tomorrows.status, todays.status, deadline.status] == [
+        "sent",
+        "cancelled",
+        "sent",
+    ]
+    assert todays.last_error == "outside_term"
+    assert len(apple.requests) == 2
+
+
+async def test_an_opted_in_holiday_does_not_start_a_class_outside_the_term(
+    db_session, prepared_engine, test_settings
+):
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    job = _start_job(user, device, scenario="inClass")
+    holiday = _holiday_on(job.fire_at)
+    day = _taipei_day(job.fire_at)
+    db_session.add_all(
+        [job, holiday, _term(day - timedelta(days=120), day - timedelta(days=1))]
+    )
+    await db_session.flush()
+    db_session.add(
+        UserHolidayOverride(user_id=user.id, holiday_id=holiday.id, notify=True)
+    )
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert apple.requests == []
+    assert job.last_error == "outside_term"
 
 
 # UserDevice.bulletin_push_enabled gates ONLY the bulletin channel. It is

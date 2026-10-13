@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import os
 import re
+import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -34,6 +37,8 @@ _SAFE_IDENT = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 # to, so we attach to a separate maintenance DB that we assume already
 # exists on the dev instance.
 _ADMIN_DB = "tigerduck"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _assert_safe_ident(db_name: str) -> None:
@@ -66,6 +71,26 @@ async def _drop_db(admin_url: str, db_name: str) -> None:
     async with admin.connect() as conn:
         await conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {db_name}")
     await admin.dispose()
+
+
+def _run_alembic(
+    database_url: str, *args: str, timeout: float = 300
+) -> subprocess.CompletedProcess[str]:
+    """Alembic runs in a subprocess because `server/migrations/env.py`
+    starts its own event loop."""
+    return subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=REPO_ROOT,
+        env={**os.environ, "TIGERDUCK_DATABASE_URL": database_url},
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _alembic(database_url: str, *args: str) -> None:
+    result = _run_alembic(database_url, *args)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.fixture(scope="session")
@@ -149,6 +174,21 @@ async def client(
         # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
         ac.app = app
         yield ac
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def migration_db_url(test_settings: Settings) -> AsyncIterator[str]:
+    """An empty database of its own, for a test that runs the migrations
+    over it the way a deploy does."""
+    admin_url = _admin_url(test_settings)
+    db_name = "tigerduck_test_migrations"
+    await _drop_create_db(admin_url, db_name)
+    yield (
+        make_url(test_settings.database_url)
+        .set(database=db_name)
+        .render_as_string(hide_password=False)
+    )
+    await _drop_db(admin_url, db_name)
 
 
 @pytest_asyncio.fixture(loop_scope="session")

@@ -32,6 +32,158 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.1
+
+3.3.1 is a fix release. Sessions survive a lost refresh reply, class
+reminders follow the published term, sync jobs keep retrying through a
+school outage, reminders and bulletin pushes scale past the database's bind
+limit, logins need a Moodle token, and several sync routes answer correctly.
+The bullets below say what each change needs at upgrade time.
+
+The session change: an app that sends a rotated refresh token again, while nothing has used the token
+that replaced it, gets one more rotation up to 24 hours after the first,
+instead of having every session on the device revoked as stolen. Both pairs
+work until one of them is used, so a late duplicate of a refresh no longer
+ends the session the app keeps; a duplicate that arrives within 60 seconds,
+after the app used its pair, is refused. A token revoked for another reason
+(logout, device removal, expiry) gets `401 session_revoked` and revokes
+nothing else. It has one migration and no new settings to set. On top of
+the normal upgrade:
+
+- **Update the submodule.** Run `git submodule update --init` after
+  `git pull`. This release pins `app-translation` to a newer commit.
+- **Migrations.** `cc54925b7852` adds `first_used_at` and `rerotated_at` to
+  `auth_sessions` and allows the revoked reason `superseded`. Postgres adds
+  the columns without rewriting the table; the replaced check constraint
+  reads every row once under the table lock, about 0.1 seconds per million
+  sessions. `bab460b19cc9` adds `local_status_received_at` to
+  `user_assignment_overrides` and fills it from `updated_at`, which writes
+  every row of that table once. `df3948adb76a` adds `fanout_retry_at` and
+  `match_retry_at` to `bulletins`.
+- **Sessions from before the upgrade** start with `first_used_at` empty,
+  and one in use gets it on its next request. For 24 hours after the
+  upgrade, a session the app has not used since may still be replaced when
+  the token before it comes back.
+- **Monitoring.** `reuse_detected_at` now marks theft revocations only.
+  The grace retry no longer sets it, so the "Token reuse" panel and
+  `tigerduck_auth_reuse_detected_24h` count fewer; rows from before keep
+  theirs.
+- **No app update needed.** Both apps treat any 4xx from
+  `/v3/auth/refresh` as a lost session, the new `session_revoked` too.
+- **Sync answers.** `PATCH /v3/sync/courses/{moodle_id}/override` answers
+  a course the server does not have with `404 {"detail": "course_not_found"}`
+  instead of `{"detail": "Not Found"}`. A request time the server compares
+  with its clock gets 422 instead of a 500 when it has no time zone: the
+  override times of the initial upload and the override PUTs, the bulletin
+  state times, the schedule sync's `fire_at` and the Live Activity
+  register's `countdown_target`. `GET /v3/courses` and
+  `PUT /v3/courses/{id}/override` fill each override's `moodle_id`,
+  `course_no` and `semester`, and the PUT takes `ignore_assignments`.
+  Neither app needs an update: iOS sends these times with a zone and
+  Android sends none of them, both count any 404 from the PATCH as a
+  refusal, and neither calls the `/v3/courses` routes.
+- **Check the semester dates.** Class reminders now go to the courses of
+  the term both apps show, the published term that began most recently,
+  and they and class Live Activity starts stay quiet on days no published
+  term runs on, as both apps already do. A term without dates gets no
+  reminders, even once its classes begin. Before upgrading, check that the
+  portal's Semester dates page has dates for 1151, and give 1152 its dates
+  before its first day of classes. With no term published at all nothing
+  changes.
+- **Turning the recovery off** without a rollback: set
+  `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS=0` in `.env` and restart
+  the backend. The 60-second grace retry stays.
+- **Sync jobs outlast a school outage.** A Moodle or SSO outage, or a
+  Moodle rate limit, that lasts past a job's retries (about 15 minutes with
+  the default backoff) no longer leaves the job `failed`: it runs again
+  after its policy interval, 8 hours by default, with its attempts reset.
+  A job still ends `failed` on our own errors: an unexpected exception, a
+  database error while it records submission status, or a worker that
+  died during each of its attempts. 3.3.0 runs a job left waiting this way
+  at its next run, so a rollback has nothing to undo here.
+- **Jobs that failed before the upgrade** stay `failed`. Once the backend
+  is up, start them again:
+
+  ```bash
+  docker compose exec postgres psql -U tigerduck -d tigerduck -c \
+    "UPDATE sync_jobs SET status = 'pending', attempts = 0, run_after = now() WHERE status = 'failed'"
+  ```
+
+  The portal's Retry all failed would start them too, but it also starts
+  the `disabled` jobs, which fail again at once and can send their users
+  another sign-in reminder.
+- **Retry buttons.** On the portal's Moodle page, Retry all failed now
+  also starts the jobs waiting out an outage: pending jobs whose last run
+  failed. Retry all retried only failed and disabled jobs; it now starts
+  every Moodle job that is not running.
+- **Sync job counts.** An outage no longer raises the number of `failed`
+  jobs, on the portal's Moodle page or in "Jobs by status". It shows as
+  failed runs ("Failed runs", "Failure reasons"), and the jobs it caught
+  stay `pending` with their last error, listed after the failed ones in
+  the Jobs table. `tigerduck_sync_oldest_success_age_seconds` now counts
+  those jobs, so it keeps climbing through a long outage.
+- **TA courses behind a refusal.** When Moodle refused every course a user
+  can submit to (courses hidden from their students, for one), the fetch
+  kept every stored assignment, so a course the user is a TA in kept its
+  assignments from before 3.3.0 and their reminders. Such an answer now
+  soft-deletes the assignments of the courses Moodle left out without a
+  warning, as any other answer does, and keeps those of the courses it
+  refused, and the user's sync log notes how many it deleted. A TA course
+  refused along with the rest, as under an unaccepted site policy, keeps
+  its assignments until a fetch succeeds. Nothing to do on upgrade or
+  rollback.
+- **Logins need a Moodle token.** `POST /v3/auth/login` without
+  `moodle_token` answers `400 moodle_token_required` and still counts
+  against the login limit. A login with a password and no token answered
+  500 before, because the code meant to sign in with the password could
+  not load. The password the apps send is ignored. No app update is needed.
+- **Cleared marks stay cleared.** Under 3.2.0, clearing an assignment's
+  done or ignored mark kept a mark made on it before the server's Moodle
+  fetch first returned it, which the apps no longer showed. 3.3.0 shows
+  that mark again once a fetch soft-deletes the assignment, as it does to
+  every assignment of a course the user is a TA in. 3.3.1 does not, and the
+  apps drop such a mark on their next full sync; a mark made after that
+  first fetch still shows. The rule compares the time each mark reached
+  the server, which `bab460b19cc9` records, so editing an assignment's
+  note does not bring its cleared mark back. After a rollback 3.3.0 shows
+  those marks again.
+- **A failing bulletin waits.** A bulletin whose push to devices or match
+  to users fails is tried again 15 minutes later instead of on the next
+  pass, so the bulletins after it are not held back while it keeps failing.
+  Nothing to do on upgrade or rollback.
+- **Rolling back.** The 3.3.0 code cannot start on a database at
+  `df3948adb76a`: its startup `alembic upgrade head` cannot find that
+  revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.
+  The new columns stay and 3.3.0 never reads them; a superseded token
+  that comes back takes its theft path. Stamp with the image you have:
+  - 3.3.1 running: `docker compose exec backend alembic stamp ddf188f91a15`.
+  - 3.3.1 restarting in a loop, which `exec` cannot reach:
+    `docker compose run --rm --entrypoint alembic backend stamp ddf188f91a15`.
+  - 3.3.0 already built:
+    `docker compose run --rm --entrypoint alembic backend stamp --purge ddf188f91a15`.
+    Without `--purge` it fails with "Can't locate revision identified by
+    'df3948adb76a'", since 3.3.0 does not have that migration.
+
+  Returning to 3.3.1 needs no stamp: its migrations skip the columns that
+  already exist. Sessions 3.3.0 made in between start with `first_used_at`
+  empty, as at the first upgrade, and an override 3.3.0 changed takes its
+  `updated_at` as the time its mark reached the server. So does one whose
+  note 3.3.1 edited before the rollback, so a cleared mark under it can
+  show again, as under 3.3.0.
+
+  `alembic downgrade ddf188f91a15` instead drops the new columns. First it
+  writes what 3.3.0 reads in place of the session ones: a token rotated a
+  second time gets `reuse_detected_at`, where 3.3.0 marks a grace retry, so
+  neither release rotates it again, and a superseded session becomes
+  `rotated` with no successor. Upgrading again starts every session without
+  `first_used_at`, as the first upgrade did. Stop the backend first
+  (`docker compose stop backend`) and run it with
+  `docker compose run --rm --entrypoint alembic backend downgrade ddf188f91a15`:
+  under a running 3.3.1 every authenticated request answers 500 until
+  3.3.0 is deployed.
+
+---
+
 ## Upgrading to 3.3.0
 
 3.3.0 lets a user ignore every assignment of a course: the apps send the

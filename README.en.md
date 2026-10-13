@@ -29,8 +29,8 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ## Modules
 
 ### 🔐 Accounts & Auth (`server/auth/`)
-- **Login** — The app normally completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. An app that sends the password instead has the backend run SSO for it, rate-limited per IP and per student ID; the password is used for that one sign-in and not stored
-- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions, with a one-shot 60-second grace retry for clients that lost the rotation response
+- **Login** — The app completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. The backend never signs in with the password: a login without a Moodle token gets `400 moodle_token_required`, and a password sent along is ignored. Attempts with or without a token count against the login limit, per IP and per student ID
+- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions. A client that lost the rotation response gets one more rotation within 24 hours while the new token has never been used, and a late duplicate of a refresh leaves the pair its client kept working
 - **Credential custody** — Only the Moodle token is stored, AES-256-GCM encrypted with per-row AAD (key rotation supported), for server-side fetching; the NTUST password is not kept
 - **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens; devices report their locale and hardware model and carry their own sync and push switches (assignment reminders, Live Activity, bulletin push, …)
 
@@ -42,6 +42,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 🎓 Server-Side Academic Sync (`server/syncjobs/`)
 - **Scheduled fetching** — `sync_policies` (admin-tunable) × `sync_jobs` (provisioned at login) × `sync_runs` (audit); the executor claims work under an advisory lock + `FOR UPDATE SKIP LOCKED`, safe across multiple workers
 - **Invalid credentials** — Fetching uses the stored Moodle token only and never signs in again with a password. A missing or rejected token is an auth-class failure and is never retried: every sync job of the user is disabled and a reauth system notification is queued; once the app sends a fresh token through `PATCH /v3/auth/credentials`, sync resumes on its own
+- **School outages** — A Moodle or SSO outage, or a Moodle rate limit, backs the job off; once its retries run out it tries again after the policy interval (8 hours by default) instead of ending `failed`. Only our own errors (an unexpected exception, a database error, a worker that died mid-run) leave a job `failed`, until the portal's Retry all failed starts it again
 - **Assignment mirror** — Fetches Moodle assignments, authoritatively upserts / soft-deletes, and writes the changelog so every device converges
 - **TA courses** — Fetches only the courses where the user can submit (`mod/assign:submit`): a course the user is a TA in is left out, and the next fetch soft-deletes its stored assignments and withdraws their reminders
 - **Submission status** — After each assignment sync, asks Moodle whether the assignments due within the window (48 hours by default) are submitted; a newly submitted one has its pending reminder withdrawn and its Live Activity countdown ended
@@ -58,7 +59,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **User push pipeline** — `push_jobs` (dedupe keys prevent duplicates) → materialized into per-token `push_deliveries` → APNs / FCM delivery → aggregated to `sent` / `partial_failed` / `failed`; round-based retries and stale-lock recovery
 - **Tick** — Every 5 seconds, and each one drains every due job. Live Activity starts and ends are filed at priority 10, ahead of every other job (default 100)
 - **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on, none for a course whose assignments the user ignores) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
-- **School holidays** — Course reminders and the class Live Activities (`classPreparing` / `inClass`) are not sent on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error = holiday`. Assignment Live Activities ignore holidays
+- **Term dates and school holidays** — Course reminders go to the courses of the term both apps show on the day: the published term (`semester_terms`) that began most recently, or, with no term published, the latest term the user synced, as before. They and the class Live Activities (`classPreparing` / `inClass`) are not sent on a day no published term runs on (from its first day of classes through its last, both inclusive, as both apps count them), nor on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The opt-in puts back the holiday, never a day outside the term. The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a term or holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error` `outside_term` or `holiday`. Assignment Live Activities ignore both
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **Notification stacks** — iOS `thread-id` is `course`, `assignment` or `other`. Class and homework reminders carry no shared collapse id, so they stack instead of replacing one another
 - **APNs** — JWT auth, Push-to-Start, Live Activity update / end; the connection stays open between sends (TCP keepalive), and one send is capped at 15 seconds
@@ -286,7 +287,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `DELETE` | `/v3/sync/courses` | Delete all courses | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
 | `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain; a course the server lacks → 404 `course_not_found`) | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
 
 ### Courses / Assignments
@@ -335,7 +336,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler; class starts are checked against school holidays when they fire) | JWT |
+| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler; class starts are checked against the term dates and school holidays when they fire) | JWT |
 | `DELETE` | `/v3/schedule/{source_id}` | Cancel this device's pending starts for one source | JWT |
 | `POST` | `/v3/live-activities/register` | Register Live Activity update token | JWT |
 

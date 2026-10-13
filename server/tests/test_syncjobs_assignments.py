@@ -220,3 +220,58 @@ async def test_never_touches_provider_submission_fields(db_session):
     await db_session.refresh(existing)
     assert existing.provider_is_submitted is True
     assert existing.provider_submitted_at is not None
+
+
+@pytest.mark.parametrize(
+    ("refused_course_ids", "deleted"),
+    [
+        (frozenset({7001}), {"left_out"}),
+        (frozenset(), {"refused", "left_out", "placeholder"}),
+    ],
+    ids=["a-course-refused", "none-refused"],
+)
+async def test_an_answer_that_lost_every_course_keeps_what_it_refused(
+    db_session, refused_course_ids, deleted
+):
+    """It says nothing about the courses it refused, nor about a
+    placeholder, which names no course and may be of one of them. The rows
+    of a course it left out, such as one the user is a TA in, go as after
+    any answer."""
+    user = User(student_id="b00000001")
+    db_session.add(user)
+    await db_session.flush()
+    rows = {
+        "refused": UserAssignment(
+            user_id=user.id, moodle_course_id=7001, moodle_assignment_id=1, title="HW1"
+        ),
+        "left_out": UserAssignment(
+            user_id=user.id, moodle_course_id=7003, moodle_assignment_id=2, title="HW2"
+        ),
+        "placeholder": UserAssignment(
+            user_id=user.id,
+            moodle_course_id=0,
+            moodle_assignment_id=3,
+            course_no="CS0000001",
+            title="HW3",
+        ),
+    }
+    db_session.add_all(rows.values())
+    await db_session.commit()
+
+    stats = await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[],
+        now=NOW,
+        refused_course_ids=refused_course_ids,
+    )
+    await db_session.commit()
+
+    for row in rows.values():
+        await db_session.refresh(row)
+    assert {name for name, row in rows.items() if row.deleted_at is not None} == deleted
+    assert stats.changed_count == len(deleted)
+    entries = await _changelog(db_session, user.id)
+    assert sorted((e.operation, e.entity_id) for e in entries) == sorted(
+        ("delete", str(rows[name].id)) for name in deleted
+    )

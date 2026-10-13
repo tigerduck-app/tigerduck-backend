@@ -3,21 +3,25 @@
 Besides verifying the JWT itself, this checks the backing auth_session is
 not revoked — so logout, device deletion, and refresh-reuse detection cut
 access immediately instead of "within 15 minutes when the JWT expires".
-One PK lookup per authenticated request; the session object is shared with
-the route handler via FastAPI's per-request dependency cache.
+One PK lookup per authenticated request, plus one write on a session's
+first; the session object is shared with the route handler via FastAPI's
+per-request dependency cache.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from sqlalchemy import update
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
+from server.auth.service import settle_contest
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -74,6 +78,8 @@ async def require_user(
             detail="session_user_mismatch",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if auth_session.first_used_at is None:
+        await _record_first_use(session, auth_session)
     if device_id:
         await session.execute(
             update(UserDevice)
@@ -82,6 +88,68 @@ async def require_user(
         )
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id
+    )
+
+
+async def _record_first_use(session: AsyncSession, auth_session: AuthSession) -> None:
+    """Note that the session's client holds its tokens, which a refresh of
+    the previous token reads to tell a lost reply from a copy.
+
+    `require_user` calls this only while the row it loaded has no
+    `first_used_at`, so only a session's first requests write. It commits
+    at once: a handler that fails must not undo it, and one that waits on
+    Moodle must not hold the row lock the session's refresh needs.
+    """
+    if auth_session.replaced_by_session_id is None:
+        # A second rotation that names this session as its successor holds
+        # this lock while it decides, and links the session to a rival.
+        await session.get(
+            AuthSession,
+            auth_session.id,
+            with_for_update=True,
+            populate_existing=True,
+        )
+        if auth_session.revoked_at is not None:
+            await session.commit()
+            raise _session_revoked()
+    if auth_session.replaced_by_session_id is not None:
+        await _claim_contest(session, auth_session)
+    await session.execute(
+        update(AuthSession)
+        .where(AuthSession.id == auth_session.id, AuthSession.first_used_at.is_(None))
+        .values(first_used_at=datetime.now(UTC))
+    )
+    await session.commit()
+
+
+async def _claim_contest(session: AsyncSession, auth_session: AuthSession) -> None:
+    """A live session pointing at another is one of the two a second
+    rotation left (`settle_contest`); its first use supersedes the other,
+    unless the other was used first.
+
+    Both rows are locked in id order, so two first uses cannot deadlock,
+    and the loser sees itself revoked once the winner commits.
+    """
+    pair = sorted((auth_session.id, auth_session.replaced_by_session_id))
+    await session.execute(
+        select(AuthSession.id)
+        .where(AuthSession.id.in_(pair))
+        .order_by(AuthSession.id)
+        .with_for_update()
+    )
+    await session.refresh(auth_session)
+    if auth_session.revoked_at is not None:
+        await session.commit()
+        raise _session_revoked()
+    if auth_session.replaced_by_session_id is not None:
+        await settle_contest(session, auth_session, datetime.now(UTC))
+
+
+def _session_revoked() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="session_revoked",
+        headers={"WWW-Authenticate": "Bearer"},
     )
 
 

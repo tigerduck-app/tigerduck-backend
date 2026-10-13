@@ -52,10 +52,12 @@ def course_to_dict(c: UserCourse) -> dict:
 def course_override_to_dict(
     o: UserCourseOverride,
     *,
-    moodle_id: str | None = None,
-    course_no: str | None = None,
-    semester: str | None = None,
+    moodle_id: str | None,
+    course_no: str | None,
+    semester: str | None,
 ) -> dict:
+    """`moodle_id`, `course_no` and `semester` are the course row's. Both
+    apps key an override by them and skip one without a `moodle_id`."""
     return {
         "user_course_id": o.user_course_id,
         "moodle_id": moodle_id,

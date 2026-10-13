@@ -10,6 +10,7 @@ import pytest
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
     HttpTokenObtainer,
+    MoodleNoCourseAccess,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -135,6 +136,39 @@ async def test_fetch_assignments_refuses_an_answer_that_lost_every_course():
     body = {"courses": [], "warnings": [COURSE_WARNING]}
     with pytest.raises(MoodleUnreachable, match="^no_course_access$"):
         await _answering(body).fetch_assignments(token="tok")
+
+
+async def test_fetch_assignments_names_the_courses_moodle_refused():
+    """Moodle leaves out a course the user cannot submit to without a
+    warning, so an answer that lost every course still settles the courses
+    its warnings do not name."""
+    body = {
+        "courses": [],
+        "warnings": [COURSE_WARNING, {**COURSE_WARNING, "itemid": 7003}],
+    }
+    with pytest.raises(MoodleNoCourseAccess, match="^no_course_access$") as refusal:
+        await _answering(body).fetch_assignments(token="tok")
+    assert refusal.value.refused_course_ids == {7002, 7003}
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [
+        {"item": "course", "warningcode": "1"},
+        {**COURSE_WARNING, "itemid": "7003"},
+        {**COURSE_WARNING, "itemid": True},
+    ],
+    ids=["no-id", "string-id", "bool-id"],
+)
+async def test_fetch_assignments_names_no_course_unless_every_refusal_has_an_id(
+    warning,
+):
+    """Any stored course may be the refused course a warning does not name,
+    so the answer then settles none of them."""
+    body = {"courses": [], "warnings": [COURSE_WARNING, warning]}
+    with pytest.raises(MoodleUnreachable, match="^no_course_access$") as refusal:
+        await _answering(body).fetch_assignments(token="tok")
+    assert not isinstance(refusal.value, MoodleNoCourseAccess)
 
 
 @pytest.mark.parametrize(

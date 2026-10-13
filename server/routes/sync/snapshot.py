@@ -256,31 +256,70 @@ async def _keys_for_marks_on_deleted_rows(
     Both apps read a mark they cannot key as cleared, yet a fetch soft-deletes
     rows the apps still show, such as a TA's course. Such a mark is keyed only
     while no live row has its assignment, and only the newest one: beside a
-    live row, an older mark may be one the user has cleared there since.
+    live row, an older mark may be one the user has cleared there since. So a
+    mark the server's row outlived, such as a placeholder's from before the
+    server fetched the assignment, stays unkeyed.
     """
     orphaned = {o.user_assignment_id for o in overrides} - live_keys.keys()
     if not orphaned:
         return {}
-    deleted_keys = dict(
-        (
-            await session.execute(
-                select(UserAssignment.id, UserAssignment.moodle_assignment_id).where(
-                    UserAssignment.user_id == user_id,
-                    UserAssignment.id.in_(orphaned),
-                )
-            )
-        ).all()
+    server_rows_gone = (
+        select(
+            UserAssignment.moodle_assignment_id,
+            func.max(UserAssignment.deleted_at).label("deleted_at"),
+        )
+        .where(
+            UserAssignment.user_id == user_id,
+            UserAssignment.moodle_course_id != 0,
+            UserAssignment.deleted_at.is_not(None),
+        )
+        .group_by(UserAssignment.moodle_assignment_id)
+        .subquery()
     )
+    deleted_rows = {
+        row.id: row
+        for row in await session.execute(
+            select(
+                UserAssignment.id,
+                UserAssignment.moodle_assignment_id,
+                UserAssignment.deleted_at,
+                server_rows_gone.c.deleted_at.label("server_row_deleted_at"),
+            )
+            .outerjoin(
+                server_rows_gone,
+                server_rows_gone.c.moodle_assignment_id
+                == UserAssignment.moodle_assignment_id,
+            )
+            .where(
+                UserAssignment.user_id == user_id,
+                UserAssignment.id.in_(orphaned),
+            )
+        )
+    }
     live_ids = set(live_keys.values())
     newest: dict[int, UserAssignmentOverride] = {}
     for override in overrides:
-        moodle_id = deleted_keys.get(override.user_assignment_id)
-        if moodle_id is None or moodle_id in live_ids:
+        row = deleted_rows.get(override.user_assignment_id)
+        if row is None or row.moodle_assignment_id in live_ids:
             continue
-        kept = newest.get(moodle_id)
+        if _hidden_since_received(override, row):
+            continue
+        kept = newest.get(row.moodle_assignment_id)
         if kept is None or _marked_at(override) > _marked_at(kept):
-            newest[moodle_id] = override
+            newest[row.moodle_assignment_id] = override
     return {o.user_assignment_id: moodle_id for moodle_id, o in newest.items()}
+
+
+def _hidden_since_received(override: UserAssignmentOverride, row) -> bool:
+    # A server row was live after this row went and after the mark reached the
+    # server, so the mark went out unkeyed and both apps dropped it; a clear
+    # made on that row may also have left it in place. A note edit since does
+    # not count as the mark arriving.
+    received = override.local_status_received_at or override.updated_at
+    return (
+        row.server_row_deleted_at is not None
+        and row.server_row_deleted_at > max(row.deleted_at, received)
+    )
 
 
 _NEVER = datetime.min.replace(tzinfo=UTC)

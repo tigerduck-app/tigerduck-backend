@@ -29,8 +29,8 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ## 功能模組
 
 ### 🔐 帳號與認證（`server/auth/`）
-- **登入** — App 通常自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。App 改送密碼時，由後端代為 SSO，依 IP 與學號限流；密碼只用於這次登入，不會儲存
-- **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session，60 秒內的單次 grace 重試容忍掉線 client
+- **登入** — App 自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。後端不會拿密碼登入：沒帶 Moodle token 的登入回 `400 moodle_token_required`，一併送來的密碼一律忽略。不論有沒有帶 token，每次嘗試都計入依 IP 與學號的登入限流
+- **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session。沒收到 rotation 回應的 client，在新 token 從未使用且未滿 24 小時時可再 rotation 一次；晚到的重複 refresh 不會讓 client 手上的那組 token 失效
 - **憑證保管** — 只存 Moodle token，以 AES-256-GCM + per-row AAD 加密（支援金鑰輪替），供伺服器端代抓使用；不保存 NTUST 密碼
 - **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）
 
@@ -42,6 +42,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 🎓 Server-Side Academic Sync（`server/syncjobs/`）
 - **排程代抓** — `sync_policies`（admin 可調）× `sync_jobs`（登入時 provision）× `sync_runs`（審計）；executor 用 advisory lock + `FOR UPDATE SKIP LOCKED` 認領，多 worker 安全
 - **憑證失效** — 代抓只用已存的 Moodle token，不會拿密碼重新登入。token 遺失或被拒屬於認證類失敗，絕不重試：直接停用該使用者所有同步工作，並排一筆 reauth 系統通知；App 用 `PATCH /v3/auth/credentials` 送新 token 後同步自動恢復
+- **學校端故障** — Moodle 或 SSO 故障、Moodle 限流時退避重試；重試用完後隔一個 policy 間隔（預設 8 小時）再試，不會停在 `failed`。只有我們這邊的錯誤（未預期的例外、資料庫錯誤、worker 執行到一半中止）才會讓同步工作停在 `failed`，直到 portal 的 Retry all failed 重新排入
 - **作業鏡像** — 抓 Moodle 作業權威 upsert / 軟刪除，寫入 changelog 讓所有裝置同步
 - **助教課程** — 只抓使用者能繳交作業的課程（`mod/assign:submit`）：擔任助教的課程不抓，下次代抓會軟刪除已存的作業並撤回其提醒
 - **繳交狀態** — 每次作業同步後，向 Moodle 查詢時間窗內（預設 48 小時）到期作業的繳交狀態；新繳交的作業撤回待送提醒、結束倒數中的即時動態
@@ -58,7 +59,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
 - **tick** — 每 5 秒一次，每次把所有到期的 job 清完。Live Activity 的 start / end 以 priority 10 排在其他 job（預設 100）前面
 - **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad；使用者忽略作業的課程不送）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
-- **校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在校曆假日（`academic_holidays`）不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error = holiday`。作業類 Live Activity 不受假日影響
+- **學期起訖與校曆假日** — 課程提醒送給兩個 App 當天顯示的學期的課程：最近開學的已公布學期（`semester_terms`）；一個學期都沒公布時，照舊送給使用者最新同步的學期。課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在沒有任何已公布學期上課的日子不送（從開學日到結業日，兩端都算，與兩個 App 相同），在校曆假日（`academic_holidays`）也不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。例外只放回假日，不會放回學期外的日子。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的學期或假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error` 為 `outside_term` 或 `holiday`。作業類 Live Activity 兩者都不受影響
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
@@ -286,7 +287,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `DELETE` | `/v3/sync/courses` | 刪除全部課程 | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | 刪除單一課程 | JWT |
 | `POST` | `/v3/sync/assignments/upload` | 上傳作業 | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain） | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain；伺服器沒有該課程回 404 `course_not_found`） | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain） | JWT |
 
 ### 課表 / 作業
@@ -335,7 +336,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程；課堂類在送出時才依校曆假日判斷） | JWT |
+| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程；課堂類在送出時才依學期起訖與校曆假日判斷） | JWT |
 | `DELETE` | `/v3/schedule/{source_id}` | 取消此裝置某個 source 待送的排程 | JWT |
 | `POST` | `/v3/live-activities/register` | 註冊 Live Activity update token | JWT |
 

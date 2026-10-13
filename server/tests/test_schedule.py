@@ -132,6 +132,24 @@ async def test_sync_inserts_and_reports_counts(client: AsyncClient):
         assert prep.payload["activity_id"] == "classPreparing::slot-1"
 
 
+async def test_sync_refuses_a_fire_time_without_a_zone(client: AsyncClient):
+    """A fire time is compared with the server's clock, which has a zone, so
+    a time without one cannot be placed against it."""
+    login = await _login(client)
+    fire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    event = _event("slot-1", "classPreparing", fire, "Intro to CS")
+    event["fire_at"] = fire.replace(tzinfo=None).isoformat()
+
+    response = await client.post(
+        "/v3/schedule/sync", headers=_bearer(login), json={"events": [event]}
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        jobs = await s.execute(select(PushJob).where(PushJob.channel == "schedule"))
+        assert jobs.first() is None
+
+
 async def test_sync_replaces_previous_events(client: AsyncClient):
     login = await _login(client)
     fire = datetime.now(timezone.utc) + timedelta(hours=1)

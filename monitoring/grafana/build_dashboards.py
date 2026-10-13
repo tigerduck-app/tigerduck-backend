@@ -423,7 +423,7 @@ L.add(stat("Sessions", PG, [sql("SELECT count(*) AS \"sessions\" FROM auth_sessi
            desc="Refresh-token sessions neither revoked nor expired. Not affected by the filters."), 3, 4)
 L.add(stat("Token reuse", PG, [sql("SELECT count(*) AS \"reuse\" FROM auth_sessions WHERE reuse_detected_at > now() - interval '24 hours'")],
            thresholds=steps(("red", 1)),
-           desc="A rotated refresh token presented again: a client bug or a stolen token. Not affected by the filters."), 3, 4)
+           desc="A replaced refresh token presented again when no lost reply explains it: a client bug or a stolen token. Not affected by the filters."), 3, 4)
 
 L.row("Over time")
 L.add(series("Online devices", PROM, [prom(f'sum by (platform) (tigerduck_devices_seen{{window="$online_window", {PLATFORM_RE}}})', "{{platform}}")],
@@ -623,7 +623,8 @@ SELECT COALESCE(u.student_id, u.id::text) AS "student",
 FROM sync_jobs j
 JOIN users u ON u.id = j.user_id
 WHERE {JOB_FILTER} AND {STUDENT_FILTER}
-ORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC, j.run_after
+ORDER BY (j.status = 'running') DESC, (j.status = 'failed') DESC,
+         (j.last_error IS NOT NULL) DESC, j.run_after
 LIMIT 500
 """)], colored=["status"], from_now=["next run", "last success", "last failure"],
     desc="One row per student and sync type. Running and failed first."), 24, 10)

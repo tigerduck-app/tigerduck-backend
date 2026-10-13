@@ -124,6 +124,7 @@ async def patch_assignment_override(
                 local_status=AssignmentLocalStatus.none.value,
                 local_status_updated_at=now,
                 local_status_device_id=auth.device_id,
+                local_status_received_at=now,
                 updated_at=now,
             )
         )
@@ -160,6 +161,7 @@ async def patch_assignment_override(
             local_status=payload.local_status,
             local_status_updated_at=now,
             local_status_device_id=auth.device_id,
+            local_status_received_at=now,
         )
         .on_conflict_do_update(
             index_elements=["user_id", "user_assignment_id"],
@@ -167,6 +169,7 @@ async def patch_assignment_override(
                 "local_status": payload.local_status,
                 "local_status_updated_at": now,
                 "local_status_device_id": auth.device_id,
+                "local_status_received_at": now,
                 "updated_at": now,
             },
         )
@@ -372,5 +375,9 @@ async def _get_course_by_moodle_id(
         .first()
     )
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        # Unlike the "Not Found" a backend gives for a route it lacks, so an
+        # app can tell the course is gone.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="course_not_found"
+        )
     return row
