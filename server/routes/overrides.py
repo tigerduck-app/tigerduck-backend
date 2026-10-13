@@ -372,5 +372,9 @@ async def _get_course_by_moodle_id(
         .first()
     )
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        # Unlike the "Not Found" a backend gives for a route it lacks, so an
+        # app can tell the course is gone.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="course_not_found"
+        )
     return row

@@ -287,7 +287,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `DELETE` | `/v3/sync/courses` | 刪除全部課程 | JWT |
 | `DELETE` | `/v3/sync/courses/{key}` | 刪除單一課程 | JWT |
 | `POST` | `/v3/sync/assignments/upload` | 上傳作業 | JWT |
-| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain） | JWT |
+| `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain；伺服器沒有該課程回 404 `course_not_found`） | JWT |
 | `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain） | JWT |
 
 ### 課表 / 作業

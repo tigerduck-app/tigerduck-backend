@@ -26,7 +26,7 @@ server/
 ├── _ssl_compat.py             # OpenSSL 3 leniency for NTUST's broken TLS chain
 ├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
-├── db.py                      # Base, async engine/session, SessionDep
+├── db.py                      # Base, async engine/session, SessionDep, in_array
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token)
 ├── system_settings.py         # operator-tunable settings read at runtime
@@ -166,6 +166,11 @@ into the backend container via `docker-compose.yml`.
 ## CONVENTIONS
 - All DB timestamps stored as `timestamp with time zone` (UTC in, UTC out)
 - Session management: `SessionDep` in routes auto-commits/rolls-back
+- asyncpg refuses a statement with more than 32,767 bind parameters. A
+  filter on ids gathered across users goes through `in_array` (`db.py`),
+  one array parameter, rather than `in_()`, which binds one per value, and
+  rows inserted for every user go in chunks, as `file_jobs`
+  (`push/reminders.py`) files reminders.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index.
