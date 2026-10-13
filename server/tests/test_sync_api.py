@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.sync.changelog import append_change
+from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -18,6 +20,11 @@ from server.sync.models import (
     UserSettingsDocument,
 )
 from server.sync.models import UserSyncState
+from server.sync.upload import (
+    InitialUploadRequest,
+    UploadAssignmentOverride,
+    process_initial_upload,
+)
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.moodle_client import FetchedAssignment
 
@@ -512,6 +519,70 @@ async def test_full_sync_keys_a_mark_imported_after_the_server_row_went(
         },
     )
     assert response.status_code == 200, response.text
+
+    assert await keyed_marks(client, login) == [(5, "ignored")]
+
+
+async def wait_for_a_lock_wait(factory) -> None:
+    for _ in range(200):
+        async with factory() as session:
+            waiting = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the upload never waited for the sync lock")
+
+
+async def test_full_sync_keys_a_mark_imported_while_a_fetch_held_the_lock(
+    client,
+) -> None:
+    """An upload waits for the sync lock while a fetch soft-deletes the
+    server's row, then imports the mark. Its transaction and its own clock
+    reading both began before that soft-delete, yet the mark reached the
+    server after it, so it is keyed."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    await upload_placeholders(client, login, 5)
+    await fetch(client, login, (7002, 5))
+    factory = build_session_factory(client.app.state.engine)
+    payload = InitialUploadRequest(
+        assignment_overrides=[
+            UploadAssignmentOverride(
+                moodle_course_id=0,
+                moodle_assignment_id=5,
+                local_status="ignored",
+                local_status_updated_at=datetime.now(UTC),
+            )
+        ]
+    )
+    async with factory() as fetch_session, factory() as upload_session:
+        await lock_sync_state(fetch_session, user_id)
+        upload = asyncio.create_task(
+            process_initial_upload(
+                upload_session, user_id=user_id, device_id=None, payload=payload
+            )
+        )
+        try:
+            await wait_for_a_lock_wait(factory)
+            await apply_fetched_assignments(
+                fetch_session,
+                user_id=user_id,
+                fetched=[_fetched(7001, 1)],
+                now=datetime.now(UTC),
+            )
+            await fetch_session.commit()
+            await upload
+        finally:
+            upload.cancel()
+        await upload_session.commit()
 
     assert await keyed_marks(client, login) == [(5, "ignored")]
 
