@@ -638,7 +638,7 @@
     {
       "type": "stat",
       "title": "Token reuse",
-      "description": "A rotated refresh token presented again: a client bug or a stolen token. Not affected by the filters.",
+      "description": "A replaced refresh token presented again when no lost reply explains it: a client bug or a stolen token. Not affected by the filters.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
