@@ -15,12 +15,13 @@ from datetime import datetime, timezone
 from itertools import batched
 
 import structlog
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins.matcher import match_device_ids
 from server.bulletins.models import (
+    FAILED_BULLETIN_RETRY_DELAY,
     Bulletin,
     BulletinDispatch,
     BulletinDispatchStatus,
@@ -78,6 +79,10 @@ async def dispatch_pending_bulletins(
                         == BulletinProcessingState.processed.value,
                         Bulletin.notified_at.is_(None),
                         Bulletin.is_deleted.is_(False),
+                        or_(
+                            Bulletin.fanout_retry_at.is_(None),
+                            Bulletin.fanout_retry_at <= ts,
+                        ),
                     )
                     .order_by(Bulletin.id)
                     .limit(batch_limit)
@@ -101,6 +106,7 @@ async def dispatch_pending_bulletins(
                 bulletin_id=bulletin.id,
                 error=str(exc)[:200],
             )
+            await _delay_retry(session_factory, bulletin.id, ts)
             continue
         totals[0] += sent
         totals[1] += failed
@@ -118,6 +124,27 @@ async def dispatch_pending_bulletins(
     if totals[4]:
         logger.info("bulletins.dispatch.tick", **outcome.__dict__)
     return outcome
+
+
+async def _delay_retry(
+    session_factory: async_sessionmaker[AsyncSession], bulletin_id: int, ts: datetime
+) -> None:
+    """Skip a bulletin whose fan-out failed for a while, or one that keeps
+    failing holds a slot of every batch and the bulletins after it wait."""
+    try:
+        async with session_factory() as session:
+            await session.execute(
+                update(Bulletin)
+                .where(Bulletin.id == bulletin_id)
+                .values(fanout_retry_at=ts + FAILED_BULLETIN_RETRY_DELAY)
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 — the next tick tries it again
+        logger.warning(
+            "bulletins.dispatch.retry_not_delayed",
+            bulletin_id=bulletin_id,
+            error=str(exc)[:200],
+        )
 
 
 async def _dispatch_one(
