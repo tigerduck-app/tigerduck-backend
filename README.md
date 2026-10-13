@@ -58,7 +58,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **使用者推播 pipeline** — `push_jobs`（dedupe key 防重）→ materialize 成 per-token `push_deliveries` → APNs / FCM 投遞 → 聚合 `sent` / `partial_failed` / `failed`；round-based retry、stale lock 回收
 - **tick** — 每 5 秒一次，每次把所有到期的 job 清完。Live Activity 的 start / end 以 priority 10 排在其他 job（預設 100）前面
 - **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad；使用者忽略作業的課程不送）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
-- **校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在校曆假日（`academic_holidays`）不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error = holiday`。作業類 Live Activity 不受假日影響
+- **學期起訖與校曆假日** — 課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在學期外的日子不送（`semester_terms`，從開學日到結業日，兩端都算，與兩個 App 相同），在校曆假日（`academic_holidays`）也不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。例外只放回假日，不會放回學期外的日子。課程提醒看課程所屬學期的起訖；還沒有起訖的學期和所有課堂類 Live Activity 一樣，看當天有沒有已公布的學期在上課；一個學期都沒公布時不擋。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的學期或假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error` 為 `outside_term` 或 `holiday`。作業類 Live Activity 兩者都不受影響
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
@@ -335,7 +335,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程；課堂類在送出時才依校曆假日判斷） | JWT |
+| `POST` | `/v3/schedule/sync` | 課表同步（驅動 Live Activity 排程；課堂類在送出時才依學期起訖與校曆假日判斷） | JWT |
 | `DELETE` | `/v3/schedule/{source_id}` | 取消此裝置某個 source 待送的排程 | JWT |
 | `POST` | `/v3/live-activities/register` | 註冊 Live Activity update token | JWT |
 

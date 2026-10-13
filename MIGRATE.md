@@ -62,6 +62,14 @@ the normal upgrade:
   theirs.
 - **No app update needed.** Both apps treat any 4xx from
   `/v3/auth/refresh` as a lost session, the new `session_revoked` too.
+- **Check the semester dates.** Class reminders and class Live Activity
+  starts now stay quiet on days outside the term, as both apps already do.
+  A course follows its own term's dates. A term with no dates follows
+  whichever published term runs on the day: after the last one ends its
+  classes go quiet, and while an earlier term runs they ring on its days.
+  Before upgrading, give every term the portal's Semester dates page lists
+  its dates, and date 1152 before its course selection opens. With no term
+  published at all nothing changes.
 - **Turning the recovery off** without a rollback: set
   `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS=0` in `.env` and restart
   the backend. The 60-second grace retry stays.
