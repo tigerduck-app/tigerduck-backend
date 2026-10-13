@@ -32,6 +32,17 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.2
+
+- **The 48-hour reminder sees early submissions.** The submission probe now
+  reaches assignments due within 72 hours (`submission_status_window_hours`,
+  was 48). At 48 an assignment entered the probe only as its 48-hour
+  reminder fired, so a submission made before then was never seen and the
+  reminder went out. Each assignment sync now also probes the assignments
+  due 48 to 72 hours ahead, one Moodle request each. A deployment that set
+  `TIGERDUCK_SUBMISSION_STATUS_WINDOW_HOURS=72` in `.env` as a stopgap can
+  remove that line.
+
 ## Upgrading to 3.3.1
 
 3.3.1 is a fix release. Sessions survive a lost refresh reply, class
