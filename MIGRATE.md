@@ -62,6 +62,14 @@ the normal upgrade:
   theirs.
 - **No app update needed.** Both apps treat any 4xx from
   `/v3/auth/refresh` as a lost session, the new `session_revoked` too.
+- **Sync answers.** `PATCH /v3/sync/courses/{moodle_id}/override` answers
+  a course the server does not have with `404 {"detail": "course_not_found"}`
+  instead of `{"detail": "Not Found"}`, and a request time without a time
+  zone gets 422 instead of a 500. `GET /v3/courses` and
+  `PUT /v3/courses/{id}/override` fill each override's `moodle_id`,
+  `course_no` and `semester`, and the PUT takes `ignore_assignments`.
+  Neither app needs an update: both send times with a zone, count any 404
+  from the PATCH as a refusal, and do not call the `/v3/courses` routes.
 - **Check the semester dates.** Class reminders now go to the courses of
   the term both apps show, the published term that began most recently,
   and they and class Live Activity starts stay quiet on days no published
