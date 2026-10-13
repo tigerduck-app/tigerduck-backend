@@ -37,7 +37,8 @@ server/
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
 ├── academic_calendar/         # semester terms + school holidays (models, schemas,
-│                              #   terms.py: which days a term's classes meet)
+│                              #   terms.py: the current term and the days a term
+│                              #   runs on, as the apps take them)
 ├── routes/
 │   ├── auth.py                # /v3/auth/*
 │   ├── user_devices.py        # /v3/devices/*
