@@ -50,11 +50,14 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
-    # After a refresh rotation, the superseded token stays redeemable for
-    # this long so a client whose rotation response was lost in transit can
-    # retry without tripping reuse detection (which would log the whole
-    # device out). Reuse outside this window IS treated as theft.
+    # A rotated token presented again this soon after its rotation is
+    # rotated once more, so a client that lost the reply in transit can
+    # retry without tripping reuse detection, which logs the device out.
     auth_refresh_reuse_grace_seconds: int = 60
+    # Past the grace, the same holds for this long after the rotation while
+    # nothing has used the successor: the client lost the reply and was not
+    # running to retry. Either rule rotates a token once more, not twice.
+    auth_refresh_recovery_window_seconds: int = 24 * 60 * 60
     # Login rate limit: N attempts per window, applied independently to the
     # student_id and the client IP. Protects both against credential
     # stuffing and against our single server IP getting blocked by Moodle.

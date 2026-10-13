@@ -189,12 +189,12 @@ async def refresh(
 ) -> RefreshResult:
     """Rotate a refresh token.
 
-    Reuse semantics: a token revoked by rotation can
-    be redeemed again within `auth_refresh_reuse_grace_seconds` IF its
-    successor was never used — that's a client retrying after losing the
-    rotation response. The lost successor is revoked and a fresh session is
-    chained in its place. Any other reuse is treated as theft: the whole
-    successor chain plus every active session on the same device is revoked.
+    A token revoked by rotation and presented again comes from a client
+    that lost the rotation reply, or from a copy. `_handle_revoked_reuse`
+    rotates it once more when the reply may have been lost, and treats any
+    other reuse as theft: the whole successor chain plus every active
+    session on the same device is revoked. A token revoked for another
+    reason is refused and nothing else is revoked.
     """
     if not settings.auth_jwt_secret or not settings.auth_refresh_hmac_key:
         raise HTTPException(
@@ -279,46 +279,51 @@ async def _rotate(
     )
 
 
+# Revoked by being replaced with a newer token of the same lineage, so
+# presenting one again is a reuse. A token revoked for any other reason is
+# only dead.
+_REPLACED_REASONS = frozenset(
+    {SessionRevokedReason.rotated.value, SessionRevokedReason.superseded.value}
+)
+
+
 async def _handle_revoked_reuse(
     session: AsyncSession,
     settings: Settings,
     auth_session: AuthSession,
     now: datetime,
 ) -> RefreshResult:
-    grace = timedelta(seconds=settings.auth_refresh_reuse_grace_seconds)
-    successor = None
-    if auth_session.replaced_by_session_id is not None:
-        successor = await session.get(
-            AuthSession, auth_session.replaced_by_session_id
+    if auth_session.revoked_reason not in _REPLACED_REASONS:
+        # Logged out, removed with its device, expired or revoked with its
+        # family earlier: nothing is left to contain, and revoking the
+        # device's sessions would end the one a relogin has just made.
+        logger.info(
+            "auth.refresh.revoked_token",
+            session_id=auth_session.id,
+            reason=auth_session.revoked_reason,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session_revoked",
         )
 
-    is_benign_retry = (
-        auth_session.revoked_reason == SessionRevokedReason.rotated.value
-        and auth_session.revoked_at is not None
-        and auth_session.revoked_at > now - grace
-        and successor is not None
-        and successor.revoked_at is None
-        # One-shot: the grace path itself re-stamps revoked_at (via
-        # _rotate), which would otherwise keep the window sliding and let
-        # a holder of the old token mint live sessions indefinitely.
-        # reuse_detected_at doubles as the "grace consumed" marker — the
-        # token WAS reused, just benignly, exactly once.
-        and auth_session.reuse_detected_at is None
-    )
-    if is_benign_retry:
-        assert successor is not None
-        # The successor token was lost in transit — kill it and chain a
-        # fresh session in its place.
-        successor.revoked_at = now
-        successor.revoked_reason = SessionRevokedReason.rotated.value
-        logger.info(
-            "auth.refresh.grace_retry",
-            session_id=auth_session.id,
-            lost_successor_id=successor.id,
+    successor = None
+    if auth_session.replaced_by_session_id is not None:
+        # Locked, so a concurrent rotation or first use of the successor
+        # lands before the checks below read it.
+        successor = await session.get(
+            AuthSession,
+            auth_session.replaced_by_session_id,
+            with_for_update=True,
+            populate_existing=True,
         )
-        result = await _rotate(session, settings, auth_session, now)
-        auth_session.reuse_detected_at = now
-        return result
+
+    event = _second_rotation(settings, auth_session, successor, now)
+    if event is not None:
+        assert successor is not None  # narrowed by _second_rotation
+        return await _rotate_again(
+            session, settings, auth_session, successor, now, event=event
+        )
 
     auth_session.reuse_detected_at = now
     await _revoke_family(session, auth_session, now)
@@ -334,6 +339,69 @@ async def _handle_revoked_reuse(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="refresh_reuse_detected",
     )
+
+
+def _second_rotation(
+    settings: Settings,
+    token: AuthSession,
+    successor: AuthSession | None,
+    now: datetime,
+) -> str | None:
+    """The log event of the rule that rotates `token` once more, or None.
+
+    Either rule needs a token revoked by its own rotation and not rotated a
+    second time yet, whose successor is unrevoked, so never rotated. Inside
+    the grace that is enough: a quick retry. Past it, up to the recovery
+    window, nothing may have used the successor either: a client that got
+    the reply would have sent the successor, not this token.
+    """
+    if (
+        token.revoked_reason != SessionRevokedReason.rotated.value
+        or token.revoked_at is None
+        or token.rerotated_at is not None
+        # Set when a reuse of it took the theft path, or by a grace retry
+        # from before rerotated_at.
+        or token.reuse_detected_at is not None
+        or successor is None
+        or successor.revoked_at is not None
+    ):
+        return None
+    since_rotation = now - token.revoked_at
+    if since_rotation < timedelta(seconds=settings.auth_refresh_reuse_grace_seconds):
+        return "auth.refresh.grace_retry"
+    recovery_window = timedelta(seconds=settings.auth_refresh_recovery_window_seconds)
+    if successor.first_used_at is None and since_rotation <= recovery_window:
+        return "auth.refresh.lost_rotation_recovered"
+    return None
+
+
+async def _rotate_again(
+    session: AsyncSession,
+    settings: Settings,
+    token: AuthSession,
+    lost: AuthSession,
+    now: datetime,
+    *,
+    event: str,
+) -> RefreshResult:
+    """Rotate `token` once more in place of `lost`, the successor whose
+    reply its client did not receive."""
+    assert token.revoked_at is not None  # checked by _second_rotation
+    since_rotation = now - token.revoked_at
+    lost.revoked_at = now
+    lost.revoked_reason = SessionRevokedReason.superseded.value
+    result = await _rotate(session, settings, token, now)
+    # If `lost` turns up after all, its reuse takes the theft path, and the
+    # chain walk goes on from it to the session that replaced it.
+    lost.replaced_by_session_id = token.replaced_by_session_id
+    token.rerotated_at = now
+    logger.info(
+        event,
+        session_id=token.id,
+        lost_successor_id=lost.id,
+        seconds_since_rotation=int(since_rotation.total_seconds()),
+    )
+    return result
 
 
 async def _revoke_family(
