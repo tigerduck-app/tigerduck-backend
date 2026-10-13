@@ -17,8 +17,7 @@ from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import BigInteger, any_, bindparam, func, select, text
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
@@ -37,7 +36,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.config import Settings
-from server.db import session_scope
+from server.db import in_array, session_scope
 from server.push.reminders import file_jobs
 from server.sync.models import (
     UserCourse,
@@ -148,7 +147,7 @@ async def _course_prefs(
         (
             await session.execute(
                 select(UserSettingsDocument).where(
-                    UserSettingsDocument.user_id.in_(user_ids),
+                    in_array(UserSettingsDocument.user_id, user_ids),
                     UserSettingsDocument.namespace == "notification",
                     UserSettingsDocument.deleted_at.is_(None),
                 )
@@ -195,7 +194,7 @@ async def _users_with_a_recipient(
     if not user_ids:
         return set()
     query = select(UserDevice.user_id).where(
-        UserDevice.user_id.in_(user_ids),
+        in_array(UserDevice.user_id, user_ids),
         UserDevice.deleted_at.is_(None),
         UserDevice.platform.in_(APPLE_HANDHELD_PLATFORMS),
     )
@@ -403,14 +402,7 @@ async def scan_course_reminders(
                         UserCourseSkippedDate.user_course_id,
                         UserCourseSkippedDate.skipped_on,
                     ).where(
-                        # One array parameter: an IN list binds one per
-                        # course, every user's, and asyncpg takes 32,767.
-                        UserCourseSkippedDate.user_course_id
-                        == any_(
-                            bindparam(
-                                "course_ids", course_ids, type_=ARRAY(BigInteger)
-                            )
-                        ),
+                        in_array(UserCourseSkippedDate.user_course_id, course_ids),
                         UserCourseSkippedDate.deleted_at.is_(None),
                     )
                 )

@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, insert, literal, select
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
@@ -778,3 +778,43 @@ async def test_a_scan_files_more_reminders_than_one_statement_can_carry(
     assert await scan_assignment_reminders(factory, test_settings) == 3000
     assert len(await _jobs(db_session, user.id)) == 3000
     assert await scan_assignment_reminders(factory, test_settings) == 0
+
+
+async def test_a_scan_looks_up_more_users_than_a_statement_binds(
+    db_session, prepared_engine, test_settings
+):
+    """The scan looks up the ignored courses, settings and devices of every
+    user with an assignment due, and asyncpg allows 32,767 bind parameters
+    per statement. Bound one per user, the lookups failed the whole scan
+    once about that many users had an assignment due."""
+    user = await _make_user(db_session)
+    db_session.add(_assignment(user))
+    # 32,767 more users with an assignment due and no device to file it for.
+    # Postgres generates them: built in Python, the rows take seconds.
+    await db_session.execute(
+        insert(User).from_select(
+            ["id"],
+            select(func.gen_random_uuid()).select_from(func.generate_series(1, 32_767)),
+        )
+    )
+    due_at = datetime.now(UTC) + timedelta(hours=30)
+    assignment = {
+        "user_id": User.id,
+        "moodle_course_id": literal(7001),
+        "moodle_assignment_id": literal(1),
+        "title": literal("HW1"),
+        "due_at": literal(due_at, UserAssignment.due_at.type),
+    }
+    await db_session.execute(
+        insert(UserAssignment).from_select(
+            list(assignment), select(*assignment.values()).where(User.id != user.id)
+        )
+    )
+    await db_session.commit()
+
+    created = await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert created == 2
+    assert len(await _jobs(db_session, user.id)) == 2
