@@ -84,10 +84,10 @@ class MoodleBreaker:
     """Whether Moodle failed for everyone during this push tick.
 
     The first check that fails the way every other check would too (Moodle
-    unreachable, rate limiting us, or past the check's timeout) opens it, and
-    the tick's remaining checks come out `unverified` without asking: an
-    outage then costs one timeout a tick, not one a job. A dead token is one
-    user's problem and leaves it shut.
+    rate limiting us, or past the check's timeout) opens it, and the tick's
+    remaining checks come out `unverified` without asking: an outage then
+    costs one timeout a tick, not one a job. A fast refusal, such as a dead
+    token or a suspended account, is one user's answer and leaves it shut.
     """
 
     opened_by: str | None = None
@@ -317,7 +317,10 @@ async def _ask_moodle(
     except MoodleRateLimited:
         return _open(breaker, "rate_limited")
     except MoodleUnreachable:
-        return _open(breaker, "unreachable")
+        # Raised for site-info's answer to this token, such as
+        # wsaccessusersuspended or accessexception. A Moodle that is down
+        # reaches here as no answer or as the timeout above.
+        return _unverified("refused")
     except MoodleTokenInvalid:
         return _unverified("token_invalid")
     except Exception as exc:

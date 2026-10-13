@@ -647,21 +647,11 @@ async def _three_due_reminders(session, make_assignment, store_moodle_token):
     return jobs
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [MoodleUnreachable("submission_probe_unreachable"), MoodleRateLimited("http_429")],
-    ids=["unreachable", "rate-limited"],
-)
-async def test_moodle_failing_for_everyone_is_asked_once_a_tick(
-    db_session,
-    prepared_engine,
-    test_settings,
-    make_assignment,
-    store_moodle_token,
-    failure,
+async def test_a_rate_limiting_moodle_is_asked_once_a_tick(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
     jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
-    moodle = SubmissionStatusStub(failure, OPEN)
+    moodle = SubmissionStatusStub(MoodleRateLimited("http_429"), OPEN)
     worker = _worker(prepared_engine, test_settings, moodle)
 
     await run_push_tick(worker)
@@ -703,6 +693,31 @@ async def test_one_users_dead_token_does_not_hold_back_the_others(
 ):
     jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
     moodle = SubmissionStatusStub(MoodleTokenInvalid("invalidtoken"), OPEN)
+
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle))
+
+    assert moodle.asked == [41, 42, 43]
+    assert [(await _reload(db_session, job)).status for job in jobs] == [
+        "pending",
+        "sent",
+        "sent",
+    ]
+
+
+@pytest.mark.parametrize("errorcode", ["wsaccessusersuspended", "accessexception"])
+async def test_one_users_refusal_does_not_hold_back_the_others(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    errorcode,
+):
+    """Moodle refuses a suspended student's or an expired token's site-info
+    request at once, which the fetcher raises as `MoodleUnreachable`. That
+    is the one account's answer, not Moodle down for everyone."""
+    jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
+    moodle = SubmissionStatusStub(MoodleUnreachable(errorcode), OPEN)
 
     await run_push_tick(_worker(prepared_engine, test_settings, moodle))
 
