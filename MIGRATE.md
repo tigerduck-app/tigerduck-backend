@@ -119,6 +119,14 @@ the normal upgrade:
   against the login limit. A login with a password and no token answered
   500 before, because the code meant to sign in with the password could
   not load. The password the apps send is ignored. No app update is needed.
+- **Cleared marks stay cleared.** Under 3.2.0, clearing an assignment's
+  done or ignored mark kept a mark made on it before the server's Moodle
+  fetch first returned it, which the apps no longer showed. 3.3.0 shows
+  that mark again once a fetch soft-deletes the assignment, as it does to
+  every assignment of a course the user is a TA in. 3.3.1 does not, and the
+  apps drop such a mark on their next full sync; a mark made after that
+  first fetch still shows. Nothing is migrated, so after a rollback 3.3.0
+  shows those marks again.
 - **Rolling back.** The 3.3.0 code cannot start on a database at
   `cc54925b7852`: its startup `alembic upgrade head` cannot find that
   revision. Stamp the database back to `ddf188f91a15`, then deploy 3.3.0.

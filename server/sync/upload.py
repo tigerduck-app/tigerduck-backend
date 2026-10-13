@@ -400,6 +400,10 @@ async def process_initial_upload(
                 now=now,
             )
         if changed:
+            # Read under the sync lock, after any fetch the upload waited for:
+            # `/sync/full` compares it with those fetches' soft-deletes, and
+            # the column's now() would be when the transaction began.
+            override.updated_at = datetime.now(UTC)
             counts["assignment_overrides"] += 1
             await log("assignment_override", str(assignment.id))
 
