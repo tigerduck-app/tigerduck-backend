@@ -53,7 +53,15 @@ async def apply_fetched_assignments(
     user_id: uuid.UUID,
     fetched: list[FetchedAssignment],
     now: datetime,
+    refused_course_ids: frozenset[int] = frozenset(),
 ) -> AssignmentSyncStats:
+    """Apply one Moodle answer, soft-deleting the stored rows it leaves out.
+
+    `refused_course_ids` are the courses an answer that lost every course
+    refused (`MoodleNoCourseAccess`). It says nothing about them, so their
+    rows stay, and so do the placeholders, which name no course (course id
+    0) and may belong to one of them.
+    """
     locked_state = await lock_sync_state(session, user_id)
 
     async def log(entity_id: str, operation: str, hint: dict | None = None):
@@ -149,6 +157,10 @@ async def apply_fetched_assignments(
 
     for key, row in existing.items():
         if key in seen or row.deleted_at is not None:
+            continue
+        if refused_course_ids and (
+            row.moodle_course_id == 0 or row.moodle_course_id in refused_course_ids
+        ):
             continue
         row.deleted_at = now
         changed += 1
