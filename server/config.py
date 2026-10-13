@@ -182,8 +182,11 @@ class Settings(BaseSettings):
     # Only assignments due inside this window get probed. The Moodle API is
     # one request per assignment, so a full sweep would multiply load by the
     # user's whole assignment count on every sync tick; only assignments
-    # about to enter a reminder window need an accurate answer.
-    submission_status_window_hours: int = 48
+    # about to enter a reminder window need an accurate answer. It reaches past
+    # the largest reminder the apps offer, 48 h before the due time, by more
+    # than an assignment sync interval (8 h), so a submission made before that
+    # reminder is probed before it fires; at 48 h the reminder always went out.
+    submission_status_window_hours: int = 72
     submission_status_max_concurrency: int = 4
 
     # --- Assignment reminders (Phase 4a) ---

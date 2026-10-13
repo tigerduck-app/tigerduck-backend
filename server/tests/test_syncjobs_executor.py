@@ -29,7 +29,7 @@ from server.logging_setup import configure
 from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
 from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
-from server.syncjobs.models import SyncJob, SyncLogEntry, SyncPolicy, SyncRun
+from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedSubmission,
@@ -39,7 +39,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnreachable,
     SsoUnavailable,
 )
-from server.syncjobs.policies import ensure_default_policies
+from server.syncjobs.policies import DEFAULT_POLICIES, ensure_default_policies
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -994,15 +994,15 @@ async def test_submission_status_settings_are_threaded_through(
         seen["max_concurrency"] = max_concurrency
         return {}
 
-    # Due in 60h: inside a widened 72h window, outside the *default* 48h
+    # Due in 84h: inside a widened 96h window, outside the *default* 72h
     # window -- proves window_hours actually comes from settings rather
     # than being hardcoded to the default.
     fetcher = StubFetcher(
-        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=60))]
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=84))]
     )
     settings = test_settings.model_copy(
         update={
-            "submission_status_window_hours": 72,
+            "submission_status_window_hours": 96,
             "submission_status_max_concurrency": 9,
         }
     )
@@ -1015,6 +1015,21 @@ async def test_submission_status_settings_are_threaded_through(
 
     assert seen["assignment_ids"] == [1]
     assert seen["max_concurrency"] == 9
+
+
+async def test_the_probe_reaches_the_largest_reminder_a_sync_ahead():
+    """The 48 h reminder, the largest the apps offer, fires 48 h before the
+    due time. The probe has to reach the assignment at least one assignment
+    sync before then, or a submission made earlier is never seen and the
+    reminder goes out anyway."""
+    largest_reminder_hours = 48
+    assignments = next(
+        policy
+        for policy in DEFAULT_POLICIES
+        if policy["job_type"] == SyncJobType.moodle_assignments.value
+    )
+    window = Settings.model_fields["submission_status_window_hours"].default
+    assert window >= largest_reminder_hours + assignments["default_interval_seconds"] / 3600
 
 
 
