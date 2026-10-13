@@ -22,6 +22,7 @@ from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     DevicePushToken,
     ExternalAccount,
+    ExternalAccountCredential,
     PushDelivery,
     PushJob,
     User,
@@ -458,6 +459,95 @@ async def test_what_the_rows_learn_during_the_moodle_call_is_not_sent_past(
     )
     assert await _deliveries(db_session, job) == []
     assert _reminders_and_starts(apple) == []
+
+
+@pytest.mark.parametrize("lost", ["cleared", "taken-by-another-worker"])
+async def test_a_claim_lost_during_the_moodle_call_is_left_alone(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    lost,
+):
+    """The portal's /push-clear cancels the job, or another worker takes it,
+    while Moodle is asked: the verdict is dropped, with no delivery and
+    nothing written back."""
+    user, _ = await _iphone_user(db_session)
+    row, due_at = await _open_assignment(
+        make_assignment, store_moodle_token, user, 19
+    )
+    job = _reminder(user, 19, due_at)
+    db_session.add(job)
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    async def lose_the_claim():
+        values = (
+            {"status": "cancelled", "cancelled_at": datetime.now(UTC)}
+            if lost == "cleared"
+            else {"locked_by": "another-worker"}
+        )
+        async with factory() as session:
+            await session.execute(
+                update(PushJob).where(PushJob.id == job.id).values(**values)
+            )
+            await session.commit()
+
+    moodle = MoodleWhile(
+        lose_the_claim, {"is_submitted": True, "submitted_at": SUBMITTED_AT}
+    )
+    apple = ScriptedSender()
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle, apple=apple))
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == (
+        ("cancelled", None) if lost == "cleared" else ("processing", None)
+    )
+    assert await _deliveries(db_session, job) == []
+    assert apple.requests == []
+    assert (await _reload(db_session, row)).provider_is_submitted is False
+    assert await _sync_trigger_keys(db_session, user) == []
+
+
+async def test_no_transaction_is_open_while_moodle_is_asked(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """The job and the credential the check read can be locked from
+    elsewhere, without waiting, while the Moodle call is out."""
+    user, _ = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(make_assignment, store_moodle_token, user, 20)
+    account = (
+        await db_session.execute(
+            select(ExternalAccount).where(ExternalAccount.user_id == user.id)
+        )
+    ).scalar_one()
+    job = _reminder(user, 20, due_at)
+    db_session.add(job)
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    locked = []
+
+    async def lock_without_waiting():
+        async with factory() as session:
+            await session.execute(
+                select(PushJob.id)
+                .where(PushJob.id == job.id)
+                .with_for_update(nowait=True)
+            )
+            await session.execute(
+                select(ExternalAccountCredential.external_account_id)
+                .where(ExternalAccountCredential.external_account_id == account.id)
+                .with_for_update(nowait=True)
+            )
+            await session.rollback()
+        locked.append(True)
+
+    moodle = MoodleWhile(lock_without_waiting)
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle))
+
+    assert locked == [True]
+    assert (await _reload(db_session, job)).status == "sent"
 
 
 # --- The database's word ----------------------------------------------------
@@ -901,6 +991,51 @@ async def test_a_countdown_start_for_an_open_assignment_goes_out(
 
     assert (await _reload(db_session, job)).status == "sent"
     assert [r.device_token for r in apple.requests] == ["push_to_start-b11203058"]
+
+
+async def test_a_countdown_start_moodle_cannot_confirm_is_held(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    user, device = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(
+        make_assignment, store_moodle_token, user, 58
+    )
+    job = _countdown_start(user, device, 58, due_at)
+    db_session.add(job)
+    await db_session.commit()
+
+    before = datetime.now(UTC)
+    apple = ScriptedSender()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, SubmissionStatusStub(None), apple=apple)
+    )
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.attempts, job.locked_by) == ("pending", 0, None)
+    assert job.available_at >= before + timedelta(
+        seconds=test_settings.push_presend_retry_seconds
+    )
+    assert apple.requests == []
+    assert await _deliveries(db_session, job) == []
+
+
+async def test_a_countdown_start_past_its_countdown_is_cancelled(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """The due time of a start is the `countdownTarget` it counts down to,
+    even when the row says later."""
+    user, device = await _iphone_user(db_session)
+    await _open_assignment(make_assignment, store_moodle_token, user, 57)
+    job = _countdown_start(user, device, 57, _ago(1))
+    db_session.add(job)
+    await db_session.commit()
+
+    moodle = SubmissionStatusStub(OPEN)
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle))
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    assert moodle.asked == []
 
 
 async def test_a_live_activity_end_is_not_checked(
