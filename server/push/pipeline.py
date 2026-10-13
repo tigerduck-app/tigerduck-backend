@@ -72,6 +72,7 @@ from server.push.presend import (
     MoodleBreaker,
     PresendCheck,
     check_before_send,
+    needs_check,
     recheck_rows,
     record_submitted,
 )
@@ -310,7 +311,17 @@ async def _process_job(
                 # commit and now — never double-process.
                 logger.warning("push.job_reclaimed", job_id=job_id)
                 return
-            if check is not None and await _held_back(worker, session, job, check):
+            if check is not None:
+                if await _held_back(worker, session, job, check):
+                    return
+            elif needs_check(job) and not await _has_deliveries(session, job):
+                # The check saw this job unclaimed: another tick, under the
+                # same worker id, recovered and claimed it again meanwhile.
+                # Unchecked, it goes back for the next round to check.
+                job.status = PushJobStatus.pending.value
+                job.locked_by = None
+                job.locked_at = None
+                logger.warning("push.presend_check_missed", job_id=job.id)
                 return
             if await _materialize(
                 session, job, school_tz=worker.settings.course_reminder_timezone

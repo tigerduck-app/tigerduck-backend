@@ -960,6 +960,69 @@ async def test_a_retry_round_is_not_checked_again(
     assert moodle.asked == []
 
 
+async def test_a_job_the_check_missed_is_put_back_for_the_next_round(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    monkeypatch,
+):
+    """Ticks share one worker id. One that recovers this job as stale and
+    claims it again while this tick's check runs shows the check a job not
+    claimed and the lock afterwards one that is: it must not go out
+    unchecked."""
+    user, _ = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(
+        make_assignment, store_moodle_token, user, 17
+    )
+    job = _reminder(user, 17, due_at)
+    db_session.add(job)
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    real_check = pipeline_module.check_before_send
+
+    async def set_claim(job_id, **values):
+        async with factory() as session:
+            await session.execute(
+                update(PushJob).where(PushJob.id == job_id).values(**values)
+            )
+            await session.commit()
+
+    async def check_while_another_tick_reclaims(worker, *, job_id, breaker):
+        await set_claim(job_id, status="pending", locked_by=None, locked_at=None)
+        result = await real_check(worker, job_id=job_id, breaker=breaker)
+        await set_claim(
+            job_id,
+            status="processing",
+            locked_by=worker.worker_id,
+            locked_at=datetime.now(UTC),
+        )
+        return result
+
+    monkeypatch.setattr(
+        pipeline_module, "check_before_send", check_while_another_tick_reclaims
+    )
+    moodle = SubmissionStatusStub({"is_submitted": True, "submitted_at": None})
+    apple = ScriptedSender()
+    worker = _worker(prepared_engine, test_settings, moodle, apple=apple)
+
+    await run_push_tick(worker)
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.locked_by, job.attempts) == ("pending", None, 0)
+    assert apple.requests == []
+    assert await _deliveries(db_session, job) == []
+
+    # The next round checks it.
+    monkeypatch.setattr(pipeline_module, "check_before_send", real_check)
+    await run_push_tick(worker)
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == ("cancelled", "submitted_before_send")
+    assert await _deliveries(db_session, job) == []
+
+
 async def test_each_verdict_is_counted(
     db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
