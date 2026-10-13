@@ -36,6 +36,7 @@ from server.syncjobs.moodle_client import (
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
+    SsoUnavailable,
 )
 from server.syncjobs.policies import ensure_default_policies
 
@@ -399,34 +400,102 @@ async def test_expired_token_disables_job_and_queues_push(
     assert push.scenario == "reauth_required"
 
 
-async def test_network_failure_backs_off_then_terminal_after_max_attempts(
-    db_session, prepared_engine, test_settings
-):
-    user, _, job = await _setup_user_job(db_session)
-    fetcher = StubFetcher(
-        errors=[
-            MoodleUnreachable("net"),
-            MoodleUnreachable("net"),
-            MoodleUnreachable("net"),
-        ]
-    )
-    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
-
+async def _run_when_due(db_session, worker, job) -> None:
+    job.run_after = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
     await run_sync_tick(worker)
     await db_session.refresh(job)
-    assert job.status == "pending"
-    assert job.attempts == 1
-    assert job.last_error.startswith("sync_failed")
-    assert job.run_after > datetime.now(UTC)  # backoff in the future
 
-    # Force-due and run twice more → terminal failed at max_attempts=3.
-    for _ in range(2):
-        job.run_after = datetime.now(UTC) - timedelta(seconds=1)
-        await db_session.commit()
-        await run_sync_tick(worker)
-        await db_session.refresh(job)
-    assert job.status == "failed"
-    assert job.attempts == 3
+
+@pytest.mark.parametrize(
+    ("outage", "last_error"),
+    [
+        (MoodleUnreachable("http_503"), "sync_failed:http_503"),
+        (SsoUnavailable("http_502"), "sync_failed:http_502"),
+    ],
+    ids=["moodle-unreachable", "sso-unavailable"],
+)
+async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
+    db_session, prepared_engine, test_settings, outage, last_error
+):
+    """An outage that outlasts the retries, about 15 minutes with the
+    default backoff, left the job failed, and a failed job waits for an
+    operator: no released app calls run-now, and re-login revives only a
+    disabled job. Past its attempts the job runs again at its policy
+    interval, with its attempts reset, so the next error gets every retry
+    again, and at its policy's priority rather than the 1 a run-now gave
+    it."""
+    _, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
+    fetcher = StubFetcher(errors=[outage] * (job.max_attempts + 1))
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    interval, priority = (
+        await db_session.execute(
+            select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
+                SyncPolicy.job_type == job.job_type
+            )
+        )
+    ).one()
+    assert priority != 1
+
+    for _ in range(job.max_attempts):
+        await _run_when_due(db_session, worker, job)
+    assert (job.status, job.attempts, job.priority) == ("pending", 0, priority)
+    assert job.last_error == last_error
+    assert job.run_after - job.last_failure_at == timedelta(seconds=interval)
+    assert await run_sync_tick(worker) == 0
+
+    # Still down when the interval is up: back on the backoff.
+    await _run_when_due(db_session, worker, job)
+    assert (job.status, job.attempts) == ("pending", 1)
+    assert job.run_after - job.last_failure_at == timedelta(
+        seconds=worker.settings.sync_job_backoff_base_seconds
+    )
+
+    await _run_when_due(db_session, worker, job)
+    assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
+    assert job.last_success_at is not None
+    assert fetcher.errors == []
+
+
+def _a_crash(monkeypatch, attempts):
+    errors = [RuntimeError("unhandled answer") for _ in range(attempts)]
+    return StubFetcher(errors=errors), "sync_failed:RuntimeError"
+
+
+def _a_failed_submission_write(monkeypatch, attempts):
+    async def poisoning_select(session, *, user_id, now, window_hours):
+        await session.execute(text("SELECT 1/0"))
+
+    monkeypatch.setattr(
+        "server.syncjobs.executor.select_assignment_ids", poisoning_select
+    )
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    return fetcher, "sync_failed:submission_status"
+
+
+@pytest.mark.parametrize(
+    "arrange",
+    [_a_crash, _a_failed_submission_write],
+    ids=["crash", "submission-status-db-error"],
+)
+async def test_an_error_retrying_cannot_fix_still_fails_the_job(
+    db_session, prepared_engine, test_settings, monkeypatch, arrange
+):
+    """A crash in our code, or a database error writing what the
+    submission probe found, comes back on every run. Past its attempts the
+    job is failed, for an operator to see and retry once it is fixed."""
+    _, _, job = await _setup_user_job(db_session)
+    fetcher, last_error = arrange(monkeypatch, job.max_attempts)
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await _run_when_due(db_session, worker, job)
+    assert (job.status, job.attempts) == ("pending", 1)
+    for _ in range(job.max_attempts - 1):
+        await _run_when_due(db_session, worker, job)
+    assert (job.status, job.attempts) == ("failed", job.max_attempts)
+    assert job.last_error == last_error
 
 
 async def test_an_answer_that_lost_every_course_keeps_the_assignments(
@@ -522,23 +591,17 @@ async def test_an_answer_without_the_courses_never_fails_the_job_for_good(
     ).one()
     assert priority != 1
 
-    async def run_due() -> None:
-        job.run_after = datetime.now(UTC) - timedelta(seconds=1)
-        await db_session.commit()
-        await run_sync_tick(worker)
-        await db_session.refresh(job)
-
     for _ in range(job.max_attempts):
-        await run_due()
+        await _run_when_due(db_session, worker, job)
     assert job.status == "pending"
     assert job.attempts == 0
     assert job.priority == priority
     assert job.last_error == f"sync_failed:{code}"
     assert job.run_after > datetime.now(UTC) + timedelta(seconds=interval - 60)
 
-    await run_due()
+    await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts) == ("pending", 1)
-    await run_due()
+    await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
     assert answers == []
 
