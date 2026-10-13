@@ -61,7 +61,7 @@ async def retry_all_jobs(req: RetryAllRequest = RetryAllRequest(), pool=Depends(
                 locked_at = NULL,
                 last_error = NULL
             WHERE job_type IN ('moodle_assignments', 'ntust_courses')
-              AND status IN ('active', 'disabled', 'failed')
+              AND status IN ('pending', 'disabled', 'failed')
         """)
         count = int(result.split()[-1]) if result else 0
 

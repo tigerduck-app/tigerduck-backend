@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from portal.app.db import _asyncpg_dsn  # noqa: E402
 from portal.app.routes.moodle.jobs import (  # noqa: E402
     RetryAllRequest,
+    retry_all_jobs,
     retry_all_moodle,
 )
 from server.auth.models import ExternalAccount, User  # noqa: E402
@@ -118,3 +119,16 @@ async def test_retry_all_failed_takes_a_job_that_keeps_retrying(
     assert result == {"retried": 3, "notified": 0}
     assert await _requeued(db_session, jobs) == {"failed", "disabled", "retrying"}
 
+
+async def test_retry_all_takes_every_job_but_a_running_one(db_session, portal_pool):
+    """Retry all asked for status 'active', which no job has (the portal's
+    status card calls pending jobs active), so it retried only what Retry
+    all failed did, and from now on less."""
+    jobs = await _queue(db_session)
+
+    result = await retry_all_jobs(RetryAllRequest(), pool=portal_pool)
+
+    assert result == {"retried": 4, "notified": 0}
+    assert await _requeued(db_session, jobs) == {
+        "failed", "disabled", "retrying", "healthy",
+    }
