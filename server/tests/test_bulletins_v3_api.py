@@ -214,6 +214,25 @@ async def test_bulletin_state_put_and_get(client) -> None:
     assert len(get.json()["items"]) == 1
 
 
+@pytest.mark.parametrize("field", ["read", "starred", "hidden"])
+async def test_bulletin_state_refuses_a_time_without_a_zone(client, field) -> None:
+    """An edit's time is compared with the server's clock, which has a zone,
+    so a time without one cannot be placed against it."""
+    login = await do_login(client)
+    bulletin_id = await seed_bulletin(client)
+
+    response = await client.put(
+        f"/v3/bulletin-states/{bulletin_id}",
+        headers=bearer(login),
+        json={f"is_{field}": True, f"{field}_updated_at": "2026-06-08T10:00:00"},
+    )
+    assert response.status_code == 422
+    listing = await client.get(
+        f"/v3/bulletin-states?bulletin_ids={bulletin_id}", headers=bearer(login)
+    )
+    assert listing.json()["items"] == []
+
+
 async def test_bulletin_state_unknown_bulletin_404(client) -> None:
     login = await do_login(client)
     response = await client.put(

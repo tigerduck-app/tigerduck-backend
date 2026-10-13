@@ -221,6 +221,28 @@ async def test_register_refuses_an_activity_id_that_is_not_the_composed_one(clie
     assert response.json()["detail"] == "activity_id_mismatch"
 
 
+async def test_register_refuses_a_countdown_target_without_a_zone(client) -> None:
+    """The end job's time is compared with the server's clock, which has a
+    zone, so a time without one cannot be placed against it."""
+    login = await _login(client)
+    target = datetime.now(timezone.utc) + timedelta(minutes=15)
+    body = _register_body(target, "e" * 128)
+    body["countdown_target"] = target.replace(tzinfo=None).isoformat()
+
+    response = await client.post(
+        "/v3/live-activities/register", headers=_bearer(login), json=body
+    )
+    assert response.status_code == 422
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as s:
+        tokens = await s.execute(
+            select(DevicePushToken).where(
+                DevicePushToken.token_kind == "live_activity_update"
+            )
+        )
+        assert tokens.first() is None
+
+
 async def test_full_sync_leaves_the_devices_own_jobs_alone(client) -> None:
     """A full sync must not cancel a job addressed to this one device.
 

@@ -13,7 +13,14 @@ from datetime import UTC, date, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_validator,
+)
 from sqlalchemy import select
 
 from server.auth.dependencies import CurrentAuthDep
@@ -40,16 +47,32 @@ class CourseOverridePut(BaseModel):
     edited"; the value itself may be null to clear nullable fields."""
 
     custom_name: str | None = Field(default=None, max_length=256)
-    custom_name_updated_at: datetime | None = None
+    custom_name_updated_at: AwareDatetime | None = None
     color_hex: str | None = Field(default=None, max_length=16)
-    color_hex_updated_at: datetime | None = None
+    color_hex_updated_at: AwareDatetime | None = None
+    # Strict: a lax bool takes "yes" or 1 as true.
+    ignore_assignments: StrictBool | None = None
+    ignore_assignments_updated_at: AwareDatetime | None = None
+    # The numeric Moodle course id, which the reminder scan matches the
+    # assignments the server fetches by. Kept until a request sends another.
+    moodle_course_id: StrictInt | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def ignore_edit_has_a_value(self) -> "CourseOverridePut":
+        # Unlike the name and colour, the setting has no null to clear to.
+        if (
+            self.ignore_assignments_updated_at is not None
+            and self.ignore_assignments is None
+        ):
+            raise ValueError("ignore_assignments cannot be null")
+        return self
 
 
 class AssignmentOverridePut(BaseModel):
     local_status: str | None = None
-    local_status_updated_at: datetime | None = None
+    local_status_updated_at: AwareDatetime | None = None
     note: str | None = None
-    note_updated_at: datetime | None = None
+    note_updated_at: AwareDatetime | None = None
 
 
 class SkippedDatePut(BaseModel):
@@ -101,11 +124,26 @@ async def list_courses(
             .scalars()
             .all()
         )
+    course_by_id = {c.id: c for c in courses}
     return {
         "courses": [serializers.course_to_dict(c) for c in courses],
-        "overrides": [serializers.course_override_to_dict(o) for o in overrides],
+        "overrides": [
+            _course_override_to_dict(o, course_by_id[o.user_course_id])
+            for o in overrides
+        ],
         "skipped_dates": [serializers.skipped_date_to_dict(s) for s in skipped],
     }
+
+
+def _course_override_to_dict(
+    override: UserCourseOverride, course: UserCourse
+) -> dict:
+    return serializers.course_override_to_dict(
+        override,
+        moodle_id=course.moodle_id,
+        course_no=course.course_no,
+        semester=course.semester,
+    )
 
 
 async def _get_owned_course(
@@ -131,7 +169,7 @@ async def put_course_override(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    await _get_owned_course(session, auth.user_id, course_id)
+    course = await _get_owned_course(session, auth.user_id, course_id)
     override = (
         await session.execute(
             select(UserCourseOverride).where(
@@ -152,6 +190,11 @@ async def put_course_override(
     for field_name, value, ts in (
         ("custom_name", payload.custom_name, payload.custom_name_updated_at),
         ("color_hex", payload.color_hex, payload.color_hex_updated_at),
+        (
+            "ignore_assignments",
+            payload.ignore_assignments,
+            payload.ignore_assignments_updated_at,
+        ),
     ):
         if ts is None:
             continue
@@ -164,6 +207,9 @@ async def put_course_override(
             now=now,
         ):
             changed_fields.append(field_name)
+    # No changelog entry for the id alone: no device shows it.
+    if payload.moodle_course_id is not None:
+        override.moodle_course_id = payload.moodle_course_id
 
     if changed_fields:
         await append_change(
@@ -175,7 +221,7 @@ async def put_course_override(
             payload={"fields": changed_fields},
             device_id=auth.device_id,
         )
-    return {"override": serializers.course_override_to_dict(override)}
+    return {"override": _course_override_to_dict(override, course)}
 
 
 @courses_router.put("/{course_id}/skipped-dates/{skipped_on}")
