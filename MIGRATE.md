@@ -37,10 +37,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 3.3.1 stops signing a device out when its app lost a refresh reply. An app
 that sends a rotated refresh token again, while nothing has used the token
 that replaced it, gets one more rotation up to 24 hours after the first,
-instead of having every session on the device revoked as stolen. A token
-revoked for another reason (logout, device removal, expiry) gets
-`401 session_revoked` and revokes nothing else. It has one migration and
-no new settings to set. On top of the normal upgrade:
+instead of having every session on the device revoked as stolen. Both pairs
+work until one of them is used, so a late duplicate of a refresh no longer
+ends the session the app keeps; a duplicate that arrives within 60 seconds,
+after the app used its pair, is refused. A token revoked for another reason
+(logout, device removal, expiry) gets `401 session_revoked` and revokes
+nothing else. It has one migration and no new settings to set. On top of
+the normal upgrade:
 
 - **Update the submodule.** Run `git submodule update --init` after
   `git pull`. This release pins `app-translation` to a newer commit.
