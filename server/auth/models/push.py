@@ -33,9 +33,10 @@ PUSH_JOB_DEDUPE_ACTIVE_STATUSES: tuple[str, ...] = (
     PushJobStatus.partial_failed.value,
 )
 
-#: That predicate as SQL text. An `ON CONFLICT` aimed at the partial index
-#: repeats it as `index_where`; as bound values, a generic plan of the
-#: statement would not find the index (Postgres 42P10).
+#: Those statuses as SQL text, for an `ON CONFLICT` aimed at that partial
+#: index: as bound values, a generic plan of the statement would not find the
+#: index (Postgres 42P10). Built from the statuses, while the index keeps its
+#: own text, so a status added here fails the tests until a migration follows.
 PUSH_JOB_DEDUPE_ACTIVE_WHERE = sa.text(
     "status IN (" + ", ".join(f"'{s}'" for s in PUSH_JOB_DEDUPE_ACTIVE_STATUSES) + ")"
 )
@@ -120,7 +121,9 @@ class PushJob(Base):
             "user_id",
             "dedupe_key",
             unique=True,
-            postgresql_where=PUSH_JOB_DEDUPE_ACTIVE_WHERE,
+            postgresql_where=sa.text(
+                "status IN ('pending', 'processing', 'sent', 'partial_failed')"
+            ),
         ),
         Index(
             "idx_push_jobs_due",

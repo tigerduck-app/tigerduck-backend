@@ -64,6 +64,12 @@ async def _drop_create_db(admin_url: str, db_name: str) -> None:
     async with admin.connect() as conn:
         await conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {db_name}")
         await conn.exec_driver_sql(f"CREATE DATABASE {db_name}")
+        # Production's pooled connections plan a prepared statement generically
+        # after its first runs, and some statements fail only then (an ON CONFLICT
+        # whose predicate is a bound value). Tests plan that way from the start.
+        await conn.exec_driver_sql(
+            f"ALTER DATABASE {db_name} SET plan_cache_mode = force_generic_plan"
+        )
     await admin.dispose()
 
 
@@ -176,20 +182,6 @@ async def client(
         # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
         ac.app = app
         yield ac
-
-
-@pytest_asyncio.fixture(loop_scope="session")
-async def generic_plan_engine(
-    test_settings: Settings, prepared_engine: AsyncEngine
-) -> AsyncIterator[AsyncEngine]:
-    """An engine whose connections plan every prepared statement generically,
-    as a pooled production connection does after a statement's first runs."""
-    engine = create_async_engine(
-        test_settings.database_url,
-        connect_args={"server_settings": {"plan_cache_mode": "force_generic_plan"}},
-    )
-    yield engine
-    await engine.dispose()
 
 
 @pytest_asyncio.fixture(loop_scope="session")

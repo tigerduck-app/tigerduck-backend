@@ -32,9 +32,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .user import User
 
-#: The predicate of `ux_push_token_active`, as SQL text. An `ON CONFLICT`
-#: aimed at that partial index repeats it as `index_where`; as a bound value,
-#: a generic plan of the statement would not find the index (Postgres 42P10).
+#: The predicate of `ux_push_token_active` as SQL text, for an `ON CONFLICT`
+#: aimed at that partial index: as a bound value, a generic plan of the
+#: statement would not find the index (Postgres 42P10).
 PUSH_TOKEN_ACTIVE_WHERE = sa.text("status = 'active'")
 
 
@@ -277,7 +277,7 @@ class DevicePushToken(Base):
             "token_hash",
             "scope_key",
             unique=True,
-            postgresql_where=PUSH_TOKEN_ACTIVE_WHERE,
+            postgresql_where=sa.text("status = 'active'"),
         ),
         Index("idx_push_tokens_device_active", "device_id", "token_kind", "status"),
         Index(

@@ -142,22 +142,6 @@ async def test_register_live_activity_token_upserts(client) -> None:
         assert jobs[0].payload["kind"] == "live_activity_end"
 
 
-async def test_register_survives_a_generic_plan(client, generic_plan_engine) -> None:
-    """A generic plan cannot match `ON CONFLICT ... WHERE status = $1` to a
-    partial unique index (Postgres answers 42P10), so the route's conflict
-    targets carry their predicates as SQL literals."""
-    client.app.state.session_factory = build_session_factory(generic_plan_engine)
-    login = await _login(client)
-    target = datetime.now(timezone.utc) + timedelta(minutes=15)
-    for token_hex in ("b" * 128, "c" * 128):
-        response = await client.post(
-            "/v3/live-activities/register",
-            headers=_bearer(login),
-            json=_register_body(target, token_hex),
-        )
-        assert response.status_code == 200, response.text
-
-
 async def test_re_registering_moves_an_older_end_job_to_the_front(client) -> None:
     # An end job filed before Live Activity jobs went out first carries the
     # column default; the register that updates it brings it forward too.

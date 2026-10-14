@@ -20,7 +20,6 @@ from server.auth.models import (
     User,
     UserDevice,
 )
-from server.db import build_session_factory
 from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY, activity_end_key
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key
@@ -333,24 +332,6 @@ async def test_reminder_for_a_different_user_is_not_touched(db_session):
     assert cancelled == 1
     assert my_job.status == PushJobStatus.cancelled.value
     assert their_job.status == PushJobStatus.pending.value
-
-
-async def test_an_end_job_is_filed_under_a_generic_plan(db_session, generic_plan_engine):
-    """As the register route's upsert: the partial index's predicate has to
-    reach Postgres as a literal for a generic plan to find the index."""
-    user = await _make_user(db_session)
-    device = await _running_activity(db_session, user, 42)
-    db_session.add(_assignment_row(user, 42, due_at=NOW + timedelta(hours=5)))
-    await db_session.commit()
-
-    async with build_session_factory(generic_plan_engine)() as session:
-        _, created = await cancel_for_submitted(
-            session, user_id=user.id, moodle_assignment_ids={42}, now=NOW
-        )
-        await session.commit()
-
-    assert created == 1
-    assert len(await _end_jobs(db_session, device.id, 42)) == 1
 
 
 async def test_running_activity_for_a_different_user_is_not_touched(db_session):
