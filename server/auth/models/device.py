@@ -22,6 +22,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from server.db import Base
 from .enums import PushTokenStatus
+
 # User and UserDevice reference each other, so a runtime import here
 # would be a cycle. Both references are annotations, and with
 # `from __future__ import annotations` SQLAlchemy resolves the target
@@ -30,6 +31,11 @@ from .enums import PushTokenStatus
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .user import User
+
+#: The predicate of `ux_push_token_active`, as SQL text. An `ON CONFLICT`
+#: aimed at that partial index repeats it as `index_where`; as a bound value,
+#: a generic plan of the statement would not find the index (Postgres 42P10).
+PUSH_TOKEN_ACTIVE_WHERE = sa.text("status = 'active'")
 
 
 class UserDevice(Base):
@@ -271,7 +277,7 @@ class DevicePushToken(Base):
             "token_hash",
             "scope_key",
             unique=True,
-            postgresql_where=sa.text("status = 'active'"),
+            postgresql_where=PUSH_TOKEN_ACTIVE_WHERE,
         ),
         Index("idx_push_tokens_device_active", "device_id", "token_kind", "status"),
         Index(

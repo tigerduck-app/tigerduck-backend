@@ -25,14 +25,19 @@ from server.db import Base
 from .enums import PushDeliveryStatus, PushJobStatus
 
 #: The statuses under which a push job's `(user_id, dedupe_key)` is taken:
-#: the predicate of `ux_push_jobs_dedupe_active` below. An `ON CONFLICT`
-#: aimed at that partial index has to repeat it as `index_where`, or
-#: Postgres cannot match the index.
+#: the predicate of `ux_push_jobs_dedupe_active` below.
 PUSH_JOB_DEDUPE_ACTIVE_STATUSES: tuple[str, ...] = (
     PushJobStatus.pending.value,
     PushJobStatus.processing.value,
     PushJobStatus.sent.value,
     PushJobStatus.partial_failed.value,
+)
+
+#: That predicate as SQL text. An `ON CONFLICT` aimed at the partial index
+#: repeats it as `index_where`; as bound values, a generic plan of the
+#: statement would not find the index (Postgres 42P10).
+PUSH_JOB_DEDUPE_ACTIVE_WHERE = sa.text(
+    "status IN (" + ", ".join(f"'{s}'" for s in PUSH_JOB_DEDUPE_ACTIVE_STATUSES) + ")"
 )
 
 
@@ -115,9 +120,7 @@ class PushJob(Base):
             "user_id",
             "dedupe_key",
             unique=True,
-            postgresql_where=sa.text(
-                "status IN ('pending', 'processing', 'sent', 'partial_failed')"
-            ),
+            postgresql_where=PUSH_JOB_DEDUPE_ACTIVE_WHERE,
         ),
         Index(
             "idx_push_jobs_due",

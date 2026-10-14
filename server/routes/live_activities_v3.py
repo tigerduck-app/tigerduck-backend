@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import (
     PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
+    PUSH_JOB_DEDUPE_ACTIVE_WHERE,
+    PUSH_TOKEN_ACTIVE_WHERE,
     DevicePushToken,
     PushJob,
     PushJobStatus,
@@ -160,7 +162,7 @@ async def register_live_activity(
             # ux_push_token_active is a PARTIAL unique index (WHERE
             # status='active'); the predicate must be repeated here or
             # Postgres can't match the ON CONFLICT target.
-            index_where=DevicePushToken.status == PushTokenStatus.active.value,
+            index_where=PUSH_TOKEN_ACTIVE_WHERE,
             set_={
                 "device_id": auth.device_id,
                 "token_value": payload.update_token_hex,
@@ -204,7 +206,7 @@ async def register_live_activity(
                 index_elements=["user_id", "dedupe_key"],
                 # ux_push_jobs_dedupe_active is partial (active statuses);
                 # repeat its predicate so ON CONFLICT matches the index.
-                index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
+                index_where=PUSH_JOB_DEDUPE_ACTIVE_WHERE,
                 set_={
                     "fire_at": payload.countdown_target,
                     # A job filed before Live Activity jobs went out first

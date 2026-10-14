@@ -179,6 +179,20 @@ async def client(
 
 
 @pytest_asyncio.fixture(loop_scope="session")
+async def generic_plan_engine(
+    test_settings: Settings, prepared_engine: AsyncEngine
+) -> AsyncIterator[AsyncEngine]:
+    """An engine whose connections plan every prepared statement generically,
+    as a pooled production connection does after a statement's first runs."""
+    engine = create_async_engine(
+        test_settings.database_url,
+        connect_args={"server_settings": {"plan_cache_mode": "force_generic_plan"}},
+    )
+    yield engine
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture(loop_scope="session")
 async def migration_db_url(test_settings: Settings) -> AsyncIterator[str]:
     """An empty database of its own, for a test that runs the migrations
     over it the way a deploy does."""
