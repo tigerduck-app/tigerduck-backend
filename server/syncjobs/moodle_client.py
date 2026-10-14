@@ -19,6 +19,13 @@ hangs off it:
 
 Past a job's attempts the executor keeps retrying `SsoUnavailable`,
 `MoodleRateLimited` and `MoodleUnreachable`, at the job's policy interval.
+
+The push pipeline's pre-send check (`check_submission_status`) adds two:
+
+* `MoodleUnavailable`   → Moodle failing as a whole: no connection, a
+                          timeout, HTTP 5xx or a body that is not JSON.
+* `MoodleRefused`       → Moodle's own exception about one token or one
+                          assignment, other than `invalidtoken`.
 """
 
 from __future__ import annotations
@@ -71,6 +78,14 @@ class SsoAuthFailed(MoodleClientError):
 
 
 class SsoUnavailable(MoodleClientError):
+    pass
+
+
+class MoodleUnavailable(MoodleClientError):
+    pass
+
+
+class MoodleRefused(MoodleClientError):
     pass
 
 
@@ -177,6 +192,12 @@ class FetchedSubmission:
     moodle_assignment_id: int
     is_submitted: bool
     submitted_at: datetime | None
+    # Read by the push pipeline's pre-send check (push/presend.py), not by
+    # the probe: whether the assignment takes an online submission at all,
+    # whether the teacher locked this student's, and their extension.
+    submissions_enabled: bool = True
+    locked: bool = False
+    extension_due_at: datetime | None = None
 
 
 class AssignmentFetcher(Protocol):
@@ -185,6 +206,12 @@ class AssignmentFetcher(Protocol):
     async def fetch_submission_status(
         self, *, token: str, assignment_ids: list[int], max_concurrency: int
     ) -> dict[int, FetchedSubmission]: ...
+
+
+class SubmissionStatusChecker(Protocol):
+    async def check_submission_status(
+        self, *, token: str, assignment_id: int, timeout_seconds: float
+    ) -> FetchedSubmission | None: ...
 
 
 class CourseFetcher(Protocol):
@@ -295,26 +322,73 @@ async def _get_moodle_userid(
     return int(body["userid"])
 
 
+async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> dict:
+    """One webservice call for `check_submission_status`, telling Moodle
+    failing as a whole (MoodleUnavailable, MoodleRateLimited) from its own
+    answer about this token or assignment (MoodleTokenInvalid,
+    MoodleRefused). Raised codes are fixed strings, never the request."""
+    try:
+        response = await client.get(url, params=params)
+    except httpx.RequestError as exc:
+        raise MoodleUnavailable(type(exc).__name__) from exc
+    if response.status_code == 429:
+        raise MoodleRateLimited("http_429")
+    if response.status_code >= 500:
+        raise MoodleUnavailable(f"http_{response.status_code}")
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise MoodleUnavailable("invalid_json") from exc
+    if not isinstance(body, dict):
+        raise MoodleRefused("unexpected_shape")
+    if "exception" in body:
+        errorcode = str(body.get("errorcode") or "moodle_exception")
+        if errorcode == "invalidtoken":
+            raise MoodleTokenInvalid(errorcode)
+        raise MoodleRefused(errorcode)
+    return body
+
+
 def _parse_submission_status(
     assignment_id: int, body: dict
 ) -> FetchedSubmission | None:
-    """Read `lastattempt.submission` into a FetchedSubmission.
+    """Read `lastattempt` into a FetchedSubmission.
+
+    A team assignment keeps its state in `lastattempt.teamsubmission`; the
+    member's own `submission` is then missing or never leaves `new`. Either
+    one at `submitted` counts, with its `timemodified` as the time. Neither
+    present is a student who never started one: Moodle creates the record
+    only then, and leaves the key out until it exists.
 
     Moodle omits `lastattempt` entirely for an assignment the user cannot
     submit to; that is not the same as "not submitted", so it yields None
     and the caller leaves the row alone.
+
+    `submissionsenabled` and `locked` are booleans and `extensionduedate`
+    unix seconds or null; a value of another shape reads as the default,
+    an open assignment without an extension.
     """
     last = body.get("lastattempt")
     if not isinstance(last, dict):
         return None
-    submission = last.get("submission")
-    if not isinstance(submission, dict):
-        return None
-    submitted = str(submission.get("status") or "") == "submitted"
+    submitted = next(
+        (
+            attempt
+            for attempt in (last.get("submission"), last.get("teamsubmission"))
+            if isinstance(attempt, dict)
+            and str(attempt.get("status") or "") == "submitted"
+        ),
+        None,
+    )
     return FetchedSubmission(
         moodle_assignment_id=assignment_id,
-        is_submitted=submitted,
-        submitted_at=_ts(submission.get("timemodified")) if submitted else None,
+        is_submitted=submitted is not None,
+        submitted_at=(
+            _ts(submitted.get("timemodified")) if submitted is not None else None
+        ),
+        submissions_enabled=last.get("submissionsenabled") is not False,
+        locked=last.get("locked") is True,
+        extension_due_at=_ts(last.get("extensionduedate")),
     )
 
 
@@ -643,6 +717,47 @@ class HttpAssignmentFetcher:
             return results
 
         return results
+
+    async def check_submission_status(
+        self, *, token: str, assignment_id: int, timeout_seconds: float
+    ) -> FetchedSubmission | None:
+        """One assignment's submission state, for the push pipeline's
+        pre-send check (`push/presend.py`), which must tell Moodle failing
+        for everyone from an answer about this one token or assignment.
+        `fetch_submission_status` leaves either out of its result alike.
+
+        Raises as `_checked_call` does, and returns None for an answer with
+        no `lastattempt`. Each request times out after `timeout_seconds`,
+        whatever this fetcher's own timeout.
+        """
+        url = f"{self._base_url}{_WS_PATH}"
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds, transport=self._transport
+        ) as client:
+            site_info = await _checked_call(
+                client,
+                url,
+                {
+                    "wstoken": token,
+                    "wsfunction": "core_webservice_get_site_info",
+                    "moodlewsrestformat": "json",
+                },
+            )
+            userid = site_info.get("userid")
+            if type(userid) is not int:
+                raise MoodleRefused("missing_userid_in_site_info")
+            body = await _checked_call(
+                client,
+                url,
+                {
+                    "wstoken": token,
+                    "wsfunction": "mod_assign_get_submission_status",
+                    "moodlewsrestformat": "json",
+                    "assignid": assignment_id,
+                    "userid": userid,
+                },
+            )
+        return _parse_submission_status(assignment_id, body)
 
 
 class HttpCourseFetcher:

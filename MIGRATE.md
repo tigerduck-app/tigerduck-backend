@@ -32,6 +32,28 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.3
+
+- **Assignment reminders are checked right before they go out.** Before an
+  assignment reminder or an `assignmentUrgent` Live Activity start is first
+  delivered, the push pipeline checks that the assignment still needs a
+  submission: the database first, then one `mod_assign_get_submission_status`
+  request with the student's stored token. A submitted assignment cancels the
+  job as `submitted_before_send`; one marked done or ignored, in an ignored
+  course, gone, past or moved from its due date, closed to submissions, locked
+  or extended cancels it as `stale_before_send`. When no answer comes, the job
+  is retried every `push_presend_retry_seconds` (60) until
+  `push_presend_grace_minutes` (10) after its fire time, then cancelled as
+  `unverified_before_send`. Expect about one more Moodle request per reminder;
+  once Moodle fails as a whole, a breaker stops asking for the rest of the
+  tick.
+- New optional settings, shown with their defaults:
+  `TIGERDUCK_PUSH_PRESEND_RETRY_SECONDS=60`,
+  `TIGERDUCK_PUSH_PRESEND_GRACE_MINUTES=10`,
+  `TIGERDUCK_PUSH_PRESEND_TIMEOUT_SECONDS=5`.
+- New metric: `tigerduck_push_presend_checks_total`, by `verdict`.
+- No migration and no app update.
+
 ## Upgrading to 3.3.2
 
 - **The 48-hour reminder sees early submissions.** The submission probe now

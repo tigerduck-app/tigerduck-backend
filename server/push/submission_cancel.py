@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import (
     PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
+    PUSH_JOB_DEDUPE_ACTIVE_WHERE,
     DevicePushToken,
     PushJob,
     PushJobStatus,
@@ -330,7 +331,7 @@ async def _end_running_activities(
                 # ux_push_jobs_dedupe_active is partial (active statuses);
                 # repeat its predicate so ON CONFLICT matches the index --
                 # same pattern as `live_activities_v3.register_live_activity`.
-                index_where=PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
+                index_where=PUSH_JOB_DEDUPE_ACTIVE_WHERE,
                 set_={
                     "fire_at": now,
                     # Same reason as the register route's upsert.

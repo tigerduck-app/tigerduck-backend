@@ -37,6 +37,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     DevicePushToken,
     PushDelivery,
@@ -50,6 +51,7 @@ from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.tests.conftest import SubmissionStatusStub
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -83,6 +85,9 @@ def _worker(prepared_engine, test_settings):
         settings=test_settings,
         router=PushRouter(apple=ScriptedSender(), android=ScriptedSender()),
         worker_id="reminder-gating-test-worker",
+        # Every assignment Moodle is asked about is open.
+        cipher=CredentialCipher.from_settings(test_settings),
+        fetcher=SubmissionStatusStub(),
     )
 
 
@@ -155,6 +160,8 @@ async def test_assignment_reminder_gate(
     db_session,
     prepared_engine,
     test_settings,
+    make_assignment,
+    store_moodle_token,
     case,
     platform,
     app_version,
@@ -173,7 +180,21 @@ async def test_assignment_reminder_gate(
         cloud_sync_enabled=cloud_sync_enabled,
         sync_assignment_reminders=sync_assignment_reminders,
     )
-    job = _job(user, dedupe_key=f"assignment:test:{case}")
+    # An open assignment, so the pre-send check passes the reminder on and
+    # only the device gate decides.
+    due_at = datetime.now(UTC) + timedelta(days=1)
+    await make_assignment(user_id=user.id, moodle_assignment_id=3, due_at=due_at)
+    await store_moodle_token(user.id)
+    job = _job(
+        user,
+        dedupe_key=f"assignment:test:{case}",
+        payload={
+            "title": "t",
+            "body": "b",
+            "moodle_assignment_id": 3,
+            "due_epoch": int(due_at.timestamp()),
+        },
+    )
     db_session.add(job)
     await db_session.commit()
 

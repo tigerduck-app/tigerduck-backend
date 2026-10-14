@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from server.auth.crypto import CredentialCipher
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
 from server.i18n import _BUNDLE_DIR, translate
@@ -31,6 +32,7 @@ from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key, scan_assignment_reminders
 from server.push.router import PushRouter
 from server.sync.models import UserAssignment, UserSettingsDocument
+from server.tests.conftest import SubmissionStatusStub
 
 # Applied per-function rather than as a module-level `pytestmark`: most of
 # this module is plain sync functions with no fixture, and pytest-asyncio
@@ -267,11 +269,12 @@ async def _jobs(session, user_id):
 
 @asyncio_session
 async def test_each_device_gets_the_reminder_in_its_own_language(
-    db_session, prepared_engine, test_settings
+    db_session, prepared_engine, test_settings, store_moodle_token
 ):
     user, _ = await _user_with_assignment(db_session, with_iphone=False)
     await _iphone(db_session, user, "iphone-tw", "zh-Hant-TW")
     await _iphone(db_session, user, "ipad-jp", "ja-JP", platform="ipados")
+    await store_moodle_token(user.id)
     await db_session.commit()
 
     factory = build_session_factory(prepared_engine)
@@ -289,6 +292,9 @@ async def test_each_device_gets_the_reminder_in_its_own_language(
             settings=test_settings,
             router=PushRouter(apple=apple, android=ScriptedSender()),
             worker_id="reminder-copy-test-worker",
+            # The assignment is still open on Moodle.
+            cipher=CredentialCipher.from_settings(test_settings),
+            fetcher=SubmissionStatusStub(),
         )
     )
 

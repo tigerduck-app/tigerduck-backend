@@ -25,6 +25,7 @@ from server.push.payload import (
     build_fcm_alert_request,
     thread_id_for,
 )
+from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 
 _RESERVED = {"title", "body"}
 _DEFAULT_TTL_SECONDS = 24 * 3600
@@ -79,6 +80,19 @@ def _collapse_key(channel: str, payload: dict[str, Any]) -> str | None:
             return None
         return "la:" + hashlib.sha256(activity_id.encode()).hexdigest()[:32]
     return _COLLAPSE_KEYS.get(channel)
+
+
+def _alert_expiration(
+    channel: str, payload: dict[str, Any], timestamp: int, ttl_seconds: int
+) -> int:
+    """When APNs may drop an alert it could not deliver. An assignment
+    reminder is held until its due time at most: a phone offline until
+    after the deadline must not show "due in 2 hours" when it comes back."""
+    expiration = timestamp + ttl_seconds
+    due_epoch = payload.get("due_epoch")
+    if channel == REMINDER_CHANNEL and type(due_epoch) is int:
+        return min(expiration, due_epoch)
+    return expiration
 
 
 def _extras(payload: dict[str, Any]) -> dict[str, str]:
@@ -241,7 +255,7 @@ def build_apns_for_job(
     return ApnsRequest(
         device_token=token_value,
         topic=bundle_id,
-        expiration=timestamp + ttl_seconds,
+        expiration=_alert_expiration(channel, payload, timestamp, ttl_seconds),
         priority=10,
         message=message,
         kind=PushKind.alert,

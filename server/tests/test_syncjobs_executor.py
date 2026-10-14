@@ -696,7 +696,7 @@ async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothin
     async def failing_trigger(session, user_id, *, source=None):
         await session.execute(text("SELECT 1/0"))
 
-    monkeypatch.setattr(executor_module, "_enqueue_sync_trigger", failing_trigger)
+    monkeypatch.setattr(executor_module, "enqueue_sync_trigger", failing_trigger)
     body = {
         "courses": [],
         "warnings": [{"item": "course", "itemid": 7001, "warningcode": "1"}],

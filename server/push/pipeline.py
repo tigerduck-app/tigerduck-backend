@@ -5,6 +5,9 @@ Claim/execute split mirrors `server/syncjobs/executor.py`: stale
 §2), then a short transaction claims due jobs under an advisory lock +
 FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
+  check:       an assignment reminder or countdown start is held back
+               unless its assignment is confirmed still open
+               (`push/presend.py`), asked before the transaction opens
   materialize: one push_deliveries row per active token
                (channel-aware: standard tokens for regular pushes; on the
                schedule channel a start goes to the device's push_to_start
@@ -35,8 +38,10 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server import metrics
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.academic_calendar.terms import load_term_dates, outside_term
+from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
     DevicePushToken,
@@ -63,8 +68,17 @@ from server.push.notification_copy import (
     build_reauth_payload,
 )
 from server.push.payload import _to_unix_seconds
+from server.push.presend import (
+    MoodleBreaker,
+    PresendCheck,
+    check_before_send,
+    needs_check,
+    recheck_rows,
+    record_submitted,
+)
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
 
@@ -88,6 +102,10 @@ class PushPipelineWorker:
     settings: Settings
     router: PushRouter
     worker_id: str
+    # The pre-send check's way to Moodle. Without either, no assignment
+    # reminder or countdown start can be confirmed, so none is sent.
+    cipher: CredentialCipher | None = None
+    fetcher: SubmissionStatusChecker | None = None
 
 
 def _is_unregistered(status: str | None, description: str | None) -> bool:
@@ -134,6 +152,7 @@ async def run_push_tick(worker: PushPipelineWorker) -> int:
     """
     await _recover_stale_jobs(worker)
     processed: set[int] = set()
+    breaker = MoodleBreaker()
     while True:
         claimed = await _claim_due_jobs(worker, skip=processed)
         if not claimed:
@@ -142,7 +161,7 @@ async def run_push_tick(worker: PushPipelineWorker) -> int:
             if index and await _outranked(worker, priority, skip=processed):
                 await _release_claimed(worker, [jid for jid, _ in claimed[index:]])
                 break
-            await _process_job(worker, job_id=job_id)
+            await _process_job(worker, job_id=job_id, breaker=breaker)
             processed.add(job_id)
     return len(processed)
 
@@ -271,8 +290,13 @@ async def _release_claimed(worker: PushPipelineWorker, job_ids: list[int]) -> No
         )
 
 
-async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
+async def _process_job(
+    worker: PushPipelineWorker, *, job_id: int, breaker: MoodleBreaker
+) -> None:
     try:
+        # Asked before the job's row lock is taken: the check may wait on
+        # Moodle, and no transaction stays open while it does.
+        check = await check_before_send(worker, job_id=job_id, breaker=breaker)
         async with session_scope(worker.session_factory) as session:
             job = (
                 await session.execute(
@@ -286,6 +310,18 @@ async def _process_job(worker: PushPipelineWorker, *, job_id: int) -> None:
                 # Stale-recovered (and possibly reclaimed) between our claim
                 # commit and now — never double-process.
                 logger.warning("push.job_reclaimed", job_id=job_id)
+                return
+            if check is not None:
+                if await _held_back(worker, session, job, check):
+                    return
+            elif needs_check(job) and not await _has_deliveries(session, job):
+                # The check saw this job unclaimed: another tick, under the
+                # same worker id, recovered and claimed it again meanwhile.
+                # Unchecked, it goes back for the next round to check.
+                job.status = PushJobStatus.pending.value
+                job.locked_by = None
+                job.locked_at = None
+                logger.warning("push.presend_check_missed", job_id=job.id)
                 return
             if await _materialize(
                 session, job, school_tz=worker.settings.course_reminder_timezone
@@ -531,6 +567,63 @@ def _settle(job: PushJob, *, status: PushJobStatus, error: str, now: datetime) -
         job.cancelled_at = now
     job.locked_by = None
     job.locked_at = None
+
+
+async def _held_back(
+    worker: PushPipelineWorker, session: AsyncSession, job: PushJob, check: PresendCheck
+) -> bool:
+    """Act on the pre-send check's verdict in the transaction that holds the
+    job; True when the job is not to be delivered now.
+
+    A `send` verdict stands only if the rows, read again here under the
+    job's lock, still say the job is due (they were read before the Moodle
+    call), and only within the grace after the job's fire time. An
+    `unverified` job goes back to pending without spending an attempt, since
+    nothing was sent, until that grace has passed; then it is cancelled.
+    """
+    now = datetime.now(UTC)
+    settings = worker.settings
+    grace_end = job.fire_at + timedelta(minutes=settings.push_presend_grace_minutes)
+    deferred = False
+    if check.verdict == "send":
+        check = await recheck_rows(session, job, now) or check
+    if check.verdict == "send" and now >= grace_end:
+        # The copy counts from the fire time ("30 minutes left"), which is
+        # wrong this late, whether the job was claimed late or retried.
+        check = PresendCheck("gone", "past_grace", check.moodle_assignment_id)
+    if check.verdict == "submitted":
+        _settle(
+            job, status=PushJobStatus.cancelled, error="submitted_before_send", now=now
+        )
+        await record_submitted(session, user_id=job.user_id, check=check, now=now)
+    elif check.verdict == "gone":
+        _settle(job, status=PushJobStatus.cancelled, error="stale_before_send", now=now)
+    elif check.verdict == "unverified":
+        if now < grace_end:
+            job.status = PushJobStatus.pending.value
+            job.available_at = now + timedelta(
+                seconds=settings.push_presend_retry_seconds
+            )
+            job.locked_by = None
+            job.locked_at = None
+            deferred = True
+        else:
+            _settle(
+                job,
+                status=PushJobStatus.cancelled,
+                error="unverified_before_send",
+                now=now,
+            )
+    logger.info(
+        "push.presend_check",
+        job_id=job.id,
+        channel=job.channel,
+        verdict=check.verdict,
+        reason=check.reason,
+        deferred=deferred,
+    )
+    metrics.observe_presend_check(check.verdict)
+    return check.verdict != "send"
 
 
 def _class_day(job: PushJob, school_tz: str) -> date:

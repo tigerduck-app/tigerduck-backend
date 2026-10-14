@@ -448,6 +448,27 @@ def observe_push_send(provider: str, outcome: str, seconds: float) -> None:
     PUSH_SEND_DURATION.labels(provider=provider, outcome=outcome).observe(seconds)
 
 
+# --- Pre-send check of assignment reminders (push/presend.py) ---
+
+PRESEND_VERDICTS = ("send", "submitted", "gone", "unverified")
+
+PUSH_PRESEND_CHECKS = Counter(
+    "tigerduck_push_presend_checks_total",
+    "Checks of an assignment reminder or countdown start right before its "
+    "first delivery, by verdict: send; submitted or gone, both cancelled; "
+    "unverified, retried until its grace runs out and then cancelled.",
+    ["verdict"],
+)
+
+# At zero from startup, as the send series above.
+for _verdict in PRESEND_VERDICTS:
+    PUSH_PRESEND_CHECKS.labels(verdict=_verdict)
+
+
+def observe_presend_check(verdict: str) -> None:
+    PUSH_PRESEND_CHECKS.labels(verdict=verdict).inc()
+
+
 # --- LLM ---
 
 LLM_REQUEST_DURATION = Histogram(

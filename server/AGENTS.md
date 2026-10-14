@@ -64,8 +64,11 @@ server/
 │   ├── fcm_client.py          # firebase-admin sender + RecordingFcmSender
 │   ├── router.py              # platform routing for outbound pushes
 │   ├── reminders.py           # assignment reminder scan
+│   ├── presend.py             # just before an assignment reminder or countdown start:
+│   │                          #   is the assignment still open? (rows, then Moodle)
 │   ├── client_versions.py     # app versions that still schedule assignment reminders locally
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
+│   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
 │   ├── course_reminders.py    # course reminder scan
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
@@ -174,7 +177,11 @@ into the backend container via `docker-compose.yml`.
   at a time.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
-  must repeat that predicate or Postgres cannot match the index.
+  must repeat that predicate or Postgres cannot match the index. Pass it as
+  SQL text (`PUSH_JOB_DEDUPE_ACTIVE_WHERE`, and `PUSH_TOKEN_ACTIVE_WHERE` for
+  `ux_push_token_active`), not as `status.in_(...)`: a bound value there
+  fails with 42P10 once Postgres plans the statement generically, which the
+  tests do from the start.
 - Two kinds of Live Activity job share the `schedule` channel, told apart
   by `payload["kind"]`. A start (`schedule`, from `/schedule/sync`) goes to
   the device's `push_to_start` token as an `event: start` push carrying
@@ -212,6 +219,13 @@ into the backend container via `docker-compose.yml`.
   cancel what they filed. A device whose token is gone for now (APNs
   dropped it, the app has not registered a new one) keeps its filed
   reminders; only new ones wait for a token.
+- Before its first delivery, an assignment reminder or `assignmentUrgent`
+  start is checked against the user's rows of the assignment (any course
+  id, deleted or not) and then Moodle (`push/presend.py`). It fails
+  closed: one nobody can confirm still open is not sent, but retried until
+  `push_presend_grace_minutes` past its fire time and then cancelled
+  (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
+  rather than costing a timeout per job.
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
