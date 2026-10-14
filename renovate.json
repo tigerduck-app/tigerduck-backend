@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "baseBranchPatterns": ["dev"],
+  "enabledManagers": ["github-actions", "pep621", "npm", "dockerfile", "docker-compose", "git-submodules"],
+  "labels": ["dependencies"],
+  "git-submodules": { "enabled": true },
+  "timezone": "Asia/Taipei",
+  "schedule": ["before 9am on monday"],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "matchManagers": ["github-actions", "pep621", "npm", "dockerfile", "docker-compose"],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "matchManagers": ["git-submodules"],
+      "schedule": ["at any time"]
+    },
+    {
+      "description": "A Postgres major upgrade needs a dump and restore, not an image bump.",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["postgres"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    }
+  ]
+}
