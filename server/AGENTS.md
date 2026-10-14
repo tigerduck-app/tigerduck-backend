@@ -177,7 +177,11 @@ into the backend container via `docker-compose.yml`.
   at a time.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
-  must repeat that predicate or Postgres cannot match the index.
+  must repeat that predicate or Postgres cannot match the index. Pass it as
+  SQL text (`PUSH_JOB_DEDUPE_ACTIVE_WHERE`, and `PUSH_TOKEN_ACTIVE_WHERE` for
+  `ux_push_token_active`), not as `status.in_(...)`: a bound value there
+  fails with 42P10 once Postgres plans the statement generically, which the
+  tests do from the start.
 - Two kinds of Live Activity job share the `schedule` channel, told apart
   by `payload["kind"]`. A start (`schedule`, from `/schedule/sync`) goes to
   the device's `push_to_start` token as an `event: start` push carrying

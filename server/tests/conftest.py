@@ -64,6 +64,12 @@ async def _drop_create_db(admin_url: str, db_name: str) -> None:
     async with admin.connect() as conn:
         await conn.exec_driver_sql(f"DROP DATABASE IF EXISTS {db_name}")
         await conn.exec_driver_sql(f"CREATE DATABASE {db_name}")
+        # Production's pooled connections plan a prepared statement generically
+        # after its first runs, and some statements fail only then (an ON CONFLICT
+        # whose predicate is a bound value). Tests plan that way from the start.
+        await conn.exec_driver_sql(
+            f"ALTER DATABASE {db_name} SET plan_cache_mode = force_generic_plan"
+        )
     await admin.dispose()
 
 
