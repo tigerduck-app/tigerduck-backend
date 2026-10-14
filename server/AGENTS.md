@@ -64,8 +64,11 @@ server/
 │   ├── fcm_client.py          # firebase-admin sender + RecordingFcmSender
 │   ├── router.py              # platform routing for outbound pushes
 │   ├── reminders.py           # assignment reminder scan
+│   ├── presend.py             # just before an assignment reminder or countdown start:
+│   │                          #   is the assignment still open? (rows, then Moodle)
 │   ├── client_versions.py     # app versions that still schedule assignment reminders locally
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
+│   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
 │   ├── course_reminders.py    # course reminder scan
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
@@ -212,6 +215,13 @@ into the backend container via `docker-compose.yml`.
   cancel what they filed. A device whose token is gone for now (APNs
   dropped it, the app has not registered a new one) keeps its filed
   reminders; only new ones wait for a token.
+- Before its first delivery, an assignment reminder or `assignmentUrgent`
+  start is checked against the user's rows of the assignment (any course
+  id, deleted or not) and then Moodle (`push/presend.py`). It fails
+  closed: one nobody can confirm still open is not sent, but retried until
+  `push_presend_grace_minutes` past its fire time and then cancelled
+  (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
+  rather than costing a timeout per job.
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one

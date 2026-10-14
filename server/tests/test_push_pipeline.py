@@ -13,6 +13,7 @@ from server.academic_calendar.models import (
     SemesterTerm,
     UserHolidayOverride,
 )
+from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     DevicePushToken,
     PushDelivery,
@@ -28,6 +29,7 @@ from server.push.dedupe import activity_end_key, schedule_key
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.tests.conftest import SubmissionStatusStub
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -64,6 +66,9 @@ def _worker(prepared_engine, test_settings, apple=None, android=None):
             apple=apple or ScriptedSender(), android=android or ScriptedSender()
         ),
         worker_id="push-test-worker",
+        # Every assignment Moodle is asked about is open.
+        cipher=CredentialCipher.from_settings(test_settings),
+        fetcher=SubmissionStatusStub(),
     )
 
 
@@ -193,7 +198,7 @@ async def test_a_job_queued_without_available_at_is_claimed_whichever_way_the_cl
     `now()`, a database clock even a few milliseconds ahead of the app
     host's (a Docker VM's drifts against its host's) stamps it later than
     the claim's own `now`, and `_trigger_push_tick` firing immediately
-    after the job is queued (as it does from `_enqueue_sync_trigger`) can
+    after the job is queued (as it does from `enqueue_sync_trigger`) can
     miss the job for a whole retry round.
 
     Pinned by constructing the job on a clock that lags the claim's and on
@@ -291,7 +296,7 @@ async def test_a_job_that_comes_due_mid_batch_goes_before_the_rest_it_outranks(
     order: list[int] = []
     urgent_ids: list[int] = []
 
-    async def process_job(worker, *, job_id):
+    async def process_job(worker, *, job_id, **kwargs):
         if not urgent_ids:
             async with factory() as session:
                 urgent = _job(user, dedupe_key="system:urgent", priority=10)
@@ -299,7 +304,7 @@ async def test_a_job_that_comes_due_mid_batch_goes_before_the_rest_it_outranks(
                 await session.commit()
                 urgent_ids.append(urgent.id)
         order.append(job_id)
-        await real_process_job(worker, job_id=job_id)
+        await real_process_job(worker, job_id=job_id, **kwargs)
 
     monkeypatch.setattr(pipeline_module, "_process_job", process_job)
     processed = await run_push_tick(_worker(prepared_engine, test_settings))
@@ -811,24 +816,38 @@ async def test_activity_job_without_activity_id_sends_nothing(
 # put a second copy on the lock screen and ring the alert for it.
 
 
-def _start_job(user, device, *, scenario="inClass"):
+def _start_job(user, device, *, scenario="inClass", source_id="c1"):
     return _job(
         user,
         device_id=device.id,
         channel="schedule",
         scenario=scenario,
-        dedupe_key=schedule_key(device.id, "c1", scenario),
+        dedupe_key=schedule_key(device.id, source_id, scenario),
         payload={
             "kind": "schedule",
             "scenario": scenario,
-            "source_id": "c1",
-            "activity_id": f"{scenario}::c1",
+            "source_id": source_id,
+            "activity_id": f"{scenario}::{source_id}",
             "title": "Math",
             "subtitle": "09:10-10:00",
             "accentHex": 1,
-            "sourceId": "c1",
+            "sourceId": source_id,
         },
     )
+
+
+async def _deadline_start(session, user, device, make_assignment, store_moodle_token):
+    """An assignment's countdown start the pre-send check lets through: the
+    assignment is due tomorrow, and Moodle can be asked about it."""
+    await make_assignment(
+        user_id=user.id,
+        moodle_assignment_id=501,
+        due_at=datetime.now(UTC) + timedelta(days=1),
+    )
+    await store_moodle_token(user.id)
+    job = _start_job(user, device, scenario="assignmentUrgent", source_id="501")
+    session.add(job)
+    return job
 
 
 def _push_to_start_token(device, *, token_value="pts-tok", scope_key="RenamedAttributes"):
@@ -1191,12 +1210,18 @@ async def test_a_bad_school_timezone_holds_back_nothing_but_class_starts(
 
 
 async def test_assignment_start_fires_on_a_holiday(
-    db_session, prepared_engine, test_settings
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
     """A deadline on a day off is still a deadline."""
-    job, apple = await _tick_start_on_a_holiday(
-        db_session, prepared_engine, test_settings, scenario="assignmentUrgent"
+    user, device, _ = await _setup_user_device_token(db_session)
+    db_session.add(_push_to_start_token(device))
+    job = await _deadline_start(
+        db_session, user, device, make_assignment, store_moodle_token
     )
+    db_session.add(_holiday_on(job.fire_at))
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
 
     assert [r.device_token for r in apple.requests] == ["pts-tok"]
     assert job.status == "sent"
@@ -1242,7 +1267,7 @@ async def test_class_start_is_cancelled_after_the_term(
 
 
 async def test_only_class_starts_before_the_term_are_held(
-    db_session, prepared_engine, test_settings
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
     """The term opens tomorrow: tomorrow's class starts, today's does not,
     and a deadline today still does."""
@@ -1254,7 +1279,9 @@ async def test_only_class_starts_before_the_term_are_held(
         "countdownTarget": (tomorrows.fire_at + timedelta(days=1)).isoformat(),
     }
     todays = _start_job(user, device, scenario="inClass")
-    deadline = _start_job(user, device, scenario="assignmentUrgent")
+    deadline = await _deadline_start(
+        db_session, user, device, make_assignment, store_moodle_token
+    )
     opening = _taipei_day(todays.fire_at) + timedelta(days=1)
     db_session.add_all(
         [tomorrows, todays, deadline, _term(opening, opening + timedelta(days=120))]
@@ -1354,11 +1381,14 @@ async def _delivered_device_ids_for_job(session, job_id) -> set:
 
 
 async def test_bulletin_flag_false_blocks_only_the_bulletin_channel(
-    db_session, prepared_engine, test_settings
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
     """One opted-out device, three jobs: the bulletin is withheld, and an
     assignment reminder and a server-started Live Activity still land."""
     user, device = await _bulletin_flag_device(db_session, bulletin_push_enabled=False)
+    due_at = datetime.now(UTC) + timedelta(days=1)
+    await make_assignment(user_id=user.id, moodle_assignment_id=502, due_at=due_at)
+    await store_moodle_token(user.id)
 
     bulletin_job = _job(
         user,
@@ -1371,6 +1401,12 @@ async def test_bulletin_flag_false_blocks_only_the_bulletin_channel(
         channel=REMINDER_CHANNEL,
         scenario="reminder_24h",
         dedupe_key="assignment:test:flag-false",
+        payload={
+            "title": "t",
+            "body": "b",
+            "moodle_assignment_id": 502,
+            "due_epoch": int(due_at.timestamp()),
+        },
     )
     activity_job = _start_job(user, device)
     db_session.add_all([bulletin_job, reminder_job, activity_job])

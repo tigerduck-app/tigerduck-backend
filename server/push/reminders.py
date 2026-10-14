@@ -2,7 +2,7 @@
 
 Scan-based (default every 300s): eligible = not deleted, not submitted,
 local_status not in (locally_completed/ignored/archived), not in a course
-whose assignments the user ignores (`_ignored_courses`), due within the
+whose assignments the user ignores (`ignored_courses`), due within the
 scan window, the user's `notification` settings document has
 assignments enabled (no document → enabled with the server default
 offsets), and the user has a device the pipeline would deliver the
@@ -53,7 +53,7 @@ from server.sync.models import (
 
 logger = structlog.get_logger(__name__)
 
-_EXCLUDED_LOCAL_STATUSES = {"locally_completed", "ignored", "archived"}
+EXCLUDED_LOCAL_STATUSES = {"locally_completed", "ignored", "archived"}
 CHANNEL = "assignment"
 
 
@@ -150,7 +150,7 @@ def _numbers(raw: list) -> list[float]:
     return [float(value) for value in raw if isinstance(value, (int, float))]
 
 
-async def _ignored_courses(
+async def ignored_courses(
     session: AsyncSession, user_ids: set[uuid.UUID], now: datetime
 ) -> dict[uuid.UUID, tuple[set[int], set[str]]]:
     """user_id → (numeric Moodle course ids, course numbers) of the courses
@@ -191,7 +191,7 @@ async def _ignored_courses(
     return ignored
 
 
-def _in_ignored_course(
+def in_ignored_course(
     assignment: UserAssignment,
     ignored: dict[uuid.UUID, tuple[set[int], set[str]]],
 ) -> bool:
@@ -285,12 +285,12 @@ async def scan_assignment_reminders(
             assignment
             for assignment, override in rows
             if override is None
-            or override.local_status not in _EXCLUDED_LOCAL_STATUSES
+            or override.local_status not in EXCLUDED_LOCAL_STATUSES
         ]
-        ignored = await _ignored_courses(
+        ignored = await ignored_courses(
             session, {a.user_id for a in not_marked}, now
         )
-        eligible = [a for a in not_marked if not _in_ignored_course(a, ignored)]
+        eligible = [a for a in not_marked if not in_ignored_course(a, ignored)]
         user_ids = {a.user_id for a in eligible}
 
         # Pending reminder jobs of EVERY user — also covers users whose

@@ -164,16 +164,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ensure_default_policies(seed_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
+    # Read by the sync worker and by the push pipeline's pre-send check.
+    assignment_fetcher = HttpAssignmentFetcher(
+        base_url=settings.moodle_base_url,
+        timeout_seconds=settings.moodle_fetch_timeout_seconds,
+    )
     sync_worker = None
     if cipher is not None:
         sync_worker = SyncWorker(
             session_factory=session_factory,
             settings=settings,
             cipher=cipher,
-            fetcher=HttpAssignmentFetcher(
-                base_url=settings.moodle_base_url,
-                timeout_seconds=settings.moodle_fetch_timeout_seconds,
-            ),
+            fetcher=assignment_fetcher,
             course_fetcher=HttpCourseFetcher(
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
@@ -187,6 +189,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings=settings,
         router=router,
         worker_id=default_worker_id(),
+        cipher=cipher,
+        fetcher=assignment_fetcher,
     )
     scheduler = build_scheduler(
         session_factory,

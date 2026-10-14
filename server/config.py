@@ -177,6 +177,15 @@ class Settings(BaseSettings):
     push_retry_round_delay_seconds: int = 60
     push_job_retention_days: int = 7
     push_job_retention_interval_hours: int = 24
+    # Pre-send check (push/presend.py). An assignment reminder or countdown
+    # start whose submission state nobody could confirm is retried this often
+    # until this long after its fire time, and then cancelled.
+    push_presend_retry_seconds: int = 60
+    push_presend_grace_minutes: int = 10
+    # Budget for the check's Moodle call and the timeout of each of its
+    # requests, independent of moodle_fetch_timeout_seconds. Running out of
+    # it opens the tick's breaker.
+    push_presend_timeout_seconds: float = 5.0
 
     # --- Submission status probe (v2.1.0) ---
     # Only assignments due inside this window get probed. The Moodle API is

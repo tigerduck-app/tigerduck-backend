@@ -20,7 +20,9 @@ from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
     MoodleRateLimited,
+    MoodleRefused,
     MoodleTokenInvalid,
+    MoodleUnavailable,
     MoodleUnreachable,
 )
 
@@ -84,6 +86,295 @@ async def test_reports_submitted_and_unsubmitted():
     assert result[1].submitted_at == datetime.fromtimestamp(1_757_000_000, tz=UTC)
     assert result[2].is_submitted is False
     assert result[2].submitted_at is None
+
+
+# What mod_assign_get_submission_status answers. A member's own attempt
+# carries the user id, a team's the group id; in a team assignment the
+# member's own `submission` is missing, has no status, or stays `new`.
+_SUBMITTED_AT = 1_757_000_000
+
+
+def _attempt(status: str | None, timemodified: int, **ids: int) -> dict:
+    attempt = {
+        "id": 9001,
+        "userid": ids.get("userid", 0),
+        "attemptnumber": 0,
+        "timecreated": 1_756_900_000,
+        "timemodified": timemodified,
+        "timestarted": None,
+        "status": status,
+        "groupid": ids.get("groupid", 0),
+        "assignment": 77,
+        "latest": 1,
+        "plugins": [{"type": "onlinetext", "name": "Online text", "editorfields": []}],
+    }
+    if status is None:
+        del attempt["status"]
+    return attempt
+
+
+def _answer(**lastattempt: object) -> dict:
+    return {
+        "lastattempt": {
+            "submissiongroupmemberswhoneedtosubmit": [],
+            "submissionsenabled": True,
+            "locked": False,
+            "graded": False,
+            "canedit": True,
+            "caneditowner": True,
+            "cansubmit": True,
+            "extensionduedate": None,
+            "timelimit": 0,
+            "blindmarking": False,
+            "gradingstatus": "notgraded",
+            "usergroups": [12] if "teamsubmission" in lastattempt else [],
+            **lastattempt,
+        },
+        "warnings": [],
+    }
+
+
+def _team(status: str, own: dict | None) -> dict:
+    parts = {"teamsubmission": _attempt(status, _SUBMITTED_AT, groupid=12)}
+    if own is not None:
+        parts["submission"] = own
+    return _answer(**parts, submissiongroup=12)
+
+
+_SUBMITTED = (True, datetime.fromtimestamp(_SUBMITTED_AT, tz=UTC))
+_OPEN = (False, None)
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (
+            _answer(submission=_attempt("submitted", _SUBMITTED_AT, userid=42)),
+            _SUBMITTED,
+        ),
+        (_team("submitted", None), _SUBMITTED),
+        (_team("submitted", _attempt("new", 0, userid=42)), _SUBMITTED),
+        (_team("submitted", _attempt(None, 0, userid=42)), _SUBMITTED),
+        (_answer(submission=_attempt("draft", _SUBMITTED_AT, userid=42)), _OPEN),
+        (_answer(submission=_attempt("new", 0, userid=42)), _OPEN),
+        (_answer(submission=_attempt("reopened", _SUBMITTED_AT, userid=42)), _OPEN),
+        (_team("new", _attempt(None, 0, userid=42)), _OPEN),
+        (_team("draft", None), _OPEN),
+        ({"feedback": {"plugins": []}, "warnings": []}, None),
+        (_answer(), _OPEN),
+    ],
+    ids=[
+        "own-submitted",
+        "team-submitted-own-missing",
+        "team-submitted-own-new",
+        "team-submitted-own-without-status",
+        "own-draft",
+        "own-new",
+        "own-reopened",
+        "team-new",
+        "team-draft",
+        "no-lastattempt",
+        "never-started",
+    ],
+)
+def test_parse_reads_the_members_and_the_teams_attempt(body, expected):
+    parsed = moodle_client._parse_submission_status(77, body)
+
+    if expected is None:
+        assert parsed is None
+    else:
+        assert (parsed.is_submitted, parsed.submitted_at) == expected
+
+
+_EXTENDED_TO = 1_757_600_000
+_OWN_NEW = _attempt("new", 0, userid=42)
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_answer(submission=_OWN_NEW), (True, False, None)),
+        (_answer(submission=_OWN_NEW, submissionsenabled=False), (False, False, None)),
+        (_answer(submission=_OWN_NEW, locked=True), (True, True, None)),
+        (
+            _answer(submission=_OWN_NEW, extensionduedate=_EXTENDED_TO),
+            (True, False, datetime.fromtimestamp(_EXTENDED_TO, tz=UTC)),
+        ),
+        # A student whose flags row exists without an extension.
+        (_answer(submission=_OWN_NEW, extensionduedate=0), (True, False, None)),
+        (_answer(), (True, False, None)),
+    ],
+    ids=[
+        "open",
+        "no-online-submission",
+        "locked",
+        "extension",
+        "flags-without-extension",
+        "never-started",
+    ],
+)
+def test_parse_reads_whether_the_student_can_still_submit(body, expected):
+    parsed = moodle_client._parse_submission_status(77, body)
+
+    assert (
+        parsed.submissions_enabled,
+        parsed.locked,
+        parsed.extension_due_at,
+    ) == expected
+    assert parsed.is_submitted is False
+
+
+# The push pipeline's pre-send check asks about one assignment at a time
+# and must tell Moodle failing for everyone, which opens its breaker, from
+# an answer about one token or assignment, which does not.
+
+_SECRET_TOKEN = "secret-wstoken-value"
+
+
+def _moodle_error(errorcode: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={"exception": "moodle_exception", "errorcode": errorcode, "message": "x"},
+    )
+
+
+def _checking(site_info, status=None):
+    """A handler answering site-info with `site_info(request)` and the
+    submission status with `status(request)`, by default an open one."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("wsfunction") == "core_webservice_get_site_info":
+            return site_info(request)
+        if status is not None:
+            return status(request)
+        return httpx.Response(200, json=_answer(submission=_OWN_NEW))
+
+    return handler
+
+
+def _ok(request):
+    return httpx.Response(200, json=_site_info())
+
+
+def _html(status: int) -> httpx.Response:
+    """A proxy's error page, or Moodle's maintenance page."""
+    return httpx.Response(status, text="<html>Moodle is unavailable</html>")
+
+
+def _raise(error):
+    def respond(request):
+        raise error("failed", request=request)
+
+    return respond
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler,raised",
+    [
+        (_checking(_raise(httpx.ConnectError)), MoodleUnavailable),
+        (_checking(_raise(httpx.ReadTimeout)), MoodleUnavailable),
+        (_checking(_raise(httpx.PoolTimeout)), MoodleUnavailable),
+        (_checking(_ok, _raise(httpx.ReadTimeout)), MoodleUnavailable),
+        (_checking(lambda r: _html(503)), MoodleUnavailable),
+        (_checking(lambda r: _html(200)), MoodleUnavailable),
+        (_checking(lambda r: httpx.Response(429)), MoodleRateLimited),
+        (_checking(lambda r: _moodle_error("invalidtoken")), MoodleTokenInvalid),
+        (_checking(lambda r: _moodle_error("wsaccessusersuspended")), MoodleRefused),
+        (_checking(lambda r: _moodle_error("accessexception")), MoodleRefused),
+        (_checking(_ok, lambda r: _moodle_error("invalidrecord")), MoodleRefused),
+    ],
+    ids=[
+        "connection-refused",
+        "read-timeout",
+        "pool-timeout",
+        "timeout-on-the-assignment",
+        "http-503",
+        "html-page",
+        "http-429",
+        "invalid-token",
+        "suspended-account",
+        "expired-token",
+        "invalid-assignment",
+    ],
+)
+async def test_the_pre_send_check_tells_moodle_down_from_its_answer(handler, raised):
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(handler)
+    )
+
+    with pytest.raises(raised) as excinfo:
+        await fetcher.check_submission_status(
+            token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=5.0
+        )
+
+    assert _SECRET_TOKEN not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_answer(submission=_OWN_NEW), False),
+        (_team("submitted", None), True),
+        ({"warnings": []}, None),
+    ],
+    ids=["open", "submitted", "no-lastattempt"],
+)
+async def test_the_pre_send_check_reads_one_assignment(body, expected):
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE,
+        timeout_seconds=5.0,
+        transport=_transport(_checking(_ok, lambda r: httpx.Response(200, json=body))),
+    )
+
+    answer = await fetcher.check_submission_status(
+        token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=5.0
+    )
+
+    assert (None if answer is None else answer.is_submitted) == expected
+
+
+@pytest.mark.asyncio
+async def test_the_pre_send_check_times_its_requests_by_its_own_budget(monkeypatch):
+    """Not by the fetcher's timeout: whichever of the two settings is
+    shorter, a request that runs out of time is a timeout of the check."""
+    timeouts = []
+    real_client = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(moodle_client.httpx, "AsyncClient", client)
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=20.0, transport=_transport(_checking(_ok))
+    )
+
+    await fetcher.check_submission_status(
+        token=_SECRET_TOKEN, assignment_id=77, timeout_seconds=3.0
+    )
+
+    assert timeouts == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_a_team_submission_reports_submitted():
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE,
+        timeout_seconds=5.0,
+        transport=_transport(
+            _handler_for({1: _team("submitted", None), 2: _team("new", None)})
+        ),
+    )
+
+    result = await fetcher.fetch_submission_status(
+        token="tok", assignment_ids=[1, 2], max_concurrency=2
+    )
+
+    assert result[1].is_submitted is True
+    assert result[1].submitted_at == datetime.fromtimestamp(_SUBMITTED_AT, tz=UTC)
+    assert result[2].is_submitted is False
 
 
 @pytest.mark.asyncio
