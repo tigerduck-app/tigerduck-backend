@@ -9,7 +9,7 @@ at https://api.tigerduck.app/v3/. Separate from backend/api/ which is POC-only.
 #   * The /version endpoint
 #   * _compose-files.sh's print_stack_status (greps this file directly)
 #   * The portal's status page (hits /version on the backend)
-__version__ = "3.3.2"
+__version__ = "3.3.3"
 
 from server import config
 
