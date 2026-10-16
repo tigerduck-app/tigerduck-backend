@@ -33,7 +33,16 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import BigInteger, ColumnElement, all_, func, literal, select, update
+from sqlalchemy import (
+    BigInteger,
+    ColumnElement,
+    all_,
+    func,
+    literal,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -44,6 +53,7 @@ from server.academic_calendar.terms import load_term_dates, outside_term
 from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
+    PUSH_JOB_DEDUPE_ACTIVE_WHERE,
     DevicePushToken,
     PushDelivery,
     PushDeliveryStatus,
@@ -60,7 +70,8 @@ from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
-from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
+from server.push.dedupe import activity_id as _activity_id
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
@@ -71,6 +82,7 @@ from server.push.payload import _to_unix_seconds
 from server.push.presend import (
     MoodleBreaker,
     PresendCheck,
+    _assignment_id,
     check_before_send,
     needs_check,
     recheck_rows,
@@ -94,6 +106,15 @@ _UNREGISTERED_APNS_DESCRIPTIONS = {"baddevicetoken", "unregistered"}
 _CLASS_SCENARIOS = frozenset(
     {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
 )
+
+# A reminder due right after its countdown start went out, to a device whose
+# app has not registered the activity yet, waits once: the app registers within
+# seconds, and the reminder follows the start in the same tick. Only a reminder
+# this close to the start's send waits, and only once: a wait pushes the job's
+# `available_at` a minute past its fire time. Each round before the first
+# delivery asks Moodle again.
+_COUNTDOWN_WAIT_UNTIL = timedelta(seconds=30)
+_COUNTDOWN_WAIT = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -324,7 +345,15 @@ async def _process_job(
                 logger.warning("push.presend_check_missed", job_id=job.id)
                 return
             if await _materialize(
-                session, job, school_tz=worker.settings.course_reminder_timezone
+                session,
+                job,
+                school_tz=worker.settings.course_reminder_timezone,
+                countdown_window=timedelta(
+                    seconds=worker.settings.push_countdown_dedupe_window_seconds
+                ),
+                presend_grace=timedelta(
+                    minutes=worker.settings.push_presend_grace_minutes
+                ),
             ):
                 await _deliver_round(worker, session, job)
     except Exception:
@@ -351,7 +380,14 @@ async def _process_job(
                 )
 
 
-async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -> bool:
+async def _materialize(
+    session: AsyncSession,
+    job: PushJob,
+    *,
+    school_tz: str,
+    countdown_window: timedelta,
+    presend_grace: timedelta,
+) -> bool:
     """Create one delivery row per active token. Idempotent — a stale-
     recovered job re-materializes onto the same unique index.
 
@@ -365,7 +401,8 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
     up after class; and an update token can only address an activity that
     already exists.
 
-    Returns False when the job was settled here and must not be delivered.
+    Returns False when the job was settled or put back here and must not be
+    delivered now.
 
     Skips macOS devices (foreground-only, no background push). Non-macOS
     devices always receive the push — collapse keys deduplicate on the
@@ -516,6 +553,49 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
     rows = (await session.execute(token_query)).all()
     if not rows:
         return True
+    covered: dict[uuid.UUID, datetime] = {}
+    waiting: dict[uuid.UUID, datetime] = {}
+    if is_assignment_reminder:
+        # Only the devices this reminder can reach: an older app's start must
+        # not hold the reminder back from the others.
+        covered, waiting = await _countdown_starts(
+            session,
+            job,
+            {
+                device.id
+                for _, device in rows
+                if not schedules_reminders_locally(device.platform, device.app_version)
+            },
+            window=countdown_window,
+            now=now,
+        )
+    first_round = bool(covered or waiting) and not await _has_deliveries(
+        session, job
+    )
+    if (
+        waiting
+        and first_round
+        and now < max(waiting.values()) + _COUNTDOWN_WAIT_UNTIL
+        and job.available_at < job.fire_at + _COUNTDOWN_WAIT
+        # The round after the wait, with its tick and its Moodle check, must
+        # still fall inside the pre-send grace, which would otherwise cancel
+        # the reminder as stale.
+        and now + 2 * _COUNTDOWN_WAIT < job.fire_at + presend_grace
+    ):
+        # Back to pending without spending an attempt, as for an unverified
+        # pre-send check (`_held_back`).
+        job.status = PushJobStatus.pending.value
+        job.available_at = now + _COUNTDOWN_WAIT
+        job.locked_by = None
+        job.locked_at = None
+        logger.info(
+            "push.reminder_waits_for_countdown",
+            job_id=job.id,
+            devices=_sent_times(waiting),
+        )
+        metrics.observe_countdown_dedupe("held")
+        return False
+    left_out: dict[uuid.UUID, datetime] = {}
     values = []
     for token, device in rows:
         if device.platform == UserDevicePlatform.macos.value:
@@ -527,6 +607,11 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             # reminder twice. Version comparison cannot go in the query
             # above: app_version is VARCHAR, and "2.10.0" sorts below
             # "2.9.0" as a string.
+            continue
+        if device.id in covered:
+            # The countdown start's alert rang here for this moment, and the
+            # app cannot drop a remote notification.
+            left_out[device.id] = covered[device.id]
             continue
         if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
             continue
@@ -547,7 +632,32 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
                 "next_retry_at": now,
             }
         )
+    if first_round and left_out:
+        logger.info(
+            "push.reminder_left_out_for_countdown",
+            job_id=job.id,
+            devices=_sent_times(left_out),
+        )
+        metrics.observe_countdown_dedupe("left_out", len(left_out))
+    if first_round and waiting:
+        # Waited once already, or too late to wait: two alerts beat none.
+        logger.info(
+            "push.countdown_not_registered",
+            job_id=job.id,
+            devices=_sent_times(waiting),
+        )
+        metrics.observe_countdown_dedupe("unregistered", len(waiting))
     if not values:
+        if left_out and first_round:
+            # Every device that would take it already rang for this moment.
+            # Only before the first delivery, as for a running activity above.
+            _settle(
+                job,
+                status=PushJobStatus.cancelled,
+                error="countdown_start_sent",
+                now=now,
+            )
+            return False
         return True
     await session.execute(
         pg_insert(PushDelivery)
@@ -706,7 +816,32 @@ async def _activity_already_registered(
     session: AsyncSession, *, job: PushJob, activity_id: str, now: datetime
 ) -> bool:
     """Whether the device this start job addresses has already registered
-    `activity_id` and its countdown has not passed.
+    `activity_id` and its countdown has not passed (`_registered`).
+
+    Every schedule job carries a device: `/schedule/sync` refuses a
+    session without one, as `/live-activities/register` does.
+    """
+    return bool(
+        await _registered(
+            session,
+            user_id=job.user_id,
+            device_ids=[job.device_id],
+            activity_id=activity_id,
+            now=now,
+        )
+    )
+
+
+async def _registered(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    device_ids: Collection[uuid.UUID | None],
+    activity_id: str,
+    now: datetime,
+) -> set[uuid.UUID | None]:
+    """The devices among `device_ids` that have registered `activity_id`
+    and whose countdown has not passed.
 
     `/live-activities/register` files the activity's end job under the
     device's `la_end` key at its countdown target; while that job is still
@@ -715,23 +850,83 @@ async def _activity_already_registered(
     re-registering with a later target puts the job back to pending. The
     token rows cannot say this — an update token stays active after its
     activity ends until something is pushed to it and APNs answers 410.
-
-    Every schedule job carries a device: `/schedule/sync` refuses a
-    session without one, as `/live-activities/register` does.
     """
-    row = (
-        await session.execute(
-            select(PushJob.id)
-            .where(
-                PushJob.user_id == job.user_id,
-                PushJob.dedupe_key == activity_end_key(job.device_id, activity_id),
-                PushJob.status == PushJobStatus.pending.value,
-                PushJob.fire_at > now,
-            )
-            .limit(1)
+    keys = {
+        activity_end_key(device_id, activity_id): device_id for device_id in device_ids
+    }
+    rows = await session.execute(
+        select(PushJob.dedupe_key).where(
+            PushJob.user_id == user_id,
+            PushJob.dedupe_key.in_(list(keys)),
+            # SQL text, so a generic plan still reads ux_push_jobs_dedupe_active.
+            text("status = 'pending'"),
+            PushJob.fire_at > now,
         )
-    ).first()
-    return row is not None
+    )
+    return {keys[key] for key in rows.scalars()}
+
+
+async def _countdown_starts(
+    session: AsyncSession,
+    job: PushJob,
+    device_ids: set[uuid.UUID],
+    *,
+    window: timedelta,
+    now: datetime,
+) -> tuple[dict[uuid.UUID, datetime], dict[uuid.UUID, datetime]]:
+    """When the countdown start of reminder `job`'s assignment went out to
+    each of `device_ids` it reached at most `window` before the reminder's
+    fire time, or since, as `(covered, waiting)`: whether the app there has
+    registered the activity the start created, or not yet.
+
+    The start is the device's own `/schedule/sync` job for the assignment,
+    the one the pre-send check guards, and counts once a delivery of it was
+    sent on a job still sent or retrying. A start that failed, was
+    cancelled, found no push-to-start token or was never filed leaves the
+    device its reminder. A sent one is not yet a countdown on screen: iOS
+    shows nothing for a start it cannot show, and the app ends one it does
+    not want without registering it. Read from the fire time rather than
+    the clock, so every round of the job finds the same starts.
+    """
+    assignment_id = _assignment_id(job)
+    if not window or assignment_id is None or not device_ids:
+        return {}, {}
+    source_id = str(assignment_id)
+    scenario = ScheduleScenario.assignment_urgent.value
+    starts = select(PushJob.id).where(
+        PushJob.user_id == job.user_id,
+        PushJob.dedupe_key.in_(
+            [schedule_key(device_id, source_id, scenario) for device_id in device_ids]
+        ),
+        # SQL text, so a generic plan still reads ux_push_jobs_dedupe_active:
+        # a start that went out is sent, partial_failed or still retrying.
+        PUSH_JOB_DEDUPE_ACTIVE_WHERE,
+    )
+    rows = await session.execute(
+        select(PushDelivery.device_id, PushDelivery.sent_at).where(
+            PushDelivery.push_job_id.in_(starts),
+            PushDelivery.status == PushDeliveryStatus.sent.value,
+            PushDelivery.sent_at >= job.fire_at - window,
+        )
+    )
+    sent = {device_id: at for device_id, at in rows}
+    if not sent:
+        return {}, {}
+    registered = await _registered(
+        session,
+        user_id=job.user_id,
+        device_ids=sent.keys(),
+        activity_id=_activity_id(source_id, scenario),
+        now=now,
+    )
+    covered = {d: at for d, at in sent.items() if d in registered}
+    waiting = {d: at for d, at in sent.items() if d not in registered}
+    return covered, waiting
+
+
+def _sent_times(starts: dict[uuid.UUID, datetime]) -> dict[str, str]:
+    """For the log: each device id with when its countdown start went out."""
+    return {str(device_id): at.isoformat() for device_id, at in starts.items()}
 
 
 async def _deliver_round(

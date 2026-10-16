@@ -60,6 +60,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **tick** — 每 5 秒一次，每次把所有到期的 job 清完。Live Activity 的 start / end 以 priority 10 排在其他 job（預設 100）前面
 - **提醒來源** — 作業提醒（提前時間取自 notification 設定文件，只送給開啟作業提醒同步的 iPhone / iPad；使用者忽略作業的課程不送）、課程提醒（從 schedule_json × NTUST 節次表計算上課時間，預設前 10 分鐘，只送給 iPhone / iPad；Android 自己排）；繳交 / 退選 / 課表變更會取消過期提醒
 - **學期起訖與校曆假日** — 課程提醒送給兩個 App 當天顯示的學期的課程：最近開學的已公布學期（`semester_terms`）；一個學期都沒公布時，照舊送給使用者最新同步的學期。課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在沒有任何已公布學期上課的日子不送（從開學日到結業日，兩端都算，與兩個 App 相同），在校曆假日（`academic_holidays`）也不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。例外只放回假日，不會放回學期外的日子。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的學期或假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error` 為 `outside_term` 或 `holiday`。作業類 Live Activity 兩者都不受影響
+- **同一時刻只響一次**（預設關閉）— 設定 `push_countdown_dedupe_window_seconds`（300）後，作業的 `assignmentUrgent` Live Activity 啟動推播在作業提醒的發送時間前這麼多秒內送到某台 iPhone，且那台的 App 已註冊這個 Live Activity 時，這則提醒就不再送往那台：啟動推播的提示已經響過。提醒緊接在啟動推播之後、且發送前檢查的寬限時間還夠時，會等一次（一分鐘）讓 App 註冊；到時仍未註冊的 iPhone 照常收到提醒。所有裝置都略過的提醒記為 `cancelled`、`last_error` 為 `countdown_start_sent`；設為 `0` 即關閉
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
