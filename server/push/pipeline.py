@@ -110,7 +110,7 @@ _CLASS_SCENARIOS = frozenset(
 # A reminder due right after its countdown start went out, to a device whose
 # app has not registered the activity yet, waits once: the app registers within
 # seconds, and the reminder follows the start in the same tick. Only a reminder
-# this close to its fire time waits, so after one wait it goes; each round
+# this close to the start's send waits, so after one wait it goes; each round
 # before the first delivery asks Moodle again.
 _COUNTDOWN_WAIT_UNTIL = timedelta(seconds=30)
 _COUNTDOWN_WAIT = timedelta(seconds=60)
@@ -350,6 +350,9 @@ async def _process_job(
                 countdown_window=timedelta(
                     seconds=worker.settings.push_countdown_dedupe_window_seconds
                 ),
+                presend_grace=timedelta(
+                    minutes=worker.settings.push_presend_grace_minutes
+                ),
             ):
                 await _deliver_round(worker, session, job)
     except Exception:
@@ -382,6 +385,7 @@ async def _materialize(
     *,
     school_tz: str,
     countdown_window: timedelta,
+    presend_grace: timedelta,
 ) -> bool:
     """Create one delivery row per active token. Idempotent — a stale-
     recovered job re-materializes onto the same unique index.
@@ -561,7 +565,14 @@ async def _materialize(
     first_round = bool(covered or waiting) and not await _has_deliveries(
         session, job
     )
-    if waiting and first_round and now < job.fire_at + _COUNTDOWN_WAIT_UNTIL:
+    if (
+        waiting
+        and first_round
+        and now < max(waiting.values()) + _COUNTDOWN_WAIT_UNTIL
+        # The round after the wait must still fall inside the pre-send grace,
+        # which would otherwise cancel the reminder as stale.
+        and now + _COUNTDOWN_WAIT < job.fire_at + presend_grace
+    ):
         # Back to pending without spending an attempt, as for an unverified
         # pre-send check (`_held_back`).
         job.status = PushJobStatus.pending.value

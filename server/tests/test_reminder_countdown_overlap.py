@@ -29,6 +29,7 @@ from server.auth.models import (
     User,
     UserDevice,
 )
+from server.config import Settings
 from server.db import build_session_factory
 from server.push import pipeline as pipeline_module
 from server.push.apns_client import SendResult
@@ -61,6 +62,8 @@ class ScriptedSender:
 
 
 def _worker(prepared_engine, test_settings, apple, **settings):
+    # The skip ships off; these tests run it at the window the deploy notes give.
+    settings = {"push_countdown_dedupe_window_seconds": 300, **settings}
     return PushPipelineWorker(
         session_factory=build_session_factory(prepared_engine),
         settings=test_settings.model_copy(update=settings),
@@ -407,6 +410,103 @@ async def test_a_countdown_that_never_registers_leaves_the_reminder(
     assert reminder.status == "sent"
     assert [r.device_token for r in apple.requests] == ["standard-a"]
     assert _counted("unregistered") == unregistered + 1
+
+
+async def test_a_start_that_went_out_late_still_gets_its_wait(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """The wait runs from when the start went out: a start the pipeline
+    sent 40 seconds after its fire time still gives the app its minute."""
+    user = await _user(db_session, store_moodle_token)
+    iphone = await _iphone(db_session, user, "a")
+    fire_at = datetime.now(UTC) - timedelta(seconds=45)
+    due_at = fire_at + timedelta(hours=8)
+    await make_assignment(user_id=user.id, moodle_assignment_id=77, due_at=due_at)
+    await _handled_start(
+        db_session, user, iphone, 77, due_at, at=datetime.now(UTC) - timedelta(seconds=5)
+    )
+    reminder = _reminder(user, 77, due_at, fire_at=fire_at)
+    db_session.add(reminder)
+    await db_session.commit()
+    held = _counted("held")
+
+    apple = ScriptedSender()
+    await run_push_tick(_worker(prepared_engine, test_settings, apple))
+
+    await db_session.refresh(reminder)
+    assert (reminder.status, reminder.attempts) == ("pending", 0)
+    assert apple.requests == []
+    assert _counted("held") == held + 1
+
+
+async def test_a_short_presend_grace_leaves_no_room_to_wait(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """With a one-minute grace the round after the wait would fall past it
+    and cancel the reminder as stale, so the reminder goes at once."""
+    user = await _user(db_session, store_moodle_token)
+    iphone = await _iphone(db_session, user, "a")
+    fire_at = datetime.now(UTC) - timedelta(seconds=5)
+    due_at = fire_at + timedelta(hours=8)
+    await make_assignment(user_id=user.id, moodle_assignment_id=78, due_at=due_at)
+    await _handled_start(db_session, user, iphone, 78, due_at, at=fire_at)
+    reminder = _reminder(user, 78, due_at, fire_at=fire_at)
+    db_session.add(reminder)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, apple, push_presend_grace_minutes=1)
+    )
+
+    await db_session.refresh(reminder)
+    assert reminder.status == "sent"
+    assert [r.device_token for r in apple.requests] == ["standard-a"]
+
+
+async def test_of_two_started_iphones_only_the_registered_one_is_left_out(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """Both starts went out; only one app registered its activity. The
+    reminder waits once, then reaches the other iPhone only."""
+    user = await _user(db_session, store_moodle_token)
+    registered = await _iphone(db_session, user, "a")
+    unregistered = await _iphone(db_session, user, "b")
+    fire_at = datetime.now(UTC) - timedelta(seconds=5)
+    due_at = fire_at + timedelta(hours=8)
+    await make_assignment(user_id=user.id, moodle_assignment_id=79, due_at=due_at)
+    starts = [
+        await _handled_start(db_session, user, device, 79, due_at, at=fire_at)
+        for device in (registered, unregistered)
+    ]
+    await _register(db_session, user, registered, 79, due_at)
+    reminder = _reminder(user, 79, due_at, fire_at=fire_at)
+    db_session.add(reminder)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(_worker(prepared_engine, test_settings, apple))
+    await db_session.refresh(reminder)
+    assert reminder.status == "pending"
+    assert apple.requests == []
+
+    # A minute and a half later.
+    later = timedelta(seconds=90)
+    reminder.fire_at -= later
+    reminder.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    for start in starts:
+        delivery = (
+            await db_session.execute(
+                select(PushDelivery).where(PushDelivery.push_job_id == start.id)
+            )
+        ).scalar_one()
+        delivery.sent_at -= later
+    await db_session.commit()
+    await run_push_tick(_worker(prepared_engine, test_settings, apple))
+
+    await db_session.refresh(reminder)
+    assert reminder.status == "sent"
+    assert [r.device_token for r in apple.requests] == ["standard-b"]
 
 
 async def test_a_reminder_well_past_its_fire_time_does_not_wait(
@@ -773,8 +873,18 @@ async def test_a_reminder_no_device_takes_for_another_reason_still_fails(
     assert apple.requests == []
 
 
+async def test_the_skip_ships_off():
+    assert Settings.model_fields["push_countdown_dedupe_window_seconds"].default == 0
+
+
+@pytest.mark.parametrize("registers", [True, False])
 async def test_a_zero_window_turns_the_skip_off(
-    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    registers,
 ):
     """`push_countdown_dedupe_window_seconds = 0`: no device is left out and
     no reminder waits."""
@@ -784,7 +894,8 @@ async def test_a_zero_window_turns_the_skip_off(
     due_at = fire_at + timedelta(hours=8)
     await make_assignment(user_id=user.id, moodle_assignment_id=76, due_at=due_at)
     await _handled_start(db_session, user, iphone, 76, due_at, at=fire_at)
-    await _register(db_session, user, iphone, 76, due_at)
+    if registers:
+        await _register(db_session, user, iphone, 76, due_at)
     reminder = _reminder(user, 76, due_at, fire_at=fire_at)
     db_session.add(reminder)
     await db_session.commit()

@@ -192,8 +192,9 @@ class Settings(BaseSettings):
     # A lead time equal to the offset gives both one fire time and the start
     # goes first, so this only takes in a start that fired a little ahead,
     # far short of the 30 minutes between the app's lead times (1 to 8 hours,
-    # in half hours) and any other reminder offset.
-    push_countdown_dedupe_window_seconds: int = 300
+    # in half hours) and any other reminder offset. It ships off: 300 turns it
+    # on once a start's alert is heard to sound on a device (MIGRATE.md).
+    push_countdown_dedupe_window_seconds: int = 0
 
     # --- Submission status probe (v2.1.0) ---
     # Only assignments due inside this window get probed. The Moodle API is
