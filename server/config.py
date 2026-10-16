@@ -186,6 +186,14 @@ class Settings(BaseSettings):
     # requests, independent of moodle_fetch_timeout_seconds. Running out of
     # it opens the tick's breaker.
     push_presend_timeout_seconds: float = 5.0
+    # An assignment reminder leaves out a device that the assignment's
+    # countdown start reached at most this long before the reminder's fire
+    # time, once the app registered the activity it started; 0 turns that off.
+    # A lead time equal to the offset gives both one fire time and the start
+    # goes first, so this only takes in a start that fired a little ahead,
+    # far short of the 30 minutes between the app's lead times (1 to 8 hours,
+    # in half hours) and any other reminder offset.
+    push_countdown_dedupe_window_seconds: int = 300
 
     # --- Submission status probe (v2.1.0) ---
     # Only assignments due inside this window get probed. The Moodle API is
