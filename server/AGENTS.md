@@ -226,6 +226,12 @@ into the backend container via `docker-compose.yml`.
   `push_presend_grace_minutes` past its fire time and then cancelled
   (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
   rather than costing a timeout per job.
+- An assignment reminder leaves out a device that the assignment's
+  `assignmentUrgent` start went to (a sent delivery) from
+  `COUNTDOWN_ALERT_WINDOW` (5 minutes) before the reminder's fire time on:
+  the start's alert already rang there. A start that did not go out leaves
+  the device its reminder, and a reminder left out on every device ends
+  `cancelled` (`countdown_start_sent`).
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
