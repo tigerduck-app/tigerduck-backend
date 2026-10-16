@@ -51,10 +51,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   0), since the start's alert has a title and body and no sound field. Send
   a test countdown from the portal to an iPhone and listen to its alert. If
   it makes a sound, set `TIGERDUCK_PUSH_COUNTDOWN_DEDUPE_WINDOW_SECONDS=300`
-  in `.env` and run `docker compose up -d backend` (a plain restart does not
-  read `.env` again); if not, leave it off.
+  in `.env` and run `./start.sh` (a plain restart does not read `.env`
+  again); if not, leave it off.
 - **Turning the skip off** again without a rollback: remove that line, or set
-  it to 0, and run `docker compose up -d backend`.
+  it to 0, and run `./start.sh`.
 - New metric: `tigerduck_push_countdown_dedupe_total`, by `outcome`:
   `left_out` (devices), `held` (reminders that waited) and `unregistered`
   (devices that got the reminder after their start went out).
