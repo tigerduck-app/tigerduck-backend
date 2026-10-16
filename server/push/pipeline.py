@@ -110,8 +110,9 @@ _CLASS_SCENARIOS = frozenset(
 # A reminder due right after its countdown start went out, to a device whose
 # app has not registered the activity yet, waits once: the app registers within
 # seconds, and the reminder follows the start in the same tick. Only a reminder
-# this close to the start's send waits, so after one wait it goes; each round
-# before the first delivery asks Moodle again.
+# this close to the start's send waits, and only once: a wait pushes the job's
+# `available_at` a minute past its fire time. Each round before the first
+# delivery asks Moodle again.
 _COUNTDOWN_WAIT_UNTIL = timedelta(seconds=30)
 _COUNTDOWN_WAIT = timedelta(seconds=60)
 
@@ -555,10 +556,16 @@ async def _materialize(
     covered: dict[uuid.UUID, datetime] = {}
     waiting: dict[uuid.UUID, datetime] = {}
     if is_assignment_reminder:
+        # Only the devices this reminder can reach: an older app's start must
+        # not hold the reminder back from the others.
         covered, waiting = await _countdown_starts(
             session,
             job,
-            {device.id for _, device in rows},
+            {
+                device.id
+                for _, device in rows
+                if not schedules_reminders_locally(device.platform, device.app_version)
+            },
             window=countdown_window,
             now=now,
         )
@@ -569,9 +576,11 @@ async def _materialize(
         waiting
         and first_round
         and now < max(waiting.values()) + _COUNTDOWN_WAIT_UNTIL
-        # The round after the wait must still fall inside the pre-send grace,
-        # which would otherwise cancel the reminder as stale.
-        and now + _COUNTDOWN_WAIT < job.fire_at + presend_grace
+        and job.available_at < job.fire_at + _COUNTDOWN_WAIT
+        # The round after the wait, with its tick and its Moodle check, must
+        # still fall inside the pre-send grace, which would otherwise cancel
+        # the reminder as stale.
+        and now + 2 * _COUNTDOWN_WAIT < job.fire_at + presend_grace
     ):
         # Back to pending without spending an attempt, as for an unverified
         # pre-send check (`_held_back`).
@@ -880,7 +889,7 @@ async def _countdown_starts(
     the clock, so every round of the job finds the same starts.
     """
     assignment_id = _assignment_id(job)
-    if not window or assignment_id is None:
+    if not window or assignment_id is None or not device_ids:
         return {}, {}
     source_id = str(assignment_id)
     scenario = ScheduleScenario.assignment_urgent.value
