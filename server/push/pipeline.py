@@ -44,6 +44,7 @@ from server.academic_calendar.terms import load_term_dates, outside_term
 from server.auth.crypto import CredentialCipher
 from server.auth.models import (
     APPLE_HANDHELD_PLATFORMS,
+    PUSH_JOB_DEDUPE_ACTIVE_STATUSES,
     DevicePushToken,
     PushDelivery,
     PushDeliveryStatus,
@@ -60,7 +61,7 @@ from server.config import Settings
 from server.db import session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
-from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key
+from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
@@ -71,6 +72,7 @@ from server.push.payload import _to_unix_seconds
 from server.push.presend import (
     MoodleBreaker,
     PresendCheck,
+    _assignment_id,
     check_before_send,
     needs_check,
     recheck_rows,
@@ -94,6 +96,14 @@ _UNREGISTERED_APNS_DESCRIPTIONS = {"baddevicetoken", "unregistered"}
 _CLASS_SCENARIOS = frozenset(
     {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
 )
+
+# How long before an assignment reminder's fire time a sent countdown start
+# still counts as the same alert (`_countdown_alerted`). A Live Activity lead
+# time equal to the offset gives both one fire time, and the start goes first
+# (`LIVE_ACTIVITY_JOB_PRIORITY`). The window takes in a start that fired a
+# little ahead, and stays far short of the 30 minutes that separate the app's
+# lead times (1 to 8 hours, in half hours) from every other reminder offset.
+COUNTDOWN_ALERT_WINDOW = timedelta(minutes=5)
 
 
 @dataclass(frozen=True)
@@ -516,6 +526,12 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
     rows = (await session.execute(token_query)).all()
     if not rows:
         return True
+    alerted = (
+        await _countdown_alerted(session, job, {device.id for _, device in rows})
+        if is_assignment_reminder
+        else set()
+    )
+    left_out = 0
     values = []
     for token, device in rows:
         if device.platform == UserDevicePlatform.macos.value:
@@ -527,6 +543,11 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
             # reminder twice. Version comparison cannot go in the query
             # above: app_version is VARCHAR, and "2.10.0" sorts below
             # "2.9.0" as a string.
+            continue
+        if device.id in alerted:
+            # The countdown start's alert rang here for this moment, and the
+            # app cannot drop a remote notification.
+            left_out += 1
             continue
         if is_sync_trigger and source_device_id and str(device.id) == source_device_id:
             continue
@@ -547,7 +568,21 @@ async def _materialize(session: AsyncSession, job: PushJob, *, school_tz: str) -
                 "next_retry_at": now,
             }
         )
+    if left_out:
+        logger.info(
+            "push.reminder_left_out_for_countdown", job_id=job.id, devices=left_out
+        )
     if not values:
+        if left_out and not await _has_deliveries(session, job):
+            # Every device that would take it already rang for this moment.
+            # Only before the first delivery, as for a running activity above.
+            _settle(
+                job,
+                status=PushJobStatus.cancelled,
+                error="countdown_start_sent",
+                now=now,
+            )
+            return False
         return True
     await session.execute(
         pg_insert(PushDelivery)
@@ -732,6 +767,46 @@ async def _activity_already_registered(
         )
     ).first()
     return row is not None
+
+
+async def _countdown_alerted(
+    session: AsyncSession, job: PushJob, device_ids: set[uuid.UUID]
+) -> set[uuid.UUID]:
+    """The devices among `device_ids` that the countdown start of reminder
+    `job`'s assignment reached at most `COUNTDOWN_ALERT_WINDOW` before the
+    reminder's fire time, or since.
+
+    The start is the device's own `/schedule/sync` job for the assignment, the
+    one the pre-send check guards, and it counts only once a delivery of it
+    was sent: a start that failed, waits on a retry, was cancelled, found no
+    push-to-start token or was never filed (the app's Live Activity switch
+    off) leaves the device its reminder. Read from the fire time rather than
+    the clock, so every round of the job leaves out the same devices.
+    """
+    assignment_id = _assignment_id(job)
+    if assignment_id is None:
+        return set()
+    keys = [
+        schedule_key(
+            device_id, str(assignment_id), ScheduleScenario.assignment_urgent.value
+        )
+        for device_id in device_ids
+    ]
+    rows = await session.execute(
+        select(PushDelivery.device_id)
+        .join(PushJob, PushJob.id == PushDelivery.push_job_id)
+        .where(
+            # Through ux_push_jobs_dedupe_active, as `submission_cancel` finds
+            # these jobs: a start that went out is sent, partial_failed or
+            # still retrying, all states that index covers.
+            PushJob.user_id == job.user_id,
+            PushJob.dedupe_key.in_(keys),
+            PushJob.status.in_(PUSH_JOB_DEDUPE_ACTIVE_STATUSES),
+            PushDelivery.status == PushDeliveryStatus.sent.value,
+            PushDelivery.sent_at >= job.fire_at - COUNTDOWN_ALERT_WINDOW,
+        )
+    )
+    return set(rows.scalars())
 
 
 async def _deliver_round(
