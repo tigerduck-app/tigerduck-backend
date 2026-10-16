@@ -469,6 +469,26 @@ def observe_presend_check(verdict: str) -> None:
     PUSH_PRESEND_CHECKS.labels(verdict=verdict).inc()
 
 
+COUNTDOWN_DEDUPE_OUTCOMES = ("left_out", "held", "unregistered")
+
+PUSH_COUNTDOWN_DEDUPE = Counter(
+    "tigerduck_push_countdown_dedupe_total",
+    "Assignment reminders that come due just after the assignment's countdown "
+    "start went out: left_out counts devices left out because the app "
+    "registered the activity the start created; held counts reminders put "
+    "back once to wait for that registration; unregistered counts devices "
+    "that got the reminder anyway, their activity never registered.",
+    ["outcome"],
+)
+
+for _outcome in COUNTDOWN_DEDUPE_OUTCOMES:
+    PUSH_COUNTDOWN_DEDUPE.labels(outcome=_outcome)
+
+
+def observe_countdown_dedupe(outcome: str, count: int = 1) -> None:
+    PUSH_COUNTDOWN_DEDUPE.labels(outcome=outcome).inc(count)
+
+
 # --- LLM ---
 
 LLM_REQUEST_DURATION = Histogram(

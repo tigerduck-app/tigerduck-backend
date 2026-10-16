@@ -32,6 +32,34 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.4
+
+- **One alert per moment for an assignment.** When the "due soon" Live
+  Activity's lead time equals an assignment reminder offset (both 8 hours by
+  default), the `assignmentUrgent` start and the reminder come due together
+  and the iPhone rang twice. With the skip on, the reminder leaves out an
+  iPhone that the start went to, from `push_countdown_dedupe_window_seconds`
+  before the reminder's fire time on, once the app there registered the
+  activity the start created. A reminder due within 30 seconds of such a
+  start waits once, 60 seconds, for that registration, when the pre-send
+  grace leaves room for it; an iPhone still unregistered then gets the
+  reminder, as does one whose start did not go out. A reminder left out on
+  every device ends `cancelled` as `countdown_start_sent`. A reminder that
+  waited asks Moodle again at its next round, so it costs two pre-send
+  checks.
+- **The skip ships off** (`push_countdown_dedupe_window_seconds` defaults to
+  0), since the start's alert has a title and body and no sound field. Send
+  a test countdown from the portal to an iPhone and listen to its alert. If
+  it makes a sound, set `TIGERDUCK_PUSH_COUNTDOWN_DEDUPE_WINDOW_SECONDS=300`
+  in `.env` and run `./start.sh` (a plain restart does not read `.env`
+  again); if not, leave it off.
+- **Turning the skip off** again without a rollback: remove that line, or set
+  it to 0, and run `./start.sh`.
+- New metric: `tigerduck_push_countdown_dedupe_total`, by `outcome`:
+  `left_out` (devices), `held` (reminders that waited) and `unregistered`
+  (devices that got the reminder after their start went out).
+- No migration and no app update.
+
 ## Upgrading to 3.3.3
 
 - **Assignment reminders are checked right before they go out.** Before an
