@@ -12,6 +12,7 @@ from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 from server.sync.models import (
     UserAssignment,
+    UserAssignmentOverride,
     UserBulletinSubscription,
     UserChangeLog,
     UserCourse,
@@ -464,3 +465,85 @@ async def test_initial_upload_refuses_a_malformed_ignore_setting(client, fields)
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
+async def seed_server_assignment(client, login, moodle_assignment_id: int) -> int:
+    """The row the server's own Moodle fetch writes, under the real course id."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = UserAssignment(
+            user_id=uuid.UUID(login["user"]["id"]),
+            moodle_course_id=7001,
+            moodle_assignment_id=moodle_assignment_id,
+            title="HW5",
+        )
+        session.add(row)
+        await session.commit()
+        return row.id
+
+
+async def rows_of(client, moodle_assignment_id: int) -> list[tuple[int, int]]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        rows = await session.execute(
+            select(UserAssignment.id, UserAssignment.moodle_course_id).where(
+                UserAssignment.moodle_assignment_id == moodle_assignment_id
+            )
+        )
+        return sorted(tuple(row) for row in rows)
+
+
+async def test_initial_upload_files_an_apps_mark_on_the_servers_row(client) -> None:
+    """The apps name no course (course id 0). A mark for an assignment the
+    server fetched under its real course id goes on that row."""
+    login = await do_login(client)
+    server_row = await seed_server_assignment(client, login, 5)
+
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "local_status": "ignored",
+                    "local_status_updated_at": "2026-10-01T08:00:00Z",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        marks = (
+            await session.execute(
+                select(
+                    UserAssignmentOverride.user_assignment_id,
+                    UserAssignmentOverride.local_status,
+                )
+            )
+        ).all()
+    assert [tuple(mark) for mark in marks] == [(server_row, "ignored")]
+
+
+async def test_initial_upload_adds_no_second_row_for_an_assignment(client) -> None:
+    """One row per assignment: an app's copy of one the server already has,
+    under whatever course id, leaves it as it is."""
+    login = await do_login(client)
+    server_row = await seed_server_assignment(client, login, 5)
+
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {"moodle_course_id": 0, "moodle_assignment_id": 5, "title": "HW5"},
+                {"moodle_course_id": 7002, "moodle_assignment_id": 5, "title": "HW5"},
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["assignments"] == 0
+    assert await rows_of(client, 5) == [(server_row, 7001)]

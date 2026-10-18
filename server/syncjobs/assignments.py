@@ -3,7 +3,9 @@
 A successful fetch is treated as the authoritative snapshot of the
 account's assignments: new rows insert, changed provider fields update,
 rows absent from the fetch soft-delete, previously-deleted rows that
-reappear resurrect. Submission state is not written *here* — the
+reappear resurrect, and an app's placeholder (course id 0) for an
+assignment the fetch lists becomes its row, one row per assignment.
+Submission state is not written *here* — the
 assignment list endpoint does not carry it. `submissions.py` refreshes
 it separately for assignments about to enter a reminder window, and
 client-uploaded values survive everywhere else.
@@ -111,6 +113,15 @@ async def apply_fetched_assignments(
         seen.add(key)
         linked_course = course_by_moodle_id.get(str(item.moodle_course_id))
         row = existing.get(key)
+        fields: list[str] = []
+        placeholder_key = (0, item.moodle_assignment_id)
+        if row is None and placeholder_key in existing:
+            # An app uploaded it before any fetch listed it: that row, with
+            # the marks and the submission on it, becomes the server's.
+            row = existing.pop(placeholder_key)
+            row.moodle_course_id = item.moodle_course_id
+            existing[key] = row
+            fields.append("moodle_course_id")
 
         if row is None:
             row = UserAssignment(
@@ -136,7 +147,6 @@ async def apply_fetched_assignments(
             await log(str(row.id), "upsert", {"fields": list(_PROVIDER_FIELDS)})
             continue
 
-        fields: list[str] = []
         for field_name in _PROVIDER_FIELDS:
             new_value = getattr(item, field_name)
             if getattr(row, field_name) != new_value:
