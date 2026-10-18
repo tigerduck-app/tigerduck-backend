@@ -314,12 +314,9 @@ async def patch_course_override(
 async def _get_assignment_by_moodle_id(
     session: AsyncSession, user_id, moodle_assignment_id: int
 ) -> UserAssignment:
-    # Uniqueness is (user_id, moodle_course_id, moodle_assignment_id), and
-    # client uploads use moodle_course_id=0 (real course ID unknown on the
-    # client), so a server-synced row and an upload placeholder can both be
-    # live for the same assignment until the next fetch soft-deletes the
-    # placeholder. Prefer the server-synced row — overrides attached to it
-    # survive that fetch.
+    # An assignment has one row, but the placeholder merge (migration
+    # d899fe7d1f79) left some soft-deleted upload placeholders (course id 0)
+    # beside the server-synced row, holding a mark. Prefer the server's row.
     #
     # With no live row, a soft-deleted one takes the mark: the server's fetch
     # leaves out a course the user cannot submit to, which the apps still

@@ -4,8 +4,8 @@ An assignment reminder (channel `assignment`, scenarios `reminder_*`) or the
 start of an assignment's countdown Live Activity (`assignmentUrgent` on the
 schedule channel) that reaches a student who already submitted tells them to
 do something they did. The rows the reminder scan reads can be hours behind
-Moodle: the submission probe runs only with an assignment sync, and what an
-app reports can land on a row the scan does not read. So the pipeline asks
+Moodle: the submission probe runs only with an assignment sync, and an app
+reports a submission only when it next uploads. So the pipeline asks
 again right before a job's first delivery, the database first and Moodle
 when the database cannot settle it, and acts on the verdict:
 
@@ -274,11 +274,10 @@ async def _database_verdict(
     """What the user's rows settle, or None to ask Moodle.
 
     A submission, a mark and an ignored course count on any row, whatever
-    its course id and deleted state. An app's upload
-    (`POST /sync/assignments/upload`) files the assignment under course id 0,
-    which the server's own sync soft-deletes as unseen and later uploads
-    never bring back, so what the app reported can sit on a deleted twin of
-    the row the scan reads.
+    its course id and deleted state. An assignment has one row, but a
+    soft-deleted upload placeholder (course id 0) that the placeholder merge
+    (migration d899fe7d1f79) left beside the server's row keeps its mark,
+    which the apps no longer show, and that mark still holds a reminder back.
     """
     assignments = [row for row, _ in rows]
     submitted = next((row for row in assignments if row.provider_is_submitted), None)

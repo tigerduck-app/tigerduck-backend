@@ -32,6 +32,40 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.5
+
+- **One row per assignment.** An app's upload of an assignment was stored as
+  a placeholder with course id 0 beside the row the server's own Moodle fetch
+  keeps under the real course id. A mark made before the fetch first listed
+  the assignment went out of `/sync/full` without its Moodle id, so the apps
+  dropped it, and the reminder scan read neither that mark nor a submission
+  an app reported. The fetch now takes the placeholder over, and once the
+  server has its row an upload only reports a submission and a grade there,
+  and an initial upload only a submission. Neither takes a submission back,
+  and a new one cancels the assignment's pending reminders and countdowns at
+  once.
+- **Migration `d899fe7d1f79`** merges the placeholders already stored. The
+  server's row takes the submission if either row has one, the
+  placeholder's grade where it has none, and the placeholder's override;
+  where both rows have one, the later mark and the later note win. The
+  placeholder is then deleted. A soft-deleted placeholder whose mark
+  `/sync/full` has not shown since the server's row came stays as it is, mark
+  and note, when the server's row holds no mark or only a clear older than
+  that mark: such a mark may be one the user cleared under 3.2.0. Each user
+  whose `/sync/full` the merge changes gets one change entry. A moved or
+  winning mark or note makes the apps fetch again; a folded submission or a
+  copied grade alone only moves their cursor, though an Android build older
+  than the one that passes over `assignment` changes runs one full sync.
+  Data only; a second run changes nothing.
+- **Rolling back.** The 3.3.4 code cannot start on a database at
+  `d899fe7d1f79`, so stamp it back to `df3948adb76a` first: with 3.3.5
+  running, `docker compose exec backend alembic stamp df3948adb76a`; with
+  3.3.4 already built,
+  `docker compose run --rm --entrypoint alembic backend stamp --purge df3948adb76a`.
+  3.3.4 reads the merged rows as they are, and its uploads add placeholders
+  again, which the migration merges when 3.3.5 starts again.
+- No app update and no setting.
+
 ## Upgrading to 3.3.4
 
 - **One alert per moment for an assignment.** When the "due soon" Live

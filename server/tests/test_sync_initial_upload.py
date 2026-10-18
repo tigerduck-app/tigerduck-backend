@@ -8,10 +8,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from server.auth.models import PushJob
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.push.reminders import reminder_key_prefix
 from server.sync.models import (
     UserAssignment,
+    UserAssignmentOverride,
     UserBulletinSubscription,
     UserChangeLog,
     UserCourse,
@@ -464,3 +467,157 @@ async def test_initial_upload_refuses_a_malformed_ignore_setting(client, fields)
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
+async def seed_server_assignment(client, login, moodle_assignment_id: int) -> int:
+    """The row the server's own Moodle fetch writes, under the real course id."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = UserAssignment(
+            user_id=uuid.UUID(login["user"]["id"]),
+            moodle_course_id=7001,
+            moodle_assignment_id=moodle_assignment_id,
+            title="HW5",
+        )
+        session.add(row)
+        await session.commit()
+        return row.id
+
+
+async def rows_of(client, moodle_assignment_id: int) -> list[tuple[int, int]]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        rows = await session.execute(
+            select(UserAssignment.id, UserAssignment.moodle_course_id).where(
+                UserAssignment.moodle_assignment_id == moodle_assignment_id
+            )
+        )
+        return sorted(tuple(row) for row in rows)
+
+
+async def test_initial_upload_files_an_apps_mark_on_the_servers_row(client) -> None:
+    """The apps name no course (course id 0). A mark for an assignment the
+    server fetched under its real course id goes on that row."""
+    login = await do_login(client)
+    server_row = await seed_server_assignment(client, login, 5)
+
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignment_overrides": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "local_status": "ignored",
+                    "local_status_updated_at": "2026-10-01T08:00:00Z",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        marks = (
+            await session.execute(
+                select(
+                    UserAssignmentOverride.user_assignment_id,
+                    UserAssignmentOverride.local_status,
+                )
+            )
+        ).all()
+    assert [tuple(mark) for mark in marks] == [(server_row, "ignored")]
+
+
+async def test_initial_upload_adds_no_second_row_for_an_assignment(client) -> None:
+    """One row per assignment: an app's copy of one the server already has,
+    under whatever course id, leaves it as it is."""
+    login = await do_login(client)
+    server_row = await seed_server_assignment(client, login, 5)
+
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {"moodle_course_id": 0, "moodle_assignment_id": 5, "title": "HW5"},
+                {"moodle_course_id": 7002, "moodle_assignment_id": 5, "title": "HW5"},
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["assignments"] == 0
+    assert await rows_of(client, 5) == [(server_row, 7001)]
+
+
+async def upload_submission(client, login, *, submitted: bool, at: str | None = None):
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {
+                    "moodle_course_id": 0,
+                    "moodle_assignment_id": 5,
+                    "title": "HW5",
+                    "provider_is_submitted": submitted,
+                    "provider_submitted_at": at,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+async def submission_of(client, moodle_assignment_id: int) -> list[tuple]:
+    """(course id, submitted, submission time) of each row of the assignment."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        rows = await session.execute(
+            select(
+                UserAssignment.moodle_course_id,
+                UserAssignment.provider_is_submitted,
+                UserAssignment.provider_submitted_at,
+            ).where(UserAssignment.moodle_assignment_id == moodle_assignment_id)
+        )
+        return sorted(tuple(row) for row in rows)
+
+
+async def test_initial_upload_reports_a_submission_on_the_servers_row(client) -> None:
+    """The server's row keeps its own fields, but a submission the app saw
+    reaches it, with its time. Moodle never takes one back, so a later
+    upload that says otherwise leaves it."""
+    login = await do_login(client)
+    await seed_server_assignment(client, login, 5)
+
+    await upload_submission(client, login, submitted=True, at="2026-10-01T08:00:00Z")
+    await upload_submission(client, login, submitted=False)
+
+    assert await submission_of(client, 5) == [
+        (7001, True, datetime(2026, 10, 1, 8, tzinfo=UTC))
+    ]
+
+
+async def test_initial_upload_submission_cancels_the_pending_reminders(client) -> None:
+    """As the regular assignment upload does: a reminder filed for the
+    assignment goes at once instead of at the next scan."""
+    login = await do_login(client)
+    await seed_server_assignment(client, login, 5)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        reminder = PushJob(
+            user_id=uuid.UUID(login["user"]["id"]),
+            dedupe_key=f"{reminder_key_prefix(5)}24h:1790000000",
+            channel="assignment",
+            scenario="reminder_24h",
+            fire_at=datetime.now(UTC) + timedelta(hours=1),
+            payload={"kind": "assignment_reminder", "moodle_assignment_id": 5},
+        )
+        session.add(reminder)
+        await session.commit()
+
+    await upload_submission(client, login, submitted=True)
+
+    async with factory() as session:
+        assert (await session.get(PushJob, reminder.id)).status == "cancelled"

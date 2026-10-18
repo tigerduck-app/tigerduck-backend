@@ -8,7 +8,12 @@ import pytest
 from sqlalchemy import select
 
 from server.auth.models import User
-from server.sync.models import UserAssignment, UserChangeLog, UserCourse
+from server.sync.models import (
+    UserAssignment,
+    UserAssignmentOverride,
+    UserChangeLog,
+    UserCourse,
+)
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.moodle_client import FetchedAssignment
 
@@ -275,3 +280,111 @@ async def test_an_answer_that_lost_every_course_keeps_what_it_refused(
     assert sorted((e.operation, e.entity_id) for e in entries) == sorted(
         ("delete", str(rows[name].id)) for name in deleted
     )
+
+
+@pytest.mark.parametrize("deleted", [False, True], ids=["live", "soft-deleted"])
+async def test_a_fetch_takes_over_the_apps_placeholder(db_session, deleted):
+    """An app uploads an assignment before the server's fetch lists it, as a
+    placeholder with course id 0. The fetch makes that row its own, so the
+    mark and the submission it holds stay on the assignment's only row
+    instead of on a second one the fetch soft-deletes."""
+    user = await _make_user(db_session)
+    placeholder = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=0,
+        moodle_assignment_id=1,
+        course_no="CS2006301",
+        title="HW1 as the app saw it",
+        provider_is_submitted=True,
+        deleted_at=NOW - timedelta(hours=8) if deleted else None,
+    )
+    db_session.add(placeholder)
+    await db_session.flush()
+    db_session.add(
+        UserAssignmentOverride(
+            user_id=user.id, user_assignment_id=placeholder.id, local_status="ignored"
+        )
+    )
+    await db_session.commit()
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1)], now=NOW
+    )
+    await db_session.commit()
+
+    rows = (
+        await db_session.execute(
+            select(
+                UserAssignment.id,
+                UserAssignment.moodle_course_id,
+                UserAssignment.title,
+                UserAssignment.deleted_at,
+                UserAssignment.provider_is_submitted,
+            )
+            .where(UserAssignment.user_id == user.id)
+            .order_by(UserAssignment.id)
+        )
+    ).all()
+    assert [tuple(row) for row in rows] == [(placeholder.id, 7001, "HW1", None, True)]
+    marks = (
+        await db_session.execute(
+            select(
+                UserAssignmentOverride.user_assignment_id,
+                UserAssignmentOverride.local_status,
+            )
+        )
+    ).all()
+    assert [tuple(mark) for mark in marks] == [(placeholder.id, "ignored")]
+    assert stats.changed_count == 1
+    entries = await _changelog(db_session, user.id)
+    assert [(e.operation, e.entity_id) for e in entries] == [
+        ("upsert", str(placeholder.id))
+    ]
+    assert "moodle_course_id" in entries[0].payload["fields"]
+
+
+async def test_a_fetch_listing_an_assignment_under_two_courses_keeps_both(db_session):
+    """Moodle gives an assignment one course, but a fetch that names it
+    under two still applies: the first course takes the app's placeholder
+    over, with its mark, and the second gets a row of its own."""
+    user = await _make_user(db_session)
+    placeholder = UserAssignment(
+        user_id=user.id, moodle_course_id=0, moodle_assignment_id=1, title="HW1"
+    )
+    db_session.add(placeholder)
+    await db_session.flush()
+    db_session.add(
+        UserAssignmentOverride(
+            user_id=user.id, user_assignment_id=placeholder.id, local_status="ignored"
+        )
+    )
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1), _fa(1, moodle_course_id=7002)],
+        now=NOW,
+    )
+    await db_session.commit()
+
+    rows = (
+        await db_session.execute(
+            select(
+                UserAssignment.id,
+                UserAssignment.moodle_course_id,
+                UserAssignment.deleted_at,
+            )
+            .where(UserAssignment.user_id == user.id)
+            .order_by(UserAssignment.moodle_course_id)
+        )
+    ).all()
+    assert [(row.moodle_course_id, row.deleted_at) for row in rows] == [
+        (7001, None),
+        (7002, None),
+    ]
+    assert rows[0].id == placeholder.id
+    marks = (
+        await db_session.execute(select(UserAssignmentOverride.user_assignment_id))
+    ).scalars()
+    assert list(marks) == [placeholder.id]
