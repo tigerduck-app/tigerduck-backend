@@ -51,8 +51,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   placeholder is then deleted. A soft-deleted placeholder whose mark
   `/sync/full` has not shown since the server's row came stays as it is, mark
   and note, when the server's row holds no mark or only a clear older than
-  that mark: such a mark may be one the user cleared under 3.2.0. Data only;
-  a second run changes nothing.
+  that mark: such a mark may be one the user cleared under 3.2.0. A user
+  whose moved or winning mark or note, or copied grade, changes `/sync/full`
+  gets one change entry, so a device that caught up before the deploy
+  fetches again; a submission alone logs none. Data only; a second run
+  changes nothing.
 - **Rolling back.** The 3.3.4 code cannot start on a database at
   `d899fe7d1f79`, so stamp it back to `df3948adb76a` first: with 3.3.5
   running, `docker compose exec backend alembic stamp df3948adb76a`; with

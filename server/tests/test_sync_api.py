@@ -716,6 +716,56 @@ async def test_an_upload_waits_for_a_fetch_under_way(client) -> None:
     assert await rows_of(client, 5) == [(7002, "HW5", False, True, True)]
 
 
+async def test_an_upload_logs_a_rows_grade_and_submission_in_one_entry(
+    client,
+) -> None:
+    login = await do_login(client)
+    await fetch(client, login, (7002, 6))
+    revision, _ = await changes_since(client, login, 0)
+    await upload(client, login, 6, grade="A", is_submitted=True)
+
+    _, changes = await changes_since(client, login, revision)
+    assert changes == [
+        (
+            "assignment",
+            await row_id(client, 6),
+            "upsert",
+            ["provider_grade", "provider_is_submitted", "provider_submitted_at"],
+        )
+    ]
+
+
+async def test_an_upload_logs_only_the_rows_it_changes(client) -> None:
+    """Other devices hear of an upload through the change log, under the
+    entity type the server's fetch writes, and only of a stored row the
+    upload changed: a new placeholder, a field of one, or a submission."""
+    login = await do_login(client)
+    await fetch(client, login, (7002, 6))
+    revision, _ = await changes_since(client, login, 0)
+
+    await upload(client, login, 5)
+    await upload(client, login, 6, is_submitted=True)
+    revision, changes = await changes_since(client, login, revision)
+    assert changes == [
+        ("assignment", await row_id(client, 5), "upsert", ["course_no", "course_name", "title"]),
+        (
+            "assignment",
+            await row_id(client, 6),
+            "upsert",
+            ["provider_is_submitted", "provider_submitted_at"],
+        ),
+    ]
+
+    await upload(client, login, 5)
+    await upload(client, login, 6, is_submitted=True)
+    revision, changes = await changes_since(client, login, revision)
+    assert changes == []
+
+    await upload(client, login, 5, title="HW5, part 2")
+    _, changes = await changes_since(client, login, revision)
+    assert changes == [("assignment", await row_id(client, 5), "upsert", ["title"])]
+
+
 async def fetch_before_the_takeover(client, login, *keys: tuple[int, int]) -> None:
     """What a fetch did to an app's placeholder before it took the row over:
     it added the server's row beside it and soft-deleted the placeholder."""
