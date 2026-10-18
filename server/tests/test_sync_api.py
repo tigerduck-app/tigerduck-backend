@@ -692,7 +692,8 @@ async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_ou
 
 
 async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -> None:
-    """A note uploaded for HW5's placeholder after its server's row went
+    """A note edit on HW5's placeholder after its server's row went, as an
+    initial upload made one before it filed notes on the server's row,
     changes the override but not when its old mark reached the server, so
     that mark, hidden since a fetch from before the takeover, stays hidden
     instead of coming back as received now."""
@@ -701,6 +702,52 @@ async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -
     await mark(client, login, 5, "ignored")
     await fetch_before_the_takeover(client, login, (7002, 5))
     await fetch(client, login, (7001, 1))
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        now = datetime.now(UTC)
+        await session.execute(
+            update(UserAssignmentOverride)
+            .where(UserAssignmentOverride.user_id == uuid.UUID(login["user"]["id"]))
+            .values(note="Bring the lab sheet", note_updated_at=now, updated_at=now)
+        )
+        await session.commit()
+
+    assert await keyed_marks(client, login) == [(None, "ignored")]
+
+
+async def test_an_initial_upload_marks_the_servers_row_beside_a_kept_placeholder(
+    client,
+) -> None:
+    """The placeholder merge keeps a soft-deleted placeholder whose mark the
+    apps no longer see beside the server's live row. A mark an app sends in
+    its initial upload, under course id 0, goes on the server's row, which
+    /sync/full keys, and the hidden mark stays as it was."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        placeholder = UserAssignment(
+            user_id=user_id,
+            moodle_course_id=0,
+            moodle_assignment_id=5,
+            title="HW5",
+            deleted_at=datetime.now(UTC),
+        )
+        server_row = UserAssignment(
+            user_id=user_id, moodle_course_id=7002, moodle_assignment_id=5, title="HW5"
+        )
+        session.add_all([placeholder, server_row])
+        await session.flush()
+        session.add(
+            UserAssignmentOverride(
+                user_id=user_id,
+                user_assignment_id=placeholder.id,
+                local_status="ignored",
+                local_status_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+            )
+        )
+        await session.commit()
+
     response = await client.post(
         "/v3/sync/initial-upload",
         headers=bearer(login),
@@ -709,15 +756,18 @@ async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -
                 {
                     "moodle_course_id": 0,
                     "moodle_assignment_id": 5,
-                    "note": "Bring the lab sheet",
-                    "note_updated_at": datetime.now(UTC).isoformat(),
+                    "local_status": "locally_completed",
+                    "local_status_updated_at": datetime.now(UTC).isoformat(),
                 }
             ]
         },
     )
     assert response.status_code == 200, response.text
 
-    assert await keyed_marks(client, login) == [(None, "ignored")]
+    assert await keyed_marks(client, login) == [
+        (None, "ignored"),
+        (5, "locally_completed"),
+    ]
 
 
 async def test_full_sync_keys_marks_made_after_the_server_row_went(client) -> None:
