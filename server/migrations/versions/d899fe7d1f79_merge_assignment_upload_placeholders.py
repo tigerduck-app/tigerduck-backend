@@ -71,8 +71,9 @@ LEFT JOIN user_assignment_overrides po ON po.user_assignment_id = p.id
 WHERE p.moodle_course_id = 0
 """
 
-# What the grade fold, the merges and the move change, for the change log:
-# the user, the server row, and whether an override (a mark or a note) did.
+# What the submission and grade folds, the merges and the move change, for
+# the change log: the user, the server row, and whether an override (a mark
+# or a note) did.
 _CHANGES = """
 CREATE TEMP TABLE placeholder_merge_changes (
     user_id uuid NOT NULL,
@@ -83,15 +84,21 @@ CREATE TEMP TABLE placeholder_merge_changes (
 
 # Moodle never takes a submission back, so either row's counts.
 _FOLD_SUBMISSION = """
-UPDATE user_assignments s
-SET provider_is_submitted = true,
-    provider_submitted_at = COALESCE(s.provider_submitted_at, p.provider_submitted_at),
-    updated_at = now()
-FROM placeholder_merges m
-JOIN user_assignments p ON p.id = m.placeholder_id
-WHERE s.id = m.server_id
-    AND p.provider_is_submitted
-    AND NOT s.provider_is_submitted
+WITH changed AS (
+    UPDATE user_assignments s
+    SET provider_is_submitted = true,
+        provider_submitted_at = COALESCE(
+            s.provider_submitted_at, p.provider_submitted_at
+        ),
+        updated_at = now()
+    FROM placeholder_merges m
+    JOIN user_assignments p ON p.id = m.placeholder_id
+    WHERE s.id = m.server_id
+        AND p.provider_is_submitted
+        AND NOT s.provider_is_submitted
+    RETURNING s.user_id, s.id
+)
+INSERT INTO placeholder_merge_changes SELECT user_id, id, false FROM changed
 """
 
 # No fetch writes a grade, so an app's upload is the only source: the
@@ -182,13 +189,13 @@ WHERE p.id = m.placeholder_id AND NOT m.keep
 """
 
 # One change per user whose /sync/full the merge changed, so a device that
-# caught up before it fetches again. A submission fold alone is no such
-# change: the apps read submissions from Moodle, and use assignment rows only
-# to resolve unkeyed overrides. Both apps pass over `assignment` entries, so
-# a moved or winning mark or note logs `assignment_override`, which they act
-# on, and a copied grade alone `assignment`. As server/sync/changelog.py
-# requires, the user's sync state is locked first and its watermark moves to
-# the new entry in the same transaction.
+# caught up before it reads the change. A moved or winning mark or note logs
+# `assignment_override`, which both apps act on with a full sync. A folded
+# submission or a copied grade alone logs `assignment`, which they pass over,
+# moving only their cursor: they read submissions from Moodle and use
+# assignment rows only to resolve unkeyed overrides. As
+# server/sync/changelog.py requires, the user's sync state is locked first
+# and its watermark moves to the new entry in the same transaction.
 _SYNC_STATES = """
 INSERT INTO user_sync_state (user_id)
 SELECT DISTINCT user_id FROM placeholder_merge_changes
