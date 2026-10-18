@@ -18,9 +18,10 @@ depends_on: str | Sequence[str] | None = None
 # Each placeholder (course id 0) that has a server row of its assignment, the
 # server row chosen as the override PATCH chooses it. `keep` marks one whose
 # mark `/sync/full` no longer keys (`_hidden_since_received` in
-# server/routes/sync/snapshot.py) beside a server row without a mark: the
-# apps dropped it long ago, and it may be one the user cleared under 3.2.0,
-# which left the placeholder's mark behind, so it stays where it is.
+# server/routes/sync/snapshot.py) while the server row's override, if any,
+# settles nothing: it holds no mark, and no clear as late as that mark. The
+# apps dropped such a mark long ago, and it may be one the user cleared under
+# 3.2.0, which left the placeholder's mark behind, so the pair stays as it is.
 _PAIRS = """
 CREATE TEMP TABLE placeholder_merges ON COMMIT DROP AS
 SELECT
@@ -32,6 +33,11 @@ SELECT
         AND NOT EXISTS (
             SELECT 1 FROM user_assignment_overrides so
             WHERE so.user_assignment_id = s.id
+                AND (
+                    so.local_status <> 'none'
+                    OR COALESCE(so.local_status_updated_at, '-infinity')
+                        >= COALESCE(po.local_status_updated_at, '-infinity')
+                )
         )
         AND (
             EXISTS (
@@ -91,6 +97,7 @@ SET local_status = po.local_status,
 FROM placeholder_merges m
 JOIN user_assignment_overrides po ON po.user_assignment_id = m.placeholder_id
 WHERE so.user_assignment_id = m.server_id
+    AND NOT m.keep
     AND COALESCE(po.local_status_updated_at, '-infinity')
         > COALESCE(so.local_status_updated_at, '-infinity')
 """
@@ -104,6 +111,7 @@ SET note = po.note,
 FROM placeholder_merges m
 JOIN user_assignment_overrides po ON po.user_assignment_id = m.placeholder_id
 WHERE so.user_assignment_id = m.server_id
+    AND NOT m.keep
     AND (po.note IS NOT NULL OR po.note_updated_at IS NOT NULL)
     AND (
         (so.note IS NULL AND so.note_updated_at IS NULL)

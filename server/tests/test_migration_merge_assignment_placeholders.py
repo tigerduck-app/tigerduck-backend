@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from server.db import build_session_factory
 from server.push.reminders import scan_assignment_reminders
+from server.routes.sync.snapshot import _read_full_snapshot
 from server.tests.conftest import _alembic
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -66,7 +67,7 @@ async def _mark(
     user: uuid.UUID,
     row: int,
     status: str,
-    at: datetime,
+    at: datetime | None,
     *,
     note: str | None = None,
     note_at: datetime | None = None,
@@ -137,6 +138,29 @@ async def _seed(conn: AsyncConnection) -> tuple[uuid.UUID, uuid.UUID]:
         note="Bring the lab sheet", note_at=T0,
     )
     await _row(conn, user, 7001, 12)
+    # 13: a server override holding only a note settles no mark, so the
+    # hidden mark stays, and so does each row's note.
+    await _mark(
+        conn, user, await _row(conn, user, 0, 13, deleted=T0 + DAY), "ignored", T0,
+        note="Bring the calculator", note_at=T0 + 3 * DAY,
+    )
+    await _mark(
+        conn, user, await _row(conn, user, 7001, 13), "none", None,
+        note="Bring the lab sheet", note_at=T0 + DAY,
+    )
+    # 14: a clear on the server row after the mark settles it; the
+    # placeholder goes.
+    await _mark(conn, user, await _row(conn, user, 0, 14, deleted=T0 + DAY), "ignored", T0)
+    await _mark(
+        conn, user, await _row(conn, user, 7001, 14), "none", T0 + 2 * DAY,
+        note="Bring the lab sheet", note_at=T0 + 2 * DAY,
+    )
+    # 15: an older mark on the server row settles it too, and the later mark
+    # wins as in 3 and 4, though the apps showed the older one.
+    await _mark(
+        conn, user, await _row(conn, user, 0, 15, deleted=T0 + 4 * DAY), "ignored", T0 + 3 * DAY
+    )
+    await _mark(conn, user, await _row(conn, user, 7001, 15), "locally_completed", T0 + 2 * DAY)
     other = await _user(conn)
     await _row(conn, other, 0, 1)
     return user, other
@@ -162,6 +186,17 @@ async def _state(conn: AsyncConnection, user: uuid.UUID) -> dict[int, list[tuple
     return state
 
 
+async def _shown(engine, user: uuid.UUID) -> set[tuple[int, str]]:
+    """The marks `/sync/full` keys to a Moodle id, which the apps show."""
+    async with build_session_factory(engine)() as session:
+        snapshot = await _read_full_snapshot(session, user, None)
+    return {
+        (o["moodle_assignment_id"], o["local_status"])
+        for o in snapshot["assignment_overrides"]
+        if o["moodle_assignment_id"] is not None and o["local_status"] != "none"
+    }
+
+
 async def _scalar(conn: AsyncConnection, sql: str, user: uuid.UUID, aid: int):
     return (
         await conn.execute(
@@ -179,8 +214,15 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
     try:
         async with engine.begin() as conn:
             user, other = await _seed(conn)
+        shown = await _shown(engine, user)
 
         _alembic(migration_db_url, "upgrade", "head")
+        # The apps show the same marks, except that where both rows held one
+        # they show the later: HW3 and HW10 lose a duplicate, and HW15's
+        # hidden later mark replaces the older one.
+        assert await _shown(engine, user) == (
+            shown - {(3, "ignored"), (10, "ignored"), (15, "locally_completed")}
+        ) | {(15, "ignored")}
         async with engine.connect() as conn:
             merged = await _state(conn, user)
             assert merged == {
@@ -196,6 +238,9 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
                 10: [(7001, False, False, "locally_completed")],
                 11: [(7001, False, True, None)],
                 12: [(7001, False, False, "none")],
+                13: [(0, True, False, "ignored"), (7001, False, False, "none")],
+                14: [(7001, False, False, "none")],
+                15: [(7001, False, False, "ignored")],
             }
             submitted_at = (
                 "SELECT a.provider_submitted_at FROM user_assignments a"
@@ -213,6 +258,18 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
             )
             assert await _scalar(conn, note, user, 10) == "Bring the lab sheet"
             assert await _scalar(conn, note, user, 12) == "Bring the lab sheet"
+            notes_of_13 = await conn.execute(
+                text(
+                    "SELECT a.moodle_course_id, o.note FROM user_assignments a"
+                    " JOIN user_assignment_overrides o ON o.user_assignment_id = a.id"
+                    " WHERE a.user_id = :user AND a.moodle_assignment_id = 13"
+                ),
+                {"user": user},
+            )
+            assert dict(notes_of_13.all()) == {
+                0: "Bring the calculator",
+                7001: "Bring the lab sheet",
+            }
             assert await _state(conn, other) == {1: [(0, False, False, None)]}
 
         # A rollback stamps the previous revision; the next start runs it again.
