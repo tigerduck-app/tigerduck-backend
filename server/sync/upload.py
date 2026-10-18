@@ -323,11 +323,21 @@ async def process_initial_upload(
         await log("course_skipped_date", str(skipped.id))
 
     # --- Assignments (snapshot; skip existing) ---
+    # One row per assignment: the apps name no course (course id 0) and the
+    # server's fetch the real one, so a row under any course id stands for
+    # it. Old duplicates resolve as the override PATCH resolves them.
     assignment_by_key: dict[tuple[int, int], UserAssignment] = {}
+    assignment_by_id: dict[int, UserAssignment] = {}
     existing_assignments = (
         (
             await session.execute(
-                select(UserAssignment).where(UserAssignment.user_id == user_id)
+                select(UserAssignment)
+                .where(UserAssignment.user_id == user_id)
+                .order_by(
+                    UserAssignment.deleted_at.is_not(None),
+                    UserAssignment.moodle_course_id == 0,
+                    UserAssignment.id,
+                )
             )
         )
         .scalars()
@@ -337,10 +347,11 @@ async def process_initial_upload(
         assignment_by_key[
             (assignment.moodle_course_id, assignment.moodle_assignment_id)
         ] = assignment
+        assignment_by_id.setdefault(assignment.moodle_assignment_id, assignment)
 
     for item in payload.assignments:
         key = (item.moodle_course_id, item.moodle_assignment_id)
-        if key in assignment_by_key:
+        if item.moodle_assignment_id in assignment_by_id:
             continue
         assignment = UserAssignment(
             user_id=user_id,
@@ -360,6 +371,7 @@ async def process_initial_upload(
         session.add(assignment)
         await session.flush()
         assignment_by_key[key] = assignment
+        assignment_by_id[item.moodle_assignment_id] = assignment
         counts["assignments"] += 1
         await log("assignment", str(assignment.id))
 
@@ -367,7 +379,7 @@ async def process_initial_upload(
     for item in payload.assignment_overrides:
         assignment = assignment_by_key.get(
             (item.moodle_course_id, item.moodle_assignment_id)
-        )
+        ) or assignment_by_id.get(item.moodle_assignment_id)
         if assignment is None:
             continue
         override = (
