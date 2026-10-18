@@ -607,6 +607,64 @@ async def test_an_uploaded_grade_reaches_the_assignments_row(client, fetched) ->
         assert list(grades.scalars()) == ["92"]
 
 
+async def changes_since(client, login, revision: int) -> tuple[int, list[tuple]]:
+    """The change feed after `revision`, as the apps read it, and the
+    revision it reaches."""
+    response = await client.get(
+        f"/v3/sync?since_revision={revision}", headers=bearer(login)
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return body["current_revision"], [
+        (c["entity_type"], c["entity_id"], c["operation"], c["payload"]["fields"])
+        for c in body["changes"]
+    ]
+
+
+async def row_id(client, moodle_assignment_id: int) -> str:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return str(
+            (
+                await session.execute(
+                    select(UserAssignment.id).where(
+                        UserAssignment.moodle_assignment_id == moodle_assignment_id
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+async def grade_once(client, login) -> int:
+    """Uploads a grade for the server's row of HW5, checks the one change
+    entry it adds, and returns the revision after it."""
+    await fetch(client, login, (7002, 5))
+    revision, _ = await changes_since(client, login, 0)
+    await upload(client, login, 5, grade="92")
+    after, changes = await changes_since(client, login, revision)
+    assert after > revision
+    assert changes == [
+        ("assignment", await row_id(client, 5), "upsert", ["provider_grade"])
+    ]
+    return after
+
+
+async def test_an_uploaded_grade_reaches_the_change_log(client) -> None:
+    """Other devices hear of a grade an upload changes as of the fields a
+    fetch changes: an `assignment` upsert that moves the revision."""
+    login = await do_login(client)
+    await grade_once(client, login)
+
+
+@pytest.mark.parametrize("grade", ["92", None], ids=["same-grade", "no-grade"])
+async def test_an_upload_that_leaves_the_grade_logs_nothing(client, grade) -> None:
+    login = await do_login(client)
+    revision = await grade_once(client, login)
+    await upload(client, login, 5, grade=grade)
+
+    assert await changes_since(client, login, revision) == (revision, [])
+
+
 async def test_an_uploaded_submission_cancels_the_pending_reminders(
     client, test_settings
 ) -> None:
