@@ -29,6 +29,7 @@ from pydantic import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.push.submission_cancel import cancel_for_submitted
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import apply_field
 from server.sync.models import (
@@ -325,8 +326,8 @@ async def process_initial_upload(
     # --- Assignments (snapshot; skip existing) ---
     # One row per assignment: the apps name no course (course id 0) and the
     # server's fetch the real one, so a row under any course id stands for
-    # it. Old duplicates resolve as the override PATCH resolves them.
-    assignment_by_key: dict[tuple[int, int], UserAssignment] = {}
+    # it. Old duplicates resolve as the override PATCH resolves them, marks
+    # included: a soft-deleted placeholder beside the server's row is hidden.
     assignment_by_id: dict[int, UserAssignment] = {}
     existing_assignments = (
         (
@@ -344,14 +345,22 @@ async def process_initial_upload(
         .all()
     )
     for assignment in existing_assignments:
-        assignment_by_key[
-            (assignment.moodle_course_id, assignment.moodle_assignment_id)
-        ] = assignment
         assignment_by_id.setdefault(assignment.moodle_assignment_id, assignment)
 
+    submitted: set[int] = set()
     for item in payload.assignments:
-        key = (item.moodle_course_id, item.moodle_assignment_id)
-        if item.moodle_assignment_id in assignment_by_id:
+        existing = assignment_by_id.get(item.moodle_assignment_id)
+        if existing is not None:
+            # Its fields stay, but Moodle never takes a submission back.
+            if item.provider_is_submitted and not existing.provider_is_submitted:
+                existing.provider_is_submitted = True
+                existing.provider_submitted_at = item.provider_submitted_at or now
+                submitted.add(item.moodle_assignment_id)
+                await log(
+                    "assignment",
+                    str(existing.id),
+                    {"fields": ["provider_is_submitted", "provider_submitted_at"]},
+                )
             continue
         assignment = UserAssignment(
             user_id=user_id,
@@ -370,16 +379,19 @@ async def process_initial_upload(
         )
         session.add(assignment)
         await session.flush()
-        assignment_by_key[key] = assignment
         assignment_by_id[item.moodle_assignment_id] = assignment
         counts["assignments"] += 1
         await log("assignment", str(assignment.id))
+        if item.provider_is_submitted:
+            submitted.add(item.moodle_assignment_id)
+    # As the assignment upload does when an app reports a submission.
+    await cancel_for_submitted(
+        session, user_id=user_id, moodle_assignment_ids=submitted, now=now
+    )
 
     # --- Assignment overrides (per-field merge) ---
     for item in payload.assignment_overrides:
-        assignment = assignment_by_key.get(
-            (item.moodle_course_id, item.moodle_assignment_id)
-        ) or assignment_by_id.get(item.moodle_assignment_id)
+        assignment = assignment_by_id.get(item.moodle_assignment_id)
         if assignment is None:
             continue
         override = (

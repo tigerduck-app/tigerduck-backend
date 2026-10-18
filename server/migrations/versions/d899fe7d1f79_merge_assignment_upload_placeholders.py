@@ -84,6 +84,19 @@ WHERE s.id = m.server_id
     AND NOT s.provider_is_submitted
 """
 
+# No fetch writes a grade, so an app's upload is the only source: the
+# placeholder's fills a server row that has none.
+_FOLD_GRADE = """
+UPDATE user_assignments s
+SET provider_grade = p.provider_grade,
+    updated_at = now()
+FROM placeholder_merges m
+JOIN user_assignments p ON p.id = m.placeholder_id
+WHERE s.id = m.server_id
+    AND p.provider_grade IS NOT NULL
+    AND s.provider_grade IS NULL
+"""
+
 # Where both rows have an override, each field keeps the later value, as the
 # per-field merge does (server/sync/merge.py): the mark by its time and the
 # note by its own, the server row's winning a tie.
@@ -146,10 +159,11 @@ def upgrade() -> None:
     Until now an app's upload went to a placeholder with course id 0 beside
     the row the server's fetch keeps under the real course id, so a
     submission or a mark the app sent sat on a row the reminder scan does
-    not read. The server's row takes the submission if either row has it
-    and the placeholder's override, and the placeholder is deleted. Where
-    both rows have an override, the later mark and the later note win,
-    except for a kept placeholder, which merges neither.
+    not read. The server's row takes the submission if either row has it,
+    the placeholder's grade where it has none, and the placeholder's
+    override, and the placeholder is deleted. Where both rows have an
+    override, the later mark and the later note win, except for a kept
+    placeholder, which merges neither.
 
     Data only. A second run finds only the placeholders it kept, and those
     with no server row, which the next fetch takes over.
@@ -157,6 +171,7 @@ def upgrade() -> None:
     for statement in (
         _PAIRS,
         _FOLD_SUBMISSION,
+        _FOLD_GRADE,
         _MERGE_MARK,
         _MERGE_NOTE,
         _MOVE_OVERRIDE,

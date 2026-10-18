@@ -8,7 +8,7 @@ from sqlalchemy import select
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep, in_array
 from server.push.submission_cancel import cancel_for_submitted
-from server.sync.changelog import lock_sync_state
+from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import (
     ChangeEntityType,
     UserAssignment,
@@ -50,16 +50,16 @@ async def upload_assignments(
 
     The apps do not know an assignment's Moodle course id. Once the
     server's fetch has the assignment, a row under its real course id, live
-    or soft-deleted, the upload only reports a submission there; the fetch
-    owns the rest. Before that the upload keeps a placeholder with course
-    id 0, which the fetch takes over. A submission is never taken back,
-    since Moodle never un-submits, and a new one cancels the assignment's
-    pending reminders as the submission probe does.
+    or soft-deleted, the upload only reports a submission and a grade
+    there; the fetch owns the rest. Before that the upload keeps a
+    placeholder with course id 0, which the fetch takes over. A submission
+    is never taken back, since Moodle never un-submits, and a new one
+    cancels the assignment's pending reminders as the submission probe does.
     """
     now = datetime.now(UTC)
     # The fetch takes over a placeholder under this lock; without it, an
     # upload could add a second placeholder beside the row it just took.
-    await lock_sync_state(session, auth.user_id)
+    locked_state = await lock_sync_state(session, auth.user_id)
     rows = (
         await session.execute(
             select(UserAssignment)
@@ -82,6 +82,7 @@ async def upload_assignments(
         by_assignment.setdefault(row.moodle_assignment_id, row)
 
     submitted: set[int] = set()
+    graded: dict[int, UserAssignment] = {}
     for a in payload.assignments:
         try:
             due_at = datetime.fromisoformat(a.due_at) if a.due_at else None
@@ -104,13 +105,29 @@ async def upload_assignments(
             row.title = a.title
             row.due_at = due_at
             row.moodle_url = a.moodle_url
-            row.provider_grade = a.grade
             row.last_seen_at = now
+        # No fetch writes a grade; an upload without one has none to tell.
+        if a.grade is not None and a.grade != row.provider_grade:
+            row.provider_grade = a.grade
+            graded[a.moodle_assignment_id] = row
         if a.is_submitted and not row.provider_is_submitted:
             row.provider_is_submitted = True
             row.provider_submitted_at = row.provider_submitted_at or now
             submitted.add(a.moodle_assignment_id)
     await session.flush()
+    # A grade reaches the other devices only through the change log, as the
+    # fields a fetch changes do.
+    for row in graded.values():
+        await append_change(
+            session,
+            user_id=auth.user_id,
+            entity_type=ChangeEntityType.assignment.value,
+            entity_id=str(row.id),
+            operation="upsert",
+            payload={"fields": ["provider_grade"]},
+            device_id=auth.device_id,
+            locked_state=locked_state,
+        )
     await cancel_for_submitted(
         session, user_id=auth.user_id, moodle_assignment_ids=submitted, now=now
     )
