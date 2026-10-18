@@ -148,7 +148,8 @@ def upgrade() -> None:
     submission or a mark the app sent sat on a row the reminder scan does
     not read. The server's row takes the submission if either row has it
     and the placeholder's override, and the placeholder is deleted. Where
-    both rows have an override, the later mark and the later note win.
+    both rows have an override, the later mark and the later note win,
+    except for a kept placeholder, which merges neither.
 
     Data only. A second run finds only the placeholders it kept, and those
     with no server row, which the next fetch takes over.
