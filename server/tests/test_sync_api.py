@@ -575,6 +575,18 @@ async def test_an_upload_never_takes_a_submission_back(client, fetched) -> None:
     assert [row[3] for row in await rows_of(client, 5)] == [True]
 
 
+async def test_an_upload_updates_a_soft_deleted_placeholder_in_place(client) -> None:
+    """An assignment no fetch has listed, whose placeholder a later fetch
+    soft-deleted, as one of a TA's course: an upload updates that
+    placeholder, still soft-deleted, instead of adding a row."""
+    login = await do_login(client)
+    await upload(client, login, 5)
+    await fetch(client, login, (7001, 1))
+    await upload(client, login, 5, title="HW5, part 2", is_submitted=True)
+
+    assert await rows_of(client, 5) == [(0, "HW5, part 2", True, True, True)]
+
+
 async def test_an_uploaded_submission_cancels_the_pending_reminders(
     client, test_settings
 ) -> None:

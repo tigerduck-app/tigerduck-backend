@@ -341,3 +341,50 @@ async def test_a_fetch_takes_over_the_apps_placeholder(db_session, deleted):
         ("upsert", str(placeholder.id))
     ]
     assert "moodle_course_id" in entries[0].payload["fields"]
+
+
+async def test_a_fetch_listing_an_assignment_under_two_courses_keeps_both(db_session):
+    """Moodle gives an assignment one course, but a fetch that names it
+    under two still applies: the first course takes the app's placeholder
+    over, with its mark, and the second gets a row of its own."""
+    user = await _make_user(db_session)
+    placeholder = UserAssignment(
+        user_id=user.id, moodle_course_id=0, moodle_assignment_id=1, title="HW1"
+    )
+    db_session.add(placeholder)
+    await db_session.flush()
+    db_session.add(
+        UserAssignmentOverride(
+            user_id=user.id, user_assignment_id=placeholder.id, local_status="ignored"
+        )
+    )
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1), _fa(1, moodle_course_id=7002)],
+        now=NOW,
+    )
+    await db_session.commit()
+
+    rows = (
+        await db_session.execute(
+            select(
+                UserAssignment.id,
+                UserAssignment.moodle_course_id,
+                UserAssignment.deleted_at,
+            )
+            .where(UserAssignment.user_id == user.id)
+            .order_by(UserAssignment.moodle_course_id)
+        )
+    ).all()
+    assert [(row.moodle_course_id, row.deleted_at) for row in rows] == [
+        (7001, None),
+        (7002, None),
+    ]
+    assert rows[0].id == placeholder.id
+    marks = (
+        await db_session.execute(select(UserAssignmentOverride.user_assignment_id))
+    ).scalars()
+    assert list(marks) == [placeholder.id]
