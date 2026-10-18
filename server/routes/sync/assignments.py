@@ -55,6 +55,8 @@ async def upload_assignments(
     placeholder with course id 0, which the fetch takes over. A submission
     is never taken back, since Moodle never un-submits, and a new one
     cancels the assignment's pending reminders as the submission probe does.
+    Each row the upload changes goes to the change log as the fetch logs its
+    own.
     """
     now = datetime.now(UTC)
     # The fetch takes over a placeholder under this lock; without it, an
@@ -82,7 +84,7 @@ async def upload_assignments(
         by_assignment.setdefault(row.moodle_assignment_id, row)
 
     submitted: set[int] = set()
-    graded: dict[int, UserAssignment] = {}
+    changed: dict[int, list[str]] = {}
     for a in payload.assignments:
         try:
             due_at = datetime.fromisoformat(a.due_at) if a.due_at else None
@@ -99,35 +101,41 @@ async def upload_assignments(
             )
             session.add(row)
             by_assignment[a.moodle_assignment_id] = row
+        fields = changed.setdefault(a.moodle_assignment_id, [])
         if row.moodle_course_id == 0:
-            row.course_no = a.course_no
-            row.course_name = a.course_name
-            row.title = a.title
-            row.due_at = due_at
-            row.moodle_url = a.moodle_url
+            for name, value in (
+                ("course_no", a.course_no),
+                ("course_name", a.course_name),
+                ("title", a.title),
+                ("due_at", due_at),
+                ("moodle_url", a.moodle_url),
+            ):
+                if getattr(row, name) != value:
+                    setattr(row, name, value)
+                    fields.append(name)
             row.last_seen_at = now
         # No fetch writes a grade; an upload without one has none to tell.
         if a.grade is not None and a.grade != row.provider_grade:
             row.provider_grade = a.grade
-            graded[a.moodle_assignment_id] = row
+            fields.append("provider_grade")
         if a.is_submitted and not row.provider_is_submitted:
             row.provider_is_submitted = True
             row.provider_submitted_at = row.provider_submitted_at or now
             submitted.add(a.moodle_assignment_id)
+            fields += ["provider_is_submitted", "provider_submitted_at"]
     await session.flush()
-    # A grade reaches the other devices only through the change log, as the
-    # fields a fetch changes do.
-    for row in graded.values():
-        await append_change(
-            session,
-            user_id=auth.user_id,
-            entity_type=ChangeEntityType.assignment.value,
-            entity_id=str(row.id),
-            operation="upsert",
-            payload={"fields": ["provider_grade"]},
-            device_id=auth.device_id,
-            locked_state=locked_state,
-        )
+    for moodle_assignment_id, fields in changed.items():
+        if fields:
+            await append_change(
+                session,
+                user_id=auth.user_id,
+                entity_type=ChangeEntityType.assignment.value,
+                entity_id=str(by_assignment[moodle_assignment_id].id),
+                operation="upsert",
+                payload={"fields": fields},
+                device_id=auth.device_id,
+                locked_state=locked_state,
+            )
     await cancel_for_submitted(
         session, user_id=auth.user_id, moodle_assignment_ids=submitted, now=now
     )
