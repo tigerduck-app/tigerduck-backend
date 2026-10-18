@@ -335,10 +335,11 @@ async def _feed_after(
 async def test_upgrade_logs_one_change_per_user_whose_full_sync_it_changes(
     migration_db_url: str,
 ) -> None:
-    """A device that caught up before the deploy refetches only when the
-    merge changes what /sync/full shows it: an `assignment_override` entry
-    for a mark that moves or wins, which both apps act on, an `assignment`
-    one for a grade alone, and nothing for a submission alone."""
+    """A device that caught up before the deploy hears of each change the
+    merge makes to what /sync/full shows it: an `assignment_override` entry
+    for a mark that moves or wins, which both apps act on, and an
+    `assignment` one, which they pass over, for a grade or a submission
+    alone."""
     _alembic(migration_db_url, "upgrade", BEFORE)
     engine = create_async_engine(migration_db_url)
     try:
@@ -351,8 +352,15 @@ async def test_upgrade_logs_one_change_per_user_whose_full_sync_it_changes(
             graded = await _user(conn)
             await _row(conn, graded, 0, 1, grade="A")
             await _row(conn, graded, 7001, 1)
+            # Kept for its hidden mark, so the rerun meets the pair again.
             submitted = await _user(conn)
-            await _row(conn, submitted, 0, 1, deleted=T0, submitted=True)
+            await _mark(
+                conn,
+                submitted,
+                await _row(conn, submitted, 0, 1, deleted=T0, submitted=True),
+                "ignored",
+                T0,
+            )
             await _row(conn, submitted, 7001, 1)
             since = {user: await _caught_up(conn, user) for user in (marked, graded, submitted)}
 
@@ -361,11 +369,11 @@ async def test_upgrade_logs_one_change_per_user_whose_full_sync_it_changes(
             for user, logged in (
                 (marked, ["assignment_override"]),
                 (graded, ["assignment"]),
-                (submitted, []),
+                (submitted, ["assignment"]),
             ):
                 current, changes = await _feed_after(conn, user, since[user])
                 assert [entity_type for _, entity_type in changes] == logged
-                assert current == (changes[-1][0] if changes else since[user])
+                assert current == changes[-1][0] > since[user]
             feed = {user: await _feed_after(conn, user, since[user]) for user in since}
 
         _alembic(migration_db_url, "stamp", BEFORE)
