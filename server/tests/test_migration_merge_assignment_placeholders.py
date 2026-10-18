@@ -39,15 +39,16 @@ async def _row(
     submitted_at: datetime | None = None,
     submitted: bool | None = None,
     due: datetime | None = None,
+    grade: str | None = None,
 ) -> int:
     return (
         await conn.execute(
             text(
                 "INSERT INTO user_assignments (user_id, moodle_course_id,"
                 " moodle_assignment_id, title, deleted_at, provider_is_submitted,"
-                " provider_submitted_at, due_at)"
+                " provider_submitted_at, due_at, provider_grade)"
                 " VALUES (:user, :course, :aid, 'HW', :deleted, :submitted,"
-                " :submitted_at, :due) RETURNING id"
+                " :submitted_at, :due, :grade) RETURNING id"
             ),
             {
                 "user": user,
@@ -57,6 +58,7 @@ async def _row(
                 "submitted": bool(submitted or submitted_at),
                 "submitted_at": submitted_at,
                 "due": due,
+                "grade": grade,
             },
         )
     ).scalar_one()
@@ -94,8 +96,8 @@ async def _seed(conn: AsyncConnection) -> tuple[uuid.UUID, uuid.UUID]:
     """One user's rows, a case per assignment id, and a second user's
     placeholder under an id the first user has a server row of."""
     user = await _user(conn)
-    # 1: a submission the app reported folds into the server's row.
-    await _row(conn, user, 0, 1, deleted=T0 + DAY, submitted_at=T0 + DAY)
+    # 1: a submission and a grade the app reported fold into the server's row.
+    await _row(conn, user, 0, 1, deleted=T0 + DAY, submitted_at=T0 + DAY, grade="85")
     await _row(conn, user, 7001, 1)
     # 2: a mark the apps show, on a live placeholder, moves.
     await _mark(conn, user, await _row(conn, user, 0, 2), "ignored", T0 + DAY)
@@ -129,9 +131,9 @@ async def _seed(conn: AsyncConnection) -> tuple[uuid.UUID, uuid.UUID]:
         note="Bring the lab sheet", note_at=T0 + 3 * DAY,
     )
     await _mark(conn, user, await _row(conn, user, 7001, 10), "locally_completed", T0 + 2 * DAY)
-    # 11: the server's own submission time stays.
-    await _row(conn, user, 0, 11, submitted_at=T0 + DAY)
-    await _row(conn, user, 7001, 11, submitted_at=T0 + 2 * DAY)
+    # 11: the server row's own submission time and grade stay.
+    await _row(conn, user, 0, 11, submitted_at=T0 + DAY, grade="70")
+    await _row(conn, user, 7001, 11, submitted_at=T0 + 2 * DAY, grade="90")
     # 12: a cleared mark that keeps a note is no mark to hide, so it moves.
     await _mark(
         conn, user, await _row(conn, user, 0, 12, deleted=T0 + DAY), "none", T0,
@@ -247,6 +249,9 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
             )
             assert await _scalar(conn, submitted_at, user, 1) == T0 + DAY
             assert await _scalar(conn, submitted_at, user, 11) == T0 + 2 * DAY
+            grade = "SELECT a.provider_grade FROM user_assignments a"
+            assert await _scalar(conn, grade, user, 1) == "85"
+            assert await _scalar(conn, grade, user, 11) == "90"
             mark_time = (
                 "SELECT o.local_status_updated_at FROM user_assignments a"
                 " JOIN user_assignment_overrides o ON o.user_assignment_id = a.id"
