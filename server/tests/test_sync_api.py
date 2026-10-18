@@ -587,6 +587,26 @@ async def test_an_upload_updates_a_soft_deleted_placeholder_in_place(client) -> 
     assert await rows_of(client, 5) == [(0, "HW5, part 2", True, True, True)]
 
 
+@pytest.mark.parametrize("fetched", [False, True], ids=["placeholder", "servers-row"])
+async def test_an_uploaded_grade_reaches_the_assignments_row(client, fetched) -> None:
+    """No fetch writes a grade, so an app's upload is where one comes from,
+    whichever row the assignment has; an upload without one leaves it."""
+    login = await do_login(client)
+    if fetched:
+        await fetch(client, login, (7002, 5))
+    await upload(client, login, 5, grade="92")
+    await upload(client, login, 5, grade=None)
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        grades = await session.execute(
+            select(UserAssignment.provider_grade).where(
+                UserAssignment.moodle_assignment_id == 5
+            )
+        )
+        assert list(grades.scalars()) == ["92"]
+
+
 async def test_an_uploaded_submission_cancels_the_pending_reminders(
     client, test_settings
 ) -> None:

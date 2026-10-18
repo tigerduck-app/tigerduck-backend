@@ -50,11 +50,11 @@ async def upload_assignments(
 
     The apps do not know an assignment's Moodle course id. Once the
     server's fetch has the assignment, a row under its real course id, live
-    or soft-deleted, the upload only reports a submission there; the fetch
-    owns the rest. Before that the upload keeps a placeholder with course
-    id 0, which the fetch takes over. A submission is never taken back,
-    since Moodle never un-submits, and a new one cancels the assignment's
-    pending reminders as the submission probe does.
+    or soft-deleted, the upload only reports a submission and a grade
+    there; the fetch owns the rest. Before that the upload keeps a
+    placeholder with course id 0, which the fetch takes over. A submission
+    is never taken back, since Moodle never un-submits, and a new one
+    cancels the assignment's pending reminders as the submission probe does.
     """
     now = datetime.now(UTC)
     # The fetch takes over a placeholder under this lock; without it, an
@@ -104,8 +104,10 @@ async def upload_assignments(
             row.title = a.title
             row.due_at = due_at
             row.moodle_url = a.moodle_url
-            row.provider_grade = a.grade
             row.last_seen_at = now
+        # No fetch writes a grade; an upload without one has none to tell.
+        if a.grade is not None:
+            row.provider_grade = a.grade
         if a.is_submitted and not row.provider_is_submitted:
             row.provider_is_submitted = True
             row.provider_submitted_at = row.provider_submitted_at or now
