@@ -290,6 +290,92 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
         await engine.dispose()
 
 
+async def _caught_up(conn: AsyncConnection, user: uuid.UUID) -> int:
+    """A change a device of the user already read, and the watermark at it."""
+    revision = (
+        await conn.execute(
+            text(
+                "INSERT INTO user_change_log (user_id, entity_type, entity_id, operation)"
+                " VALUES (:user, 'course', '1', 'upsert') RETURNING revision"
+            ),
+            {"user": user},
+        )
+    ).scalar_one()
+    await conn.execute(
+        text(
+            "INSERT INTO user_sync_state (user_id, current_revision)"
+            " VALUES (:user, :revision)"
+        ),
+        {"user": user, "revision": revision},
+    )
+    return revision
+
+
+async def _feed_after(
+    conn: AsyncConnection, user: uuid.UUID, revision: int
+) -> tuple[int, list[tuple[int, str]]]:
+    """The user's watermark, and the (revision, entity type) of each change
+    logged after `revision`."""
+    current = (
+        await conn.execute(
+            text("SELECT current_revision FROM user_sync_state WHERE user_id = :user"),
+            {"user": user},
+        )
+    ).scalar_one()
+    changes = await conn.execute(
+        text(
+            "SELECT revision, entity_type FROM user_change_log"
+            " WHERE user_id = :user AND revision > :revision ORDER BY revision"
+        ),
+        {"user": user, "revision": revision},
+    )
+    return current, [tuple(change) for change in changes]
+
+
+async def test_upgrade_logs_one_change_per_user_whose_full_sync_it_changes(
+    migration_db_url: str,
+) -> None:
+    """A device that caught up before the deploy refetches only when the
+    merge changes what /sync/full shows it: an `assignment_override` entry
+    for a mark that moves or wins, which both apps act on, an `assignment`
+    one for a grade alone, and nothing for a submission alone."""
+    _alembic(migration_db_url, "upgrade", BEFORE)
+    engine = create_async_engine(migration_db_url)
+    try:
+        async with engine.begin() as conn:
+            marked = await _user(conn)
+            await _mark(conn, marked, await _row(conn, marked, 0, 1), "ignored", T0)
+            await _row(conn, marked, 7001, 1)
+            await _mark(conn, marked, await _row(conn, marked, 0, 2), "ignored", T0 + DAY)
+            await _mark(conn, marked, await _row(conn, marked, 7001, 2), "locally_completed", T0)
+            graded = await _user(conn)
+            await _row(conn, graded, 0, 1, grade="A")
+            await _row(conn, graded, 7001, 1)
+            submitted = await _user(conn)
+            await _row(conn, submitted, 0, 1, deleted=T0, submitted=True)
+            await _row(conn, submitted, 7001, 1)
+            since = {user: await _caught_up(conn, user) for user in (marked, graded, submitted)}
+
+        _alembic(migration_db_url, "upgrade", "head")
+        async with engine.connect() as conn:
+            for user, logged in (
+                (marked, ["assignment_override"]),
+                (graded, ["assignment"]),
+                (submitted, []),
+            ):
+                current, changes = await _feed_after(conn, user, since[user])
+                assert [entity_type for _, entity_type in changes] == logged
+                assert current == (changes[-1][0] if changes else since[user])
+            feed = {user: await _feed_after(conn, user, since[user]) for user in since}
+
+        _alembic(migration_db_url, "stamp", BEFORE)
+        _alembic(migration_db_url, "upgrade", "head")
+        async with engine.connect() as conn:
+            assert {user: await _feed_after(conn, user, since[user]) for user in since} == feed
+    finally:
+        await engine.dispose()
+
+
 async def _reminded(factory, test_settings) -> set[int]:
     await scan_assignment_reminders(factory, test_settings)
     async with factory() as session:
