@@ -7,10 +7,12 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 
+from server.auth.models import DevicePushToken, PushJob, UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.push.reminders import scan_assignment_reminders
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import (
     UserAssignment,
@@ -257,13 +259,15 @@ async def test_full_sync_course_overrides_carry_the_ignore_setting(client) -> No
     assert overrides["CS2001301"]["moodle_course_id"] is None
 
 
-def _fetched(moodle_course_id: int, moodle_assignment_id: int) -> FetchedAssignment:
+def _fetched(
+    moodle_course_id: int, moodle_assignment_id: int, due_at: datetime | None = None
+) -> FetchedAssignment:
     return FetchedAssignment(
         moodle_course_id=moodle_course_id,
         moodle_assignment_id=moodle_assignment_id,
         course_name="資料結構",
         title=f"HW{moodle_assignment_id}",
-        due_at=None,
+        due_at=due_at,
         cutoff_at=None,
         allow_from_at=None,
         moodle_url=None,
@@ -403,7 +407,9 @@ async def test_full_sync_keys_only_the_newest_mark_of_a_soft_deleted_assignment(
     ]
 
 
-async def upload_placeholders(client, login, *moodle_assignment_ids: int) -> None:
+async def upload_placeholders(
+    client, login, *moodle_assignment_ids: int, submitted: tuple[int, ...] = ()
+) -> None:
     response = await client.post(
         "/v3/sync/assignments/upload",
         headers=bearer(login),
@@ -414,6 +420,7 @@ async def upload_placeholders(client, login, *moodle_assignment_ids: int) -> Non
                     "course_no": "CS3001301",
                     "course_name": "資料結構",
                     "title": f"HW{moodle_assignment_id}",
+                    "is_submitted": moodle_assignment_id in submitted,
                 }
                 for moodle_assignment_id in moodle_assignment_ids
             ]
@@ -431,7 +438,9 @@ async def mark(client, login, moodle_assignment_id: int, local_status: str) -> N
     assert response.status_code == 200, response.text
 
 
-async def fetch(client, login, *keys: tuple[int, int]) -> None:
+async def fetch(
+    client, login, *keys: tuple[int, int], due_at: datetime | None = None
+) -> None:
     """A server fetch that returns these (course, assignment) keys and
     soft-deletes every other live row, placeholders included."""
     factory = build_session_factory(client.app.state.engine)
@@ -439,8 +448,88 @@ async def fetch(client, login, *keys: tuple[int, int]) -> None:
         await apply_fetched_assignments(
             session,
             user_id=uuid.UUID(login["user"]["id"]),
-            fetched=[_fetched(*key) for key in keys],
+            fetched=[_fetched(*key, due_at=due_at) for key in keys],
             now=datetime.now(UTC),
+        )
+        await session.commit()
+
+
+async def make_reachable(client, login) -> None:
+    """Let the reminder scan file for the login's iPhone: a release that
+    leaves assignment reminders to the server, and a push token."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        device = await session.get(UserDevice, uuid.UUID(login["device_id"]))
+        device.app_version = "2.6.1"
+        session.add(
+            DevicePushToken(
+                device_id=device.id,
+                provider="apns",
+                token_kind="standard",
+                token_hash="hash-iphone",
+                token_value="token-iphone",
+            )
+        )
+        await session.commit()
+
+
+async def reminded(client, test_settings) -> set[int]:
+    """The assignments the reminder scan has pending reminders for."""
+    factory = build_session_factory(client.app.state.engine)
+    await scan_assignment_reminders(factory, test_settings)
+    async with factory() as session:
+        jobs = (
+            await session.execute(
+                select(PushJob).where(
+                    PushJob.channel == "assignment", PushJob.status == "pending"
+                )
+            )
+        ).scalars()
+        return {job.payload["moodle_assignment_id"] for job in jobs}
+
+
+async def test_a_mark_and_a_submission_from_before_the_servers_fetch_stay(
+    client, test_settings
+) -> None:
+    """An app uploads new assignments before the server's own fetch lists
+    them; the user ignores HW5 and has handed in HW6. The fetch takes over
+    the app's rows, so the mark keeps its Moodle id in /sync/full and the
+    reminder scan reminds of HW7 alone."""
+    login = await do_login(client)
+    await make_reachable(client, login)
+    await upload_placeholders(client, login, 5, 6, 7, submitted=(6,))
+    await mark(client, login, 5, "ignored")
+    due_at = datetime.now(UTC) + timedelta(hours=30)
+    await fetch(client, login, (7002, 5), (7002, 6), (7002, 7), due_at=due_at)
+
+    assert await keyed_marks(client, login) == [(5, "ignored")]
+    assert await reminded(client, test_settings) == {7}
+
+
+async def fetch_before_the_takeover(client, login, *keys: tuple[int, int]) -> None:
+    """What a fetch did to an app's placeholder before it took the row over:
+    it added the server's row beside it and soft-deleted the placeholder."""
+    user_id = uuid.UUID(login["user"]["id"])
+    now = datetime.now(UTC)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add_all(
+            UserAssignment(
+                user_id=user_id,
+                moodle_course_id=course_id,
+                moodle_assignment_id=assignment_id,
+                title=f"HW{assignment_id}",
+            )
+            for course_id, assignment_id in keys
+        )
+        await session.execute(
+            update(UserAssignment)
+            .where(
+                UserAssignment.user_id == user_id,
+                UserAssignment.moodle_course_id == 0,
+                UserAssignment.moodle_assignment_id.in_([key[1] for key in keys]),
+            )
+            .values(deleted_at=now)
         )
         await session.commit()
 
@@ -448,17 +537,18 @@ async def fetch(client, login, *keys: tuple[int, int]) -> None:
 async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_outlived_it(
     client,
 ) -> None:
-    """A mark made on a placeholder goes out unkeyed from the fetch that adds
-    the server's row, so both apps drop it. A clear on the server's row used
-    to leave it in place, which is HW5's state here: that old mark, and none
-    on the server's row. When a later fetch soft-deletes the server's row
-    too, as it does to a TA's course, that mark must not come back; a mark
-    made on the server's row since, as for HW6, does."""
+    """Before the fetch took over an app's placeholder, a mark made on one
+    went out unkeyed from the fetch that added the server's row, so both
+    apps dropped it. A clear on the server's row used to leave it in place,
+    which is HW5's state here: that old mark, and none on the server's row.
+    When a later fetch soft-deletes the server's row too, as it does to a
+    TA's course, that mark must not come back; a mark made on the server's
+    row since, as for HW6, does."""
     login = await do_login(client)
     await upload_placeholders(client, login, 5, 6)
     await mark(client, login, 5, "ignored")
     await mark(client, login, 6, "ignored")
-    await fetch(client, login, (7002, 5), (7002, 6))
+    await fetch_before_the_takeover(client, login, (7002, 5), (7002, 6))
     await mark(client, login, 6, "locally_completed")
     await fetch(client, login, (7001, 1))
 
@@ -472,11 +562,12 @@ async def test_full_sync_keeps_a_placeholder_mark_unkeyed_once_the_server_row_ou
 async def test_full_sync_keeps_a_hidden_mark_unkeyed_after_a_note_edit(client) -> None:
     """A note uploaded for HW5's placeholder after its server's row went
     changes the override but not when its old mark reached the server, so
-    that mark stays hidden instead of coming back as received now."""
+    that mark, hidden since a fetch from before the takeover, stays hidden
+    instead of coming back as received now."""
     login = await do_login(client)
     await upload_placeholders(client, login, 5)
     await mark(client, login, 5, "ignored")
-    await fetch(client, login, (7002, 5))
+    await fetch_before_the_takeover(client, login, (7002, 5))
     await fetch(client, login, (7001, 1))
     response = await client.post(
         "/v3/sync/initial-upload",
