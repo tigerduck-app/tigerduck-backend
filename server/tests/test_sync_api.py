@@ -506,6 +506,126 @@ async def test_a_mark_and_a_submission_from_before_the_servers_fetch_stay(
     assert await reminded(client, test_settings) == {7}
 
 
+async def rows_of(client, moodle_assignment_id: int) -> list[tuple]:
+    """(course id, title, soft-deleted, submitted, has a submission time) of
+    each of the user's rows of the assignment."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        rows = await session.execute(
+            select(
+                UserAssignment.moodle_course_id,
+                UserAssignment.title,
+                UserAssignment.deleted_at.is_not(None),
+                UserAssignment.provider_is_submitted,
+                UserAssignment.provider_submitted_at.is_not(None),
+            )
+            .where(UserAssignment.moodle_assignment_id == moodle_assignment_id)
+            .order_by(UserAssignment.id)
+        )
+        return [tuple(row) for row in rows]
+
+
+async def upload(client, login, moodle_assignment_id: int, **fields) -> None:
+    response = await client.post(
+        "/v3/sync/assignments/upload",
+        headers=bearer(login),
+        json={
+            "assignments": [
+                {
+                    "moodle_assignment_id": moodle_assignment_id,
+                    "course_no": "CS3001301",
+                    "course_name": "資料結構",
+                    "title": f"HW{moodle_assignment_id}",
+                    **fields,
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.parametrize("left_out", [False, True], ids=["listed", "left-out"])
+async def test_an_upload_reports_a_submission_on_the_servers_row(
+    client, left_out
+) -> None:
+    """Once the server's fetch has an assignment, an app's upload of it
+    reports only the submission there, the fetch's title and due date
+    staying, and adds no placeholder beside it. That holds after the fetch
+    left the assignment out, as it does a TA's course."""
+    login = await do_login(client)
+    await fetch(client, login, (7002, 5))
+    if left_out:
+        await fetch(client, login, (7001, 1))
+    await upload(client, login, 5, title="HW5 as the app saw it", is_submitted=True)
+
+    assert await rows_of(client, 5) == [(7002, "HW5", left_out, True, True)]
+
+
+@pytest.mark.parametrize("fetched", [False, True], ids=["placeholder", "servers-row"])
+async def test_an_upload_never_takes_a_submission_back(client, fetched) -> None:
+    """Moodle never takes a submission back, so a later upload that says the
+    assignment is not submitted, from a device that has not seen it yet,
+    leaves it submitted."""
+    login = await do_login(client)
+    if fetched:
+        await fetch(client, login, (7002, 5))
+    await upload(client, login, 5, is_submitted=True)
+    await upload(client, login, 5, is_submitted=False)
+
+    assert [row[3] for row in await rows_of(client, 5)] == [True]
+
+
+async def test_an_uploaded_submission_cancels_the_pending_reminders(
+    client, test_settings
+) -> None:
+    """As when the submission probe finds one: the reminders already filed
+    for the assignment go at once, not at the next scan."""
+    login = await do_login(client)
+    await make_reachable(client, login)
+    await fetch(
+        client, login, (7002, 5), (7002, 6), due_at=datetime.now(UTC) + timedelta(hours=30)
+    )
+    assert await reminded(client, test_settings) == {5, 6}
+
+    await upload(client, login, 5, is_submitted=True)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        pending = (
+            await session.execute(
+                select(PushJob.payload["moodle_assignment_id"].as_integer()).where(
+                    PushJob.channel == "assignment", PushJob.status == "pending"
+                )
+            )
+        ).scalars()
+        assert set(pending) == {6}
+
+
+async def test_an_upload_waits_for_a_fetch_under_way(client) -> None:
+    """A fetch lists the assignment while an app uploads it. The upload
+    waits for the fetch's lock and then writes the fetch's row, instead of
+    adding a placeholder beside a row it could not see yet."""
+    login = await do_login(client)
+    user_id = uuid.UUID(login["user"]["id"])
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as fetch_session:
+        await lock_sync_state(fetch_session, user_id)
+        sending = asyncio.create_task(upload(client, login, 5, is_submitted=True))
+        try:
+            await wait_for_a_lock_wait(factory)
+            await apply_fetched_assignments(
+                fetch_session,
+                user_id=user_id,
+                fetched=[_fetched(7002, 5)],
+                now=datetime.now(UTC),
+            )
+            await fetch_session.commit()
+            await sending
+        finally:
+            sending.cancel()
+
+    assert await rows_of(client, 5) == [(7002, "HW5", False, True, True)]
+
+
 async def fetch_before_the_takeover(client, login, *keys: tuple[int, int]) -> None:
     """What a fetch did to an app's placeholder before it took the row over:
     it added the server's row beside it and soft-deleted the placeholder."""
