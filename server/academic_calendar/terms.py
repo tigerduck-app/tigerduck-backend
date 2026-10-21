@@ -7,6 +7,7 @@ as Taipei school days (`AcademicCalendar` on Apple and Android).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Collection
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -23,6 +24,15 @@ _SCHOOL_TZ = ZoneInfo("Asia/Taipei")
 
 #: A term's first and last day of classes, both inclusive.
 TermDates = tuple[date, date]
+
+# The ROC academic year's three digits, then 1 (fall), 2 (spring) or H
+# (summer): "1151", "115H".
+_TERM_CODE = re.compile(r"[0-9]{3}[12H]")
+
+
+def is_term_code(code: str) -> bool:
+    """Whether `code` has the shape of a term's code."""
+    return _TERM_CODE.fullmatch(code) is not None
 
 
 async def current_term_code(session: AsyncSession, now: datetime) -> str | None:
