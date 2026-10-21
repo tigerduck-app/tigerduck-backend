@@ -119,6 +119,11 @@ class UserDevice(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When push/session_reauth.py last asked this device to sign in again,
+    # which it does once every 7 days at most.
+    session_reauth_pushed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -209,6 +214,9 @@ class AuthSession(Base):
             "user_id",
             postgresql_where=sa.text("revoked_at IS NULL"),
         ),
+        # A device's newest session, which push/session_reauth.py reads for
+        # each device it looks at; every refresh adds a row.
+        Index("idx_auth_sessions_device", "device_id", "id"),
     )
 class DevicePushToken(Base):
     __tablename__ = "device_push_tokens"
