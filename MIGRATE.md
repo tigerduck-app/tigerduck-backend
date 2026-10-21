@@ -46,7 +46,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `reauth_required` push with `reason: "session"` for that device alone,
   its title and body app-translation's `notification_reauth_session_*` in
   the device's language. A device is asked at most once every 7 days, and
-  pushes are filed only between 09:00 and 21:00 at school
+  no more once its newest session ended more than 28 days before, after
+  about four pushes; one with a live session it does not use is asked on.
+  Pushes are filed only between 09:00 and 21:00 at school
   (`course_reminder_timezone`). Just before the push goes out the pipeline
   checks the device again, and cancels it as `stale_before_send` when the
   device signed in again, signed out or was removed. iPhone, iPad and
@@ -54,7 +56,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   push.
 - **Expect a first round.** tigerduck-backend#125 counted about 115 such
   devices on 2026-10-21. The first daytime scan after the upgrade asks them,
-  and one still without a session is asked again a week later.
+  and one still without a session is asked again each week, until 28 days
+  after its session ended.
 - **Update the submodule.** Run `git submodule update --init` after
   `git pull`: this release pins `app-translation` to a commit with the new
   copy.
