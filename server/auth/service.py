@@ -117,6 +117,13 @@ async def login(
         logger.info(
             "auth.login.moodle_rejected", student_id=student_id, error=result.error
         )
+        # A 401 tells the apps the token was refused, and they may harvest a
+        # fresh one with the stored password; an outage must not.
+        if result.error == "unreachable":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="moodle_unreachable",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="moodle_verification_failed",
