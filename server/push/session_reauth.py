@@ -43,6 +43,9 @@ _PLATFORMS = (*APPLE_HANDHELD_PLATFORMS, UserDevicePlatform.android.value)
 _SEEN_WITHIN = timedelta(days=3)
 # Long enough for an app to sign in again by itself after its session ended.
 _SIGN_IN_GRACE = timedelta(hours=1)
+# An app refreshes its session, or signs in again, right after it announces;
+# the scan leaves an announce this recent for a later run.
+_ANNOUNCE_SETTLE = timedelta(minutes=10)
 # An app that holds its session refreshes it once its access token runs out,
 # 15 minutes after it was issued (`auth_access_token_ttl_seconds`), so a live
 # session issued this long before a launch is not held.
@@ -142,7 +145,8 @@ async def scan_sessionless_devices(
     """File the push for each device `sessionless_devices` finds that was not
     asked in the last `_REPEAT_AFTER`, and return how many were filed.
 
-    A device is marked and its job filed in one transaction, and the mark is
+    A device announced within `_ANNOUNCE_SETTLE` waits for a later run. A
+    device is marked and its job filed in one transaction, and the mark is
     only taken over one at least `_REPEAT_AFTER` old, so a run that overlaps
     another, or follows a restart, files nothing twice.
     """
@@ -151,7 +155,13 @@ async def scan_sessionless_devices(
     if now.astimezone(school).hour not in _SEND_HOURS:
         return 0
     async with session_scope(session_factory) as session:
-        found = (await session.execute(sessionless_devices(now))).all()
+        found = (
+            await session.execute(
+                sessionless_devices(now).where(
+                    DeviceRegistration.updated_at <= now - _ANNOUNCE_SETTLE
+                )
+            )
+        ).all()
         if not found:
             return 0
         claimed = (

@@ -298,6 +298,45 @@ async def test_only_a_device_left_without_a_session_is_asked(
 
 
 @asyncio_session
+async def test_each_rule_holds_to_its_boundary(
+    db_session, prepared_engine, test_settings
+):
+    seen = NOW - 15 * MINUTE
+
+    def ended(at: datetime) -> dict:
+        return {
+            "issued_at": at - HOUR,
+            "expires_at": NOW + 80 * DAY,
+            "revoked_at": at,
+            "revoked_reason": "reuse_detected",
+        }
+
+    def issued(at: datetime) -> dict:
+        return {"issued_at": at, "expires_at": at + 90 * DAY}
+
+    # label: (sessions, last announce, asked)
+    cases = {
+        "ended-61m-before": ([ended(seen - 61 * MINUTE)], seen, True),
+        "ended-59m-before": ([ended(seen - 59 * MINUTE)], seen, False),
+        "issued-24h1m-before": ([issued(seen - 24 * HOUR - MINUTE)], seen, True),
+        "issued-23h59m-before": ([issued(seen - 24 * HOUR + MINUTE)], seen, False),
+        "seen-3d-less-1m": ([ended(NOW - 4 * DAY)], NOW - 3 * DAY + MINUTE, True),
+        "seen-3d-and-1m": ([ended(NOW - 4 * DAY)], NOW - 3 * DAY - MINUTE, False),
+        # The app refreshes, or signs in again, right after it announces.
+        "revoked-seen-11m": ([ended(NOW - 2 * HOUR)], NOW - 11 * MINUTE, True),
+        "revoked-seen-9m": ([ended(NOW - 2 * HOUR)], NOW - 9 * MINUTE, False),
+        "live-seen-11m": ([issued(NOW - 30 * HOUR)], NOW - 11 * MINUTE, True),
+        "live-seen-9m": ([issued(NOW - 30 * HOUR)], NOW - 9 * MINUTE, False),
+    }
+    for label, (sessions, announced, _) in cases.items():
+        await _device(db_session, label, sessions=sessions, announced=announced)
+
+    await _scan(prepared_engine, test_settings)
+    asked = {label for label, (_, _, asked) in cases.items() if asked}
+    assert set(await _jobs(db_session)) == asked
+
+
+@asyncio_session
 async def test_only_the_sessionless_device_of_a_user_receives_it(
     db_session, prepared_engine, test_settings
 ):
