@@ -6,6 +6,8 @@ full sync reads the tombstone that DELETE leaves as "hide this course here",
 and neither app uploads a course it hides. So once the student really takes
 the course, only the device that removed it can bring it back with its
 roster: its snapshot leaves that tombstone out, and its upload releases it.
+That works only where the removal hid nothing on the device itself, which
+today is the iPhone's tap-again in Add course.
 """
 
 from __future__ import annotations
@@ -139,25 +141,21 @@ async def test_hiding_an_enrolled_course_still_binds_the_device_that_hid_it(clie
     assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 1
 
 
-async def test_a_course_counts_as_added_by_hand_once_its_own_add_lands(client) -> None:
-    """The iPhone sends an add with the term as the class table shows it, so
-    a second course added in the same sitting can reach the server in the
-    first one's upload, unforced, before its own add lands. A course added
-    by hand that a roster put on the server already counts the same way."""
+async def test_a_forced_key_leaves_a_course_already_on_the_server_as_it_is(client) -> None:
+    """A course added by hand that a roster, or another course's add, put on
+    the server first stays as it is: the iPhone sends an add with the term
+    as the class table shows it, so a second course added in the same
+    sitting can land unforced before its own add. Removing it binds."""
     phone = await _login(client, "iphone-pair", "ios")
     await _upload(client, phone, [ENROLLED, ADDED, OTHER], force=[ADDED])
-    rows, _ = await _snapshot(client, phone)
-    assert rows[OTHER] == "ntust_portal"
     await _upload(client, phone, [ENROLLED, ADDED, OTHER], force=[OTHER])
     rows, _ = await _snapshot(client, phone)
-    assert rows[OTHER] == "user_added"
-    await _upload(client, phone, [ENROLLED, ADDED, OTHER])
-    rows, _ = await _snapshot(client, phone)
-    assert rows[OTHER] == "user_added"
+    assert rows == {ENROLLED: "ntust_portal", ADDED: "user_added", OTHER: "ntust_portal"}
 
     await _delete(client, phone, OTHER)
-    roster = await _upload(client, phone, [ENROLLED, ADDED, OTHER])
-    assert roster["skipped_tombstoned"] == 0
+    _, on_phone = await _snapshot(client, phone)
+    assert OTHER in on_phone
+    assert (await _upload(client, phone, [ENROLLED, ADDED, OTHER]))["skipped_tombstoned"] == 1
 
 
 async def test_an_add_landing_after_a_removal_does_not_bring_the_course_back(client) -> None:

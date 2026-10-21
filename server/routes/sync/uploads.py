@@ -96,20 +96,25 @@ async def upload_courses(
         )).scalars().all()
     )
 
-    # Clear tombstones for explicitly re-added courses (user action). The
-    # courses they name count as added by hand from here on, unless one
-    # comes back from the deletion of a course that did not.
+    # Clear tombstones for explicitly re-added courses (user action). A
+    # course these keys bring to the server counts as added by hand, unless
+    # it comes back from the deletion of one that did not. One the server
+    # holds already keeps what it is, so a roster course added again by hand
+    # still binds when it is hidden later, unless its key lifted the
+    # tombstone of one added by hand.
     added_by_hand = set(payload.force_keys)
+    back_by_hand: set[str] = set()
     if payload.force_keys:
-        cleared = await session.execute(
+        cleared = (await session.execute(
             delete(UserCourseTombstone)
             .where(
                 UserCourseTombstone.user_id == auth.user_id,
                 UserCourseTombstone.course_key.in_(payload.force_keys),
             )
             .returning(UserCourseTombstone.course_key, UserCourseTombstone.user_added)
-        )
+        )).all()
         added_by_hand -= {t.course_key for t in cleared if not t.user_added}
+        back_by_hand = {t.course_key for t in cleared if t.user_added}
 
     # A reset tombstone does not bind the device that wrote it. That reset
     # cleared the term precisely so this upload could replace it, and the
@@ -120,12 +125,15 @@ async def upload_courses(
     #
     # Nor does the tombstone of a course added by hand bind its author's
     # roster, an upload that forces no key. Its author's snapshot leaves it
-    # out (`_read_full_snapshot`), so that device lists the course again
-    # only once its roster does, and its upload is then the one way back:
+    # out (`_read_full_snapshot`), so where the removal hid nothing on that
+    # device (the iPhone's tap-again in Add course) it lists the course
+    # again once its roster does, and its upload is then the one way back:
     # every other device hides the course and uploads nothing it hides, and
     # one that has not synced since would only send the copy that was
     # removed. An add's upload can carry the term as it was when that
-    # course was added, a course taken back since included.
+    # course was added, a course taken back since included. An upload the
+    # author put together before the removal and sent after it releases the
+    # tombstone all the same; the window is that of one request.
     payload_keys = {f"client:{c.semester}:{c.course_no}" for c in payload.courses}
     if auth.device_id and payload_keys:
         released = [UserCourseTombstone.deleted_by_reset.is_(True)]
@@ -197,10 +205,10 @@ async def upload_courses(
                     "updated_at": now,
                     "version": UserCourse.__table__.c.version + 1,
                     "updated_by_device_id": auth.device_id,
-                    # Adding a course by hand marks it so, even over the
-                    # copy a roster put there; other uploads leave it as is.
                     "source": (
-                        source if course_key in added_by_hand else UserCourse.__table__.c.source
+                        CourseSource.user_added.value
+                        if course_key in back_by_hand
+                        else UserCourse.__table__.c.source
                     ),
                 },
             )
