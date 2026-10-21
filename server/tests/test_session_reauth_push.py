@@ -387,6 +387,38 @@ async def test_each_rule_holds_to_its_boundary(
     assert set(await _jobs(db_session)) == asked
 
 
+def _ring(rivals: int, first: dict) -> list[dict]:
+    """The sessions a duplicate refresh left as `rivals` of one another
+    (`auth.service._rotate_again`): the oldest, `first`, was used first and
+    superseded the newer ones (`auth.service.settle_contest`)."""
+    return [first] + [
+        {
+            "issued_at": first["issued_at"] + index * MINUTE,
+            "expires_at": NOW + 80 * DAY,
+            "revoked_at": first["issued_at"] + HOUR,
+            "revoked_reason": "superseded",
+        }
+        for index in range(1, rivals)
+    ]
+
+
+@asyncio_session
+@pytest.mark.parametrize("rivals", [2, 3])
+@pytest.mark.parametrize(("ending", "asked"), [("logout", False), ("expired", True)])
+async def test_a_ring_is_judged_by_the_session_that_won_it(
+    db_session, prepared_engine, test_settings, rivals, ending, asked
+):
+    won = {
+        "issued_at": NOW - 6 * HOUR,
+        "expires_at": NOW - 3 * HOUR if ending == "expired" else NOW + 80 * DAY,
+        "revoked_at": NOW - 2 * HOUR,
+        "revoked_reason": ending,
+    }
+    await _device(db_session, "iphone", sessions=_ring(rivals, won))
+
+    assert await _scan(prepared_engine, test_settings) == int(asked)
+
+
 @asyncio_session
 async def test_two_accounts_on_one_device_id_are_kept_apart(
     db_session, prepared_engine, test_settings
@@ -782,6 +814,28 @@ async def test_a_launch_right_before_the_push_holds_it_until_the_app_refreshed(
     else:
         assert len(apple.requests) == 1
         assert job.status == "sent"
+
+
+@asyncio_session
+@pytest.mark.parametrize("rivals", [2, 3])
+async def test_a_logout_on_the_session_that_won_a_ring_cancels_the_push(
+    db_session, prepared_engine, test_settings, rivals
+):
+    # Left unused for 30 hours, then used once more, only to sign out.
+    won = {"issued_at": NOW - 30 * HOUR, "expires_at": NOW + 60 * DAY}
+    device = await _device(db_session, "iphone", sessions=_ring(rivals, won))
+    assert await _scan(prepared_engine, test_settings) == 1
+
+    await db_session.execute(
+        update(AuthSession)
+        .where(AuthSession.device_id == device.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=SENT_AT - MINUTE, revoked_reason="logout")
+    )
+    await db_session.commit()
+    apple, _ = await _tick(db_session, prepared_engine, test_settings)
+
+    assert apple.requests == []
+    assert (await _job(db_session)).last_error == "stale_before_send"
 
 
 @asyncio_session

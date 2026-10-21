@@ -137,15 +137,16 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   itself, stayed out of TigerSync while the app still showed the account as
   signed in, and nothing told the user (tigerduck-backend#125). Every 10
   minutes the backend now looks for a device announced in the last 3 days,
-  with TigerSync on and an active push token, whose newest session did not
-  end in a logout, and that either has no live session and was announced
-  more than an hour after its newest session was revoked or expired, or has
-  a live session not replaced for 24 hours before an announce. An announce
-  under 10 minutes old waits for a later scan, so the refresh or sign-in the
-  app makes right after it lands first. It files a `reauth_required` push
-  with `reason: "session"` for that device alone, its title and body
-  app-translation's `notification_reauth_session_*` in the device's
-  language. A device is asked at most once every 7 days, and
+  with TigerSync on and an active push token, whose newest session (leaving
+  out the rivals a duplicate refresh left, which the one used first
+  superseded) did not end in a logout, and that either has no live session
+  and was announced more than an hour after its newest session was revoked
+  or expired, or has a live session not replaced for 24 hours before an
+  announce. An announce under 10 minutes old waits for a later scan, so the
+  refresh or sign-in the app makes right after it lands first. It files a
+  `reauth_required` push with `reason: "session"` for that device alone,
+  its title and body app-translation's `notification_reauth_session_*` in
+  the device's language. A device is asked at most once every 7 days, and
   no more once its newest session ended more than 28 days before, after
   about four pushes; one with a live session it does not use is asked on.
   Pushes are filed only between 09:00 and 21:00 at school

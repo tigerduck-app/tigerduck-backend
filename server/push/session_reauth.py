@@ -73,6 +73,11 @@ def sessionless_devices(now: datetime) -> Select:
     session was revoked or expired, at most `_GIVE_UP_AFTER` before `now`.
     `server_push_enabled`, which only operator pushes read, is not read here,
     as for the credential reauth push.
+
+    A device's newest session leaves out the rivals a duplicate refresh left
+    beside the one it went on with, which superseded them when it was first
+    used (`settle_contest` in server/auth/service.py). They can be newer, and
+    keep saying `superseded` after it ended in a sign-out.
     """
     newest = (
         select(
@@ -81,7 +86,12 @@ def sessionless_devices(now: datetime) -> Select:
             AuthSession.revoked_at,
             AuthSession.revoked_reason,
         )
-        .where(AuthSession.device_id == UserDevice.id)
+        .where(
+            AuthSession.device_id == UserDevice.id,
+            AuthSession.revoked_reason.is_distinct_from(
+                SessionRevokedReason.superseded.value
+            ),
+        )
         .order_by(AuthSession.id.desc())
         .limit(1)
         .lateral()
