@@ -425,7 +425,8 @@ async def _rotate_again(
     client may hold `successor`, or another live session `token` was
     rotated into, after all. They all stay live, linked in a ring, and the
     first of them used supersedes the rest (`settle_contest`). The new
-    session joins the ring after `successor`.
+    session joins the ring after `successor`, so the ring grows by one a
+    send, no faster than the per-IP refresh limit, until one is used.
     """
     assert token.revoked_at is not None  # checked by _may_rotate_again
     since_rotation = now - token.revoked_at
