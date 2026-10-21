@@ -391,6 +391,8 @@ async def test_an_android_device_gets_the_copy_in_its_language(
     assert request.data["kind"] == REAUTH_SCENARIO
     assert request.data["reason"] == SESSION_REAUTH_REASON
     assert request.data["android_channel_id"] == "system"
+    # Signed out, the app shows nothing for it.
+    assert request.priority == "normal"
 
 
 # --- How often ---------------------------------------------------------------

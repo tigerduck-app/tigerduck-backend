@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from server.push.dedupe import SCHEDULE_CHANNEL
+from server.push.notification_copy import REAUTH_SCENARIO, SESSION_REAUTH_REASON
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -326,6 +327,13 @@ def build_fcm_for_job(
         "android_channel_id": _ANDROID_CHANNELS.get(channel, "system"),
         **_extras(payload),
     }
+    # Android shows nothing for the session reauth push while signed out, and
+    # FCM demotes an app whose high-priority messages show nothing; the push
+    # can wait for a dozing phone.
+    session_reauth = (
+        payload.get("kind") == REAUTH_SCENARIO
+        and payload.get("reason") == SESSION_REAUTH_REASON
+    )
     return FcmRequest(
         token=token_value,
         title=title,
@@ -333,4 +341,5 @@ def build_fcm_for_job(
         data=data,
         ttl_seconds=ttl_seconds,
         collapse_key=collapse,
+        priority="normal" if session_reauth else "high",
     )

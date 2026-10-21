@@ -95,6 +95,23 @@ def test_fcm_data_is_not_empty():
     assert request.data["android_channel_id"] == "system"
 
 
+def test_only_the_session_push_goes_at_normal_fcm_priority():
+    """Android's FcmService shows nothing for a `reauth_required` while signed
+    out, and FCM demotes an app whose high-priority messages show nothing."""
+    session = build_reauth_payload(
+        provider="", reason=SESSION_REAUTH_REASON, locale="en"
+    )
+    credential = build_reauth_payload(provider="ntust_sso", locale="en")
+
+    def priority(payload):
+        return build_fcm_for_job(
+            payload=payload, channel="system", token_value="tok"
+        ).priority
+
+    assert priority(session) == "normal"
+    assert priority(credential) == "high"
+
+
 def test_scenario_name_unchanged():
     # The dedupe key embeds it; changing it would resurrect settled jobs.
     assert REAUTH_SCENARIO == "reauth_required"
