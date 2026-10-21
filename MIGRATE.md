@@ -32,6 +32,55 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.6
+
+- **A device left without a session is asked to sign in again.** A device
+  whose TigerSync session is gone, and whose app cannot sign in again by
+  itself, stayed out of TigerSync while the app still showed the account as
+  signed in, and nothing told the user (tigerduck-backend#125). Every 10
+  minutes the backend now looks for a device announced in the last 3 days,
+  with TigerSync on and an active push token, whose newest session did not
+  end in a logout, and that either has no live session and was announced
+  more than an hour after its newest session ended (revoked for theft,
+  expiry or by an operator, or expired), or has a live session not replaced
+  for 24 hours before an announce. It files a `reauth_required` push with
+  `reason: "session"` for that device alone, its title and body
+  app-translation's `notification_reauth_session_*` in the device's
+  language. A device is asked at most once every 7 days, and pushes are
+  filed only between 09:00 and 21:00 at school
+  (`course_reminder_timezone`). Just before the push goes out the pipeline
+  checks the device again, and cancels it as `stale_before_send` when the
+  device signed in again, signed out or was removed. iPhone, iPad and
+  Android; `server_push_enabled` is not read, as for the credential reauth
+  push.
+- **Expect a first round.** tigerduck-backend#125 counted about 115 such
+  devices on 2026-10-21. The first daytime scan after the upgrade asks them,
+  and one still without a session is asked again a week later.
+- **Update the submodule.** Run `git submodule update --init` after
+  `git pull`: this release pins `app-translation` to a commit with the new
+  copy.
+- **Migration `516f9bad27f0`** adds `user_devices.session_reauth_pushed_at`,
+  null on every device, without rewriting the table, and the index
+  `idx_auth_sessions_device` on `auth_sessions (device_id, id)`, which the
+  scan reads each device's newest session by. Building the index blocks
+  writes to `auth_sessions` while it runs, about half a second per million
+  sessions, and the backend migrates before it starts. Schema only; a second
+  run changes nothing.
+- **Turning it off** without a rollback: set
+  `TIGERDUCK_SESSION_REAUTH_SCAN_INTERVAL_SECONDS=0` in `.env` and run
+  `./start.sh`. A push already filed still goes out.
+- **Rolling back.** The 3.3.5 code cannot start on a database at
+  `516f9bad27f0`, so stamp it back to `d899fe7d1f79` first: with 3.3.6
+  running, `docker compose exec backend alembic stamp d899fe7d1f79`; with
+  3.3.5 already built,
+  `docker compose run --rm --entrypoint alembic backend stamp --purge d899fe7d1f79`.
+  3.3.5 does not read the column or the index, and the next upgrade keeps
+  the times the column recorded.
+- No app update: both apps show a `reauth_required` push as a plain
+  notification, and a tap opens the app. Android drops one that arrives
+  while the app is signed out; an iPhone shows it even then, if its sign-out
+  never reached the server.
+
 ## Upgrading to 3.3.5
 
 - **One row per assignment.** An app's upload of an assignment was stored as
