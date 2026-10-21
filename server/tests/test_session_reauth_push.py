@@ -406,6 +406,49 @@ async def test_a_device_that_signed_in_again_is_left_alone(
 
 
 @asyncio_session
+async def test_a_device_is_no_longer_asked_four_weeks_after_its_session_ended(
+    db_session, prepared_engine, test_settings
+):
+    await _device(db_session, "ended-28d", sessions=[revoked(28 * DAY, "expired")])
+    await _device(
+        db_session, "ended-28d-1m", sessions=[revoked(28 * DAY + MINUTE, "expired")]
+    )
+    await _device(
+        db_session,
+        "expired-29d",
+        sessions=[{"issued_at": NOW - 119 * DAY, "expires_at": NOW - 29 * DAY}],
+    )
+    # A live session left unused is asked on, however old.
+    await _device(db_session, "live-untouched-40d", sessions=[live(40 * DAY)])
+
+    assert await _scan(prepared_engine, test_settings) == 2
+    assert set(await _jobs(db_session)) == {"ended-28d", "live-untouched-40d"}
+
+
+@asyncio_session
+async def test_a_device_that_signs_in_again_after_the_cap_is_asked_again(
+    db_session, prepared_engine, test_settings
+):
+    device = await _device(
+        db_session, "iphone", sessions=[revoked(30 * DAY, "reuse_detected")]
+    )
+    assert await _scan(prepared_engine, test_settings) == 0
+
+    # Signed in again, and used it until its session went again two hours ago.
+    db_session.add(
+        AuthSession(
+            user_id=device.user_id,
+            device_id=device.id,
+            refresh_token_hash="relogin",
+            **revoked(2 * HOUR, "reuse_detected"),
+        )
+    )
+    await db_session.commit()
+    assert await _scan(prepared_engine, test_settings) == 1
+    assert len((await _jobs(db_session))["iphone"]) == 1
+
+
+@asyncio_session
 async def test_nothing_is_filed_at_night_at_school(
     db_session, prepared_engine, test_settings
 ):

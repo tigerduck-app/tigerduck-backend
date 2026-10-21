@@ -48,6 +48,9 @@ _SIGN_IN_GRACE = timedelta(hours=1)
 # session issued this long before a launch is not held.
 _UNTOUCHED = timedelta(hours=24)
 _REPEAT_AFTER = timedelta(days=7)
+# After about four pushes a device whose session ended this long ago is left
+# alone; one with a live session it does not use is asked on.
+_GIVE_UP_AFTER = timedelta(days=28)
 # Hours at school, in `course_reminder_timezone`, the scan files in.
 _SEND_HOURS = range(9, 21)
 
@@ -61,8 +64,9 @@ def sessionless_devices(now: datetime) -> Select:
     in a sign-out. Then either it has a live session and its newest session
     was issued more than `_UNTOUCHED` before the last announce, or it has no
     live session and was announced more than `_SIGN_IN_GRACE` after its newest
-    session was revoked or expired. `server_push_enabled`, which only operator
-    pushes read, is not read here, as for the credential reauth push.
+    session was revoked or expired, at most `_GIVE_UP_AFTER` before `now`.
+    `server_push_enabled`, which only operator pushes read, is not read here,
+    as for the credential reauth push.
     """
     newest = (
         select(
@@ -90,6 +94,7 @@ def sessionless_devices(now: datetime) -> Select:
         or_(DevicePushToken.expires_at.is_(None), DevicePushToken.expires_at > now),
     )
     announced = DeviceRegistration.updated_at
+    ended = func.coalesce(newest.c.revoked_at, newest.c.expires_at)
     return (
         select(UserDevice.id, UserDevice.user_id)
         .join(
@@ -110,9 +115,8 @@ def sessionless_devices(now: datetime) -> Select:
                 and_(live, announced > newest.c.issued_at + _UNTOUCHED),
                 and_(
                     ~live,
-                    announced
-                    > func.coalesce(newest.c.revoked_at, newest.c.expires_at)
-                    + _SIGN_IN_GRACE,
+                    announced > ended + _SIGN_IN_GRACE,
+                    ended >= now - _GIVE_UP_AFTER,
                 ),
             ),
         )
