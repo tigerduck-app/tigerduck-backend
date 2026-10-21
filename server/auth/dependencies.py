@@ -1,8 +1,9 @@
 """FastAPI dependency: authenticate /v3 requests via Bearer access JWT.
 
 Besides verifying the JWT itself, this checks the backing auth_session is
-not revoked — so logout, device deletion, and refresh-reuse detection cut
-access immediately instead of "within 15 minutes when the JWT expires".
+not revoked — so logout, device deletion, and a session superseded by a
+rival cut access immediately instead of "within 15 minutes when the JWT
+expires".
 One PK lookup per authenticated request, plus one write on a session's
 first; the session object is shared with the route handler via FastAPI's
 per-request dependency cache.
@@ -17,11 +18,11 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
-from server.auth.service import settle_contest
+from server.auth.service import lock_contest, settle_contest
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -101,8 +102,8 @@ async def _record_first_use(session: AsyncSession, auth_session: AuthSession) ->
     Moodle must not hold the row lock the session's refresh needs.
     """
     if auth_session.replaced_by_session_id is None:
-        # A second rotation that names this session as its successor holds
-        # this lock while it decides, and links the session to a rival.
+        # A refresh that rotates the token before it again holds this lock
+        # while it decides, and links the session to a new rival.
         await session.get(
             AuthSession,
             auth_session.id,
@@ -123,20 +124,14 @@ async def _record_first_use(session: AsyncSession, auth_session: AuthSession) ->
 
 
 async def _claim_contest(session: AsyncSession, auth_session: AuthSession) -> None:
-    """A live session pointing at another is one of the two a second
-    rotation left (`settle_contest`); its first use supersedes the other,
-    unless the other was used first.
+    """A live session pointing at another is one of those that rotations of
+    one token left (`settle_contest`); its first use supersedes the others,
+    unless one of them was used first.
 
-    Both rows are locked in id order, so two first uses cannot deadlock,
-    and the loser sees itself revoked once the winner commits.
+    They are locked in id order (`lock_contest`), so two first uses cannot
+    deadlock, and the loser sees itself revoked once the winner commits.
     """
-    pair = sorted((auth_session.id, auth_session.replaced_by_session_id))
-    await session.execute(
-        select(AuthSession.id)
-        .where(AuthSession.id.in_(pair))
-        .order_by(AuthSession.id)
-        .with_for_update()
-    )
+    await lock_contest(session, auth_session.id)
     await session.refresh(auth_session)
     if auth_session.revoked_at is not None:
         await session.commit()
