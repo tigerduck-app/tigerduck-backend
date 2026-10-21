@@ -34,22 +34,34 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.3.6
 
-- **A course added by hand comes back with the roster.** Removing a course
-  added by hand left the tombstone that hiding an enrolled course leaves, so
-  once the student really took the course, both apps kept it hidden until it
-  was added by hand again. An upload that forces a course's key now stores
-  the course as `user_added`, unless the key brings back a course deleted
-  while it was not, and deleting such a course leaves a tombstone marked
-  `user_added`. The device that deleted it does not get that tombstone in
-  `/sync/full`, so it does not hide the course, and the first roster it
-  uploads that lists the course (an upload with no `force_keys`) brings it
-  back. Every other device stays bound, and hiding an enrolled course binds
-  every device as before.
+- **A course added by hand and removed can come back with the roster.**
+  Removing a course added by hand left the tombstone that hiding an
+  enrolled course leaves, so once the student really took the course, both
+  apps kept it hidden until it was added by hand again. A course an
+  upload's `force_keys` brings to the server is now stored as `user_added`,
+  unless the key brings back a course deleted while it was not; a course
+  the server holds already keeps its `source`. Deleting a `user_added`
+  course, by hand or with a semester reset, leaves a tombstone marked
+  `user_added`. The device that deleted it by hand does not get that
+  tombstone in `/sync/full`, and the first upload from it with no
+  `force_keys` that lists the course releases it. Every other device stays
+  bound, and hiding an enrolled course binds every device as before.
+- **Only a removal that hides nothing on the device benefits**, which today
+  is the iPhone's tap-again in Add course (`removeUserAddedCourse`).
+  Android's delete and the iPhone's and Mac's timetable Delete keep a hide
+  on the device, so that device's roster uploads leave the course out, and
+  the course stays hidden as before until the apps let go of that hide.
+- **When the release moves.** Another account signing in on the same
+  install deletes the first account's device row, so the tombstone loses
+  its author and binds every device again. Another device's semester reset
+  turns the tombstone into its own reset tombstone, which only that device
+  releases. An upload the removing device put together before the removal
+  and sent after it brings the course back: that window is one request.
 - **Migration `a463951f49a7`** adds `user_added` (not null, default false)
-  to `user_course_tombstones` without rewriting the table. Existing
-  tombstones keep binding: nothing recorded which courses were added by hand
-  before this release, and those courses count as enrolled until they are
-  added by hand again.
+  to `user_course_tombstones` without rewriting the table. Nothing recorded
+  which courses were added by hand before this release, so there is no
+  backfill: a course with a tombstone from before 3.3.6 keeps today's
+  behaviour, also once it is added by hand again and removed.
 - **Rolling back.** The 3.3.5 code cannot start on a database at
   `a463951f49a7`, so stamp it back to `d899fe7d1f79` first: with 3.3.6
   running, `docker compose exec backend alembic stamp d899fe7d1f79`; with
@@ -58,7 +70,7 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   The column stays and 3.3.5 never reads it: every tombstone binds and goes
   to every device again, and a device that syncs meanwhile hides the course
   it removed for good, as before.
-- No app update and no setting.
+- No setting.
 
 ## Upgrading to 3.3.5
 
