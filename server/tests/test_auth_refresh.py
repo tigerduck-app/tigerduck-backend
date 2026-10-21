@@ -720,6 +720,45 @@ async def test_a_rotation_in_flight_when_the_device_is_removed_is_revoked_too(
     assert live == 0
 
 
+async def test_the_device_removal_locks_its_sessions_in_id_order(client) -> None:
+    """A refresh or a first use locks sessions in id order (`lock_contest`).
+    A removal waiting for a lower one must not hold a higher one, or the two
+    would deadlock."""
+    lower = await do_login(client)
+    higher = await do_login(client)
+    other = await _login_elsewhere(client)
+    row_lower = await _row(client, lower["refresh_token"])
+    row_higher = await _row(client, higher["refresh_token"])
+    # A new token hash moves the lower row after the higher one in the table
+    # and in every index, so the removal's scan meets the higher one first.
+    await _set_row(client, lower["refresh_token"], refresh_token_hash="moved")
+
+    engine = client.app.state.engine
+    device = LOGIN_BODY["device_info"]["client_device_id"]
+    async with engine.connect() as holder, engine.connect() as probe:
+        await holder.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": row_lower.id},
+        )
+        removal = asyncio.create_task(
+            client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+        )
+        await _until_queries_wait_for_a_lock(engine)
+        # NOWAIT fails at once where the removal holds the row.
+        await probe.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE NOWAIT"),
+            {"id": row_higher.id},
+        )
+        await probe.rollback()
+        await holder.commit()
+    assert (await removal).status_code == 204
+    for row in (row_lower, row_higher):
+        refused = await client.get(
+            "/v3/devices", headers=_bearer(lower if row is row_lower else higher)
+        )
+        assert refused.status_code == 401
+
+
 async def test_a_refresh_and_a_first_use_of_the_two_pairs_do_not_deadlock(client) -> None:
     """A refresh of the newer of the two sessions a second rotation left meets
     a first use of the older one, which locks the pair in id order. The
