@@ -54,11 +54,15 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   (`course_reminder_timezone`). Before each try to send it, a retry
   included, the pipeline checks the device again, and cancels the push as
   `stale_before_send` when the device signed in again, signed out, was
-  removed or turned TigerSync off. iPhone, iPad and
-  Android; `server_push_enabled` is not read, as for the credential reauth
-  push. On Android it goes at normal FCM priority, so a dozing phone gets it
-  at its next maintenance window: the app shows nothing for it while signed
-  out, and FCM demotes an app whose high-priority messages show nothing.
+  removed or turned TigerSync off. A try that falls at night at school, as a
+  retry after 21:00 or a job left pending over a restart, waits for 09:00,
+  and one within 10 minutes of an announce waits out those 10 minutes;
+  neither spends an attempt, and the device is checked again then. iPhone,
+  iPad and Android; `server_push_enabled` is not read, as for the credential
+  reauth push. On Android it goes at normal FCM priority, so a dozing phone
+  gets it at its next maintenance window: the app shows nothing for it while
+  signed out, and FCM demotes an app whose high-priority messages show
+  nothing.
 - **Expect a first round.** tigerduck-backend#125 counted about 115 such
   devices on 2026-10-21. The first daytime scan after the upgrade asks them,
   and one still without a session is asked again each week, until 28 days

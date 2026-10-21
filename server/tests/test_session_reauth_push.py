@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -22,6 +23,7 @@ from server.auth.models import (
 from server.db import build_engine, build_session_factory
 from server.i18n import translate
 from server.models import DeviceRegistration
+from server.push import pipeline
 from server.push.apns_client import RecordingSender, SendResult
 from server.push.fcm_client import RecordingFcmSender
 from server.push.notification_copy import REAUTH_SCENARIO, SESSION_REAUTH_REASON
@@ -42,6 +44,9 @@ NOW = (
     .replace(hour=12, minute=0, second=0, microsecond=0)
     .astimezone(UTC)
 )
+# The pipeline's clock in these tests: in the daytime at school, where the
+# push may go out, a few minutes after the scan.
+SENT_AT = NOW + 5 * MINUTE
 TITLE_KEY = "notification_reauth_session_title"
 BODY_KEY = "notification_reauth_session_body"
 
@@ -157,7 +162,7 @@ CHANGES = ["signed in again", "logout", "removed", "TigerSync off"]
 
 
 async def _change(session, device: UserDevice, change: str) -> None:
-    now = datetime.now(UTC)
+    now = SENT_AT
     if change == "signed in again":
         await _sign_in_again(session, device, now)
         return
@@ -220,10 +225,21 @@ class ScriptedSender:
         pass
 
 
-async def _tick(session, engine, settings, apple=None, android=None):
-    """Make every pending job and delivery due by the real clock, which the
-    pipeline reads, and run one push tick."""
-    past = datetime.now(UTC) - 5 * MINUTE
+def _clock(at: datetime):
+    """`datetime` for the pipeline module, its `now` fixed at `at`."""
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return at.astimezone(tz)
+
+    return Clock
+
+
+async def _tick(session, engine, settings, apple=None, android=None, at=SENT_AT):
+    """Make every pending job and delivery due at `at`, and run one push tick
+    with the pipeline's clock there."""
+    past = at - 5 * MINUTE
     await session.execute(
         update(PushJob)
         .where(PushJob.status == "pending")
@@ -237,14 +253,15 @@ async def _tick(session, engine, settings, apple=None, android=None):
     await session.commit()
     apple = apple or ScriptedSender()
     android = android or ScriptedSender()
-    await run_push_tick(
-        PushPipelineWorker(
-            session_factory=build_session_factory(engine),
-            settings=settings,
-            router=PushRouter(apple=apple, android=android),
-            worker_id="session-reauth-test",
+    with patch.object(pipeline, "datetime", _clock(at)):
+        await run_push_tick(
+            PushPipelineWorker(
+                session_factory=build_session_factory(engine),
+                settings=settings,
+                router=PushRouter(apple=apple, android=android),
+                worker_id="session-reauth-test",
+            )
         )
-    )
     return apple, android
 
 
@@ -611,7 +628,7 @@ async def test_a_push_filed_before_the_device_signed_in_again_is_cancelled(
     )
     assert await _scan(prepared_engine, test_settings) == 1
 
-    await _sign_in_again(db_session, device, datetime.now(UTC))
+    await _sign_in_again(db_session, device, SENT_AT - MINUTE)
     apple, _ = await _tick(db_session, prepared_engine, test_settings)
 
     assert apple.requests == []
@@ -662,6 +679,109 @@ async def test_a_retry_after_the_device_changed_sends_nothing(
         )
     ).scalars().all()
     assert (delivery.status, delivery.failure_code) == ("skipped", "stale_before_send")
+
+
+def _filed_at(at: datetime) -> list[dict]:
+    """A device's sessions as a scan at `at` asks it: gone two hours."""
+    return [
+        {
+            "issued_at": at - 3 * HOUR,
+            "expires_at": at + 80 * DAY,
+            "revoked_at": at - 2 * HOUR,
+            "revoked_reason": "reuse_detected",
+        }
+    ]
+
+
+async def _job(session) -> PushJob:
+    [job] = (
+        await session.execute(
+            select(PushJob).execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    return job
+
+
+@asyncio_session
+async def test_a_retry_due_after_nine_at_night_waits_for_the_morning(
+    db_session, prepared_engine, test_settings
+):
+    filed = _at_school(20, 58)
+    morning = _at_school(9) + DAY
+    await _device(
+        db_session, "iphone", sessions=_filed_at(filed), announced=filed - 15 * MINUTE
+    )
+    assert await _scan(prepared_engine, test_settings, filed) == 1
+    apple = ScriptedSender(
+        SendResult(success=False, status="500"), SendResult(success=True, status="200")
+    )
+    # The first try fails at 20:59, and its retry comes due after 21:00.
+    for at in (_at_school(20, 59), _at_school(21) + timedelta(seconds=30)):
+        await _tick(db_session, prepared_engine, test_settings, apple, at=at)
+    assert len(apple.requests) == 1
+    job = await _job(db_session)
+    assert (job.status, job.attempts) == ("pending", 1)
+    assert job.available_at == morning
+
+    await _tick(db_session, prepared_engine, test_settings, apple, at=morning)
+    assert len(apple.requests) == 2
+    assert (await _job(db_session)).status == "sent"
+
+
+@asyncio_session
+async def test_a_job_left_pending_over_a_restart_at_night_waits_for_the_morning(
+    db_session, prepared_engine, test_settings
+):
+    filed = _at_school(20, 59)
+    morning = _at_school(9) + DAY
+    await _device(
+        db_session, "iphone", sessions=_filed_at(filed), announced=filed - 15 * MINUTE
+    )
+    assert await _scan(prepared_engine, test_settings, filed) == 1
+
+    # Claimed first by the backend that came up at 23:30, and again at 05:00.
+    apple = ScriptedSender()
+    for at in (_at_school(23, 30), _at_school(5) + DAY):
+        await _tick(db_session, prepared_engine, test_settings, apple, at=at)
+        job = await _job(db_session)
+        assert (job.status, job.attempts) == ("pending", 0)
+        assert job.available_at == morning
+    assert apple.requests == []
+
+    await _tick(db_session, prepared_engine, test_settings, apple, at=morning)
+    assert [r.device_token for r in apple.requests] == ["tok-iphone"]
+
+
+@asyncio_session
+@pytest.mark.parametrize("refreshed", [False, True], ids=["still-gone", "refreshed"])
+async def test_a_launch_right_before_the_push_holds_it_until_the_app_refreshed(
+    db_session, prepared_engine, test_settings, refreshed
+):
+    device = await _device(
+        db_session, "iphone", sessions=[revoked(2 * HOUR, "reuse_detected")]
+    )
+    assert await _scan(prepared_engine, test_settings) == 1
+
+    launched = SENT_AT - MINUTE
+    await _announce(db_session, "iphone", launched)
+    apple, _ = await _tick(db_session, prepared_engine, test_settings)
+    assert apple.requests == []
+    job = await _job(db_session)
+    assert (job.status, job.attempts) == ("pending", 0)
+    assert job.available_at == launched + 10 * MINUTE
+
+    if refreshed:
+        await _sign_in_again(db_session, device, launched + MINUTE)
+    apple, _ = await _tick(
+        db_session, prepared_engine, test_settings, at=launched + 10 * MINUTE
+    )
+    job = await _job(db_session)
+    if refreshed:
+        assert apple.requests == []
+        assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    else:
+        assert len(apple.requests) == 1
+        assert job.status == "sent"
 
 
 @asyncio_session

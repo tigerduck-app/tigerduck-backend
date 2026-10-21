@@ -5,13 +5,14 @@ itself, stays out of TigerSync while the app still shows the account as signed
 in, and nothing tells the user (tigerduck-backend#125). This scan files a
 `reauth_required` push with reason `session` for that device alone, at most
 once every 7 days, and only in the daytime at school, since the push rings.
-The pipeline asks again just before it sends (`pipeline._materialize`).
+The pipeline asks again before each try to send, and holds a try that falls
+at night or right after an announce (`pipeline._materialize`).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -44,7 +45,8 @@ _SEEN_WITHIN = timedelta(days=3)
 # Long enough for an app to sign in again by itself after its session ended.
 _SIGN_IN_GRACE = timedelta(hours=1)
 # An app refreshes its session, or signs in again, right after it announces;
-# the scan leaves an announce this recent for a later run.
+# the scan leaves an announce this recent for a later run, and the pipeline
+# holds a try until the announce is this old.
 _ANNOUNCE_SETTLE = timedelta(minutes=10)
 # An app that holds its session refreshes it once its access token runs out,
 # 15 minutes after it was issued (`auth_access_token_ttl_seconds`), so a live
@@ -54,13 +56,14 @@ _REPEAT_AFTER = timedelta(days=7)
 # After about four pushes a device whose session ended this long ago is left
 # alone; one with a live session it does not use is asked on.
 _GIVE_UP_AFTER = timedelta(days=28)
-# Hours at school, in `course_reminder_timezone`, the scan files in.
+# Hours at school, in `course_reminder_timezone`, the push is filed and sent
+# in.
 _SEND_HOURS = range(9, 21)
 
 
 def sessionless_devices(now: datetime) -> Select:
-    """The devices, with their users, whose app keeps launching without a
-    session it can use, as of `now`.
+    """The devices, with their users and last announce (`announced_at`),
+    whose app keeps launching without a session it can use, as of `now`.
 
     Such a device was announced within `_SEEN_WITHIN`, holds an active
     standard push token, has TigerSync on, and its newest session did not end
@@ -99,7 +102,7 @@ def sessionless_devices(now: datetime) -> Select:
     announced = DeviceRegistration.updated_at
     ended = func.coalesce(newest.c.revoked_at, newest.c.expires_at)
     return (
-        select(UserDevice.id, UserDevice.user_id)
+        select(UserDevice.id, UserDevice.user_id, announced.label("announced_at"))
         .join(
             DeviceRegistration,
             DeviceRegistration.device_id == UserDevice.client_device_id,
@@ -126,14 +129,31 @@ def sessionless_devices(now: datetime) -> Select:
     )
 
 
-async def still_sessionless(
+async def announced_while_sessionless(
     session: AsyncSession, device_id: uuid.UUID, now: datetime
-) -> bool:
-    """Whether `sessionless_devices` still finds `device_id` at `now`."""
+) -> datetime | None:
+    """When `device_id` last announced itself, while `sessionless_devices`
+    still finds it at `now`; None once it does not."""
     found = await session.execute(
         sessionless_devices(now).where(UserDevice.id == device_id).limit(1)
     )
-    return found.first() is not None
+    row = found.first()
+    return row.announced_at if row is not None else None
+
+
+def send_after(
+    now: datetime, announced_at: datetime, school: ZoneInfo
+) -> datetime | None:
+    """When a push to a device last announced at `announced_at` may try to go
+    out, or None when it may at `now`: once the refresh or sign-in the app
+    makes right after an announce has had `_ANNOUNCE_SETTLE` to land, and in
+    `_SEND_HOURS` at school."""
+    at = max(now, announced_at + _ANNOUNCE_SETTLE)
+    local = at.astimezone(school)
+    if local.hour not in _SEND_HOURS:
+        day = local.date() + timedelta(days=int(local.hour >= _SEND_HOURS.stop))
+        at = datetime.combine(day, time(_SEND_HOURS.start), tzinfo=school)
+    return at.astimezone(UTC) if at > now else None
 
 
 async def scan_sessionless_devices(
