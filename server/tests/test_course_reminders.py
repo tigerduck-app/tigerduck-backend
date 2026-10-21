@@ -743,3 +743,28 @@ async def test_a_scan_looks_up_more_users_than_a_statement_binds(
 
     assert await scan_course_reminders(factory, settings) == 1
     assert len(await _jobs(db_session, user.id)) == 1
+
+
+async def test_a_cleared_custom_name_gives_the_reminder_the_course_name(
+    db_session, prepared_engine, test_settings
+):
+    """A cleared name is stored as "" so the apps hear of it; the reminder
+    goes back to the course's own name."""
+    local, schedule = _occurrence_in(26)
+    user_ids = {}
+    for student_id, names in (("b11203001", {"zh": "早八"}), ("b11203002", {"zh": "", "en": ""})):
+        user = await _make_user(db_session, student_id)
+        course = _course(user, schedule_json=schedule)
+        db_session.add(course)
+        await db_session.flush()
+        db_session.add(
+            UserCourseOverride(user_id=user.id, user_course_id=course.id, custom_names=names)
+        )
+        user_ids[student_id] = user.id
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 2
+    for student_id, title in (("b11203001", "上課提醒：早八"), ("b11203002", "上課提醒：資料結構")):
+        (job,) = await _jobs(db_session, user_ids[student_id])
+        assert job.payload["title"] == title

@@ -599,3 +599,37 @@ async def test_course_override_refuses_a_value_of_the_wrong_type(client, body) -
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         assert (await session.execute(select(UserCourseOverride))).first() is None
+
+
+async def test_clearing_a_course_name_reaches_the_other_devices(client) -> None:
+    """The apps apply only the locales a snapshot lists, so a cleared one
+    stays as "" rather than leaving the snapshot, and clearing the last one
+    keeps the override that says so."""
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    async def rename(locale: str, name: str) -> dict:
+        response = await client.patch(
+            "/v3/sync/courses/1141CS3001301/override",
+            headers=bearer(login),
+            json={"custom_name": name, "locale": locale},
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["custom_names"]
+
+    assert await rename("zh", "作業系統概論") == {"zh": "作業系統概論"}
+    assert await rename("en", "OS") == {"zh": "作業系統概論", "en": "OS"}
+    assert await rename("zh", "") == {"zh": "", "en": "OS"}
+    assert await rename("en", "") == {"zh": "", "en": ""}
+
+    snapshot = await client.get("/v3/sync/full", headers=bearer(login))
+    assert [o["custom_names"] for o in snapshot.json()["course_overrides"]] == [
+        {"zh": "", "en": ""}
+    ]
+    assert await course_override_changes(client) == [{"fields": ["custom_name"]}] * 4
