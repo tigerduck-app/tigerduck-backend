@@ -51,9 +51,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   no more once its newest session ended more than 28 days before, after
   about four pushes; one with a live session it does not use is asked on.
   Pushes are filed only between 09:00 and 21:00 at school
-  (`course_reminder_timezone`). Just before the push goes out the pipeline
-  checks the device again, and cancels it as `stale_before_send` when the
-  device signed in again, signed out or was removed. iPhone, iPad and
+  (`course_reminder_timezone`). Before each try to send it, a retry
+  included, the pipeline checks the device again, and cancels the push as
+  `stale_before_send` when the device signed in again, signed out, was
+  removed or turned TigerSync off. iPhone, iPad and
   Android; `server_push_enabled` is not read, as for the credential reauth
   push. On Android it goes at normal FCM priority, so a dozing phone gets it
   at its next maintenance window: the app shows nothing for it while signed

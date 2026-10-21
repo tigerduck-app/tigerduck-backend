@@ -440,27 +440,30 @@ async def _materialize(
         job.scenario == REAUTH_SCENARIO
         and payload.get("reason") == SESSION_REAUTH_REASON
     )
-    if is_session_reauth:
-        if not await _has_deliveries(session, job):
-            if job.device_id is None or not await still_sessionless(
-                session, job.device_id, now
-            ):
-                # Signed in again, signed out or removed since the scan filed
-                # it. Only before the first delivery, as for a running activity
-                # below.
-                _settle(
-                    job,
-                    status=PushJobStatus.cancelled,
-                    error="stale_before_send",
-                    now=now,
-                )
-                logger.info("push.session_reauth_stale", job_id=job.id)
-                return False
-        elif job.device_id is None:
-            # Its device row went after the first round. Without the filter
-            # above the job would reach the user's other devices, so only the
-            # deliveries it has play out.
-            return True
+    if is_session_reauth and (
+        job.device_id is None
+        or not await still_sessionless(session, job.device_id, now)
+    ):
+        # Signed in again, signed out, removed or TigerSync off since the scan
+        # filed it, asked on every round as a retry can come minutes after a
+        # first try that failed. A job's rounds go on only while its delivery
+        # is pending, to its one device's one token, so nothing sent is
+        # reported as cancelled; a deleted device row would leave the token
+        # query above reaching the user's other devices.
+        await session.execute(
+            update(PushDelivery)
+            .where(
+                PushDelivery.push_job_id == job.id,
+                PushDelivery.status == PushDeliveryStatus.pending.value,
+            )
+            .values(
+                status=PushDeliveryStatus.skipped.value,
+                failure_code="stale_before_send",
+            )
+        )
+        _settle(job, status=PushJobStatus.cancelled, error="stale_before_send", now=now)
+        logger.info("push.session_reauth_stale", job_id=job.id)
+        return False
 
     if is_activity_job:
         # Both kinds need the activity id. For an end it picks the token:

@@ -153,6 +153,34 @@ async def _sign_in_again(session, device: UserDevice, at: datetime) -> None:
     await session.commit()
 
 
+CHANGES = ["signed in again", "logout", "removed", "TigerSync off"]
+
+
+async def _change(session, device: UserDevice, change: str) -> None:
+    now = datetime.now(UTC)
+    if change == "signed in again":
+        await _sign_in_again(session, device, now)
+        return
+    if change == "logout":
+        statement = (
+            update(AuthSession)
+            .where(AuthSession.device_id == device.id)
+            .values(revoked_at=now, revoked_reason="logout")
+        )
+    elif change == "removed":
+        statement = (
+            update(UserDevice).where(UserDevice.id == device.id).values(deleted_at=now)
+        )
+    else:
+        statement = (
+            update(UserDevice)
+            .where(UserDevice.id == device.id)
+            .values(cloud_sync_enabled=False)
+        )
+    await session.execute(statement)
+    await session.commit()
+
+
 async def _scan(engine, settings, at: datetime = NOW) -> int:
     return await scan_sessionless_devices(
         build_session_factory(engine), settings, now=at
@@ -193,13 +221,18 @@ class ScriptedSender:
 
 
 async def _tick(session, engine, settings, apple=None, android=None):
-    """Make every pending job due by the real clock, which the pipeline
-    reads, and run one push tick."""
+    """Make every pending job and delivery due by the real clock, which the
+    pipeline reads, and run one push tick."""
     past = datetime.now(UTC) - 5 * MINUTE
     await session.execute(
         update(PushJob)
         .where(PushJob.status == "pending")
         .values(fire_at=past, available_at=past)
+    )
+    await session.execute(
+        update(PushDelivery)
+        .where(PushDelivery.status == "pending")
+        .values(next_retry_at=past)
     )
     await session.commit()
     apple = apple or ScriptedSender()
@@ -587,36 +620,48 @@ async def test_a_push_filed_before_the_device_signed_in_again_is_cancelled(
 
 
 @asyncio_session
-@pytest.mark.parametrize("change", ["logout", "soft delete", "TigerSync off"])
+@pytest.mark.parametrize("change", CHANGES)
 async def test_a_push_is_cancelled_when_the_device_changes_before_it_goes_out(
     db_session, prepared_engine, test_settings, change
 ):
     device = await _device(db_session, "iphone", sessions=[live(30 * HOUR)])
     assert await _scan(prepared_engine, test_settings) == 1
 
-    now = datetime.now(UTC)
-    if change == "logout":
-        await db_session.execute(
-            update(AuthSession)
-            .where(AuthSession.device_id == device.id)
-            .values(revoked_at=now, revoked_reason="logout")
-        )
-    elif change == "soft delete":
-        await db_session.execute(
-            update(UserDevice).where(UserDevice.id == device.id).values(deleted_at=now)
-        )
-    else:
-        await db_session.execute(
-            update(UserDevice)
-            .where(UserDevice.id == device.id)
-            .values(cloud_sync_enabled=False)
-        )
-    await db_session.commit()
+    await _change(db_session, device, change)
     apple, _ = await _tick(db_session, prepared_engine, test_settings)
 
     assert apple.requests == []
     [job] = (await _jobs(db_session))["iphone"]
     assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+
+
+@asyncio_session
+@pytest.mark.parametrize("change", CHANGES)
+async def test_a_retry_after_the_device_changed_sends_nothing(
+    db_session, prepared_engine, test_settings, change
+):
+    device = await _device(db_session, "iphone", sessions=[live(30 * HOUR)])
+    assert await _scan(prepared_engine, test_settings) == 1
+    # The first try does not get through; the retry would.
+    apple = ScriptedSender(
+        SendResult(success=False, status="500"), SendResult(success=True, status="200")
+    )
+    await _tick(db_session, prepared_engine, test_settings, apple=apple)
+
+    await _change(db_session, device, change)
+    await _tick(db_session, prepared_engine, test_settings, apple=apple)
+
+    assert len(apple.requests) == 1
+    [job] = (await _jobs(db_session))["iphone"]
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    [delivery] = (
+        await db_session.execute(
+            select(PushDelivery)
+            .where(PushDelivery.push_job_id == job.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalars().all()
+    assert (delivery.status, delivery.failure_code) == ("skipped", "stale_before_send")
 
 
 @asyncio_session
