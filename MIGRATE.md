@@ -32,6 +32,47 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.6
+
+- **A refresh token that comes back no longer signs the device out.** A
+  rotated token sent again is rotated again each time while nothing has
+  used a session it was rotated into, until the token itself expires (90
+  days), instead of once within 24 hours. The pairs it gets stay live until
+  one of them is used. From then on the token and the other pairs get
+  `401 session_revoked`, and nothing is revoked: the session the app uses
+  keeps working. Such a reuse used to revoke the chain and every session of
+  the device, which signed out phones that had only lost replies, some for
+  good.
+- **A copied refresh token is no longer contained.** A copy sent before the
+  app uses its pair gets a pair of its own; whichever pair is used first
+  keeps working until it expires, and the other is refused. Signing out in
+  the app removes the device, which still ends every session on it.
+- **Monitoring.** A reuse refused past the 60-second grace still logs the
+  warning `auth.refresh.reuse_detected`, now with a `cause`
+  (`successor_used`, `superseded` or `successor_revoked`) and
+  `seconds_since_rotation`, and still sets `reuse_detected_at`, which the
+  "Token reuse" panel and `tigerduck_auth_reuse_detected_24h` count. One
+  refused within the grace is logged at info as
+  `auth.refresh.duplicate_refused`, as before. `auth.session.superseded` is
+  one line per use, with every session it superseded in `session_ids`.
+  Nothing sets the revoked reason `reuse_detected` any more.
+- **Logins while Moodle is down.** `POST /v3/auth/login` answers
+  `503 moodle_unreachable` when the backend cannot reach Moodle to check
+  the token. `401 moodle_verification_failed` now means only that Moodle
+  refused the token, or that it belongs to another student. Both count
+  against the login limit. After a 401, Android's automatic sign-in
+  harvests a new token with the stored password; after a 503 it waits five
+  minutes and tries again, as iOS does after either.
+- **Settings.** `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS` is gone,
+  and with it the way 3.3.1 gave to turn the recovery off; a line left in
+  `.env` is ignored. `TIGERDUCK_AUTH_REFRESH_REUSE_GRACE_SECONDS` now only
+  decides which of the two logs above a refused reuse gets.
+- **Rolling back.** 3.3.5 runs on the database as it is. It takes a token
+  this release rotated again for stolen when it comes back, and revokes the
+  device's sessions as before. When one of three or more pairs one token
+  was rotated into is used, the others stay live until they expire.
+- No migration and no app update.
+
 ## Upgrading to 3.3.5
 
 - **One row per assignment.** An app's upload of an assignment was stored as
