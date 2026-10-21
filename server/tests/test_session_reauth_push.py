@@ -489,22 +489,31 @@ async def test_a_push_whose_device_is_gone_reaches_no_other_device(
 # --- Wiring --------------------------------------------------------------------
 
 
-def test_the_scan_is_scheduled_with_the_push_pipeline(test_settings):
+def _scheduled_scan(settings):
     router = PushRouter(apple=RecordingSender(), android=RecordingFcmSender())
     scheduler = build_scheduler(
         async_sessionmaker(),
         router,
-        test_settings,
+        settings,
         llm=object(),
         push_worker=PushPipelineWorker(
             session_factory=async_sessionmaker(),
-            settings=test_settings,
+            settings=settings,
             router=router,
             worker_id="w",
         ),
     )
-    job = scheduler.get_job("session_reauth_scan")
+    return scheduler.get_job("session_reauth_scan")
+
+
+def test_the_scan_is_scheduled_with_the_push_pipeline(test_settings):
+    job = _scheduled_scan(test_settings)
     assert job is not None
     assert job.trigger.interval == timedelta(
         seconds=test_settings.session_reauth_scan_interval_seconds
     )
+
+
+def test_an_interval_of_zero_turns_the_scan_off(test_settings):
+    off = test_settings.model_copy(update={"session_reauth_scan_interval_seconds": 0})
+    assert _scheduled_scan(off) is None

@@ -61,7 +61,8 @@ def build_scheduler(
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
     * `session_reauth_scan` — ask devices left without a session to sign in
-      again every 10 min (only with a `push_worker`, which delivers it).
+      again every 10 min (only with a `push_worker`, which delivers it, and
+      not at all with its interval set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -218,16 +219,17 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=30,
         )
-        scheduler.add_job(
-            session_reauth_scan,
-            trigger=IntervalTrigger(
-                seconds=settings.session_reauth_scan_interval_seconds
-            ),
-            id="session_reauth_scan",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=60,
-        )
+        if settings.session_reauth_scan_interval_seconds > 0:
+            scheduler.add_job(
+                session_reauth_scan,
+                trigger=IntervalTrigger(
+                    seconds=settings.session_reauth_scan_interval_seconds
+                ),
+                id="session_reauth_scan",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)
     return scheduler

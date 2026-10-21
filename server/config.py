@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     # on once a start's alert is heard to sound on a device (MIGRATE.md).
     push_countdown_dedupe_window_seconds: int = 0
     # How often push/session_reauth.py looks for devices left without a
-    # session, to ask them to sign in again.
+    # session, to ask them to sign in again; 0 turns the pushes off.
     session_reauth_scan_interval_seconds: int = 600
 
     # --- Submission status probe (v2.1.0) ---
