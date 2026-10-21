@@ -129,6 +129,7 @@ def test_settings() -> Settings:
         assignment_reminder_scan_interval_seconds=99999,
         course_reminder_scan_interval_seconds=99999,
         bulletin_user_dispatch_interval_seconds=99999,
+        session_reauth_scan_interval_seconds=99999,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
         auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",

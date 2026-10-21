@@ -25,7 +25,7 @@ class UserDevicePlatform(StrEnum):
 
 
 #: iPhone and iPad: the only platforms the backend sends assignment and
-#: class reminders to, and the only ones a reauth push is filed for.
+#: class reminders to, and the only ones a credential reauth push is filed for.
 #: Listing what is included rather than what is not makes a platform added
 #: later fail closed. A tuple, so it serves a Python `in` check and a SQL
 #: `IN (...)` alike, in a stable order.

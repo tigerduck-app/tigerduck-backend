@@ -75,6 +75,7 @@ from server.push.dedupe import activity_id as _activity_id
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
+    SESSION_REAUTH_REASON,
     build_assignment_reminder_payload,
     build_reauth_payload,
 )
@@ -90,6 +91,7 @@ from server.push.presend import (
 )
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.push.session_reauth import announced_while_sessionless, send_after
 from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
@@ -433,6 +435,53 @@ async def _materialize(
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
+
+    is_session_reauth = (
+        job.scenario == REAUTH_SCENARIO
+        and payload.get("reason") == SESSION_REAUTH_REASON
+    )
+    announced_at = (
+        await announced_while_sessionless(session, job.device_id, now)
+        if is_session_reauth and job.device_id is not None
+        else None
+    )
+    if is_session_reauth and announced_at is None:
+        # Signed in again, signed out, removed or TigerSync off since the scan
+        # filed it, asked on every round as a retry can come minutes after a
+        # first try that failed. A job's rounds go on only while its delivery
+        # is pending, to its one device's one token, so nothing sent is
+        # reported as cancelled; a deleted device row would leave the token
+        # query above reaching the user's other devices.
+        await session.execute(
+            update(PushDelivery)
+            .where(
+                PushDelivery.push_job_id == job.id,
+                PushDelivery.status == PushDeliveryStatus.pending.value,
+            )
+            .values(
+                status=PushDeliveryStatus.skipped.value,
+                failure_code="stale_before_send",
+            )
+        )
+        _settle(job, status=PushJobStatus.cancelled, error="stale_before_send", now=now)
+        logger.info("push.session_reauth_stale", job_id=job.id)
+        return False
+    if is_session_reauth and (
+        wait_until := send_after(now, announced_at, ZoneInfo(school_tz))
+    ):
+        # At night at school, as for a retry past 21:00 or a job left pending
+        # over a restart, or right after the app announced itself, before its
+        # own refresh or sign-in could land. Back to pending without spending
+        # an attempt, as for an unverified pre-send check (`_held_back`), and
+        # asked again then.
+        job.status = PushJobStatus.pending.value
+        job.available_at = wait_until
+        job.locked_by = None
+        job.locked_at = None
+        logger.info(
+            "push.session_reauth_waits", job_id=job.id, until=wait_until.isoformat()
+        )
+        return False
 
     if is_activity_job:
         # Both kinds need the activity id. For an end it picks the token:
@@ -1051,7 +1100,9 @@ async def _send_one(
         locale = device.locale if device is not None else None
         if is_reauth:
             payload = build_reauth_payload(
-                provider=payload.get("provider", ""), locale=locale
+                provider=payload.get("provider", ""),
+                reason=payload.get("reason"),
+                locale=locale,
             )
         else:
             payload = build_assignment_reminder_payload(payload, locale=locale)

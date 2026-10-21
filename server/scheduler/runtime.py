@@ -23,6 +23,7 @@ from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.retention import prune_terminal_push_jobs
 from server.push.reminders import scan_assignment_reminders
+from server.push.session_reauth import scan_sessionless_devices
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 
@@ -59,6 +60,9 @@ def build_scheduler(
       (only when a `sync_worker` is provided, i.e. credential keys exist).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
+    * `session_reauth_scan` — ask devices left without a session to sign in
+      again every 10 min (only with a `push_worker`, which delivers it, and
+      not at all with its interval set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -174,6 +178,9 @@ def build_scheduler(
         async def bulletin_user_dispatch() -> None:
             await dispatch_user_bulletins(session_factory, settings)
 
+        async def session_reauth_scan() -> None:
+            await scan_sessionless_devices(session_factory, settings)
+
         scheduler.add_job(
             push_pipeline_tick,
             trigger=IntervalTrigger(seconds=settings.push_pipeline_tick_seconds),
@@ -212,6 +219,17 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=30,
         )
+        if settings.session_reauth_scan_interval_seconds > 0:
+            scheduler.add_job(
+                session_reauth_scan,
+                trigger=IntervalTrigger(
+                    seconds=settings.session_reauth_scan_interval_seconds
+                ),
+                id="session_reauth_scan",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=60,
+            )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)
     return scheduler

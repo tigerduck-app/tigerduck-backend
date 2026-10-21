@@ -132,7 +132,60 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   this release rotated again for stolen when it comes back, and revokes the
   device's sessions as before. When one of three or more pairs one token
   was rotated into is used, the others stay live until they expire.
-- No new setting and no app update.
+- **A device left without a session is asked to sign in again.** A device
+  whose TigerSync session is gone, and whose app cannot sign in again by
+  itself, stayed out of TigerSync while the app still showed the account as
+  signed in, and nothing told the user (tigerduck-backend#125). Every 10
+  minutes the backend now looks for a device announced in the last 3 days,
+  with TigerSync on and an active push token, whose newest session (leaving
+  out the rivals a duplicate refresh left, which the one used first
+  superseded) did not end in a logout, and that either has no live session
+  and was announced more than an hour after its newest session was revoked
+  or expired, or has a live session not replaced for 24 hours before an
+  announce. An announce under 10 minutes old waits for a later scan, so the
+  refresh or sign-in the app makes right after it lands first. It files a
+  `reauth_required` push with `reason: "session"` for that device alone,
+  its title and body app-translation's `notification_reauth_session_*` in
+  the device's language. A device is asked at most once every 7 days, and
+  no more once its newest session ended more than 28 days before, after
+  about four pushes; one with a live session it does not use is asked on.
+  Pushes are filed only between 09:00 and 21:00 at school
+  (`course_reminder_timezone`). Before each try to send it, a retry
+  included, the pipeline checks the device again, and cancels the push as
+  `stale_before_send` when the device signed in again, signed out, was
+  removed or turned TigerSync off. A try that falls at night at school, as a
+  retry after 21:00 or a job left pending over a restart, waits for 09:00,
+  and one within 10 minutes of an announce waits out those 10 minutes;
+  neither spends an attempt, and the device is checked again then. iPhone,
+  iPad and Android; `server_push_enabled` is not read, as for the credential
+  reauth push. On Android it goes at normal FCM priority, so a dozing phone
+  gets it at its next maintenance window: the app shows nothing for it while
+  signed out, and FCM demotes an app whose high-priority messages show
+  nothing.
+- **Expect a first round.** tigerduck-backend#125 counted about 115 such
+  devices on 2026-10-21. The first daytime scan after the upgrade asks them,
+  and one still without a session is asked again each week, until 28 days
+  after its session ended.
+- **Update the submodule.** Run `git submodule update --init` after
+  `git pull`: this release pins `app-translation` to a commit with the new
+  copy.
+- **Migration `516f9bad27f0`** adds `user_devices.session_reauth_pushed_at`,
+  null on every device, without rewriting the table, and the index
+  `idx_auth_sessions_device` on `auth_sessions (device_id, id)`, which the
+  scan reads each device's newest session by. Building the index blocks
+  writes to `auth_sessions` while it runs, about half a second per million
+  sessions, and the backend migrates before it starts. Schema only; a second
+  run changes nothing.
+- **Turning it off** without a rollback: set
+  `TIGERDUCK_SESSION_REAUTH_SCAN_INTERVAL_SECONDS=0` in `.env` and run
+  `./start.sh`. A push already filed still goes out.
+- **Rolling back, pushes.** The stamp to `d899fe7d1f79` above also covers
+  `516f9bad27f0`. 3.3.5 does not read the column or the index, and the next
+  upgrade keeps the times the column recorded.
+- No app update: both apps show a `reauth_required` push as a plain
+  notification, and a tap opens the app. Android drops one that arrives
+  while the app is signed out; an iPhone shows it even then, if its sign-out
+  never reached the server.
 
 ## Upgrading to 3.3.5
 
