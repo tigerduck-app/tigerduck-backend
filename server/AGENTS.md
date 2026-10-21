@@ -248,7 +248,12 @@ into the backend container via `docker-compose.yml`.
   predecessor delivering.
 - `/sync/full` tags each course tombstone with `deleted_by_reset` and
   `deleted_by_this_device`; a client ignores a tombstone that is both,
-  the same rule `upload_courses` applies when it releases them.
+  the same rule `upload_courses` applies when it releases them. A course
+  whose key an upload forces is stored as `user_added`, unless the key
+  brings back a course deleted while it was not. A single delete of a
+  `user_added` course leaves a tombstone marked `user_added`, which its
+  author's snapshot leaves out and its author's next upload forcing no
+  key releases.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.

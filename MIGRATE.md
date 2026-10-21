@@ -32,6 +32,34 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.6
+
+- **A course added by hand comes back with the roster.** Removing a course
+  added by hand left the tombstone that hiding an enrolled course leaves, so
+  once the student really took the course, both apps kept it hidden until it
+  was added by hand again. An upload that forces a course's key now stores
+  the course as `user_added`, unless the key brings back a course deleted
+  while it was not, and deleting such a course leaves a tombstone marked
+  `user_added`. The device that deleted it does not get that tombstone in
+  `/sync/full`, so it does not hide the course, and the first roster it
+  uploads that lists the course (an upload with no `force_keys`) brings it
+  back. Every other device stays bound, and hiding an enrolled course binds
+  every device as before.
+- **Migration `a463951f49a7`** adds `user_added` (not null, default false)
+  to `user_course_tombstones` without rewriting the table. Existing
+  tombstones keep binding: nothing recorded which courses were added by hand
+  before this release, and those courses count as enrolled until they are
+  added by hand again.
+- **Rolling back.** The 3.3.5 code cannot start on a database at
+  `a463951f49a7`, so stamp it back to `d899fe7d1f79` first: with 3.3.6
+  running, `docker compose exec backend alembic stamp d899fe7d1f79`; with
+  3.3.5 already built,
+  `docker compose run --rm --entrypoint alembic backend stamp --purge d899fe7d1f79`.
+  The column stays and 3.3.5 never reads it: every tombstone binds and goes
+  to every device again, and a device that syncs meanwhile hides the course
+  it removed for good, as before.
+- No app update and no setting.
+
 ## Upgrading to 3.3.5
 
 - **One row per assignment.** An app's upload of an assignment was stored as
