@@ -30,7 +30,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ### 🔐 帳號與認證（`server/auth/`）
 - **登入** — App 自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。後端不會拿密碼登入：沒帶 Moodle token 的登入回 `400 moodle_token_required`，一併送來的密碼一律忽略。連不上 Moodle，或 Moodle 回的錯誤與 token 無關（例如維護模式）時回 `503 moodle_unreachable`，只有 Moodle 拒絕的 token 才回 `401 moodle_verification_failed`。不論有沒有帶 token，每次嘗試都計入依 IP 與學號的登入限流
-- **Token** — 短效 JWT access token + 90 天 refresh token rotation。被 rotation 換掉的 token 再送來時，只要它換出的 session 都還沒用過，就每次再 rotation 一次，直到 token 本身過期；這些 session 最先被使用的那組會讓其餘失效，所以晚到的重複 refresh 不會讓 client 手上的那組 token 失效。已有一組用過之後，舊 token 回 `401 session_revoked`，不撤銷任何 session
+- **Token** — 短效 JWT access token + 90 天 refresh token rotation。被 rotation 換掉的 token 再送來時，只要它換出的 session 都還沒用過，就每次再 rotation 一次（最多保留最新的 16 組），直到 token 本身過期；這些 session 最先被使用的那組會讓其餘失效，所以晚到的重複 refresh 不會讓 client 手上的那組 token 失效。已有一組用過之後，舊 token 回 `401 session_revoked`，不撤銷任何 session
 - **憑證保管** — 只存 Moodle token，以 AES-256-GCM + per-row AAD 加密（支援金鑰輪替），供伺服器端代抓使用；不保存 NTUST 密碼
 - **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）
 

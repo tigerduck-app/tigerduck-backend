@@ -6,6 +6,7 @@ pragmatic); the route layer is a thin adapter.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -305,6 +306,11 @@ _REPLACED_REASONS = frozenset(
     {SessionRevokedReason.rotated.value, SessionRevokedReason.superseded.value}
 )
 
+# How many of the sessions one token was rotated into stay live and unused.
+# The app holds one of the newest; without a limit, a copy or a broken client
+# sending the token every few seconds would keep adding live sessions.
+_UNUSED_SESSIONS_KEPT = 16
+
 
 async def _handle_revoked_reuse(
     session: AsyncSession,
@@ -316,8 +322,9 @@ async def _handle_revoked_reuse(
 
     One a rotation replaced is rotated again while nothing has used a
     session it was rotated into: its client lost every reply, or a request
-    that rotated it came late. Once one of them has been used, or the token
-    lost to a rival, it is refused. Nothing else is revoked either way.
+    that rotated it came late. The newest `_UNUSED_SESSIONS_KEPT` of those
+    stay live. Once one of them has been used, or the token lost to a
+    rival, it is refused. Nothing else is revoked either way.
 
     This gives up containing a copied token. A copy sent while the client
     has not used its pair gets a pair of its own; once either pair is used,
@@ -423,10 +430,10 @@ async def _rotate_again(
 
     A late duplicate of a request that rotated it reaches here too, so the
     client may hold `successor`, or another live session `token` was
-    rotated into, after all. They all stay live, linked in a ring, and the
+    rotated into, after all. They stay live, linked in a ring, and the
     first of them used supersedes the rest (`settle_contest`). The new
-    session joins the ring after `successor`, so the ring grows by one a
-    send, no faster than the per-IP refresh limit, until one is used.
+    session joins the ring after `successor`, and the oldest beyond
+    `_UNUSED_SESSIONS_KEPT` are superseded.
     """
     assert token.revoked_at is not None  # checked by _may_rotate_again
     since_rotation = now - token.revoked_at
@@ -439,6 +446,15 @@ async def _rotate_again(
         else successor.replaced_by_session_id
     )
     successor.replaced_by_session_id = replacement.id
+    # Each session joins after the newest, so the ring runs in id order from
+    # the oldest, and cutting the oldest leaves it closed at the newest.
+    ring = sorted(await _linked_ids(session, replacement.id))
+    dropped: list[int] = []
+    if len(ring) > _UNUSED_SESSIONS_KEPT:
+        replacement.replaced_by_session_id = ring[-_UNUSED_SESSIONS_KEPT]
+        dropped = await _supersede(
+            session, ring[:-_UNUSED_SESSIONS_KEPT], replacement.id, now
+        )
     token.rerotated_at = now
     grace = timedelta(seconds=settings.auth_refresh_reuse_grace_seconds)
     logger.info(
@@ -449,6 +465,7 @@ async def _rotate_again(
         successor_id=successor.id,
         replacement_id=replacement.id,
         seconds_since_rotation=int(since_rotation.total_seconds()),
+        superseded_ids=sorted(dropped),
     )
     return result
 
@@ -507,29 +524,35 @@ async def settle_contest(
     winner.replaced_by_session_id = None
     if not rivals:
         return
-    superseded = (
-        await session.execute(
-            update(AuthSession)
-            .where(
-                in_array(AuthSession.id, rivals),
-                AuthSession.revoked_at.is_(None),
-                # Used, it is not one of them.
-                AuthSession.first_used_at.is_(None),
-            )
-            .values(
-                revoked_at=now,
-                revoked_reason=SessionRevokedReason.superseded.value,
-                replaced_by_session_id=winner.id,
-            )
-            .returning(AuthSession.id)
-        )
-    ).scalars().all()
+    superseded = await _supersede(session, rivals, winner.id, now)
     if superseded:
         logger.info(
             "auth.session.superseded",
             session_ids=sorted(superseded),
             winner_id=winner.id,
         )
+
+
+async def _supersede(
+    session: AsyncSession, ids: Iterable[int], by: int, now: datetime
+) -> list[int]:
+    """Revoke the live sessions among `ids` as superseded by `by`, and
+    return their ids. A used one is skipped: it is in no ring."""
+    rows = await session.execute(
+        update(AuthSession)
+        .where(
+            in_array(AuthSession.id, ids),
+            AuthSession.revoked_at.is_(None),
+            AuthSession.first_used_at.is_(None),
+        )
+        .values(
+            revoked_at=now,
+            revoked_reason=SessionRevokedReason.superseded.value,
+            replaced_by_session_id=by,
+        )
+        .returning(AuthSession.id)
+    )
+    return list(rows.scalars())
 
 
 async def logout(session: AsyncSession, *, session_id: int) -> None:

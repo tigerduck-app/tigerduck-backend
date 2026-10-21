@@ -38,9 +38,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   rotated token sent again is rotated again each time while nothing has
   used a session it was rotated into, until the token itself expires (90
   days), instead of once within 24 hours. The pairs it gets stay live until
-  one of them is used. From then on the token and the other pairs get
-  `401 session_revoked`, and nothing is revoked: the session the app uses
-  keeps working. Such a reuse used to revoke the chain and every session of
+  one of them is used, the 16 newest at most: a seventeenth send supersedes
+  the oldest, so a copy or a broken client that keeps sending the token
+  does not keep adding live sessions. From then on the token and the other
+  pairs get `401 session_revoked`, and nothing is revoked: the session the
+  app uses keeps working. Such a reuse used to revoke the chain and every session of
   the device, which signed out phones that had only lost replies, some for
   good.
 - **A copied refresh token is no longer contained.** A copy sent before the
@@ -54,7 +56,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   "Token reuse" panel and `tigerduck_auth_reuse_detected_24h` count. One
   refused within the grace is logged at info as
   `auth.refresh.duplicate_refused`, as before. `auth.session.superseded` is
-  one line per use, with every session it superseded in `session_ids`.
+  one line per use, with every session it superseded in `session_ids`, and
+  `auth.refresh.grace_retry` and `auth.refresh.lost_rotation_recovered`
+  list in `superseded_ids` the oldest pairs a send cut.
   Nothing sets the revoked reason `reuse_detected` any more.
 - **Logins while Moodle is down.** `POST /v3/auth/login` answers
   `503 moodle_unreachable` when the backend cannot reach Moodle to check

@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 from server.auth import service
 from server.auth.models import AuthSession
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
+from server.auth.rate_limit import SlidingWindowLimiter
 from server.auth.tokens import hash_refresh_token
 from server.db import build_session_factory
 
@@ -224,6 +225,34 @@ async def test_a_token_sent_again_and_again_gets_a_pair_each_time(client) -> Non
         assert refused.status_code == 401
     assert await _reuse_detections(client) == 0
     assert (await _refresh(client, pairs[-1]["refresh_token"])).status_code == 200
+
+
+async def test_a_token_sent_on_and_on_keeps_its_sixteen_newest_pairs(
+    client,
+) -> None:
+    """A copy or a broken client sending a token without end still gets a
+    pair each time, but only the 16 newest unused ones stay live, and the
+    use of any of them still supersedes the rest."""
+    client.app.state.refresh_limiter = SlidingWindowLimiter(
+        max_attempts=100, window_seconds=60
+    )
+    login = await do_login(client)
+    pairs = []
+    for _ in range(18):
+        sent = await _refresh(client, login["refresh_token"])
+        assert sent.status_code == 200
+        pairs.append(sent.json())
+
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded"] * 2 + [None] * 16
+    used = await client.get("/v3/devices", headers=_bearer(pairs[2]))
+    assert used.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded"] * 2 + [None] + ["superseded"] * 15
 
 
 async def test_a_grace_retry_is_not_counted_as_reuse(client) -> None:
