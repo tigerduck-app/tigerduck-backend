@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -337,6 +338,27 @@ async def test_each_rule_holds_to_its_boundary(
 
 
 @asyncio_session
+async def test_two_accounts_on_one_device_id_are_kept_apart(
+    db_session, prepared_engine, test_settings
+):
+    gone = [revoked(2 * HOUR, "reuse_detected")]
+    # The account that left the phone kept a token of its own, a stale one.
+    await _device(db_session, "shared-1", sessions=gone, token_name="left-1")
+    await _device(
+        db_session, "shared-1", sessions=[live(HOUR)], token_name="now-1", announced=None
+    )
+    # Here its token moved to the account on the phone now.
+    await _device(db_session, "shared-2", sessions=gone, token=None)
+    await _device(
+        db_session, "shared-2", sessions=[live(HOUR)], token_name="now-2", announced=None
+    )
+
+    assert await _scan(prepared_engine, test_settings) == 1
+    apple, _ = await _tick(db_session, prepared_engine, test_settings)
+    assert [r.device_token for r in apple.requests] == ["tok-left-1"]
+
+
+@asyncio_session
 async def test_only_the_sessionless_device_of_a_user_receives_it(
     db_session, prepared_engine, test_settings
 ):
@@ -429,6 +451,32 @@ async def test_a_device_is_asked_at_most_once_every_seven_days(
     assert jobs[0].dedupe_key != jobs[1].dedupe_key
     await db_session.refresh(device)
     assert device.session_reauth_pushed_at == again
+
+
+@asyncio_session
+async def test_overlapping_scans_file_one_job_per_device(
+    db_session, prepared_engine, test_settings
+):
+    labels = [f"phone-{index}" for index in range(40)]
+    for label in labels:
+        await _device(db_session, label, sessions=[revoked(2 * HOUR, "reuse_detected")])
+
+    # A second apart, as on two hosts, so the jobs' dedupe keys differ and
+    # only the device's mark keeps them apart.
+    factory = build_session_factory(prepared_engine)
+    created = await asyncio.gather(
+        *(
+            scan_sessionless_devices(
+                factory, test_settings, now=NOW + timedelta(seconds=index)
+            )
+            for index in range(4)
+        )
+    )
+
+    assert sum(created) == len(labels)
+    jobs = await _jobs(db_session)
+    assert sorted(jobs) == sorted(labels)
+    assert all(len(filed) == 1 for filed in jobs.values())
 
 
 @asyncio_session
@@ -531,6 +579,39 @@ async def test_a_push_filed_before_the_device_signed_in_again_is_cancelled(
     assert await _scan(prepared_engine, test_settings) == 1
 
     await _sign_in_again(db_session, device, datetime.now(UTC))
+    apple, _ = await _tick(db_session, prepared_engine, test_settings)
+
+    assert apple.requests == []
+    [job] = (await _jobs(db_session))["iphone"]
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+
+
+@asyncio_session
+@pytest.mark.parametrize("change", ["logout", "soft delete", "TigerSync off"])
+async def test_a_push_is_cancelled_when_the_device_changes_before_it_goes_out(
+    db_session, prepared_engine, test_settings, change
+):
+    device = await _device(db_session, "iphone", sessions=[live(30 * HOUR)])
+    assert await _scan(prepared_engine, test_settings) == 1
+
+    now = datetime.now(UTC)
+    if change == "logout":
+        await db_session.execute(
+            update(AuthSession)
+            .where(AuthSession.device_id == device.id)
+            .values(revoked_at=now, revoked_reason="logout")
+        )
+    elif change == "soft delete":
+        await db_session.execute(
+            update(UserDevice).where(UserDevice.id == device.id).values(deleted_at=now)
+        )
+    else:
+        await db_session.execute(
+            update(UserDevice)
+            .where(UserDevice.id == device.id)
+            .values(cloud_sync_enabled=False)
+        )
+    await db_session.commit()
     apple, _ = await _tick(db_session, prepared_engine, test_settings)
 
     assert apple.requests == []
