@@ -419,17 +419,16 @@ async def delete_device(
     now = datetime.now(UTC)
     device.deleted_at = now
 
-    device_sessions = (
-        await session.execute(
-            select(AuthSession).where(
-                AuthSession.device_id == device.id,
-                AuthSession.revoked_at.is_(None),
-            )
-        )
-    ).scalars()
-    for row in device_sessions:
-        row.revoked_at = now
-        row.revoked_reason = SessionRevokedReason.admin_revoked.value
+    revoke = (
+        update(AuthSession)
+        .where(AuthSession.device_id == device.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now, revoked_reason=SessionRevokedReason.admin_revoked.value)
+    )
+    # A refresh holding its sessions' locks when a pass starts commits its
+    # new session too late for that pass to see, and every refresh needs a
+    # live session of the device, so passes repeat until one revokes none.
+    while (await session.execute(revoke)).rowcount:
+        pass
 
     tokens = (
         await session.execute(

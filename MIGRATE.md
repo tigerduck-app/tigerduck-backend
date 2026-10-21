@@ -48,7 +48,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **A copied refresh token is no longer contained.** A copy sent before the
   app uses its pair gets a pair of its own; whichever pair is used first
   keeps working until it expires, and the other is refused. Signing out in
-  the app removes the device, which still ends every session on it.
+  the app removes the device, which still ends every session on it, now
+  including one a refresh in flight adds while the removal runs.
 - **Monitoring.** A reuse refused past the 60-second grace still logs the
   warning `auth.refresh.reuse_detected`, now with a `cause`
   (`successor_used`, `superseded` or `successor_revoked`) and

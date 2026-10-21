@@ -662,6 +662,64 @@ async def test_concurrent_refreshes_with_one_token_all_get_a_pair(client) -> Non
     assert (await _refresh(client, pairs[1]["refresh_token"])).status_code == 200
 
 
+async def test_a_rotation_in_flight_when_the_device_is_removed_is_revoked_too(
+    client,
+) -> None:
+    """A rotation again holds its sessions' locks when the device is removed
+    and commits its new session after the removal started revoking: that
+    session is revoked as well."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    lost = await _refresh(client, token_a)
+    other = await _login_elsewhere(client)
+    row_a = await _row(client, token_a)
+    row_b = await _row(client, lost.json()["refresh_token"])
+
+    engine = client.app.state.engine
+    async with engine.connect() as rotation:
+        # What rotating A again writes while it holds the ring's locks.
+        await rotation.execute(
+            text(
+                "SELECT 1 FROM auth_sessions WHERE id IN (:a, :b)"
+                " ORDER BY id FOR UPDATE"
+            ),
+            {"a": row_a.id, "b": row_b.id},
+        )
+        new_id = await rotation.scalar(
+            text(
+                "INSERT INTO auth_sessions (user_id, device_id, refresh_token_hash,"
+                " expires_at, replaced_by_session_id)"
+                " VALUES (:user_id, :device_id, 'in-flight',"
+                " now() + interval '90 days', :b) RETURNING id"
+            ),
+            {"user_id": row_a.user_id, "device_id": row_a.device_id, "b": row_b.id},
+        )
+        await rotation.execute(
+            text(
+                "UPDATE auth_sessions SET replaced_by_session_id = :new"
+                " WHERE id IN (:a, :b)"
+            ),
+            {"new": new_id, "a": row_a.id, "b": row_b.id},
+        )
+        device = LOGIN_BODY["device_info"]["client_device_id"]
+        removal = asyncio.create_task(
+            client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+        )
+        await _until_queries_wait_for_a_lock(engine)
+        await rotation.commit()
+    assert (await removal).status_code == 204
+
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        live = await session.scalar(
+            select(func.count()).where(
+                AuthSession.device_id == row_a.device_id,
+                AuthSession.revoked_at.is_(None),
+            )
+        )
+    assert live == 0
+
+
 async def test_a_refresh_and_a_first_use_of_the_two_pairs_do_not_deadlock(client) -> None:
     """A refresh of the newer of the two sessions a second rotation left meets
     a first use of the older one, which locks the pair in id order. The
