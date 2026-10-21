@@ -6,15 +6,16 @@ pragmatic); the route layer is a thin adapter.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from enum import Enum
 
 import structlog
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
@@ -36,6 +37,7 @@ from server.auth.tokens import (
     issue_access_token,
 )
 from server.config import Settings
+from server.db import in_array
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
@@ -116,6 +118,13 @@ async def login(
         logger.info(
             "auth.login.moodle_rejected", student_id=student_id, error=result.error
         )
+        # A 401 tells the apps the token was refused, and they may harvest a
+        # fresh one with the stored password; an outage must not.
+        if result.error == "unreachable":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="moodle_unreachable",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="moodle_verification_failed",
@@ -193,13 +202,11 @@ async def refresh(
 ) -> RefreshResult:
     """Rotate a refresh token.
 
-    A token revoked by rotation and presented again comes from a client
-    that lost the rotation reply, from a late duplicate of the request, or
-    from a copy. `_handle_revoked_reuse` rotates it once more or refuses it
-    when the reply may have been lost or duplicated, and treats any other
-    reuse as theft: the whole successor chain plus every active session on
-    the same device is revoked. A token revoked for another reason is
-    refused and nothing else is revoked.
+    A token replaced by a rotation and presented again comes from a client
+    that lost the reply, from a late duplicate of the request, or from a
+    copy. `_handle_revoked_reuse` rotates it again while nothing has used a
+    session it was rotated into, and refuses it once one has; nothing else
+    is revoked either way. A token revoked for another reason is refused.
     """
     if not settings.auth_jwt_secret or not settings.auth_refresh_hmac_key:
         raise HTTPException(
@@ -208,35 +215,19 @@ async def refresh(
         )
 
     token_hash = hash_refresh_token(settings.auth_refresh_hmac_key, refresh_token)
-    found = (
-        await session.execute(
-            select(AuthSession.id, AuthSession.replaced_by_session_id).where(
-                AuthSession.refresh_token_hash == token_hash
-            )
-        )
-    ).one_or_none()
-    if found is None:
+    found_id = await session.scalar(
+        select(AuthSession.id).where(AuthSession.refresh_token_hash == token_hash)
+    )
+    if found_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_refresh_token",
         )
     # Row locks: two concurrent refreshes with the same token serialize here;
-    # the loser then sees revoked_at set and flows through the grace path
-    # instead of forking the rotation chain or 500ing on the unique index.
-    # The session it points at is locked with it, in id order as
-    # `_claim_contest` takes the pair, so a refresh and a first use of the two
-    # sessions a second rotation left cannot deadlock. A pointer set after the
-    # read names a newer session, which still comes after in id order.
-    pair = sorted(
-        {found.id, found.replaced_by_session_id} - {None}
-    )
-    await session.execute(
-        select(AuthSession.id)
-        .where(AuthSession.id.in_(pair))
-        .order_by(AuthSession.id)
-        .with_for_update()
-    )
-    auth_session = await session.get(AuthSession, found.id, populate_existing=True)
+    # the later one then sees revoked_at set and is rotated again or refused,
+    # instead of forking the chain or 500ing on the unique index.
+    await lock_contest(session, found_id)
+    auth_session = await session.get(AuthSession, found_id, populate_existing=True)
     if auth_session is None:  # deleted with its user between the read and the lock
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -249,11 +240,14 @@ async def refresh(
         return await _handle_revoked_reuse(session, settings, auth_session, now)
 
     if auth_session.expires_at <= now:
-        auth_session.revoked_at = now
-        auth_session.revoked_reason = SessionRevokedReason.expired.value
-        # The route's session dependency rolls back on exceptions — commit
-        # explicitly so the revocation outlives the 401 we're about to raise.
-        await session.commit()
+        # A session in a ring (`_rotate_again`) stays live: revoked, it would
+        # end the walk from its rivals before the walk reaches the rest.
+        if auth_session.replaced_by_session_id is None:
+            auth_session.revoked_at = now
+            auth_session.revoked_reason = SessionRevokedReason.expired.value
+            # The route's session dependency rolls back on exceptions — commit
+            # explicitly so the revocation outlives the 401 we're about to raise.
+            await session.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="refresh_token_expired",
@@ -312,11 +306,10 @@ _REPLACED_REASONS = frozenset(
     {SessionRevokedReason.rotated.value, SessionRevokedReason.superseded.value}
 )
 
-
-class _Reuse(Enum):
-    ROTATE_AGAIN = "rotate_again"
-    REFUSE = "refuse"
-    THEFT = "theft"
+# How many of the sessions one token was rotated into stay live and unused.
+# The app holds one of the newest; without a limit, a copy or a broken client
+# sending the token every few seconds would keep adding live sessions.
+_UNUSED_SESSIONS_KEPT = 16
 
 
 async def _handle_revoked_reuse(
@@ -325,10 +318,25 @@ async def _handle_revoked_reuse(
     auth_session: AuthSession,
     now: datetime,
 ) -> RefreshResult:
+    """A revoked token presented again.
+
+    One a rotation replaced is rotated again while nothing has used a
+    session it was rotated into: its client lost every reply, or a request
+    that rotated it came late. The newest `_UNUSED_SESSIONS_KEPT` of those
+    stay live. Once one of them has been used, or the token lost to a
+    rival, it is refused. Nothing else is revoked either way.
+
+    This gives up containing a copied token. A copy sent while the client
+    has not used its pair gets a pair of its own; once either pair is used,
+    the other is refused, and the one used keeps working until it expires
+    or its device is removed. Revoking every session of the device on a
+    reuse signed phones out, some for good, while no reuse looked like an
+    attack (#123).
+    """
     if auth_session.revoked_reason not in _REPLACED_REASONS:
         # Logged out, removed with its device, expired or revoked with its
-        # family earlier: nothing is left to contain, and revoking the
-        # device's sessions would end the one a relogin has just made.
+        # family by an earlier release: revoking the device's sessions would
+        # end the one a relogin has just made.
         logger.info(
             "auth.refresh.revoked_token",
             session_id=auth_session.id,
@@ -341,79 +349,74 @@ async def _handle_revoked_reuse(
 
     successor = None
     if auth_session.replaced_by_session_id is not None:
-        # Locked, so a concurrent rotation or first use of the successor
-        # lands before the checks below read it.
+        # Locked by `refresh`, so a rotation or first use of the successor
+        # in flight lands before the checks below read it.
         successor = await session.get(
             AuthSession,
             auth_session.replaced_by_session_id,
-            with_for_update=True,
             populate_existing=True,
         )
 
-    outcome = _reuse_outcome(settings, auth_session, successor, now)
-    if outcome is _Reuse.ROTATE_AGAIN:
-        assert successor is not None  # narrowed by _reuse_outcome
+    if _may_rotate_again(auth_session, successor):
+        if auth_session.expires_at <= now:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="refresh_token_expired",
+            )
+        assert successor is not None  # narrowed by _may_rotate_again
         return await _rotate_again(session, settings, auth_session, successor, now)
-    if outcome is _Reuse.REFUSE:
+
+    assert auth_session.revoked_at is not None  # revoked, as the caller checked
+    since_rotation = now - auth_session.revoked_at
+    if since_rotation < timedelta(seconds=settings.auth_refresh_reuse_grace_seconds):
         logger.info(
             "auth.refresh.duplicate_refused",
             session_id=auth_session.id,
             successor_id=auth_session.replaced_by_session_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="session_revoked",
+    else:
+        auth_session.reuse_detected_at = now
+        logger.warning(
+            "auth.refresh.reuse_detected",
+            session_id=auth_session.id,
+            user_id=str(auth_session.user_id),
+            cause=_refusal_cause(auth_session, successor),
+            seconds_since_rotation=int(since_rotation.total_seconds()),
         )
-
-    auth_session.reuse_detected_at = now
-    await _revoke_family(session, auth_session, now)
-    logger.warning(
-        "auth.refresh.reuse_detected",
-        session_id=auth_session.id,
-        user_id=str(auth_session.user_id),
-    )
-    # Commit before raising: the session dependency rolls back on exceptions,
-    # and losing the family revocation would let the stolen chain live on.
-    await session.commit()
+        # The session dependency rolls back on exceptions, and the mark is
+        # what the Token reuse panel counts.
+        await session.commit()
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="refresh_reuse_detected",
+        detail="session_revoked",
     )
 
 
-def _reuse_outcome(
-    settings: Settings,
-    token: AuthSession,
-    successor: AuthSession | None,
-    now: datetime,
-) -> _Reuse:
-    """What a rotated `token` presented again gets.
+def _may_rotate_again(token: AuthSession, successor: AuthSession | None) -> bool:
+    """Whether nothing has used a session the rotated `token` was rotated
+    into.
 
-    It is rotated once more while nothing has used its successor: the client
-    lost the reply, or this is a late duplicate of the request that rotated
-    it. Inside the grace, with the successor in use, it is that late
-    duplicate, or a copy, and is refused without revoking anything. Any
-    other reuse is theft.
+    `successor` is the newest of them. A use of any of them supersedes the
+    others, and a rotation of `successor` revokes it, so it is live and
+    unused only while none has been used.
     """
-    if (
-        token.revoked_reason != SessionRevokedReason.rotated.value
-        or token.revoked_at is None
-        or token.rerotated_at is not None
-        # Set when a reuse of it took the theft path, or by a grace retry
-        # from before rerotated_at.
-        or token.reuse_detected_at is not None
-        or successor is None
-        or successor.revoked_at is not None
-    ):
-        return _Reuse.THEFT
-    since_rotation = now - token.revoked_at
-    grace = timedelta(seconds=settings.auth_refresh_reuse_grace_seconds)
-    window = max(
-        grace, timedelta(seconds=settings.auth_refresh_recovery_window_seconds)
+    return (
+        token.revoked_reason == SessionRevokedReason.rotated.value
+        and successor is not None
+        and successor.revoked_at is None
+        and successor.first_used_at is None
     )
-    if successor.first_used_at is None:
-        return _Reuse.ROTATE_AGAIN if since_rotation <= window else _Reuse.THEFT
-    return _Reuse.REFUSE if since_rotation < grace else _Reuse.THEFT
+
+
+def _refusal_cause(token: AuthSession, successor: AuthSession | None) -> str:
+    if token.revoked_reason == SessionRevokedReason.superseded.value:
+        return "superseded"
+    if successor is not None and (
+        successor.first_used_at is not None
+        or successor.revoked_reason in _REPLACED_REASONS
+    ):
+        return "successor_used"
+    return "successor_revoked"
 
 
 async def _rotate_again(
@@ -423,20 +426,35 @@ async def _rotate_again(
     successor: AuthSession,
     now: datetime,
 ) -> RefreshResult:
-    """Rotate `token` once more, for a client that may not hold `successor`.
+    """Rotate `token` again, for a client that may not hold `successor`.
 
-    A late duplicate of the request that made `successor` reaches here too,
-    so the client may hold it after all. `successor` and the new session
-    therefore both stay live, each pointing at the other, and whichever is
-    used first supersedes the other (`settle_contest`).
+    A late duplicate of a request that rotated it reaches here too, so the
+    client may hold `successor`, or another live session `token` was
+    rotated into, after all. They stay live, linked in a ring, and the
+    first of them used supersedes the rest (`settle_contest`). The new
+    session joins the ring after `successor`, and the oldest beyond
+    `_UNUSED_SESSIONS_KEPT` are superseded.
     """
-    assert token.revoked_at is not None  # checked by _reuse_outcome
+    assert token.revoked_at is not None  # checked by _may_rotate_again
     since_rotation = now - token.revoked_at
     result = await _rotate(session, settings, token, now)
     replacement = await session.get(AuthSession, token.replaced_by_session_id)
     assert replacement is not None  # flushed by _rotate
+    replacement.replaced_by_session_id = (
+        successor.id
+        if successor.replaced_by_session_id is None
+        else successor.replaced_by_session_id
+    )
     successor.replaced_by_session_id = replacement.id
-    replacement.replaced_by_session_id = successor.id
+    # Each session joins after the newest, so the ring runs in id order from
+    # the oldest, and cutting the oldest leaves it closed at the newest.
+    ring = sorted(await _linked_ids(session, replacement.id))
+    dropped: list[int] = []
+    if len(ring) > _UNUSED_SESSIONS_KEPT:
+        replacement.replaced_by_session_id = ring[-_UNUSED_SESSIONS_KEPT]
+        dropped = await _supersede(
+            session, ring[:-_UNUSED_SESSIONS_KEPT], replacement.id, now
+        )
     token.rerotated_at = now
     grace = timedelta(seconds=settings.auth_refresh_reuse_grace_seconds)
     logger.info(
@@ -447,70 +465,94 @@ async def _rotate_again(
         successor_id=successor.id,
         replacement_id=replacement.id,
         seconds_since_rotation=int(since_rotation.total_seconds()),
+        superseded_ids=sorted(dropped),
     )
     return result
+
+
+async def _linked_ids(session: AsyncSession, session_id: int) -> set[int]:
+    """`session_id`, the session it points at and, on from there, each live
+    session's rival: what a refresh or a first use of it reads and settles."""
+    linked = (
+        select(
+            AuthSession.id,
+            AuthSession.replaced_by_session_id.label("next_id"),
+            true().label("live"),
+        )
+        .where(AuthSession.id == session_id)
+        .cte("linked", recursive=True)
+    )
+    previous = linked.alias()
+    rival = aliased(AuthSession)
+    linked = linked.union(
+        select(
+            rival.id, rival.replaced_by_session_id, rival.revoked_at.is_(None)
+        ).where(rival.id == previous.c.next_id, previous.c.live)
+    )
+    return set((await session.execute(select(linked.c.id))).scalars())
+
+
+async def lock_contest(session: AsyncSession, session_id: int) -> None:
+    """Lock `session_id` and the sessions linked to it (`_linked_ids`), in
+    id order.
+
+    A refresh and a first use both lock this way, so they cannot deadlock
+    on the sessions one token was rotated into. A session that joins while
+    this waits is newer than every one locked, so it is locked after them.
+    """
+    locked: set[int] = set()
+    while missing := await _linked_ids(session, session_id) - locked:
+        await session.execute(
+            select(AuthSession.id)
+            .where(in_array(AuthSession.id, missing))
+            .order_by(AuthSession.id)
+            .with_for_update()
+        )
+        locked |= missing
 
 
 async def settle_contest(
     session: AsyncSession, winner: AuthSession, now: datetime
 ) -> None:
-    """`winner`, one of the two live sessions a second rotation left, has
-    been used, so the other is superseded and points at it.
+    """`winner`, one of the live sessions that rotations of one token left,
+    has been used, so the others are superseded and point at it.
 
-    The caller holds `winner`'s row lock. A token of the superseded session
-    that turns up later takes the theft path, and the chain walk goes on
-    from it to `winner`.
+    The caller holds their locks (`lock_contest`). A token of a superseded
+    session that turns up later is refused.
     """
-    rival = await session.get(
-        AuthSession,
-        winner.replaced_by_session_id,
-        with_for_update=True,
-        populate_existing=True,
-    )
+    rivals = await _linked_ids(session, winner.id) - {winner.id}
     winner.replaced_by_session_id = None
-    if (
-        rival is None
-        or rival.revoked_at is not None
-        or rival.replaced_by_session_id != winner.id
-    ):
+    if not rivals:
         return
-    rival.revoked_at = now
-    rival.revoked_reason = SessionRevokedReason.superseded.value
-    logger.info(
-        "auth.session.superseded", session_id=rival.id, winner_id=winner.id
+    superseded = await _supersede(session, rivals, winner.id, now)
+    if superseded:
+        logger.info(
+            "auth.session.superseded",
+            session_ids=sorted(superseded),
+            winner_id=winner.id,
+        )
+
+
+async def _supersede(
+    session: AsyncSession, ids: Iterable[int], by: int, now: datetime
+) -> list[int]:
+    """Revoke the live sessions among `ids` as superseded by `by`, and
+    return their ids. A used one is skipped: it is in no ring."""
+    rows = await session.execute(
+        update(AuthSession)
+        .where(
+            in_array(AuthSession.id, ids),
+            AuthSession.revoked_at.is_(None),
+            AuthSession.first_used_at.is_(None),
+        )
+        .values(
+            revoked_at=now,
+            revoked_reason=SessionRevokedReason.superseded.value,
+            replaced_by_session_id=by,
+        )
+        .returning(AuthSession.id)
     )
-
-
-async def _revoke_family(
-    session: AsyncSession, start: AuthSession, now: datetime
-) -> None:
-    """Revoke the forward successor chain of `start`, plus every active
-    session on the same device. The chain walk does not depend on the
-    nullable device_id, so theft is contained even for device-less rows."""
-    seen = {start.id}
-    current = start
-    while current.replaced_by_session_id is not None:
-        nxt = await session.get(AuthSession, current.replaced_by_session_id)
-        if nxt is None or nxt.id in seen:
-            break
-        if nxt.revoked_at is None:
-            nxt.revoked_at = now
-            nxt.revoked_reason = SessionRevokedReason.reuse_detected.value
-        seen.add(nxt.id)
-        current = nxt
-
-    if start.device_id is not None:
-        device_sessions = (
-            await session.execute(
-                select(AuthSession).where(
-                    AuthSession.device_id == start.device_id,
-                    AuthSession.revoked_at.is_(None),
-                )
-            )
-        ).scalars()
-        for row in device_sessions:
-            row.revoked_at = now
-            row.revoked_reason = SessionRevokedReason.reuse_detected.value
+    return list(rows.scalars())
 
 
 async def logout(session: AsyncSession, *, session_id: int) -> None:

@@ -34,6 +34,29 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.3.6
 
+- **A course added by hand and removed can come back with the roster.**
+  Removing a course added by hand left the tombstone that hiding an
+  enrolled course leaves, so once the student really took the course, both
+  apps kept it hidden until it was added by hand again. A course an
+  upload's `force_keys` brings to the server is now stored as `user_added`,
+  unless the key brings back a course deleted while it was not; a course
+  the server holds already keeps its `source`. Deleting a `user_added`
+  course, by hand or with a semester reset, leaves a tombstone marked
+  `user_added`. The device that deleted it by hand does not get that
+  tombstone in `/sync/full`, and the first upload from it with no
+  `force_keys` that lists the course releases it. Every other device stays
+  bound, and hiding an enrolled course binds every device as before.
+- **Only a removal that hides nothing on the device benefits**, which today
+  is the iPhone's tap-again in Add course (`removeUserAddedCourse`).
+  Android's delete and the iPhone's and Mac's timetable Delete keep a hide
+  on the device, so that device's roster uploads leave the course out, and
+  the course stays hidden as before until the apps let go of that hide.
+- **When the release moves.** Another account signing in on the same
+  install deletes the first account's device row, so the tombstone loses
+  its author and binds every device again. Another device's semester reset
+  turns the tombstone into its own reset tombstone, which only that device
+  releases. An upload the removing device put together before the removal
+  and sent after it brings the course back: that window is one request.
 - **A cleared course name reaches the other devices.** Clearing a course's
   name in one language used to drop that language from `custom_names`, so
   `/sync/full` no longer listed it and every other device kept the old name;
@@ -47,6 +70,68 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   the portal's data panel read `""` as no custom name. A name cleared before
   the upgrade is not sent again: a device that kept the old name keeps it
   until the name is cleared once more.
+- **Migration `a463951f49a7`** adds `user_added` (not null, default false)
+  to `user_course_tombstones` without rewriting the table. Nothing recorded
+  which courses were added by hand before this release, so there is no
+  backfill: a course with a tombstone from before 3.3.6 keeps today's
+  behaviour, also once it is added by hand again and removed.
+- **Rolling back.** The 3.3.5 code cannot start on a database at
+  `a463951f49a7`, so stamp it back to `d899fe7d1f79` first: with 3.3.6
+  running, `docker compose exec backend alembic stamp d899fe7d1f79`; with
+  3.3.5 already built,
+  `docker compose run --rm --entrypoint alembic backend stamp --purge d899fe7d1f79`.
+  The column stays and 3.3.5 never reads it: every tombstone binds and goes
+  to every device again, and a device that syncs meanwhile hides the course
+  it removed for good, as before.
+- **A refresh token that comes back no longer signs the device out.** A
+  rotated token sent again is rotated again each time while nothing has
+  used a session it was rotated into, until the token itself expires (90
+  days), instead of once within 24 hours. The pairs it gets stay live until
+  one of them is used, the 16 newest at most: a send that would leave a
+  seventeenth supersedes the oldest, so a copy or a broken client that
+  keeps sending the token does not keep adding live sessions. From then on
+  the token and the other pairs get `401 session_revoked`, and nothing is
+  revoked: the session the app uses keeps working. Such a reuse used to
+  revoke the chain and every session of the device, which signed out
+  phones that had only lost replies, some for good.
+- **A copied refresh token is no longer contained.** A copy sent before the
+  app uses its pair gets a pair of its own; whichever pair is used first
+  keeps working until it expires, and the other is refused. Signing out in
+  the app removes the device, which still ends every session on it, now
+  including one a refresh in flight adds while the removal runs.
+- **Monitoring.** A reuse refused past the 60-second grace still logs the
+  warning `auth.refresh.reuse_detected`, now with a `cause`
+  (`successor_used`, `superseded` or `successor_revoked`) and
+  `seconds_since_rotation`, and still sets `reuse_detected_at`, which the
+  "Token reuse" panel and `tigerduck_auth_reuse_detected_24h` count. One
+  refused within the grace is logged at info as
+  `auth.refresh.duplicate_refused`, as before. `auth.session.superseded` is
+  one line per use, with every session it superseded in `session_ids`;
+  `auth.refresh.grace_retry` and `auth.refresh.lost_rotation_recovered`
+  list the oldest pairs a send superseded in `superseded_ids`. Nothing sets
+  the revoked reason `reuse_detected` any more.
+- **Logins while Moodle is down.** `POST /v3/auth/login` answers
+  `503 moodle_unreachable` when the backend cannot reach Moodle to check
+  the token, or Moodle answers with an error that is not about the token,
+  as in maintenance mode; the backend logs its `errorcode` as
+  `moodle.verify.moodle_error`. `401 moodle_verification_failed` now means
+  only that Moodle refused the token (`invalidtoken`, or `accessexception`
+  for an expired one), or that it belongs to another student. Both count
+  against the login limit. After a 401, Android's automatic sign-in
+  harvests a new token with the stored password; after a 503 it waits five
+  minutes and tries again, as iOS does after either.
+- **Settings.** `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS` is gone,
+  and with it the way 3.3.1 gave to turn the recovery off; a line left in
+  `.env` is ignored. `TIGERDUCK_AUTH_REFRESH_REUSE_GRACE_SECONDS` now only
+  decides how a send of a replaced token is recorded: a refused one as
+  `auth.refresh.duplicate_refused`, or as the `auth.refresh.reuse_detected`
+  warning with its `reuse_detected_at`; one rotated again as
+  `auth.refresh.grace_retry` or `auth.refresh.lost_rotation_recovered`. It
+  no longer decides whether a token is rotated again or refused.
+- **Rolling back, sessions.** After the stamp above, 3.3.5 takes a token
+  this release rotated again for stolen when it comes back, and revokes the
+  device's sessions as before. When one of three or more pairs one token
+  was rotated into is used, the others stay live until they expire.
 - **A device left without a session is asked to sign in again.** A device
   whose TigerSync session is gone, and whose app cannot sign in again by
   itself, stayed out of TigerSync while the app still showed the account as
@@ -93,13 +178,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **Turning it off** without a rollback: set
   `TIGERDUCK_SESSION_REAUTH_SCAN_INTERVAL_SECONDS=0` in `.env` and run
   `./start.sh`. A push already filed still goes out.
-- **Rolling back.** The 3.3.5 code cannot start on a database at
-  `516f9bad27f0`, so stamp it back to `d899fe7d1f79` first: with 3.3.6
-  running, `docker compose exec backend alembic stamp d899fe7d1f79`; with
-  3.3.5 already built,
-  `docker compose run --rm --entrypoint alembic backend stamp --purge d899fe7d1f79`.
-  3.3.5 does not read the column or the index, and the next upgrade keeps
-  the times the column recorded.
+- **Rolling back, pushes.** The stamp to `d899fe7d1f79` above also covers
+  `516f9bad27f0`. 3.3.5 does not read the column or the index, and the next
+  upgrade keeps the times the column recorded.
 - No app update: both apps show a `reauth_required` push as a plain
   notification, and a tap opens the app. Android drops one that arrives
   while the app is signed out; an iPhone shows it even then, if its sign-out

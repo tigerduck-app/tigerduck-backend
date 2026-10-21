@@ -129,6 +129,13 @@ class UserCourseTombstone(Base):
     deleted_by_reset: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa.false(), default=False
     )
+    # Whether the deleted row was a course the user added by hand (`source`
+    # 'user_added'). Left by a single delete, such a tombstone does not bind
+    # its author's roster either, and that device's snapshot leaves it out;
+    # see `upload_courses`.
+    user_added: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false(), default=False
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "course_key"),

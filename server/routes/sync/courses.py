@@ -12,6 +12,7 @@ from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJo
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.models import (
     ChangeEntityType,
+    CourseSource,
     UserAssignment,
     UserAssignmentOverride,
     UserBulletinState,
@@ -59,7 +60,10 @@ async def delete_all_courses(
     rows = (await session.execute(
         delete(UserCourse)
         .where(*course_scope)
-        .returning(UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no)
+        .returning(
+            UserCourse.id, UserCourse.course_key, UserCourse.semester, UserCourse.course_no,
+            UserCourse.source,
+        )
     )).all()
 
     # Replace the tombstones in scope rather than merely clearing them.
@@ -110,26 +114,27 @@ async def delete_all_courses(
             )
         )
         if rows:
+            tombstones = pg_insert(UserCourseTombstone).values([
+                {
+                    "user_id": auth.user_id,
+                    "course_key": row.course_key,
+                    "semester": row.semester,
+                    "course_no": row.course_no,
+                    "deleted_at": now,
+                    "deleted_by_device_id": auth.device_id,
+                    "deleted_by_reset": True,
+                    "user_added": row.source == CourseSource.user_added,
+                }
+                for row in rows
+            ])
             await session.execute(
-                pg_insert(UserCourseTombstone)
-                .values([
-                    {
-                        "user_id": auth.user_id,
-                        "course_key": row.course_key,
-                        "semester": row.semester,
-                        "course_no": row.course_no,
-                        "deleted_at": now,
-                        "deleted_by_device_id": auth.device_id,
-                        "deleted_by_reset": True,
-                    }
-                    for row in rows
-                ])
-                .on_conflict_do_update(
+                tombstones.on_conflict_do_update(
                     index_elements=["user_id", "course_key"],
                     set_={
                         "deleted_at": now,
                         "deleted_by_device_id": auth.device_id,
                         "deleted_by_reset": True,
+                        "user_added": tombstones.excluded.user_added,
                     },
                 )
             )
@@ -207,13 +212,14 @@ async def delete_course(
             UserCourse.user_id == auth.user_id,
             UserCourse.course_key == course_key,
         )
-        .returning(UserCourse.id, UserCourse.semester, UserCourse.course_no)
+        .returning(UserCourse.id, UserCourse.semester, UserCourse.course_no, UserCourse.source)
     )
     result = await session.execute(del_stmt)
     deleted_row = result.one_or_none()
     if deleted_row is None:
         return {"deleted": 0}
 
+    user_added = deleted_row.source == CourseSource.user_added
     await session.execute(
         pg_insert(UserCourseTombstone)
         .values(
@@ -223,10 +229,15 @@ async def delete_course(
             course_no=deleted_row.course_no,
             deleted_at=now,
             deleted_by_device_id=auth.device_id,
+            user_added=user_added,
         )
         .on_conflict_do_update(
             index_elements=["user_id", "course_key"],
-            set_={"deleted_at": now, "deleted_by_device_id": auth.device_id},
+            set_={
+                "deleted_at": now,
+                "deleted_by_device_id": auth.device_id,
+                "user_added": user_added,
+            },
         )
     )
 

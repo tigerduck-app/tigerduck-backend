@@ -18,7 +18,7 @@
 
 TigerDuck Backend is the server side of the [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) app (iOS / Android). It runs at `api.tigerduck.app` and is responsible for five things:
 
-- 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (theft detection revokes the whole chain), AES-256-GCM credential storage, user device & push-token management
+- 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (a resent old token does not sign the device out), AES-256-GCM credential storage, user device & push-token management
 - 🔄 **User data sync (v3)** — Multi-device sync of courses / assignments / settings: initial client upload + per-user changelog incremental pulls, with the server periodically fetching authoritative Moodle assignment updates
 - 📣 **Bulletin pipeline** — Scrape NTUST departmental announcements → de-duplicate → LLM classification (canonical_org / content_tags / importance) → match subscriptions → push (dual-track: anonymous devices and logged-in users)
 - 📲 **Push delivery** — Logged-in users go through the two-phase `push_jobs` → `push_deliveries` pipeline (assignment / course reminders, bulletins, system notices); APNs Push-to-Start (iOS Live Activity), FCM fan-out (Android), bad-token classification and cleanup
@@ -29,8 +29,8 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ## Modules
 
 ### 🔐 Accounts & Auth (`server/auth/`)
-- **Login** — The app completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. The backend never signs in with the password: a login without a Moodle token gets `400 moodle_token_required`, and a password sent along is ignored. Attempts with or without a token count against the login limit, per IP and per student ID
-- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions. A client that lost the rotation response gets one more rotation within 24 hours while the new token has never been used, and a late duplicate of a refresh leaves the pair its client kept working
+- **Login** — The app completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. The backend never signs in with the password: a login without a Moodle token gets `400 moodle_token_required`, and a password sent along is ignored. A login gets `503 moodle_unreachable` when Moodle cannot be reached or answers with an error that is not about the token, as in maintenance mode; only a token Moodle refused gets `401 moodle_verification_failed`. Attempts with or without a token count against the login limit, per IP and per student ID
+- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation. A rotated token sent again is rotated again each time while none of the sessions it was rotated into has been used, keeping the 16 newest live, until the token itself expires; the first of those sessions used supersedes the rest, so a late duplicate of a refresh leaves the pair its client kept working. Once one has been used, the old token gets `401 session_revoked`, and nothing is revoked
 - **Credential custody** — Only the Moodle token is stored, AES-256-GCM encrypted with per-row AAD (key rotation supported), for server-side fetching; the NTUST password is not kept
 - **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens; devices report their locale and hardware model and carry their own sync and push switches (assignment reminders, Live Activity, bulletin push, …)
 
@@ -264,7 +264,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `POST` | `/v3/auth/login` | NTUST SSO login (Moodle token verification) → access + refresh tokens | none |
-| `POST` | `/v3/auth/refresh` | Refresh token rotation (replay detection revokes the family) | refresh token |
+| `POST` | `/v3/auth/refresh` | Refresh token rotation | refresh token |
 | `PATCH` | `/v3/auth/credentials` | Update stored encrypted credentials | JWT |
 | `POST` | `/v3/auth/logout` | Revoke the current session | JWT |
 

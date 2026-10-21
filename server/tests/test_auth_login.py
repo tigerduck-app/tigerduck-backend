@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import httpx
 import pytest
 import structlog
 from sqlalchemy import select
@@ -18,7 +19,11 @@ from server.auth.models import (
     User,
     UserDevice,
 )
-from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
+from server.auth.moodle import (
+    HttpMoodleVerifier,
+    MoodleVerifyResult,
+    StaticMoodleVerifier,
+)
 from server.db import build_session_factory
 from server.syncjobs.models import SyncJob
 
@@ -177,8 +182,9 @@ async def test_second_login_reuses_user_and_device(client) -> None:
         assert len(sessions) == 2
 
 
-async def test_moodle_failure_returns_401_and_creates_nothing(client) -> None:
-    deny_moodle(client)
+@pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
+async def test_moodle_failure_returns_401_and_creates_nothing(client, error) -> None:
+    deny_moodle(client, error=error)
     response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 401
     assert response.json()["detail"] == "moodle_verification_failed"
@@ -188,11 +194,48 @@ async def test_moodle_failure_returns_401_and_creates_nothing(client) -> None:
         assert (await session.execute(select(User))).scalars().all() == []
 
 
-async def test_login_rate_limited_after_max_attempts(client) -> None:
-    deny_moodle(client)
+async def test_unreachable_moodle_returns_503_and_creates_nothing(client) -> None:
+    """An outage says nothing about the token, so the apps try again later
+    instead of taking it for refused."""
+    deny_moodle(client, error="unreachable")
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "moodle_unreachable"
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(User))).scalars().all() == []
+
+
+async def test_moodle_in_maintenance_returns_503(client) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "exception": "moodle_exception",
+                "errorcode": "sitemaintenance",
+                "message": "Site is under maintenance",
+            },
+        )
+
+    client.app.state.moodle_verifier = HttpMoodleVerifier(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "moodle_unreachable"
+
+
+@pytest.mark.parametrize(
+    ("error", "status"), [("invalid_token", 401), ("unreachable", 503)]
+)
+async def test_login_rate_limited_after_max_attempts(client, error, status) -> None:
+    deny_moodle(client, error=error)
     for _ in range(5):
         response = await client.post("/v3/auth/login", json=LOGIN_BODY)
-        assert response.status_code == 401
+        assert response.status_code == status
     response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 429
     assert response.json()["detail"] == "too_many_login_attempts"

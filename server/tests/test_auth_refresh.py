@@ -6,11 +6,15 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import structlog
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine
+from structlog.testing import capture_logs
 
+from server.auth import service
 from server.auth.models import AuthSession
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
+from server.auth.rate_limit import SlidingWindowLimiter
 from server.auth.tokens import hash_refresh_token
 from server.db import build_session_factory
 
@@ -84,6 +88,27 @@ async def _reuse_detections(client) -> int:
         )
 
 
+async def _session_count(client) -> int:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return await session.scalar(select(func.count()).select_from(AuthSession))
+
+
+@pytest.fixture
+def logs(monkeypatch):
+    # The module's logger may be cached with the processors of an earlier
+    # app, which capture_logs does not reach; a new one binds inside it.
+    monkeypatch.setattr(service, "logger", structlog.get_logger(service.__name__))
+    with capture_logs() as captured:
+        yield captured
+
+
+def _logged(logs, event: str, **fields) -> bool:
+    return any(
+        entry["event"] == event and fields.items() <= entry.items() for entry in logs
+    )
+
+
 async def test_normal_rotation_issues_new_tokens(client) -> None:
     login = await do_login(client)
     response = await client.post(
@@ -130,41 +155,14 @@ async def test_retry_within_grace_returns_fresh_tokens(client) -> None:
     assert ok.status_code == 200
     token_d = ok.json()["refresh_token"]
 
-    # If B surfaces later, the "lost" response was actually intercepted —
-    # that's theft: B is rejected AND the device's sessions are revoked.
+    # B lost to C when C was rotated: it is refused, and D keeps working.
     stale = await client.post("/v3/auth/refresh", json={"refresh_token": token_b})
     assert stale.status_code == 401
-
-    dead = await client.post("/v3/auth/refresh", json={"refresh_token": token_d})
-    assert dead.status_code == 401
-
-
-async def test_reuse_after_the_recovery_window_revokes_family(client) -> None:
-    login = await do_login(client)
-    token_a = login["refresh_token"]
-
-    first = await _refresh(client, token_a)
-    assert first.status_code == 200
-    token_b = first.json()["refresh_token"]
-    await _rotated_ago(client, token_a, timedelta(hours=25))
-
-    # B was never used, but a lost reply is not recovered this late: theft,
-    # 401, and the whole family dies.
-    reuse = await _refresh(client, token_a)
-    assert reuse.status_code == 401
-    assert reuse.json()["detail"] == "refresh_reuse_detected"
-
-    dead = await _refresh(client, token_b)
-    assert dead.status_code == 401
-
-    factory = build_session_factory(client.app.state.engine)
-    async with factory() as session:
-        rows = (await session.execute(select(AuthSession))).scalars().all()
-        assert all(r.revoked_at is not None for r in rows)
-        assert any(r.reuse_detected_at is not None for r in rows)
+    assert stale.json()["detail"] == "session_revoked"
+    assert (await _refresh(client, token_d)).status_code == 200
 
 
-async def test_grace_does_not_apply_if_successor_already_used(client) -> None:
+async def test_reuse_after_the_successor_was_rotated_is_refused(client) -> None:
     login = await do_login(client)
     token_a = login["refresh_token"]
 
@@ -173,11 +171,12 @@ async def test_grace_does_not_apply_if_successor_already_used(client) -> None:
     second = await client.post("/v3/auth/refresh", json={"refresh_token": token_b})
     assert second.status_code == 200
 
-    # B was redeemed, so the client DID receive the rotation response —
-    # a later replay of A is theft even inside the grace window.
+    # B was redeemed, so the client did receive the rotation reply: A is
+    # refused, and the pair B was rotated into keeps working.
     reuse = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
     assert reuse.status_code == 401
-    assert reuse.json()["detail"] == "refresh_reuse_detected"
+    assert reuse.json()["detail"] == "session_revoked"
+    assert (await _refresh(client, second.json()["refresh_token"])).status_code == 200
 
 
 async def test_expired_session_401(client) -> None:
@@ -199,35 +198,67 @@ async def test_expired_session_401(client) -> None:
     assert response.status_code == 401
     assert response.json()["detail"] == "refresh_token_expired"
 
-async def test_grace_retry_is_one_shot(client) -> None:
-    """Replaying token A a SECOND time within the grace window must be
-    treated as theft, not another benign retry — otherwise an attacker
-    holding A can mint unbounded live sessions for 60s."""
+async def test_a_token_sent_again_and_again_gets_a_pair_each_time(client) -> None:
+    """An app that loses every reply sends the same token a third and a
+    fourth time, the last ones days later. Each send gets a pair, all stay
+    live while none is used, and once the app uses the newest the others no
+    longer work."""
     login = await do_login(client)
     token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(2)]
+    await _rotated_ago(client, token_a, timedelta(days=3))
+    for _ in range(2):
+        sent = await _refresh(client, token_a)
+        assert sent.status_code == 200
+        pairs.append(sent.json())
+    assert len({pair["refresh_token"] for pair in pairs}) == 4
+    for pair in pairs:
+        assert (await _row(client, pair["refresh_token"])).revoked_at is None
 
-    first = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
-    assert first.status_code == 200
+    used = await client.get("/v3/devices", headers=_bearer(pairs[-1]))
 
-    retry = await client.post("/v3/auth/refresh", json={"refresh_token": token_a})
-    assert retry.status_code == 200  # the one benign grace retry
-    token_c = retry.json()["refresh_token"]
+    assert used.status_code == 200
+    for pair in pairs[:-1]:
+        row = await _row(client, pair["refresh_token"])
+        assert row.revoked_reason == "superseded"
+        refused = await client.get("/v3/devices", headers=_bearer(pair))
+        assert refused.status_code == 401
+    assert await _reuse_detections(client) == 0
+    assert (await _refresh(client, pairs[-1]["refresh_token"])).status_code == 200
 
-    second_retry = await client.post(
-        "/v3/auth/refresh", json={"refresh_token": token_a}
+
+async def test_a_token_sent_on_and_on_keeps_its_sixteen_newest_pairs(
+    client,
+) -> None:
+    """A copy or a broken client sending a token without end still gets a
+    pair each time, but only the 16 newest unused ones stay live, and the
+    use of any of them still supersedes the rest."""
+    client.app.state.refresh_limiter = SlidingWindowLimiter(
+        max_attempts=100, window_seconds=60
     )
-    assert second_retry.status_code == 401
-    assert second_retry.json()["detail"] == "refresh_reuse_detected"
+    login = await do_login(client)
+    pairs = []
+    for _ in range(18):
+        sent = await _refresh(client, login["refresh_token"])
+        assert sent.status_code == 200
+        pairs.append(sent.json())
 
-    # Family revoked: the session minted by the first grace retry dies too.
-    dead = await client.post("/v3/auth/refresh", json={"refresh_token": token_c})
-    assert dead.status_code == 401
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded"] * 2 + [None] * 16
+    used = await client.get("/v3/devices", headers=_bearer(pairs[2]))
+    assert used.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded"] * 2 + [None] + ["superseded"] * 15
 
 
 async def test_a_grace_retry_is_not_counted_as_reuse(client) -> None:
-    """reuse_detected_at counts theft only; the retry spends the token's one
-    second rotation instead, and the lost successor goes once the retry's
-    pair is used."""
+    """reuse_detected_at marks a refused reuse only; the retry rotates the
+    token again instead, and the lost successor goes once the retry's pair is
+    used."""
     login = await do_login(client)
     token_a = login["refresh_token"]
     token_b = (await _refresh(client, token_a)).json()["refresh_token"]
@@ -249,10 +280,11 @@ async def test_a_grace_retry_is_not_counted_as_reuse(client) -> None:
         # Android after a 502 or 504 that hid the rotation: it keeps the old
         # token and sends it again after a 60 s pause.
         timedelta(minutes=2),
-        timedelta(hours=23),
+        timedelta(days=3),
+        timedelta(days=89),
     ],
 )
-async def test_a_lost_reply_is_recovered_within_the_window(client, age) -> None:
+async def test_a_lost_reply_is_recovered_however_late(client, age) -> None:
     """The client lost the rotation reply and came back with the old token
     later: it gets a fresh pair, and once it uses that pair only the
     successor it never received is revoked."""
@@ -292,83 +324,183 @@ async def test_a_lost_reply_is_recovered_within_the_window(client, age) -> None:
     assert (await _refresh(client, token_c)).status_code == 200
 
 
-async def test_a_zero_recovery_window_turns_the_recovery_off(client) -> None:
-    """MIGRATE.md offers this to switch the recovery off without a
-    rollback; the grace retry stays."""
-    client.app.state.settings.auth_refresh_recovery_window_seconds = 0
-    try:
-        login = await do_login(client)
-        token_a = login["refresh_token"]
-        await _refresh(client, token_a)
-        assert (await _refresh(client, token_a)).status_code == 200
-
-        second = await do_login(client)
-        await _refresh(client, second["refresh_token"])
-        await _rotated_ago(client, second["refresh_token"], timedelta(hours=2))
-        reuse = await _refresh(client, second["refresh_token"])
-    finally:
-        client.app.state.settings.auth_refresh_recovery_window_seconds = 24 * 60 * 60
-
-    assert reuse.status_code == 401
-    assert reuse.json()["detail"] == "refresh_reuse_detected"
-
-
-async def test_a_second_recovery_of_the_same_token_is_theft(client) -> None:
-    login = await do_login(client)
-    token_a = login["refresh_token"]
-    await _refresh(client, token_a)
-    await _rotated_ago(client, token_a, timedelta(hours=2))
-    recovered = await _refresh(client, token_a)
-    assert recovered.status_code == 200
-    token_c = recovered.json()["refresh_token"]
-    await _rotated_ago(client, token_a, timedelta(hours=1))
-
-    again = await _refresh(client, token_a)
-
-    assert again.status_code == 401
-    assert again.json()["detail"] == "refresh_reuse_detected"
-    assert (await _row(client, token_a)).reuse_detected_at is not None
-    assert (await _row(client, token_c)).revoked_reason == "reuse_detected"
-
-
-async def test_reuse_after_the_successor_was_used_is_theft(client) -> None:
+async def test_reuse_after_the_successor_was_used_is_refused_and_revokes_nothing(
+    client, logs
+) -> None:
     """The successor's access token was accepted, so its client got the
-    reply: the old token comes from a copy."""
+    reply: the old token comes from a copy, or from a client that lost the
+    pair it used. It is refused and logged, and the successor keeps
+    working."""
     login = await do_login(client)
     token_a = login["refresh_token"]
     rotated = await _refresh(client, token_a)
     token_b = rotated.json()["refresh_token"]
     used = await client.get("/v3/devices", headers=_bearer(rotated.json()))
     assert used.status_code == 200
+    # Another session on the same device, which must stay alive.
+    other = await do_login(client)
     await _rotated_ago(client, token_a, timedelta(hours=2))
 
     reuse = await _refresh(client, token_a)
 
     assert reuse.status_code == 401
-    assert reuse.json()["detail"] == "refresh_reuse_detected"
-    assert (await _row(client, token_b)).revoked_reason == "reuse_detected"
+    assert reuse.json()["detail"] == "session_revoked"
+    assert (await _row(client, token_a)).reuse_detected_at is not None
+    assert _logged(
+        logs, "auth.refresh.reuse_detected", log_level="warning", cause="successor_used"
+    )
+    assert (await _row(client, token_b)).revoked_at is None
+    again = await client.get("/v3/devices", headers=_bearer(rotated.json()))
+    assert again.status_code == 200
+    assert (await _refresh(client, token_b)).status_code == 200
+    assert (await _refresh(client, other["refresh_token"])).status_code == 200
 
 
-async def test_a_superseded_successor_that_turns_up_is_theft(client) -> None:
+async def test_a_superseded_session_that_turns_up_is_refused_and_revokes_nothing(
+    client, logs
+) -> None:
     """The recovered pair was used, so a token of the successor it
-    superseded comes from a second holder. The sessions here have no
-    device, so only the chain walk from that token reaches the session
-    that won."""
+    superseded comes from a second holder. It is refused and logged, and the
+    pair that won keeps working."""
     login = await do_login(client)
-    await _set_row(client, login["refresh_token"], device_id=None)
     token_a = login["refresh_token"]
     token_b = (await _refresh(client, token_a)).json()["refresh_token"]
     await _rotated_ago(client, token_a, timedelta(hours=2))
     recovered = await _refresh(client, token_a)
     used = await client.get("/v3/devices", headers=_bearer(recovered.json()))
     assert used.status_code == 200
+    await _rotated_ago(client, token_b, timedelta(hours=1))
 
     stale = await _refresh(client, token_b)
 
     assert stale.status_code == 401
-    assert stale.json()["detail"] == "refresh_reuse_detected"
+    assert stale.json()["detail"] == "session_revoked"
+    assert _logged(
+        logs, "auth.refresh.reuse_detected", log_level="warning", cause="superseded"
+    )
     token_c = recovered.json()["refresh_token"]
-    assert (await _row(client, token_c)).revoked_reason == "reuse_detected"
+    assert (await _row(client, token_c)).revoked_at is None
+    assert (await _refresh(client, token_c)).status_code == 200
+
+
+async def test_a_replaced_token_past_its_expiry_is_refused(client) -> None:
+    """The token's own expiry is the one limit on rotating it again."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    token_b = (await _refresh(client, token_a)).json()["refresh_token"]
+    now = datetime.now(UTC)
+    await _set_row(
+        client,
+        token_a,
+        issued_at=now - timedelta(days=91),
+        expires_at=now - timedelta(days=1),
+    )
+    sessions = await _session_count(client)
+
+    expired = await _refresh(client, token_a)
+
+    assert expired.status_code == 401
+    assert expired.json()["detail"] == "refresh_token_expired"
+    assert await _session_count(client) == sessions
+    assert (await _refresh(client, token_b)).status_code == 200
+
+
+async def test_an_expired_session_among_its_rivals_does_not_hide_the_rest(
+    client,
+) -> None:
+    """One of three pairs expires and is refused; the use of another still
+    supersedes both of the others."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(3)]
+    now = datetime.now(UTC)
+    await _set_row(
+        client,
+        pairs[0]["refresh_token"],
+        issued_at=now - timedelta(days=91),
+        expires_at=now - timedelta(days=1),
+    )
+    expired = await _refresh(client, pairs[0]["refresh_token"])
+    assert expired.json()["detail"] == "refresh_token_expired"
+
+    used = await client.get("/v3/devices", headers=_bearer(pairs[2]))
+
+    assert used.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded", "superseded", None]
+
+
+async def test_a_refresh_of_one_of_three_pairs_supersedes_the_others(client) -> None:
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(3)]
+
+    rotated = await _refresh(client, pairs[1]["refresh_token"])
+
+    assert rotated.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded", "rotated", "superseded"]
+    for token in (token_a, pairs[0]["refresh_token"], pairs[2]["refresh_token"]):
+        assert (await _refresh(client, token)).status_code == 401
+    assert (await _refresh(client, rotated.json()["refresh_token"])).status_code == 200
+
+
+async def _login_elsewhere(client) -> dict:
+    """The same student on a second device, which can remove the first."""
+    body = {
+        **LOGIN_BODY,
+        "device_info": {"client_device_id": "ipad-xyz", "platform": "ios"},
+    }
+    response = await client.post("/v3/auth/login", json=body)
+    assert response.status_code == 200
+    return response.json()
+
+
+async def test_removing_the_device_ends_every_pair_its_token_was_rotated_into(
+    client,
+) -> None:
+    """The device is removed from another one while three pairs of one
+    token wait unused: the token and every pair are refused, and no session
+    is made."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(3)]
+    other = await _login_elsewhere(client)
+    device = LOGIN_BODY["device_info"]["client_device_id"]
+    removed = await client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+    assert removed.status_code == 204
+    sessions = await _session_count(client)
+
+    for token in [token_a, *(pair["refresh_token"] for pair in pairs)]:
+        refused = await _refresh(client, token)
+        assert refused.status_code == 401
+        assert refused.json()["detail"] == "session_revoked"
+    for pair in pairs:
+        used = await client.get("/v3/devices", headers=_bearer(pair))
+        assert used.status_code == 401
+    assert await _session_count(client) == sessions
+
+
+async def test_after_a_logout_no_token_of_the_chain_gets_a_pair(client) -> None:
+    """A logout still ends the session: the token it was rotated from and
+    the pair it superseded are refused, and no session is made."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    lost = await _refresh(client, token_a)
+    kept = await _refresh(client, token_a)
+    logout = await client.post("/v3/auth/logout", headers=_bearer(kept.json()))
+    assert logout.status_code == 204
+    sessions = await _session_count(client)
+
+    for token in (token_a, lost.json()["refresh_token"], kept.json()["refresh_token"]):
+        refused = await _refresh(client, token)
+        assert refused.status_code == 401
+        assert refused.json()["detail"] == "session_revoked"
+    assert await _session_count(client) == sessions
 
 
 async def test_a_late_duplicate_after_the_successor_is_used_is_refused(
@@ -419,43 +551,6 @@ async def test_a_late_duplicate_before_the_successor_is_used_loses_to_it(
     assert (await _refresh(client, token_b)).status_code == 200
 
 
-async def test_the_pair_that_lost_turns_up_as_theft(client) -> None:
-    """Once one of the two pairs is used, a token of the other comes from a
-    second holder. Without a device, the chain walk from it has to reach
-    the session that won."""
-    login = await do_login(client)
-    await _set_row(client, login["refresh_token"], device_id=None)
-    token_a = login["refresh_token"]
-    resend = await _refresh(client, token_a)
-    late = await _refresh(client, token_a)
-    used = await client.get("/v3/devices", headers=_bearer(resend.json()))
-    assert used.status_code == 200
-
-    stale = await _refresh(client, late.json()["refresh_token"])
-
-    assert stale.status_code == 401
-    assert stale.json()["detail"] == "refresh_reuse_detected"
-    token_b = resend.json()["refresh_token"]
-    assert (await _row(client, token_b)).revoked_reason == "reuse_detected"
-
-
-async def test_a_token_the_previous_release_retried_is_not_rotated_again(
-    client,
-) -> None:
-    """Before rerotated_at, a grace retry marked the token in
-    reuse_detected_at; such a token has had its second rotation."""
-    login = await do_login(client)
-    token_a = login["refresh_token"]
-    await _refresh(client, token_a)
-    await _set_row(client, token_a, reuse_detected_at=datetime.now(UTC))
-    await _rotated_ago(client, token_a, timedelta(hours=2))
-
-    reuse = await _refresh(client, token_a)
-
-    assert reuse.status_code == 401
-    assert reuse.json()["detail"] == "refresh_reuse_detected"
-
-
 async def _until_queries_wait_for_a_lock(engine: AsyncEngine, count: int = 1) -> None:
     for _ in range(200):
         # A transaction of its own each time: Postgres keeps the
@@ -501,37 +596,167 @@ async def test_a_rotation_of_the_successor_in_flight_is_waited_for(client) -> No
     response = await reuse
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "refresh_reuse_detected"
+    assert response.json()["detail"] == "session_revoked"
     assert (await _row(client, token_b)).revoked_reason == "rotated"
 
 
-async def test_two_first_uses_of_the_two_pairs_let_one_win(client) -> None:
-    """A second holder uses the other pair at the same moment: one request
-    supersedes the other session, and the other request gets a 401."""
+@pytest.mark.parametrize("sends", [2, 3])
+async def test_first_uses_of_the_pairs_at_once_let_one_win(client, sends) -> None:
+    """Holders of the pairs a token's sends left use them at the same
+    moment: one request supersedes every other session, and the others get
+    a 401."""
     login = await do_login(client)
     token_a = login["refresh_token"]
-    resend = await _refresh(client, token_a)
-    late = await _refresh(client, token_a)
-    row_b = await _row(client, resend.json()["refresh_token"])
-    row_c = await _row(client, late.json()["refresh_token"])
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(sends)]
+    rows = [await _row(client, pair["refresh_token"]) for pair in pairs]
 
     engine = client.app.state.engine
     async with engine.connect() as holder:
         await holder.execute(
             text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
-            {"id": min(row_b.id, row_c.id)},
+            {"id": min(row.id for row in rows)},
         )
         uses = [
             asyncio.create_task(client.get("/v3/devices", headers=_bearer(pair)))
-            for pair in (resend.json(), late.json())
+            for pair in pairs
         ]
-        await _until_queries_wait_for_a_lock(engine, count=2)
+        await _until_queries_wait_for_a_lock(engine, count=sends)
         await holder.commit()
     statuses = sorted([(await use).status_code for use in uses])
 
-    assert statuses == [200, 401]
-    rows = [await _row(client, pair["refresh_token"]) for pair in (resend.json(), late.json())]
-    assert sorted(str(row.revoked_reason) for row in rows) == ["None", "superseded"]
+    assert statuses == [200] + [401] * (sends - 1)
+    rows = [await _row(client, pair["refresh_token"]) for pair in pairs]
+    reasons = sorted(str(row.revoked_reason) for row in rows)
+    assert reasons == ["None"] + ["superseded"] * (sends - 1)
+
+
+async def test_concurrent_refreshes_with_one_token_all_get_a_pair(client) -> None:
+    """Three sends of one token at once take turns: the first rotates it,
+    the others rotate it again, and the app's use of any of the three pairs
+    supersedes the other two."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    row_a = await _row(client, token_a)
+
+    engine = client.app.state.engine
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": row_a.id},
+        )
+        sends = [asyncio.create_task(_refresh(client, token_a)) for _ in range(3)]
+        await _until_queries_wait_for_a_lock(engine, count=3)
+        await holder.commit()
+    replies = [await send for send in sends]
+
+    assert [reply.status_code for reply in replies] == [200] * 3
+    pairs = [reply.json() for reply in replies]
+    for pair in pairs:
+        assert (await _row(client, pair["refresh_token"])).revoked_at is None
+    used = await client.get("/v3/devices", headers=_bearer(pairs[1]))
+    assert used.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded", None, "superseded"]
+    assert (await _refresh(client, pairs[1]["refresh_token"])).status_code == 200
+
+
+async def test_a_rotation_in_flight_when_the_device_is_removed_is_revoked_too(
+    client,
+) -> None:
+    """A rotation again holds its sessions' locks when the device is removed
+    and commits its new session after the removal started revoking: that
+    session is revoked as well."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    lost = await _refresh(client, token_a)
+    other = await _login_elsewhere(client)
+    row_a = await _row(client, token_a)
+    row_b = await _row(client, lost.json()["refresh_token"])
+
+    engine = client.app.state.engine
+    async with engine.connect() as rotation:
+        # What rotating A again writes while it holds the ring's locks.
+        await rotation.execute(
+            text(
+                "SELECT 1 FROM auth_sessions WHERE id IN (:a, :b)"
+                " ORDER BY id FOR UPDATE"
+            ),
+            {"a": row_a.id, "b": row_b.id},
+        )
+        new_id = await rotation.scalar(
+            text(
+                "INSERT INTO auth_sessions (user_id, device_id, refresh_token_hash,"
+                " expires_at, replaced_by_session_id)"
+                " VALUES (:user_id, :device_id, 'in-flight',"
+                " now() + interval '90 days', :b) RETURNING id"
+            ),
+            {"user_id": row_a.user_id, "device_id": row_a.device_id, "b": row_b.id},
+        )
+        await rotation.execute(
+            text(
+                "UPDATE auth_sessions SET replaced_by_session_id = :new"
+                " WHERE id IN (:a, :b)"
+            ),
+            {"new": new_id, "a": row_a.id, "b": row_b.id},
+        )
+        device = LOGIN_BODY["device_info"]["client_device_id"]
+        removal = asyncio.create_task(
+            client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+        )
+        await _until_queries_wait_for_a_lock(engine)
+        await rotation.commit()
+    assert (await removal).status_code == 204
+
+    factory = build_session_factory(engine)
+    async with factory() as session:
+        live = await session.scalar(
+            select(func.count()).where(
+                AuthSession.device_id == row_a.device_id,
+                AuthSession.revoked_at.is_(None),
+            )
+        )
+    assert live == 0
+
+
+async def test_the_device_removal_locks_its_sessions_in_id_order(client) -> None:
+    """A refresh or a first use locks sessions in id order (`lock_contest`).
+    A removal waiting for a lower one must not hold a higher one, or the two
+    would deadlock."""
+    lower = await do_login(client)
+    higher = await do_login(client)
+    other = await _login_elsewhere(client)
+    row_lower = await _row(client, lower["refresh_token"])
+    row_higher = await _row(client, higher["refresh_token"])
+    # A new token hash moves the lower row after the higher one in the table
+    # and in every index, so the removal's scan meets the higher one first.
+    await _set_row(client, lower["refresh_token"], refresh_token_hash="moved")
+
+    engine = client.app.state.engine
+    device = LOGIN_BODY["device_info"]["client_device_id"]
+    async with engine.connect() as holder, engine.connect() as probe:
+        await holder.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE"),
+            {"id": row_lower.id},
+        )
+        removal = asyncio.create_task(
+            client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+        )
+        await _until_queries_wait_for_a_lock(engine)
+        # NOWAIT fails at once where the removal holds the row.
+        await probe.execute(
+            text("SELECT 1 FROM auth_sessions WHERE id = :id FOR UPDATE NOWAIT"),
+            {"id": row_higher.id},
+        )
+        await probe.rollback()
+        await holder.commit()
+    assert (await removal).status_code == 204
+    for row in (row_lower, row_higher):
+        refused = await client.get(
+            "/v3/devices", headers=_bearer(lower if row is row_lower else higher)
+        )
+        assert refused.status_code == 401
 
 
 async def test_a_refresh_and_a_first_use_of_the_two_pairs_do_not_deadlock(client) -> None:
@@ -633,13 +858,15 @@ async def _expired(client) -> str:
 
 
 async def _revoked_with_its_family(client) -> str:
+    """As releases before 3.3.6 revoked a session on a reuse of its chain."""
     login = await do_login(client)
-    token_a = login["refresh_token"]
-    rotated = await _refresh(client, token_a)
-    await client.get("/v3/devices", headers=_bearer(rotated.json()))
-    await _rotated_ago(client, token_a, timedelta(hours=2))
-    assert (await _refresh(client, token_a)).json()["detail"] == "refresh_reuse_detected"
-    return rotated.json()["refresh_token"]
+    await _set_row(
+        client,
+        login["refresh_token"],
+        revoked_at=datetime.now(UTC),
+        revoked_reason="reuse_detected",
+    )
+    return login["refresh_token"]
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,11 @@ logger = structlog.get_logger(__name__)
 
 _WS_PATH = "/webservice/rest/server.php"
 
+# What Moodle answers a token it does not take with: an unknown one, and an
+# expired one (webservice_access_exception). Any other error, such as
+# maintenance mode, is Moodle failing and says nothing about the token.
+_TOKEN_ERRORCODES = frozenset({"invalidtoken", "accessexception"})
+
 
 @dataclass(frozen=True)
 class MoodleVerifyResult:
@@ -67,8 +72,12 @@ class HttpMoodleVerifier:
         if not isinstance(body, dict) or response.status_code >= 400:
             return MoodleVerifyResult(ok=False, error="unreachable")
         if "exception" in body:
-            # Moodle reports auth problems as 200 + exception payload.
-            return MoodleVerifyResult(ok=False, error="invalid_token")
+            # Moodle reports errors as 200 + exception payload.
+            errorcode = str(body.get("errorcode", ""))
+            if errorcode in _TOKEN_ERRORCODES:
+                return MoodleVerifyResult(ok=False, error="invalid_token")
+            logger.warning("moodle.verify.moodle_error", errorcode=errorcode[:64])
+            return MoodleVerifyResult(ok=False, error="unreachable")
 
         username = str(body.get("username", ""))
         if username.lower() != student_id.lower():
