@@ -1051,7 +1051,9 @@ async def _send_one(
         locale = device.locale if device is not None else None
         if is_reauth:
             payload = build_reauth_payload(
-                provider=payload.get("provider", ""), locale=locale
+                provider=payload.get("provider", ""),
+                reason=payload.get("reason"),
+                locale=locale,
             )
         else:
             payload = build_assignment_reminder_payload(payload, locale=locale)

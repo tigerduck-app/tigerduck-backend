@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from server import i18n
 from server.auth.models import (
     DevicePushToken,
     ExternalAccount,
@@ -29,10 +30,14 @@ from server.auth.models import (
     UserDevice,
 )
 from server.db import build_session_factory
-from server.i18n import MISSING_KEY_SENTINEL, translate
+from server.i18n import MISSING_KEY_SENTINEL, load_bundle, resolve_locale, translate
 from server.push.apns_client import SendResult
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
-from server.push.notification_copy import REAUTH_SCENARIO, build_reauth_payload
+from server.push.notification_copy import (
+    REAUTH_SCENARIO,
+    SESSION_REAUTH_REASON,
+    build_reauth_payload,
+)
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.router import PushRouter
 from server.syncjobs.credentials import mark_credentials_invalid
@@ -93,6 +98,56 @@ def test_fcm_data_is_not_empty():
 def test_scenario_name_unchanged():
     # The dedupe key embeds it; changing it would resurrect settled jobs.
     assert REAUTH_SCENARIO == "reauth_required"
+
+
+SESSION_TITLE_KEY = "notification_reauth_session_title"
+SESSION_BODY_KEY = "notification_reauth_session_body"
+
+
+def test_the_session_reason_picks_its_own_copy():
+    assert build_reauth_payload(
+        provider="", reason=SESSION_REAUTH_REASON, locale="zh-Hant-TW"
+    ) == {
+        "kind": REAUTH_SCENARIO,
+        "reason": SESSION_REAUTH_REASON,
+        "title": "TigerSync 已暫停",
+        "body": "開啟 TigerDuck 重新登入，即可恢復同步。",
+    }
+    # Any other reason is the Moodle credential's, the portal's
+    # "operator_retry" among them.
+    for reason in (None, "operator_retry"):
+        payload = build_reauth_payload(
+            provider="ntust_sso", reason=reason, locale="zh-Hant-TW"
+        )
+        assert payload == {
+            "kind": REAUTH_SCENARIO,
+            "provider": "ntust_sso",
+            "title": translate("notification_reauth_required_title", "zh-Hant"),
+            "body": translate("notification_reauth_required_body", "zh-Hant"),
+        }
+
+
+@pytest.mark.parametrize(
+    "locale", ["zh-Hant-TW", "zh-HK", "ja-JP", "fr-CA", "en-AU", "xx", "", None]
+)
+def test_the_session_copy_follows_the_device_language(locale):
+    payload = build_reauth_payload(
+        provider="", reason=SESSION_REAUTH_REASON, locale=locale
+    )
+    bundle = load_bundle(resolve_locale(locale))
+    assert (payload["title"], payload["body"]) == (
+        bundle[SESSION_TITLE_KEY],
+        bundle[SESSION_BODY_KEY],
+    )
+
+
+def test_every_bundle_has_the_session_copy():
+    stems = [path.stem for path in i18n._BUNDLE_DIR.glob("*.json")]
+    assert stems
+    for stem in stems:
+        bundle = load_bundle(stem)
+        assert bundle[SESSION_TITLE_KEY].strip(), stem
+        assert bundle[SESSION_BODY_KEY].strip(), stem
 
 
 # --- Delivery conditions (spec §4.5) ----------------------------------------

@@ -17,6 +17,11 @@ from server.i18n import translate
 
 REAUTH_SCENARIO = "reauth_required"
 
+#: The `reason` of a reauth job filed for a device whose TigerSync session is
+#: gone (`push/session_reauth.py`). Any other reason, or none, is the Moodle
+#: credential's, the portal's "operator_retry" among them.
+SESSION_REAUTH_REASON = "session"
+
 #: What an assignment reminder's payload carries so its copy can be written
 #: per recipient. `push/reminders.py` writes these; the payload a device
 #: receives has them replaced by the finished `title` and `body`.
@@ -29,13 +34,23 @@ _REMINDER_TITLE_KEY = "notification_assignment_reminder_title"
 _PLACEHOLDER = re.compile(r"%(\d+)\$s|%%")
 
 
-def build_reauth_payload(*, provider: str, locale: str | None) -> dict:
-    """Push payload telling the user their provider credential expired.
+def build_reauth_payload(
+    *, provider: str, locale: str | None, reason: str | None = None
+) -> dict:
+    """Push payload telling the user their provider credential expired, or,
+    for `SESSION_REAUTH_REASON`, that the device lost its TigerSync session.
 
     `kind` is what both clients route on; without it the message reaches
     iOS as an untyped alert and is dropped outright by Android's FCM
     handler, which keys on the payload shape.
     """
+    if reason == SESSION_REAUTH_REASON:
+        return {
+            "kind": REAUTH_SCENARIO,
+            "reason": reason,
+            "title": translate("notification_reauth_session_title", locale),
+            "body": translate("notification_reauth_session_body", locale),
+        }
     return {
         "kind": REAUTH_SCENARIO,
         "provider": provider,
