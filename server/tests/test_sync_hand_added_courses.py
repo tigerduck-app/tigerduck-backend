@@ -170,3 +170,20 @@ async def test_an_add_landing_after_a_removal_does_not_bring_the_course_back(cli
     late = await _upload(client, phone, [ENROLLED, ADDED, OTHER], force=[OTHER])
     assert late["skipped_tombstoned"] == 1
     assert late["accepted_keys"] == sorted([_key(ENROLLED), _key(OTHER)])
+
+
+async def test_a_course_added_by_hand_stays_so_through_a_semester_reset(client) -> None:
+    """The reset's tombstone remembers the course was added by hand, so
+    adding it by hand again after the reset and removing it lets the
+    roster bring it back."""
+    phone = await _login(client, "iphone-reset", "ios")
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    reset = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=phone)
+    assert reset.json() == {"deleted": 2}
+    await _upload(client, phone, [ENROLLED])
+
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    rows, _ = await _snapshot(client, phone)
+    assert rows[ADDED] == "user_added"
+    await _delete(client, phone, ADDED)
+    assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 0
