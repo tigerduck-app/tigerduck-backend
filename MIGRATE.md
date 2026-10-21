@@ -58,8 +58,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   Nothing sets the revoked reason `reuse_detected` any more.
 - **Logins while Moodle is down.** `POST /v3/auth/login` answers
   `503 moodle_unreachable` when the backend cannot reach Moodle to check
-  the token. `401 moodle_verification_failed` now means only that Moodle
-  refused the token, or that it belongs to another student. Both count
+  the token, or Moodle answers with an error that is not about the token,
+  as in maintenance mode; the backend logs its `errorcode` as
+  `moodle.verify.moodle_error`. `401 moodle_verification_failed` now means
+  only that Moodle refused the token (`invalidtoken`, or `accessexception`
+  for an expired one), or that it belongs to another student. Both count
   against the login limit. After a 401, Android's automatic sign-in
   harvests a new token with the stored password; after a 503 it waits five
   minutes and tries again, as iOS does after either.
