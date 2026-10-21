@@ -129,6 +129,13 @@ class UserCourseTombstone(Base):
     deleted_by_reset: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sa.false(), default=False
     )
+    # Whether the deleted row was a course the user added by hand (`source`
+    # 'user_added'). Left by a single delete, such a tombstone does not bind
+    # its author's roster either, and that device's snapshot leaves it out;
+    # see `upload_courses`.
+    user_added: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sa.false(), default=False
+    )
 
     __table_args__ = (
         UniqueConstraint("user_id", "course_key"),
@@ -160,21 +167,18 @@ class UserCourseOverride(Base):
     # the locale-keyed map with the a1b2c3d4e5f6 backfill convention: one
     # locale-less name feeds both 'zh' and 'en', the only keys the apps
     # and portal read. Without this bridge, setattr lands on a transient
-    # instance attribute and the name is silently dropped.
+    # instance attribute and the name is silently dropped. A cleared name
+    # stays as "" in both, as the override PATCH keeps a cleared locale, so
+    # a snapshot carries the clear.
     @property
     def custom_name(self) -> str | None:
         names = self.custom_names or {}
-        return names.get("zh") or names.get("en")
+        return names.get("zh") or names.get("en") or None
 
     @custom_name.setter
     def custom_name(self, value: str | None) -> None:
         names = dict(self.custom_names or {})
-        if value:
-            names["zh"] = value
-            names["en"] = value
-        else:
-            names.pop("zh", None)
-            names.pop("en", None)
+        names["zh"] = names["en"] = value or ""
         self.custom_names = names
 
     color_hex: Mapped[str | None] = mapped_column(String(16), nullable=True)

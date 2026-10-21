@@ -18,7 +18,7 @@
 
 TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app)（iOS / Android）的後端服務，跑在 `api.tigerduck.app`。負責五件事：
 
-- 🔐 **帳號與認證（v3）** — NTUST SSO 登入驗證、JWT access + refresh rotation（盜用偵測滅族）、AES-256-GCM 憑證加密儲存、使用者裝置與 push token 管理
+- 🔐 **帳號與認證（v3）** — NTUST SSO 登入驗證、JWT access + refresh rotation（重送舊 token 不會登出裝置）、AES-256-GCM 憑證加密儲存、使用者裝置與 push token 管理
 - 🔄 **使用者資料同步（v3）** — 課表 / 作業 / 設定的多裝置同步：client 初始上傳 + per-user changelog 增量下行，伺服器端再定期代抓 Moodle 作業權威更新
 - 📣 **公告管線** — 抓取 NTUST 各處室公告 → 去重 → LLM 分類（canonical_org / content_tags / importance）→ 訂閱比對 → 推播（匿名裝置與登入使用者雙軌）
 - 📲 **推播服務** — 登入使用者走 `push_jobs` → `push_deliveries` 兩階段投遞（作業 / 課程提醒、公告、系統通知）；APNs Push-to-Start（iOS Live Activity）、FCM fan-out（Android）、bad-token 分類與清理
@@ -29,8 +29,8 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ## 功能模組
 
 ### 🔐 帳號與認證（`server/auth/`）
-- **登入** — App 自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。後端不會拿密碼登入：沒帶 Moodle token 的登入回 `400 moodle_token_required`，一併送來的密碼一律忽略。不論有沒有帶 token，每次嘗試都計入依 IP 與學號的登入限流
-- **Token** — 短效 JWT access token + 90 天 refresh token rotation；重放偵測直接撤銷整條 session 鏈與同裝置 session。沒收到 rotation 回應的 client，在新 token 從未使用且未滿 24 小時時可再 rotation 一次；晚到的重複 refresh 不會讓 client 手上的那組 token 失效
+- **登入** — App 自行完成 NTUST SSO，再把 Moodle token 交給後端驗證身分，避免觸發學校的 IP rate limit。後端不會拿密碼登入：沒帶 Moodle token 的登入回 `400 moodle_token_required`，一併送來的密碼一律忽略。連不上 Moodle，或 Moodle 回的錯誤與 token 無關（例如維護模式）時回 `503 moodle_unreachable`，只有 Moodle 拒絕的 token 才回 `401 moodle_verification_failed`。不論有沒有帶 token，每次嘗試都計入依 IP 與學號的登入限流
+- **Token** — 短效 JWT access token + 90 天 refresh token rotation。被 rotation 換掉的 token 再送來時，只要它換出的 session 都還沒用過，就每次再 rotation 一次（最多保留最新的 16 組），直到 token 本身過期；這些 session 最先被使用的那組會讓其餘失效，所以晚到的重複 refresh 不會讓 client 手上的那組 token 失效。已有一組用過之後，舊 token 回 `401 session_revoked`，不撤銷任何 session
 - **憑證保管** — 只存 Moodle token，以 AES-256-GCM + per-row AAD 加密（支援金鑰輪替），供伺服器端代抓使用；不保存 NTUST 密碼
 - **裝置管理** — `/v3/devices` 註冊使用者裝置與 push token（standard / live_activity_update）；刪除裝置同步撤銷 session 並失效 token；裝置回報語系與硬體型號，並各自帶有同步與推播開關（作業提醒、即時動態、公告推播等）
 
@@ -62,6 +62,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **學期起訖與校曆假日** — 課程提醒送給兩個 App 當天顯示的學期的課程：最近開學的已公布學期（`semester_terms`）；一個學期都沒公布時，照舊送給使用者最新同步的學期。課程提醒與課堂類 Live Activity（`classPreparing` / `inClass`）在沒有任何已公布學期上課的日子不送（從開學日到結業日，兩端都算，與兩個 App 相同），在校曆假日（`academic_holidays`）也不送，除非使用者對該假日開了「還要上課？」例外（`user_holiday_overrides`）。例外只放回假日，不會放回學期外的日子。Live Activity 由 App 提前排入，所以在**送出當下**才判斷：事後公布的學期或假日、事後切換的例外，都會作用在已排好的 job 上，被擋下的記為 `cancelled`、`last_error` 為 `outside_term` 或 `holiday`。作業類 Live Activity 兩者都不受影響
 - **同一時刻只響一次**（預設關閉）— 設定 `push_countdown_dedupe_window_seconds`（300）後，作業的 `assignmentUrgent` Live Activity 啟動推播在作業提醒的發送時間前這麼多秒內送到某台 iPhone，且那台的 App 已註冊這個 Live Activity 時，這則提醒就不再送往那台：啟動推播的提示已經響過。提醒緊接在啟動推播之後、且發送前檢查的寬限時間還夠時，會等一次（一分鐘）讓 App 註冊；到時仍未註冊的 iPhone 照常收到提醒。所有裝置都略過的提醒記為 `cancelled`、`last_error` 為 `countdown_start_sent`；設為 `0` 即關閉
 - **文案在地化** — 作業提醒與 reauth 通知的文字在投遞時依每台裝置的語系，從 app-translation 產生
+- **重新登入提醒** — TigerSync 開著、三天內出現過，卻一直在沒有可用 session 的情況下開啟 App 的裝置，會收到一則只送給它的 `reauth_required` 推播（`reason: "session"`）：最新的 session 結束（因登出以外的原因撤銷，或過期）一小時後仍沒有有效 session，或有效 session 已 24 小時沒更新。每台裝置七天最多一次，session 結束超過 28 天就不再提醒，只在學校時間 09:00 到 21:00 送出，送出前會再檢查一次
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token；sync trigger 用 normal priority、TTL 12 小時；每個 HTTP request 上限 10 秒
@@ -71,7 +72,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 
 ### ⏰ 排程
 - **單一 worker** — APScheduler 跑在 lifespan 裡，副本數固定 1；多副本會 double-send
-- **tick 設計** — 公告 scrape / process / dispatch（匿名 + 使用者層）、sync jobs、推播 pipeline、作業 / 課程提醒掃描、retention 各自 interval trigger，互不阻塞；跨 worker 安全由 DB 鎖保證（advisory lock + `SKIP LOCKED`）
+- **tick 設計** — 公告 scrape / process / dispatch（匿名 + 使用者層）、sync jobs、推播 pipeline、作業 / 課程提醒掃描、重新登入提醒掃描、retention 各自 interval trigger，互不阻塞；跨 worker 安全由 DB 鎖保證（advisory lock + `SKIP LOCKED`）
 
 ## 技術棧
 
@@ -263,7 +264,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
 | `POST` | `/v3/auth/login` | NTUST SSO 登入（Moodle token 驗證）→ access + refresh token | 無 |
-| `POST` | `/v3/auth/refresh` | refresh token rotation（重放偵測滅族） | refresh token |
+| `POST` | `/v3/auth/refresh` | refresh token rotation | refresh token |
 | `PATCH` | `/v3/auth/credentials` | 更新已儲存的加密憑證 | JWT |
 | `POST` | `/v3/auth/logout` | 撤銷目前 session | JWT |
 

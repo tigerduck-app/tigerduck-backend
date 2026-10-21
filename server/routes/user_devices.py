@@ -37,7 +37,7 @@ from server.auth.schemas import (
     DeviceRegisterV3Response,
     PushTokenIn,
 )
-from server.db import SessionDep
+from server.db import SessionDep, in_array
 # Shared so the anonymous endpoint honours the same `auth_trust_forwarded_for`
 # setting as login — two different notions of "the client's IP" behind the
 # same proxy would make one of the two limits trivially wrong.
@@ -419,17 +419,26 @@ async def delete_device(
     now = datetime.now(UTC)
     device.deleted_at = now
 
-    device_sessions = (
+    # Locked in id order, as a refresh locks its sessions (`lock_contest`), so
+    # the two cannot deadlock. A refresh holding its locks when a pass starts
+    # commits its new session too late for that pass to see, and every
+    # refresh needs a live session of the device, so passes repeat until one
+    # finds none.
+    live = (
+        select(AuthSession.id)
+        .where(AuthSession.device_id == device.id, AuthSession.revoked_at.is_(None))
+        .order_by(AuthSession.id)
+        .with_for_update()
+    )
+    while ids := list((await session.execute(live)).scalars()):
         await session.execute(
-            select(AuthSession).where(
-                AuthSession.device_id == device.id,
-                AuthSession.revoked_at.is_(None),
+            update(AuthSession)
+            .where(in_array(AuthSession.id, ids))
+            .values(
+                revoked_at=now,
+                revoked_reason=SessionRevokedReason.admin_revoked.value,
             )
         )
-    ).scalars()
-    for row in device_sessions:
-        row.revoked_at = now
-        row.revoked_reason = SessionRevokedReason.admin_revoked.value
 
     tokens = (
         await session.execute(

@@ -5,15 +5,12 @@ the way a deploy runs it."""
 from __future__ import annotations
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
-from server.auth import service
 from server.auth.tokens import hash_refresh_token
 from server.config import Settings
-from server.db import build_session_factory
 from server.tests.conftest import _alembic
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -192,12 +189,11 @@ async def test_upgrade_after_a_rollback_by_stamp_keeps_what_was_recorded(
         await engine.dispose()
 
 
-async def test_a_token_rotated_twice_stays_spent_across_a_downgrade(
+async def test_the_downgrade_marks_a_token_rotated_twice_for_the_previous_release(
     migration_db_url: str, test_settings: Settings
 ) -> None:
-    """The downgrade drops rerotated_at. If nothing took its place, the same
-    token presented after the next upgrade would be rotated a third time
-    while its replacement is unused."""
+    """The downgrade drops rerotated_at. Without the mark it leaves, the
+    previous release would rotate such a token once more."""
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)
     try:
@@ -217,19 +213,5 @@ async def test_a_token_rotated_twice_stays_spent_across_a_downgrade(
             # Where the previous release marks a grace retry, which it reads
             # as spent.
             assert marked
-        _alembic(migration_db_url, "upgrade", REVISION)
-
-        async with build_session_factory(engine)() as session:
-            with pytest.raises(HTTPException) as refused:
-                await service.refresh(session, test_settings, refresh_token="token-a")
-        assert refused.value.detail == "refresh_reuse_detected"
-        async with engine.connect() as conn:
-            replacement = await conn.scalar(
-                text(
-                    "SELECT revoked_reason FROM auth_sessions"
-                    " WHERE refresh_token_hash = 'replacement'"
-                )
-            )
-            assert replacement == "reuse_detected"
     finally:
         await engine.dispose()

@@ -50,15 +50,11 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
-    # A rotated token presented again this soon after its rotation, while
-    # its successor is in use, is taken for a late duplicate of the request
-    # that rotated it: it is refused, and nothing is revoked.
+    # A token sent again this soon after it was replaced is taken for a late
+    # duplicate of the request that replaced it. That changes only how the
+    # send is recorded, in the logs and reuse_detected_at, never whether it
+    # is rotated again or refused (`_handle_revoked_reuse`, `_rotate_again`).
     auth_refresh_reuse_grace_seconds: int = 60
-    # For this long after a rotation, and at least the grace, a rotated
-    # token presented again while nothing has used its successor is rotated
-    # once more: its client lost the reply, or a duplicate came late. The
-    # successor and the new session stay live until one of them is used.
-    auth_refresh_recovery_window_seconds: int = 24 * 60 * 60
     # Login rate limit: N attempts per window, applied independently to the
     # student_id and the client IP. Protects both against credential
     # stuffing and against our single server IP getting blocked by Moodle.
@@ -81,7 +77,7 @@ class Settings(BaseSettings):
     # --- Moodle token verification (login-time check only) ---
     # Must be the SAME instance the apps harvest the wstoken from
     # (moodle2.ntust.edu.tw) — a wstoken only validates on its issuing host.
-    # `moodle.ntust.edu.tw` (no "2") does not resolve → login 401 'unreachable'.
+    # `moodle.ntust.edu.tw` (no "2") does not resolve → login 503 'moodle_unreachable'.
     moodle_base_url: str = "https://moodle2.ntust.edu.tw"
     moodle_verify_timeout_seconds: float = 10.0
     # Default daily maintenance window (Asia/Taipei). During this window,
@@ -195,6 +191,9 @@ class Settings(BaseSettings):
     # in half hours) and any other reminder offset. It ships off: 300 turns it
     # on once a start's alert is heard to sound on a device (MIGRATE.md).
     push_countdown_dedupe_window_seconds: int = 0
+    # How often push/session_reauth.py looks for devices left without a
+    # session, to ask them to sign in again; 0 turns the pushes off.
+    session_reauth_scan_interval_seconds: int = 600
 
     # --- Submission status probe (v2.1.0) ---
     # Only assignments due inside this window get probed. The Moodle API is

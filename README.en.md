@@ -18,7 +18,7 @@
 
 TigerDuck Backend is the server side of the [TigerDuck](https://github.com/tigerduck-app/tigerduck-app) app (iOS / Android). It runs at `api.tigerduck.app` and is responsible for five things:
 
-- 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (theft detection revokes the whole chain), AES-256-GCM credential storage, user device & push-token management
+- 🔐 **Accounts & auth (v3)** — NTUST SSO login verification, JWT access + refresh token rotation (a resent old token does not sign the device out), AES-256-GCM credential storage, user device & push-token management
 - 🔄 **User data sync (v3)** — Multi-device sync of courses / assignments / settings: initial client upload + per-user changelog incremental pulls, with the server periodically fetching authoritative Moodle assignment updates
 - 📣 **Bulletin pipeline** — Scrape NTUST departmental announcements → de-duplicate → LLM classification (canonical_org / content_tags / importance) → match subscriptions → push (dual-track: anonymous devices and logged-in users)
 - 📲 **Push delivery** — Logged-in users go through the two-phase `push_jobs` → `push_deliveries` pipeline (assignment / course reminders, bulletins, system notices); APNs Push-to-Start (iOS Live Activity), FCM fan-out (Android), bad-token classification and cleanup
@@ -29,8 +29,8 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ## Modules
 
 ### 🔐 Accounts & Auth (`server/auth/`)
-- **Login** — The app completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. The backend never signs in with the password: a login without a Moodle token gets `400 moodle_token_required`, and a password sent along is ignored. Attempts with or without a token count against the login limit, per IP and per student ID
-- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation; replay detection revokes the whole session chain plus same-device sessions. A client that lost the rotation response gets one more rotation within 24 hours while the new token has never been used, and a late duplicate of a refresh leaves the pair its client kept working
+- **Login** — The app completes NTUST SSO itself and sends the Moodle token, which the backend verifies; this keeps sign-ins off the school's per-IP rate limit. The backend never signs in with the password: a login without a Moodle token gets `400 moodle_token_required`, and a password sent along is ignored. A login gets `503 moodle_unreachable` when Moodle cannot be reached or answers with an error that is not about the token, as in maintenance mode; only a token Moodle refused gets `401 moodle_verification_failed`. Attempts with or without a token count against the login limit, per IP and per student ID
+- **Tokens** — Short-lived JWT access tokens + 90-day refresh token rotation. A rotated token sent again is rotated again each time while none of the sessions it was rotated into has been used, keeping the 16 newest live, until the token itself expires; the first of those sessions used supersedes the rest, so a late duplicate of a refresh leaves the pair its client kept working. Once one has been used, the old token gets `401 session_revoked`, and nothing is revoked
 - **Credential custody** — Only the Moodle token is stored, AES-256-GCM encrypted with per-row AAD (key rotation supported), for server-side fetching; the NTUST password is not kept
 - **Device management** — `/v3/devices` registers user devices and push tokens (standard / live_activity_update); deleting a device also revokes its sessions and invalidates its tokens; devices report their locale and hardware model and carry their own sync and push switches (assignment reminders, Live Activity, bulletin push, …)
 
@@ -62,6 +62,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Term dates and school holidays** — Course reminders go to the courses of the term both apps show on the day: the published term (`semester_terms`) that began most recently, or, with no term published, the latest term the user synced, as before. They and the class Live Activities (`classPreparing` / `inClass`) are not sent on a day no published term runs on (from its first day of classes through its last, both inclusive, as both apps count them), nor on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The opt-in puts back the holiday, never a day outside the term. The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a term or holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error` `outside_term` or `holiday`. Assignment Live Activities ignore both
 - **One alert per moment** (off by default) — With `push_countdown_dedupe_window_seconds` set (300), when an assignment's `assignmentUrgent` Live Activity start went to an iPhone within that many seconds before an assignment reminder's fire time, and the app there registered the activity it started, the reminder leaves that iPhone out: the start's alert already rang. A reminder due right after such a start waits once, a minute, for the registration, when the pre-send grace leaves room; an iPhone still unregistered then gets it. A reminder left out on every device ends `cancelled` with `last_error` `countdown_start_sent`; `0` turns the skip off
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
+- **Signing in again** — A device that keeps opening the app without a session it can use, with TigerSync on and seen in the last 3 days, gets a `reauth_required` push of its own with `reason: "session"`: an hour after its newest session ended (revoked for any reason but logout, or expired) with no live one left, or once a live one has gone 24 hours without a refresh. At most once every 7 days per device, until 28 days after a session that ended, only between 09:00 and 21:00 school time, and checked again right before it goes out
 - **Notification stacks** — iOS `thread-id` is `course`, `assignment` or `other`. Class and homework reminders carry no shared collapse id, so they stack instead of replacing one another
 - **APNs** — JWT auth, Push-to-Start, Live Activity update / end; the connection stays open between sends (TCP keepalive), and one send is capped at 15 seconds
 - **FCM** — Batched fan-out, automatic cleanup on `UNREGISTERED` / `SENDER_ID_MISMATCH`; sync triggers go at normal priority with a 12-hour TTL; each HTTP request is capped at 10 seconds
@@ -71,7 +72,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 
 ### ⏰ Scheduler
 - **Single worker** — APScheduler runs inside the FastAPI lifespan; replica count is locked at 1. Multiple replicas would double-send.
-- **Tick design** — Bulletin scrape / process / dispatch (anonymous + user-level), sync jobs, the push pipeline, assignment / course reminder scans, and retention each have their own interval trigger and don't block each other; cross-worker safety comes from DB locks (advisory lock + `SKIP LOCKED`).
+- **Tick design** — Bulletin scrape / process / dispatch (anonymous + user-level), sync jobs, the push pipeline, assignment / course reminder scans, the session reauth scan, and retention each have their own interval trigger and don't block each other; cross-worker safety comes from DB locks (advisory lock + `SKIP LOCKED`).
 
 ## Stack
 
@@ -263,7 +264,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `POST` | `/v3/auth/login` | NTUST SSO login (Moodle token verification) → access + refresh tokens | none |
-| `POST` | `/v3/auth/refresh` | Refresh token rotation (replay detection revokes the family) | refresh token |
+| `POST` | `/v3/auth/refresh` | Refresh token rotation | refresh token |
 | `PATCH` | `/v3/auth/credentials` | Update stored encrypted credentials | JWT |
 | `POST` | `/v3/auth/logout` | Revoke the current session | JWT |
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from server.auth.moodle import HttpMoodleVerifier, StaticMoodleVerifier
 
@@ -32,20 +33,41 @@ async def test_valid_token_matching_username() -> None:
     assert result.username == "b11015000"
 
 
-async def test_invalid_token_returns_moodle_exception() -> None:
+def moodle_error(errorcode: str | None) -> httpx.Response:
+    body = {"exception": "moodle_exception", "message": "..."}
+    if errorcode is not None:
+        body["errorcode"] = errorcode
+    return httpx.Response(200, json=body)
+
+
+@pytest.mark.parametrize(
+    "errorcode",
+    [
+        "invalidtoken",
+        # An expired token, as webservice_access_exception reports it.
+        "accessexception",
+    ],
+)
+async def test_a_refused_token_maps_to_invalid_token(errorcode) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "exception": "moodle_exception",
-                "errorcode": "invalidtoken",
-                "message": "Invalid token",
-            },
-        )
+        return moodle_error(errorcode)
 
     result = await make_verifier(handler).verify(token="bad", student_id="B11015000")
     assert result.ok is False
     assert result.error == "invalid_token"
+
+
+@pytest.mark.parametrize("errorcode", ["sitemaintenance", "dmlreadexception", None])
+async def test_any_other_moodle_error_maps_to_unreachable(errorcode) -> None:
+    """Moodle in maintenance, or failing, answers 200 with an exception
+    that says nothing about the token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return moodle_error(errorcode)
+
+    result = await make_verifier(handler).verify(token="tok", student_id="B11015000")
+    assert result.ok is False
+    assert result.error == "unreachable"
 
 
 async def test_username_mismatch_rejected() -> None:

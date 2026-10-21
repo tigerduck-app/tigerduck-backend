@@ -119,6 +119,11 @@ class UserDevice(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # When push/session_reauth.py last asked this device to sign in again,
+    # which it does once every 7 days at most.
+    session_reauth_pushed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -167,14 +172,14 @@ class AuthSession(Base):
     )
     revoked_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # On a revoked row, the session that replaced it. On a live row, the
-    # other live session a second rotation left (`settle_contest` in
-    # server/auth/service.py).
+    # next in the ring of live sessions that rotating one token again left
+    # (`settle_contest` in server/auth/service.py).
     replaced_by_session_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("auth_sessions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Set when a reuse of this token takes the theft path.
+    # Set when this token is presented again and refused past the grace.
     reuse_detected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -183,12 +188,12 @@ class AuthSession(Base):
     )
     # When the client first showed it holds this session: its access token
     # accepted, or its refresh token rotated. The token before it is rotated
-    # once more, if presented again, only while this is null.
+    # again, if presented again, only while this is null.
     first_used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # When this rotated token was rotated once more, for a client that may
-    # not have received its successor. That happens once per token.
+    # When this rotated token was last rotated again, for a client that may
+    # not have received its successor.
     rerotated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -209,6 +214,9 @@ class AuthSession(Base):
             "user_id",
             postgresql_where=sa.text("revoked_at IS NULL"),
         ),
+        # A device's newest session, which push/session_reauth.py reads for
+        # each device it looks at; every refresh adds a row.
+        Index("idx_auth_sessions_device", "device_id", "id"),
     )
 class DevicePushToken(Base):
     __tablename__ = "device_push_tokens"

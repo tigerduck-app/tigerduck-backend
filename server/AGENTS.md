@@ -70,6 +70,7 @@ server/
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
 │   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
+│   ├── session_reauth.py      # asks a device left without a session to sign in again
 │   ├── course_reminders.py    # course reminder scan
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
 │   ├── custom_push_dispatcher.py  # drains the legacy custom_push_dispatches table on a
@@ -248,7 +249,15 @@ into the backend container via `docker-compose.yml`.
   predecessor delivering.
 - `/sync/full` tags each course tombstone with `deleted_by_reset` and
   `deleted_by_this_device`; a client ignores a tombstone that is both,
-  the same rule `upload_courses` applies when it releases them.
+  the same rule `upload_courses` applies when it releases them. A course
+  an upload's `force_keys` brings to the server is stored as
+  `user_added`, unless the key brings back a course deleted while it was
+  not; one already there keeps its `source`. A single delete of a
+  `user_added` course leaves a tombstone marked `user_added`, which its
+  author's snapshot leaves out and its author's next upload forcing no
+  key releases. That helps only a removal that hides nothing on the
+  device, today the iPhone's tap-again in Add course: the apps' other
+  removals keep a local hide, so their rosters leave the course out.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.

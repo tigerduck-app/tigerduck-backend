@@ -25,7 +25,7 @@ class UserDevicePlatform(StrEnum):
 
 
 #: iPhone and iPad: the only platforms the backend sends assignment and
-#: class reminders to, and the only ones a reauth push is filed for.
+#: class reminders to, and the only ones a credential reauth push is filed for.
 #: Listing what is included rather than what is not makes a platform added
 #: later fail closed. A tuple, so it serves a Python `in` check and a SQL
 #: `IN (...)` alike, in a stable order.
@@ -38,9 +38,12 @@ APPLE_HANDHELD_PLATFORMS: tuple[str, ...] = (
 class SessionRevokedReason(StrEnum):
     logout = "logout"
     rotated = "rotated"
-    # One of the two live sessions a second rotation leaves, revoked when the
-    # other is used first (`settle_contest` in server/auth/service.py).
+    # One of the live sessions that rotating one token again leaves, revoked
+    # when another of them is used first (`settle_contest` in
+    # server/auth/service.py).
     superseded = "superseded"
+    # Nothing sets it any more; rows revoked with their family on a reuse
+    # keep it.
     reuse_detected = "reuse_detected"
     expired = "expired"
     admin_revoked = "admin_revoked"

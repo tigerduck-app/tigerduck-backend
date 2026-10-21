@@ -202,6 +202,11 @@ async def _read_full_snapshot(session, user_id, device_id):
         # would otherwise read its own tombstones as "hide everything".
         # Authorship is resolved here rather than by sending the device id,
         # so the client needs nothing it does not already have.
+        #
+        # Nor does a single delete's tombstone of a course added by hand,
+        # but the apps hide every other tombstone, so its author never gets
+        # it: that device took the course off itself, and hiding it there
+        # would keep the roster that lists it later from going up.
         "course_tombstones": [
             {
                 "course_key": t.course_key,
@@ -214,6 +219,12 @@ async def _read_full_snapshot(session, user_id, device_id):
                 ),
             }
             for t in tombstones
+            if not (
+                t.user_added
+                and not t.deleted_by_reset
+                and device_id is not None
+                and t.deleted_by_device_id == device_id
+            )
         ],
         "holiday_overrides": [
             {"holiday_id": o.holiday_id, "notify": o.notify}
