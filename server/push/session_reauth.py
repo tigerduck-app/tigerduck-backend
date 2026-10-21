@@ -43,8 +43,9 @@ _PLATFORMS = (*APPLE_HANDHELD_PLATFORMS, UserDevicePlatform.android.value)
 _SEEN_WITHIN = timedelta(days=3)
 # Long enough for an app to sign in again by itself after its session ended.
 _SIGN_IN_GRACE = timedelta(hours=1)
-# An app that holds its session refreshes it once its 15-minute access token
-# runs out, so a live session issued this long before a launch is not held.
+# An app that holds its session refreshes it once its access token runs out,
+# 15 minutes after it was issued (`auth_access_token_ttl_seconds`), so a live
+# session issued this long before a launch is not held.
 _UNTOUCHED = timedelta(hours=24)
 _REPEAT_AFTER = timedelta(days=7)
 # Hours at school, in `course_reminder_timezone`, the scan files in.
@@ -60,7 +61,8 @@ def sessionless_devices(now: datetime) -> Select:
     in a sign-out. Then either it has a live session and its newest session
     was issued more than `_UNTOUCHED` before the last announce, or it has no
     live session and was announced more than `_SIGN_IN_GRACE` after its newest
-    session was revoked, for theft, expiry or by an operator, or expired.
+    session was revoked or expired. `server_push_enabled`, which only operator
+    pushes read, is not read here, as for the credential reauth push.
     """
     newest = (
         select(

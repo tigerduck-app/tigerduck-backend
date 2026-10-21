@@ -41,13 +41,12 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   minutes the backend now looks for a device announced in the last 3 days,
   with TigerSync on and an active push token, whose newest session did not
   end in a logout, and that either has no live session and was announced
-  more than an hour after its newest session ended (revoked for theft,
-  expiry or by an operator, or expired), or has a live session not replaced
-  for 24 hours before an announce. It files a `reauth_required` push with
-  `reason: "session"` for that device alone, its title and body
-  app-translation's `notification_reauth_session_*` in the device's
-  language. A device is asked at most once every 7 days, and pushes are
-  filed only between 09:00 and 21:00 at school
+  more than an hour after its newest session was revoked or expired, or has
+  a live session not replaced for 24 hours before an announce. It files a
+  `reauth_required` push with `reason: "session"` for that device alone,
+  its title and body app-translation's `notification_reauth_session_*` in
+  the device's language. A device is asked at most once every 7 days, and
+  pushes are filed only between 09:00 and 21:00 at school
   (`course_reminder_timezone`). Just before the push goes out the pipeline
   checks the device again, and cancels it as `stale_before_send` when the
   device signed in again, signed out or was removed. iPhone, iPad and

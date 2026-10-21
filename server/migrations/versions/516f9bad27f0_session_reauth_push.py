@@ -22,9 +22,10 @@ def upgrade() -> None:
     session without reading every session.
 
     `session_reauth_pushed_at` starts null, so a device from before has
-    never been asked; the column is added without rewriting the table. The
-    index is built while the backend, which migrates before it starts,
-    writes nothing, and a second run changes nothing.
+    never been asked; the column is added without rewriting the table.
+    Building the index blocks writes to auth_sessions while it runs, about
+    half a second per million sessions, before the backend starts. A second
+    run changes nothing.
     """
     op.execute(
         "ALTER TABLE user_devices"
