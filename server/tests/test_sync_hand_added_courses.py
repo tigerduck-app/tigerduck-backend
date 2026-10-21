@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
+from server.auth.tokens import decode_access_token, issue_access_token
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -28,14 +29,14 @@ def _key(course_no: str) -> str:
     return f"client:{SEMESTER}:{course_no}"
 
 
-async def _login(client, device: str, platform: str) -> dict:
+async def _login(client, device: str, platform: str, student_id: str = "B11015000") -> dict:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=True, username="b11015000")
+        MoodleVerifyResult(ok=True, username=student_id.lower())
     )
     response = await client.post(
         "/v3/auth/login",
         json={
-            "student_id": "B11015000",
+            "student_id": student_id,
             "password": "pw",
             "moodle_token": "tok",
             "device_info": {"client_device_id": device, "platform": platform},
@@ -185,3 +186,86 @@ async def test_a_course_added_by_hand_stays_so_through_a_semester_reset(client) 
     assert rows[ADDED] == "user_added"
     await _delete(client, phone, ADDED)
     assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 0
+
+
+async def test_a_course_removed_before_the_release_keeps_binding_after_a_re_add(client) -> None:
+    """Until this release a course added by hand was stored like a roster
+    one, so its tombstone reads as a hidden enrolled course's; adding it by
+    hand again takes that over, and removing it once more binds as before."""
+    phone = await _login(client, "iphone-before", "ios")
+    await _upload(client, phone, [ENROLLED, ADDED])
+    await _delete(client, phone, ADDED)
+
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    rows, _ = await _snapshot(client, phone)
+    assert rows[ADDED] == "ntust_portal"
+    await _delete(client, phone, ADDED)
+    _, on_phone = await _snapshot(client, phone)
+    assert ADDED in on_phone
+    assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 1
+
+
+async def test_another_account_on_the_same_install_leaves_the_tombstone_binding(client) -> None:
+    """Signing in as someone else on the same install deletes the first
+    account's device row, so the tombstone has no author any more."""
+    phone = await _login(client, "iphone-shared", "ios")
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    await _delete(client, phone, ADDED)
+
+    await _login(client, "iphone-shared", "ios", student_id="B11015001")
+    phone = await _login(client, "iphone-shared", "ios")
+    _, on_phone = await _snapshot(client, phone)
+    assert on_phone[ADDED]["deleted_by_this_device"] is False
+    assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 1
+
+
+async def test_another_devices_reset_takes_the_release_from_the_device_that_removed_it(
+    client,
+) -> None:
+    """The reset makes every tombstone of the term its own reset tombstone,
+    which binds every device but the one that reset."""
+    phone = await _login(client, "iphone-removed", "ios")
+    tablet = await _login(client, "android-reset", "android")
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    await _delete(client, phone, ADDED)
+    reset = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=tablet)
+    assert reset.json() == {"deleted": 1}
+
+    _, on_phone = await _snapshot(client, phone)
+    assert on_phone[ADDED]["deleted_by_reset"] is True
+    assert on_phone[ADDED]["deleted_by_this_device"] is False
+    assert (await _upload(client, phone, [ENROLLED, ADDED]))["skipped_tombstoned"] == 2
+    assert (await _upload(client, tablet, [ENROLLED, ADDED]))["skipped_tombstoned"] == 0
+
+
+async def test_a_stale_upload_from_the_device_that_removed_it_brings_the_course_back(
+    client,
+) -> None:
+    """Accepted: an upload the device put together before the removal and
+    that lands after it reads like its roster."""
+    phone = await _login(client, "iphone-stale", "ios")
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    await _delete(client, phone, ADDED)
+
+    late = await _upload(client, phone, [ENROLLED, ADDED])
+    assert late["skipped_tombstoned"] == 0
+    rows, _ = await _snapshot(client, phone)
+    assert ADDED in rows
+
+
+async def test_a_snapshot_without_a_device_id_lists_the_tombstone(client) -> None:
+    phone = await _login(client, "iphone-session", "ios")
+    await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
+    await _delete(client, phone, ADDED)
+
+    secret = client.app.state.settings.auth_jwt_secret
+    claims = decode_access_token(secret, phone["Authorization"].removeprefix("Bearer "))
+    token = issue_access_token(
+        secret,
+        user_id=claims.user_id,
+        session_id=claims.session_id,
+        device_id=None,
+        ttl_seconds=600,
+    )
+    _, tombstones = await _snapshot(client, {"Authorization": f"Bearer {token}"})
+    assert tombstones[ADDED]["deleted_by_this_device"] is False
