@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.academic_calendar.terms import (
     current_term_code,
+    is_term_code,
     load_term_dates,
     outside_term,
 )
@@ -280,12 +281,12 @@ async def scan_course_reminders(
         ).all()
 
         # Latest semester per user, which stands in for the term while none
-        # is published. It prefers the courses filed under a term: portal-
-        # sourced ones, and those the course upload keys by it
-        # (`client:{semester}:...`), added by hand ones included. Other
-        # `user_added` rows carry a free-form client semester string that
-        # could lexicographically outrank the real current semester (e.g.
-        # "9999") and silently mute every portal course's reminders.
+        # is published. It prefers portal-sourced courses and `user_added`
+        # ones filed under a term code, as the course upload files a course
+        # added by hand. The initial upload takes any key and semester, so a
+        # `user_added` row can carry a free-form semester string that could
+        # lexicographically outrank the real current semester (e.g. "9999")
+        # and silently mute every portal course's reminders.
         # Two buckets merged portal-last so the result is independent of
         # row order (a single-pass flag was order-sensitive).
         portal_latest: dict[uuid.UUID, str] = {}
@@ -293,8 +294,7 @@ async def scan_course_reminders(
         for course, _override in rows:
             bucket = (
                 portal_latest
-                if course.source == "ntust_portal"
-                or course.course_key.startswith("client:")
+                if course.source == "ntust_portal" or is_term_code(course.semester)
                 else fallback_latest
             )
             current = bucket.get(course.user_id)

@@ -400,6 +400,36 @@ async def test_a_course_added_by_hand_counts_toward_the_latest_semester(
     assert jobs[0].payload["user_course_id"] == added.id
 
 
+async def test_a_course_added_under_no_real_term_leaves_the_latest_semester_alone(
+    db_session, prepared_engine, test_settings
+):
+    """The initial upload takes any key and semester, so a `user_added`
+    course keyed `client:9999:...` under "9999" must not outrank the
+    portal courses either."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(
+        _course(
+            user, course_key="client:9999:GE1", course_no="GE1", semester="9999",
+            source="user_added", schedule_json=schedule,
+        )
+    )
+    await db_session.flush()
+    portal = _course(
+        user, course_key="client:1141:CS1", course_no="CS1", semester="1141",
+        schedule_json=schedule,
+    )
+    db_session.add(portal)
+    await db_session.commit()
+
+    created = await scan_course_reminders(
+        build_session_factory(prepared_engine), _scan_settings(test_settings, local)
+    )
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs) == 1
+    assert jobs[0].payload["user_course_id"] == portal.id
+
+
 # --- holiday suppression ---
 #
 # Apple guards twice: the app stays quiet AND the backend never sends. This

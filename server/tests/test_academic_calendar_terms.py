@@ -8,7 +8,7 @@ from datetime import date
 
 import pytest
 
-from server.academic_calendar.terms import outside_term
+from server.academic_calendar.terms import is_term_code, outside_term
 
 FALL = (date(2026, 9, 7), date(2027, 1, 8))
 SPRING = (date(2027, 2, 15), date(2027, 6, 18))
@@ -39,3 +39,12 @@ def test_with_no_term_published_no_day_is_outside():
 )
 def test_a_term_runs_from_its_first_day_through_its_last(day, outside):
     assert outside_term(day, [FALL, SPRING]) is outside
+
+
+@pytest.mark.parametrize(
+    ("code", "valid"),
+    [("1151", True), ("1142", True), ("115H", True), ("9999", False), ("1153", False),
+     ("115h", False), ("11511", False), ("", False), ("１１５１", False)],
+)
+def test_a_term_code_is_a_year_and_its_term(code, valid):
+    assert is_term_code(code) is valid
