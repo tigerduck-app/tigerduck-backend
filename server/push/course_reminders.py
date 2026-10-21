@@ -280,7 +280,9 @@ async def scan_course_reminders(
         ).all()
 
         # Latest semester per user, which stands in for the term while none
-        # is published. It prefers portal-sourced courses:
+        # is published. It prefers the courses filed under a term: portal-
+        # sourced ones, and those the course upload keys by it
+        # (`client:{semester}:...`), added by hand ones included. Other
         # `user_added` rows carry a free-form client semester string that
         # could lexicographically outrank the real current semester (e.g.
         # "9999") and silently mute every portal course's reminders.
@@ -292,6 +294,7 @@ async def scan_course_reminders(
             bucket = (
                 portal_latest
                 if course.source == "ntust_portal"
+                or course.course_key.startswith("client:")
                 else fallback_latest
             )
             current = bucket.get(course.user_id)

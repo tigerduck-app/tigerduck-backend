@@ -371,6 +371,35 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
     assert {j.payload["user_course_id"] for j in jobs} == {portal.id}
 
 
+async def test_a_course_added_by_hand_counts_toward_the_latest_semester(
+    db_session, prepared_engine, test_settings
+):
+    """With no term published, the user's latest semester stands in for it.
+    The course upload keys a course added by hand `client:{semester}:...`
+    under a real term, as it does a roster one, so it counts the same."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(
+        _course(
+            user, course_key="client:1141:CS1", course_no="CS1", semester="1141",
+            schedule_json=schedule,
+        )
+    )
+    added = _course(
+        user, course_key="client:1142:GE1", course_no="GE1", semester="1142",
+        source="user_added", schedule_json=schedule,
+    )
+    db_session.add(added)
+    await db_session.commit()
+
+    created = await scan_course_reminders(
+        build_session_factory(prepared_engine), _scan_settings(test_settings, local)
+    )
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs) == 1
+    assert jobs[0].payload["user_course_id"] == added.id
+
+
 # --- holiday suppression ---
 #
 # Apple guards twice: the app stays quiet AND the backend never sends. This
