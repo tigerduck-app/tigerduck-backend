@@ -69,15 +69,17 @@ async def _device(
     sessions: list[dict],
     user: User | None = None,
     platform: str = "ios",
-    announced: datetime | None = NOW - 10 * MINUTE,
+    announced: datetime | None = NOW - 15 * MINUTE,
     token: str | None = "standard",
+    token_name: str | None = None,
     token_status: str = "active",
     token_expires_at: datetime | None = None,
     **fields,
 ) -> UserDevice:
     """A device of `user`, a user of its own by default, holding `sessions`
     in the order given (the newest last), a push token of kind `token`
-    (None for none), and last announced at `announced` (None for never)."""
+    (None for none) named `token_name` (the label by default), and last
+    announced at `announced` (None for never)."""
     if user is None:
         user = User()
         session.add(user)
@@ -92,7 +94,7 @@ async def _device(
             AuthSession(
                 user_id=user.id,
                 device_id=device.id,
-                refresh_token_hash=f"{label}-{index}",
+                refresh_token_hash=f"{device.id}-{index}",
                 **values,
             )
         )
@@ -104,8 +106,8 @@ async def _device(
                 device_id=device.id,
                 provider="fcm" if platform == "android" else "apns",
                 token_kind=token,
-                token_hash=f"hash-{label}",
-                token_value=f"tok-{label}",
+                token_hash=f"hash-{token_name or label}",
+                token_value=f"tok-{token_name or label}",
                 bundle_id="org.ntust.app.TigerDuck",
                 status=token_status,
                 expires_at=token_expires_at,
@@ -367,7 +369,7 @@ async def test_a_device_is_asked_at_most_once_every_seven_days(
     # Still without a session and still opened, as after a restart: the
     # limit lives in the database.
     for at in (NOW + HOUR, NOW + 7 * DAY - HOUR):
-        await _announce(db_session, "iphone", at - 5 * MINUTE)
+        await _announce(db_session, "iphone", at - 15 * MINUTE)
         engine = build_engine(test_settings)
         try:
             assert await _scan(engine, test_settings, at) == 0
@@ -378,7 +380,7 @@ async def test_a_device_is_asked_at_most_once_every_seven_days(
     await db_session.execute(update(PushJob).values(status="sent"))
     await db_session.commit()
     again = NOW + 7 * DAY + 10 * MINUTE
-    await _announce(db_session, "iphone", again - 5 * MINUTE)
+    await _announce(db_session, "iphone", again - 15 * MINUTE)
     assert await _scan(prepared_engine, test_settings, again) == 1
 
     jobs = (await _jobs(db_session))["iphone"]
@@ -400,7 +402,7 @@ async def test_a_device_that_signed_in_again_is_left_alone(
     # Past the 7 days, with the session it signed in with in use since.
     later = NOW + 8 * DAY
     await _sign_in_again(db_session, device, later - HOUR)
-    await _announce(db_session, "iphone", later - 5 * MINUTE)
+    await _announce(db_session, "iphone", later - 15 * MINUTE)
     assert await _scan(prepared_engine, test_settings, later) == 0
     assert len((await _jobs(db_session))["iphone"]) == 1
 
@@ -492,6 +494,32 @@ async def test_a_push_filed_before_the_device_signed_in_again_is_cancelled(
 
     assert apple.requests == []
     [job] = (await _jobs(db_session))["iphone"]
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+
+
+@asyncio_session
+async def test_a_push_whose_device_row_went_before_it_was_sent_is_cancelled(
+    db_session, prepared_engine, test_settings
+):
+    user = User()
+    db_session.add(user)
+    await db_session.flush()
+    iphone = await _device(
+        db_session, "iphone", user=user, sessions=[revoked(2 * HOUR, "reuse_detected")]
+    )
+    await _device(
+        db_session, "ipad", user=user, sessions=[live(HOUR)], platform="ipados"
+    )
+    assert await _scan(prepared_engine, test_settings) == 1
+    [job] = (await _jobs(db_session))["iphone"]
+
+    # Another account signs in on the iPhone (`auth.service._upsert_device`).
+    await db_session.delete(iphone)
+    await db_session.commit()
+    apple, android = await _tick(db_session, prepared_engine, test_settings)
+
+    assert apple.requests == [] and android.requests == []
+    job = await db_session.get(PushJob, job.id, populate_existing=True)
     assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
 
 
