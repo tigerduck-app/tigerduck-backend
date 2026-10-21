@@ -75,6 +75,7 @@ from server.push.dedupe import activity_id as _activity_id
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
+    SESSION_REAUTH_REASON,
     build_assignment_reminder_payload,
     build_reauth_payload,
 )
@@ -90,6 +91,7 @@ from server.push.presend import (
 )
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.push.session_reauth import still_sessionless
 from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
@@ -433,6 +435,26 @@ async def _materialize(
     )
     if job.device_id is not None:
         token_query = token_query.where(UserDevice.id == job.device_id)
+
+    is_session_reauth = (
+        job.scenario == REAUTH_SCENARIO
+        and payload.get("reason") == SESSION_REAUTH_REASON
+    )
+    if is_session_reauth:
+        if job.device_id is None:
+            # Its device was deleted, and without the filter above the job
+            # would reach the user's other devices, which have sessions.
+            return True
+        if not await _has_deliveries(session, job) and not await still_sessionless(
+            session, job.device_id, now
+        ):
+            # Signed in again, signed out or removed since the scan filed it.
+            # Only before the first delivery, as for a running activity below.
+            _settle(
+                job, status=PushJobStatus.cancelled, error="stale_before_send", now=now
+            )
+            logger.info("push.session_reauth_stale", job_id=job.id)
+            return False
 
     if is_activity_job:
         # Both kinds need the activity id. For an end it picks the token:
