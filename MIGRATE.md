@@ -74,7 +74,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **Settings.** `TIGERDUCK_AUTH_REFRESH_RECOVERY_WINDOW_SECONDS` is gone,
   and with it the way 3.3.1 gave to turn the recovery off; a line left in
   `.env` is ignored. `TIGERDUCK_AUTH_REFRESH_REUSE_GRACE_SECONDS` now only
-  decides which of the two logs above a refused reuse gets.
+  decides how a send of a replaced token is recorded: a refused one as
+  `auth.refresh.duplicate_refused`, or as the `auth.refresh.reuse_detected`
+  warning with its `reuse_detected_at`; one rotated again as
+  `auth.refresh.grace_retry` or `auth.refresh.lost_rotation_recovered`. It
+  no longer decides whether a token is rotated again or refused.
 - **Rolling back.** 3.3.5 runs on the database as it is. It takes a token
   this release rotated again for stolen when it comes back, and revokes the
   device's sessions as before. When one of three or more pairs one token

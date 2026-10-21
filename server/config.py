@@ -50,9 +50,10 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
-    # A replaced token refused this soon after it was replaced is taken for a
-    # late duplicate of the request that replaced it, and logged as one
-    # rather than as a reuse.
+    # A token sent again this soon after it was replaced is taken for a late
+    # duplicate of the request that replaced it. That changes only how the
+    # send is recorded, in the logs and reuse_detected_at, never whether it
+    # is rotated again or refused (`_handle_revoked_reuse`, `_rotate_again`).
     auth_refresh_reuse_grace_seconds: int = 60
     # Login rate limit: N attempts per window, applied independently to the
     # student_id and the client IP. Protects both against credential
