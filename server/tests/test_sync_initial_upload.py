@@ -621,3 +621,18 @@ async def test_initial_upload_submission_cancels_the_pending_reminders(client) -
 
     async with factory() as session:
         assert (await session.get(PushJob, reminder.id)).status == "cancelled"
+
+
+async def test_initial_upload_clears_a_name_to_empty_strings(client) -> None:
+    """As the override PATCH and the /v3/courses PUT do, a cleared name stays
+    as "" in both locales, so a snapshot says it was cleared."""
+    login = await do_login(client)
+    await seed_course(client, login)
+    for name, at in (("OS", "2026-10-01T08:00:00+00:00"), ("", "2026-10-01T09:00:00+00:00")):
+        response = await upload_course_override(
+            client, login, custom_name=name, custom_name_updated_at=at
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["counts"]["course_overrides"] == 1
+
+    assert (await stored_override(client)).custom_names == {"zh": "", "en": ""}

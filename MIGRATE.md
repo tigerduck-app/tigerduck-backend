@@ -32,6 +32,23 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.3.6
+
+- **A cleared course name reaches the other devices.** Clearing a course's
+  name in one language used to drop that language from `custom_names`, so
+  `/sync/full` no longer listed it and every other device kept the old name;
+  clearing the last one left no names at all, which the iPhone skipped. The
+  cleared language now stays as `""`, which the override PATCH answer and
+  `/sync/full` send, and `PUT /v3/courses/{id}/override` and the initial
+  upload clear a name the same way. Clearing a language that never had a
+  name stores `""` too, which the other devices apply as a clear that
+  changes nothing. The iPhone already reads `""` as cleared; an Android
+  build that does not keeps the old name, as before. Class reminders and
+  the portal's data panel read `""` as no custom name. A name cleared before
+  the upgrade is not sent again: a device that kept the old name keeps it
+  until the name is cleared once more.
+- No migration and no setting.
+
 ## Upgrading to 3.3.5
 
 - **One row per assignment.** An app's upload of an assignment was stored as
