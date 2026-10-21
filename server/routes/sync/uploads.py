@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
@@ -14,6 +14,7 @@ from server.sync.changelog import RevisionExpired, append_change, lock_sync_stat
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync.models import (
     ChangeEntityType,
+    CourseSource,
     UserAssignment,
     UserAssignmentOverride,
     UserBulletinState,
@@ -95,14 +96,25 @@ async def upload_courses(
         )).scalars().all()
     )
 
-    # Clear tombstones for explicitly re-added courses (user action).
+    # Clear tombstones for explicitly re-added courses (user action). A
+    # course these keys bring to the server counts as added by hand, unless
+    # it comes back from the deletion of one that did not. One the server
+    # holds already keeps what it is, so a roster course added again by hand
+    # still binds when it is hidden later, unless its key lifted the
+    # tombstone of one added by hand.
+    added_by_hand = set(payload.force_keys)
+    back_by_hand: set[str] = set()
     if payload.force_keys:
-        await session.execute(
-            delete(UserCourseTombstone).where(
+        cleared = (await session.execute(
+            delete(UserCourseTombstone)
+            .where(
                 UserCourseTombstone.user_id == auth.user_id,
                 UserCourseTombstone.course_key.in_(payload.force_keys),
             )
-        )
+            .returning(UserCourseTombstone.course_key, UserCourseTombstone.user_added)
+        )).all()
+        added_by_hand -= {t.course_key for t in cleared if not t.user_added}
+        back_by_hand = {t.course_key for t in cleared if t.user_added}
 
     # A reset tombstone does not bind the device that wrote it. That reset
     # cleared the term precisely so this upload could replace it, and the
@@ -110,12 +122,27 @@ async def upload_courses(
     # retire the rows it covers and let the upsert through. Anything the
     # reset dropped that this upload does not mention keeps its tombstone
     # and goes on binding every device, this one included.
+    #
+    # Nor does the tombstone of a course added by hand bind its author's
+    # roster, an upload that forces no key. Its author's snapshot leaves it
+    # out (`_read_full_snapshot`), so where the removal hid nothing on that
+    # device (the iPhone's tap-again in Add course) it lists the course
+    # again once its roster does, and its upload is then the one way back:
+    # every other device hides the course and uploads nothing it hides, and
+    # one that has not synced since would only send the copy that was
+    # removed. An add's upload can carry the term as it was when that
+    # course was added, a course taken back since included. An upload the
+    # author put together before the removal and sent after it releases the
+    # tombstone all the same; the window is that of one request.
     payload_keys = {f"client:{c.semester}:{c.course_no}" for c in payload.courses}
     if auth.device_id and payload_keys:
+        released = [UserCourseTombstone.deleted_by_reset.is_(True)]
+        if not payload.force_keys:
+            released.append(UserCourseTombstone.user_added.is_(True))
         await session.execute(
             delete(UserCourseTombstone).where(
                 UserCourseTombstone.user_id == auth.user_id,
-                UserCourseTombstone.deleted_by_reset.is_(True),
+                or_(*released),
                 UserCourseTombstone.deleted_by_device_id == auth.device_id,
                 UserCourseTombstone.course_key.in_(payload_keys),
             )
@@ -140,13 +167,16 @@ async def upload_courses(
             continue
         uploaded_keys.add(course_key)
         moodle_id = c.moodle_id or f"{c.semester}{c.course_no}"
+        source = (
+            CourseSource.user_added if course_key in added_by_hand else CourseSource.ntust_portal
+        ).value
         stmt = (
             pg_insert(UserCourse)
             .values(
                 user_id=auth.user_id,
                 semester=c.semester,
                 course_key=course_key,
-                source="ntust_portal",
+                source=source,
                 course_no=c.course_no,
                 course_name=c.course_name,
                 course_name_en=c.course_name_en,
@@ -175,6 +205,11 @@ async def upload_courses(
                     "updated_at": now,
                     "version": UserCourse.__table__.c.version + 1,
                     "updated_by_device_id": auth.device_id,
+                    "source": (
+                        CourseSource.user_added.value
+                        if course_key in back_by_hand
+                        else UserCourse.__table__.c.source
+                    ),
                 },
             )
         )

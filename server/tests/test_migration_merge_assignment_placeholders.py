@@ -216,6 +216,13 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
     try:
         async with engine.begin() as conn:
             user, other = await _seed(conn)
+            # Today's snapshot also reads a column a later migration adds.
+            await conn.execute(
+                text(
+                    "ALTER TABLE user_course_tombstones"
+                    " ADD COLUMN IF NOT EXISTS user_added BOOLEAN NOT NULL DEFAULT false"
+                )
+            )
         shown = await _shown(engine, user)
 
         _alembic(migration_db_url, "upgrade", "head")

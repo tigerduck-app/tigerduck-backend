@@ -124,6 +124,22 @@ async def test_put_course_override_merges_per_field(client) -> None:
     assert merged["custom_names"] == {"zh": "OS", "en": "OS"}
 
 
+async def test_put_course_override_clears_the_name_for_the_other_devices(client) -> None:
+    """A cleared name stays as "" in both locales, as the sync PATCH keeps a
+    cleared locale, so a snapshot says the name was cleared."""
+    login = await do_login(client)
+    course_id = await seed_course(client, login["user"]["id"])
+    for name, at in (("OS", "2026-06-08T09:00:00Z"), (None, "2026-06-08T10:00:00Z")):
+        response = await client.put(
+            f"/v3/courses/{course_id}/override",
+            headers=bearer(login),
+            json={"custom_name": name, "custom_name_updated_at": at},
+        )
+        assert response.status_code == 200, response.text
+
+    assert response.json()["override"]["custom_names"] == {"zh": "", "en": ""}
+
+
 async def put_course_override(client, login: dict, course_id: int, **fields):
     return await client.put(
         f"/v3/courses/{course_id}/override", headers=bearer(login), json=fields

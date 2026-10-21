@@ -371,6 +371,65 @@ async def test_user_added_semester_string_cannot_mask_portal_courses(
     assert {j.payload["user_course_id"] for j in jobs} == {portal.id}
 
 
+async def test_a_course_added_by_hand_counts_toward_the_latest_semester(
+    db_session, prepared_engine, test_settings
+):
+    """With no term published, the user's latest semester stands in for it.
+    The course upload keys a course added by hand `client:{semester}:...`
+    under a real term, as it does a roster one, so it counts the same."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(
+        _course(
+            user, course_key="client:1141:CS1", course_no="CS1", semester="1141",
+            schedule_json=schedule,
+        )
+    )
+    added = _course(
+        user, course_key="client:1142:GE1", course_no="GE1", semester="1142",
+        source="user_added", schedule_json=schedule,
+    )
+    db_session.add(added)
+    await db_session.commit()
+
+    created = await scan_course_reminders(
+        build_session_factory(prepared_engine), _scan_settings(test_settings, local)
+    )
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs) == 1
+    assert jobs[0].payload["user_course_id"] == added.id
+
+
+async def test_a_course_added_under_no_real_term_leaves_the_latest_semester_alone(
+    db_session, prepared_engine, test_settings
+):
+    """The initial upload takes any key and semester, so a `user_added`
+    course keyed `client:9999:...` under "9999" must not outrank the
+    portal courses either."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    db_session.add(
+        _course(
+            user, course_key="client:9999:GE1", course_no="GE1", semester="9999",
+            source="user_added", schedule_json=schedule,
+        )
+    )
+    await db_session.flush()
+    portal = _course(
+        user, course_key="client:1141:CS1", course_no="CS1", semester="1141",
+        schedule_json=schedule,
+    )
+    db_session.add(portal)
+    await db_session.commit()
+
+    created = await scan_course_reminders(
+        build_session_factory(prepared_engine), _scan_settings(test_settings, local)
+    )
+    jobs = await _jobs(db_session, user.id)
+    assert created == len(jobs) == 1
+    assert jobs[0].payload["user_course_id"] == portal.id
+
+
 # --- holiday suppression ---
 #
 # Apple guards twice: the app stays quiet AND the backend never sends. This
@@ -743,3 +802,28 @@ async def test_a_scan_looks_up_more_users_than_a_statement_binds(
 
     assert await scan_course_reminders(factory, settings) == 1
     assert len(await _jobs(db_session, user.id)) == 1
+
+
+async def test_a_cleared_custom_name_gives_the_reminder_the_course_name(
+    db_session, prepared_engine, test_settings
+):
+    """A cleared name is stored as "" so the apps hear of it; the reminder
+    goes back to the course's own name."""
+    local, schedule = _occurrence_in(26)
+    user_ids = {}
+    for student_id, names in (("b11203001", {"zh": "早八"}), ("b11203002", {"zh": "", "en": ""})):
+        user = await _make_user(db_session, student_id)
+        course = _course(user, schedule_json=schedule)
+        db_session.add(course)
+        await db_session.flush()
+        db_session.add(
+            UserCourseOverride(user_id=user.id, user_course_id=course.id, custom_names=names)
+        )
+        user_ids[student_id] = user.id
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 2
+    for student_id, title in (("b11203001", "上課提醒：早八"), ("b11203002", "上課提醒：資料結構")):
+        (job,) = await _jobs(db_session, user_ids[student_id])
+        assert job.payload["title"] == title

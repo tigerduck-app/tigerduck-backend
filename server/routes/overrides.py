@@ -243,10 +243,9 @@ async def patch_course_override(
 
     if payload.locale and payload.custom_name is not None:
         names = dict(existing.custom_names or {})
-        if payload.custom_name == "":
-            names.pop(payload.locale, None)
-        else:
-            names[payload.locale] = payload.custom_name
+        # A cleared locale stays as "": the apps apply only the locales a
+        # snapshot lists, so one left out would keep the old name elsewhere.
+        names[payload.locale] = payload.custom_name
         existing.custom_names = names
         existing.custom_name_updated_at = now
         existing.custom_name_device_id = auth.device_id
