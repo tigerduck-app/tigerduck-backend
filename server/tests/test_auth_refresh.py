@@ -432,6 +432,59 @@ async def test_an_expired_session_among_its_rivals_does_not_hide_the_rest(
     assert reasons == ["superseded", "superseded", None]
 
 
+async def test_a_refresh_of_one_of_three_pairs_supersedes_the_others(client) -> None:
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(3)]
+
+    rotated = await _refresh(client, pairs[1]["refresh_token"])
+
+    assert rotated.status_code == 200
+    reasons = [
+        (await _row(client, pair["refresh_token"])).revoked_reason for pair in pairs
+    ]
+    assert reasons == ["superseded", "rotated", "superseded"]
+    for token in (token_a, pairs[0]["refresh_token"], pairs[2]["refresh_token"]):
+        assert (await _refresh(client, token)).status_code == 401
+    assert (await _refresh(client, rotated.json()["refresh_token"])).status_code == 200
+
+
+async def _login_elsewhere(client) -> dict:
+    """The same student on a second device, which can remove the first."""
+    body = {
+        **LOGIN_BODY,
+        "device_info": {"client_device_id": "ipad-xyz", "platform": "ios"},
+    }
+    response = await client.post("/v3/auth/login", json=body)
+    assert response.status_code == 200
+    return response.json()
+
+
+async def test_removing_the_device_ends_every_pair_its_token_was_rotated_into(
+    client,
+) -> None:
+    """The device is removed from another one while three pairs of one
+    token wait unused: the token and every pair are refused, and no session
+    is made."""
+    login = await do_login(client)
+    token_a = login["refresh_token"]
+    pairs = [(await _refresh(client, token_a)).json() for _ in range(3)]
+    other = await _login_elsewhere(client)
+    device = LOGIN_BODY["device_info"]["client_device_id"]
+    removed = await client.delete(f"/v3/devices/{device}", headers=_bearer(other))
+    assert removed.status_code == 204
+    sessions = await _session_count(client)
+
+    for token in [token_a, *(pair["refresh_token"] for pair in pairs)]:
+        refused = await _refresh(client, token)
+        assert refused.status_code == 401
+        assert refused.json()["detail"] == "session_revoked"
+    for pair in pairs:
+        used = await client.get("/v3/devices", headers=_bearer(pair))
+        assert used.status_code == 401
+    assert await _session_count(client) == sessions
+
+
 async def test_after_a_logout_no_token_of_the_chain_gets_a_pair(client) -> None:
     """A logout still ends the session: the token it was rotated from and
     the pair it superseded are refused, and no session is made."""
