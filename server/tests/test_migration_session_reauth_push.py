@@ -13,7 +13,7 @@ from server.tests.conftest import _alembic
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 REVISION = "516f9bad27f0"
-BEFORE = "d899fe7d1f79"
+BEFORE = "a463951f49a7"
 
 _DEVICE = """
 WITH u AS (INSERT INTO users DEFAULT VALUES RETURNING id)

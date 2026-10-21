@@ -1,7 +1,7 @@
 """Devices record their last session reauth push; sessions are read by device
 
 Revision ID: 516f9bad27f0
-Revises: d899fe7d1f79
+Revises: a463951f49a7
 Create Date: 2026-10-21 22:00:00.000000
 
 """
@@ -11,7 +11,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '516f9bad27f0'
-down_revision: str | Sequence[str] | None = 'd899fe7d1f79'
+down_revision: str | Sequence[str] | None = 'a463951f49a7'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
