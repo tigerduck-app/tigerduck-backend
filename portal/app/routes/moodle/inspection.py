@@ -345,6 +345,16 @@ def _current_semester_prefix() -> str:
         return f"{roc_year - 1}2"
     else:
         return f"{roc_year - 1}1"
+
+
+def _custom_names(raw: str | dict | None) -> dict | None:
+    """The names an override renames its course to, from `custom_names`
+    (text, as the pool has no JSONB codec). The backend keeps a cleared one
+    as "" so the apps hear of the clear, and it is no name to show."""
+    names = json.loads(raw) if isinstance(raw, str) else raw
+    return {locale: name for locale, name in names.items() if name} if names else names
+
+
 @router.get("/sync-courses")
 async def sync_courses(
     student_id: str = Query(..., min_length=1),
@@ -504,6 +514,7 @@ async def sync_courses(
         en_name = en_names.get(course_no)
         if en_name:
             d["course_name_en"] = en_name
+        d["custom_names"] = _custom_names(d.get("custom_names"))
         d["client_course_no"] = course_no
         idx = _course_hash_index(course_no)
         d["default_palette_index"] = idx

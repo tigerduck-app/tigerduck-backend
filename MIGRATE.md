@@ -57,6 +57,19 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   turns the tombstone into its own reset tombstone, which only that device
   releases. An upload the removing device put together before the removal
   and sent after it brings the course back: that window is one request.
+- **A cleared course name reaches the other devices.** Clearing a course's
+  name in one language used to drop that language from `custom_names`, so
+  `/sync/full` no longer listed it and every other device kept the old name;
+  clearing the last one left no names at all, which the iPhone skipped. The
+  cleared language now stays as `""`, which the override PATCH answer and
+  `/sync/full` send, and `PUT /v3/courses/{id}/override` and the initial
+  upload clear a name the same way. Clearing a language that never had a
+  name stores `""` too, which the other devices apply as a clear that
+  changes nothing. The iPhone already reads `""` as cleared; an Android
+  build that does not keeps the old name, as before. Class reminders and
+  the portal's data panel read `""` as no custom name. A name cleared before
+  the upgrade is not sent again: a device that kept the old name keeps it
+  until the name is cleared once more.
 - **Migration `a463951f49a7`** adds `user_added` (not null, default false)
   to `user_course_tombstones` without rewriting the table. Nothing recorded
   which courses were added by hand before this release, so there is no
