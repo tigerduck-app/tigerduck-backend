@@ -83,8 +83,12 @@ async def force_push_tick(request: Request) -> JSONResponse:
                     "error": f"HTTP {resp.status_code}: {resp.text[:300]}",
                 }
         if resp.status_code < 400:
-            async with get_pool(request).acquire() as conn:
-                await audit(conn, request, "push.tick")
+            try:
+                async with get_pool(request).acquire() as conn:
+                    await audit(conn, request, "push.tick")
+            except Exception:
+                # The tick already ran; answering 500 would tell the operator it did not.
+                logger.exception("push tick ran but its audit row was not written")
         return JSONResponse(payload, status_code=resp.status_code)
     except Exception as e:
         logger.exception("force push tick proxy failed")
