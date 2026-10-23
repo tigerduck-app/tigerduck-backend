@@ -86,8 +86,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   claims a job only while the student has a device with TigerSync on.
   Until then the job stays `pending` and is left alone, and it runs at the
   next tick once a device signs in or turns sync on. Signing out of the
-  last device (the apps delete it), or deregistering it in the portal,
-  also deletes the stored Moodle token; the next sign-in stores a new one.
+  last device (the apps delete it) also deletes the stored Moodle token;
+  the next sign-in stores a new one. The portal's deregister keeps it: it
+  leaves the device's sessions live, and the app's next request brings the
+  device back.
   The overdue metric and the Moodle sync dashboard's Overdue panel leave
   such jobs out: restart `sql-exporter` after `./start.sh`, which reads
   its collectors only at start.
@@ -101,8 +103,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   deleted; the list goes too only once assignment reminders are off on
   every device as well.
 - **Retry all's expire notification (#54)** goes only to the students
-  with a `disabled` job, the ones waiting for a sign-in, rather than to
-  every student with a healthy job.
+  with a `disabled` job, the ones waiting for a sign-in, and an iPhone or
+  iPad syncing, rather than to every student with a healthy job.
 - These five need no migration; rolling back to 3.4.0 brings the old
   behavior back. A token deleted at sign-out stays deleted.
 
