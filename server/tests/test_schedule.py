@@ -308,6 +308,36 @@ async def test_a_resync_moving_a_held_back_start_earlier_moves_its_wait_too(
     assert (job.fire_at, job.available_at) == (moved, moved)
 
 
+async def test_a_resync_at_the_same_time_keeps_a_held_back_start_waiting(
+    client: AsyncClient, prepared_engine
+):
+    login = await _login(client)
+    now = datetime.now(timezone.utc)
+    fire, held = now + timedelta(seconds=10), now + timedelta(minutes=5)
+    async with build_session_factory(prepared_engine)() as s:
+        s.add(
+            PushJob(
+                user_id=uuid.UUID(login["user"]["id"]),
+                device_id=uuid.UUID(login["device_id"]),
+                dedupe_key=f"schedule:{login['device_id']}:slot-1:classPreparing",
+                channel="schedule",
+                scenario="classPreparing",
+                fire_at=fire,
+                available_at=held,
+                payload={"kind": "schedule", "title": "A"},
+            )
+        )
+        await s.commit()
+
+    await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+    [job] = await _start_jobs(prepared_engine)
+    assert (job.fire_at, job.available_at) == (fire, held)
+
+
 async def test_a_resync_cancels_a_pending_start_moved_into_the_past(
     client: AsyncClient, prepared_engine
 ):
