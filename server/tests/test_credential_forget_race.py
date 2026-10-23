@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select, text, update
 
 from server.auth import service
 from server.auth.crypto import CredentialCipher
-from server.auth.dependencies import CurrentAuth
+from server.auth.dependencies import CurrentAuth, require_user
 from server.auth.models import (
     ExternalAccount,
     ExternalAccountCredential,
@@ -259,3 +260,38 @@ async def test_two_students_swapping_devices_do_not_deadlock(
     ).all()
     assert [tuple(o) for o in owners] == [("phone-a", "b00000002"), ("phone-b", "b00000001")]
     assert await _stored(db_session) == 2
+
+
+async def test_a_sign_out_from_a_deregistered_device_and_a_sign_in_do_not_deadlock(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """An operator's deregister leaves the device's session live. The
+    sign-out's request brought the device back, writing its row, before its
+    route locked the account, which a sign-in held while it waited for that
+    row."""
+    await _student(db_session, [])
+    factory = build_session_factory(prepared_engine)
+    async with factory() as setup:
+        signed_in = await _login(setup, test_settings, _STUDENT, "iphone-1")
+        await setup.commit()
+    await db_session.execute(update(UserDevice).values(deleted_at=func.now()))
+    await db_session.commit()
+    reached, release = _hold_logins_before_the_device(monkeypatch)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=test_settings)))
+
+    async def sign_out(session) -> None:
+        auth = await require_user(request, session, f"Bearer {signed_in.access_token}")
+        await delete_device("iphone-1", auth, session)
+
+    async with factory() as signing_in, factory() as signing_out:
+        login = asyncio.create_task(_login(signing_in, test_settings, _STUDENT, "iphone-1"))
+        await _until(prepared_engine, lambda: "iphone-1" in reached)
+        out = asyncio.create_task(sign_out(signing_out))
+        await _until(prepared_engine, out.done)
+        release.set()
+        await login
+        await signing_in.commit()
+        await out
+        await signing_out.commit()
+
+    assert await _stored(db_session) == 0

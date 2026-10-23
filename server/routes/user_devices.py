@@ -203,14 +203,17 @@ async def register_device(
     """Upsert the calling user's device (and optionally one push token).
     Idempotent — called on every app launch."""
     now = datetime.now(UTC)
-    device = (
-        await session.execute(
-            select(UserDevice).where(
-                UserDevice.user_id == auth.user_id,
-                UserDevice.client_device_id == payload.client_device_id,
-            )
-        )
-    ).scalar_one_or_none()
+    find = select(UserDevice).where(
+        UserDevice.user_id == auth.user_id,
+        UserDevice.client_device_id == payload.client_device_id,
+    )
+    device = (await session.execute(find)).scalar_one_or_none()
+    if device is not None and device.deleted_at is not None:
+        # Brought back below: lock first, as require_user does, and read again.
+        await lock_accounts(session, auth.user_id)
+        device = (
+            await session.execute(find.execution_options(populate_existing=True))
+        ).scalar_one_or_none()
     is_new = device is None
     if is_new:
         device = UserDevice(

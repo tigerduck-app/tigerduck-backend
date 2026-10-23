@@ -4,8 +4,8 @@ Besides verifying the JWT itself, this checks the backing auth_session is
 not revoked — so logout, device deletion, and a session superseded by a
 rival cut access immediately instead of "within 15 minutes when the JWT
 expires".
-One PK lookup per authenticated request, plus one write on a session's
-first; the session object is shared with the route handler via FastAPI's
+Two PK lookups per authenticated request, the session and its device,
+plus one write on a session's first; the session object is shared with the route handler via FastAPI's
 per-request dependency cache.
 """
 
@@ -18,11 +18,11 @@ from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request, status
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
-from server.auth.service import lock_contest, settle_contest
+from server.auth.service import lock_accounts, lock_contest, settle_contest
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -82,13 +82,29 @@ async def require_user(
     if auth_session.first_used_at is None:
         await _record_first_use(session, auth_session)
     if device_id:
-        await session.execute(
-            update(UserDevice)
-            .where(UserDevice.id == device_id, UserDevice.deleted_at.isnot(None))
-            .values(deleted_at=None)
-        )
+        await _bring_back(session, user_id, device_id)
     return CurrentAuth(
         user_id=user_id, session_id=claims.session_id, device_id=device_id
+    )
+
+
+async def _bring_back(
+    session: AsyncSession, user_id: uuid.UUID, device_id: uuid.UUID
+) -> None:
+    """Undelete the calling device: an operator's deregister leaves its
+    session live. Under the account lock, taken before the device row as on
+    every sign-in and sign-out (`lock_accounts`); the update reads the row
+    again, since a sign-in may have brought it back meanwhile."""
+    deleted_at = await session.scalar(
+        select(UserDevice.deleted_at).where(UserDevice.id == device_id)
+    )
+    if deleted_at is None:
+        return
+    await lock_accounts(session, user_id)
+    await session.execute(
+        update(UserDevice)
+        .where(UserDevice.id == device_id, UserDevice.deleted_at.isnot(None))
+        .values(deleted_at=None)
     )
 
 
