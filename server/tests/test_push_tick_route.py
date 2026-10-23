@@ -3,12 +3,15 @@
 A tick drains every due job, which after a large send outlasts the
 portal's 30s wait on this call. The answer has to say what happened —
 done, failed, or still sending — without cutting a long tick off.
+Served on the admin listener only, never on the API port.
 """
 
 from __future__ import annotations
 
 import asyncio
+import socket
 
+import httpx
 import pytest
 
 from server import main as main_module
@@ -21,25 +24,25 @@ def worker(client):
     return client.app.state.push_worker
 
 
-async def test_a_tick_that_finishes_is_reported_done(client, worker, monkeypatch):
+async def test_a_tick_that_finishes_is_reported_done(admin_client, worker, monkeypatch):
     async def tick(_worker):
         return 3
 
     monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
 
-    resp = await client.post("/push-tick")
+    resp = await admin_client.post("/push-tick")
 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "done": True, "processed": 3}
 
 
-async def test_a_tick_that_fails_is_reported_failed(client, worker, monkeypatch):
+async def test_a_tick_that_fails_is_reported_failed(admin_client, worker, monkeypatch):
     async def tick(_worker):
         raise RuntimeError("database went away")
 
     monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
 
-    resp = await client.post("/push-tick")
+    resp = await admin_client.post("/push-tick")
 
     assert resp.status_code == 500
     assert resp.json()["ok"] is False
@@ -47,7 +50,7 @@ async def test_a_tick_that_fails_is_reported_failed(client, worker, monkeypatch)
 
 
 async def test_a_long_tick_is_reported_still_sending_and_carries_on(
-    client, worker, monkeypatch
+    admin_client, worker, monkeypatch
 ):
     finished = asyncio.Event()
 
@@ -59,11 +62,74 @@ async def test_a_long_tick_is_reported_still_sending_and_carries_on(
     monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
     monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
 
-    resp = await client.post("/push-tick")
+    resp = await admin_client.post("/push-tick")
 
     assert resp.json() == {"ok": True, "done": False}
     # Answered, not cancelled: the drain still finishes.
     await asyncio.wait_for(finished.wait(), timeout=2)
+
+
+async def test_calls_while_a_tick_runs_join_it_rather_than_start_another(
+    admin_client, worker, monkeypatch
+):
+    started = 0
+    release = asyncio.Event()
+
+    async def tick(_worker):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return 1
+
+    monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
+    monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(main_module, "_running_ticks", set())
+    monkeypatch.setattr(main_module, "_joinable_tick", None)
+
+    first = await admin_client.post("/push-tick")
+    second = await admin_client.post("/push-tick")
+    assert first.json() == second.json() == {"ok": True, "done": False}
+    assert started == 1
+
+    (running,) = main_module._running_ticks
+    release.set()
+    await running
+    third = await admin_client.post("/push-tick")
+    assert third.json() == {"ok": True, "done": True, "processed": 1}
+    assert started == 2
+
+
+async def test_a_tick_running_past_the_join_limit_is_not_joined(
+    admin_client, worker, monkeypatch
+):
+    started = 0
+    release = asyncio.Event()
+
+    async def hung_tick(_worker):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return 0
+
+    monkeypatch.setattr(pipeline_module, "run_push_tick", hung_tick)
+    monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(main_module, "_FORCED_TICK_JOIN_LIMIT_SECONDS", 0.1)
+    monkeypatch.setattr(main_module, "_running_ticks", set())
+    monkeypatch.setattr(main_module, "_joinable_tick", None)
+
+    await admin_client.post("/push-tick")
+    await asyncio.sleep(0.15)
+    await admin_client.post("/push-tick")
+
+    assert started == 2
+    release.set()
+    await asyncio.wait(set(main_module._running_ticks), timeout=1)
+
+
+async def test_the_api_port_does_not_serve_it(client, worker):
+    resp = await client.post("/push-tick")
+
+    assert resp.status_code == 404
 
 
 async def test_shutdown_lets_a_tick_still_sending_finish(monkeypatch):
@@ -91,3 +157,27 @@ async def test_shutdown_waits_for_a_tick_only_so_long(monkeypatch):
     await asyncio.wait_for(main_module._finish_running_ticks(timeout=0.05), timeout=1)
 
     stuck.cancel()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_admin_listener_serves_it_while_the_app_runs(
+    test_settings, db_session
+):
+    from server.main import create_app, lifespan
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    app = create_app(
+        test_settings.model_copy(update={"skip_llm_probe": True, "admin_port": port})
+    )
+    url = f"http://127.0.0.1:{port}/push-tick"
+
+    async with lifespan(app):
+        async with httpx.AsyncClient() as http:
+            resp = await http.post(url)
+        assert resp.json() == {"ok": True, "done": True, "processed": 0}
+
+    with pytest.raises(httpx.ConnectError):
+        async with httpx.AsyncClient() as http:
+            await http.post(url)

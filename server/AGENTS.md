@@ -29,7 +29,7 @@ server/
 ├── db.py                      # Base, async engine/session, SessionDep;
 │                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
-├── security.py                # shared-secret dependency (X-Push-Token)
+├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
@@ -213,7 +213,12 @@ into the backend container via `docker-compose.yml`.
   that outranks the next one, and if one is waiting hands the rest of the
   batch back and claims again. `POST /push-tick` (X-Push-Token)
   forces one: it waits up to 20s, then answers `done: false` and lets the
-  tick finish on its own.
+  tick finish on its own; a call while that tick runs joins it.
+- The operator endpoints, `POST /push-tick` and `/v3/admin/sync-policies`,
+  live on a separate FastAPI app that the admin listener
+  (`TIGERDUCK_ADMIN_PORT`, 9001) serves inside the API process, bound to
+  the backend's alias on the internal `tigerduck-admin` network. The API
+  port never serves them. Add an operator endpoint there, not to the API.
 - The `course` and `assignment` channels deliver to iPhone and iPad only
   (`APPLE_HANDHELD_PLATFORMS`); Android posts its own class reminders.
   The reminder scans file nothing for a user with no such device and
