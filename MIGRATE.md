@@ -34,16 +34,40 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.4.0
 
+- **The admin endpoints moved to an internal port.** `POST /push-tick` and
+  `GET/PATCH /v3/admin/sync-policies` are no longer served on `:40000`;
+  they listen on `:9001` (`TIGERDUCK_ADMIN_PORT`), bound to the backend's
+  alias `tigerduck-internal-admin` on a new internal network,
+  `tigerduck-admin`, that only the portal joins. They still check
+  `X-Push-Token`. `docker-compose.yml` adds the network and sets
+  `TIGERDUCK_ADMIN_HOST`, and the portal now calls
+  `http://tigerduck-internal-admin:9001`, so rebuild both with `./start.sh`;
+  nothing changes in nginx-proxy-manager. Anything else that called these
+  paths through `api.tigerduck.app` must call them from inside the stack
+  instead, for example:
+
+  ```bash
+  docker compose exec backend python -c "import httpx, os; print(httpx.get('http://tigerduck-internal-admin:9001/v3/admin/sync-policies', headers={'X-Push-Token': os.environ['TIGERDUCK_API_SHARED_SECRET']}).text)"
+  ```
+
+- **An unset `TIGERDUCK_ENV` now means production** for the backend and the
+  portal, as it already did for `./start.sh`. A production backend refuses
+  to start without `TIGERDUCK_API_SHARED_SECRET`. A development `.env`
+  must say `TIGERDUCK_ENV=development` (`.env.example` does).
+
 - **Database timeouts.** Every backend connection now carries
   `statement_timeout` (`TIGERDUCK_DATABASE_STATEMENT_TIMEOUT_SECONDS`, 30)
   and `idle_in_transaction_session_timeout`
   (`TIGERDUCK_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, 60); 0 turns
   one off. The push sends and the retention purges lift both for their own
   transactions. Migrations use their own connection and are not affected.
+
 - **A second connection pool.** Scheduled jobs and the sync and push
   workers use a pool of their own (5 + 5 overflow, like the API's), so the
   backend may hold up to 20 Postgres connections instead of 10. The
   `tigerduck_db_pool_*` metrics still describe the API's pool only.
+
+---
 
 ## Upgrading to 3.3.6
 
