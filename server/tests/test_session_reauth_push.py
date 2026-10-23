@@ -325,16 +325,16 @@ async def test_only_a_device_left_without_a_session_is_asked(
         "start-token-only": {"sessions": gone, "token": "push_to_start"},
         "token-invalidated": {"sessions": gone, "token_status": "invalidated"},
         "token-expired": {"sessions": gone, "token_expires_at": NOW - HOUR},
+        "android": {"sessions": [live(30 * HOUR)], "platform": "android"},
     }
     for label, kwargs in left_alone_by_device.items():
         await _device(db_session, label, **kwargs)
     await _device(db_session, "ipad", sessions=gone, platform="ipados")
-    await _device(db_session, "pixel", sessions=[live(30 * HOUR)], platform="android")
 
-    assert await _scan(prepared_engine, test_settings) == len(asked) + 2
+    assert await _scan(prepared_engine, test_settings) == len(asked) + 1
 
     jobs = await _jobs(db_session)
-    assert set(jobs) == set(asked) | {"ipad", "pixel"}
+    assert set(jobs) == set(asked) | {"ipad"}
     for label, [job] in jobs.items():
         device = (
             await db_session.execute(
@@ -471,35 +471,21 @@ async def test_only_the_sessionless_device_of_a_user_receives_it(
 
 
 @asyncio_session
-async def test_an_android_device_gets_the_copy_in_its_language(
+async def test_a_push_filed_for_an_android_device_is_cancelled(
     db_session, prepared_engine, test_settings
 ):
-    await _device(
-        db_session,
-        "pixel",
-        sessions=[live(30 * HOUR)],
-        platform="android",
-        locale="ja-JP",
-    )
-
+    device = await _device(db_session, "pixel", sessions=[live(30 * HOUR)])
     assert await _scan(prepared_engine, test_settings) == 1
+
+    await db_session.execute(
+        update(UserDevice).where(UserDevice.id == device.id).values(platform="android")
+    )
+    await db_session.commit()
     apple, android = await _tick(db_session, prepared_engine, test_settings)
 
-    assert apple.requests == []
-    [request] = android.requests
-    assert request.token == "tok-pixel"
-    assert (request.title, request.body) == (
-        translate(TITLE_KEY, "ja"),
-        translate(BODY_KEY, "ja"),
-    )
-    assert request.data["kind"] == REAUTH_SCENARIO
-    assert request.data["reason"] == SESSION_REAUTH_REASON
-    assert request.data["android_channel_id"] == "system"
-    # Signed out, the app shows nothing for it.
-    assert request.priority == "normal"
-
-
-# --- How often ---------------------------------------------------------------
+    assert apple.requests == [] and android.requests == []
+    [job] = (await _jobs(db_session))["pixel"]
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
 
 
 @asyncio_session
