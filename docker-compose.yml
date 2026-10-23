@@ -302,6 +302,9 @@ services:
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
       # Read by monitoring/grafana/provisioning/datasources/datasources.yml.
       TIGERDUCK_MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-}
+      # Read by monitoring/grafana/provisioning/alerting/contact-points.yml. Grafana
+      # will not start with an empty URL, so unset means a local dead end.
+      TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL: ${TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL:-http://127.0.0.1:9/discord-webhook-not-set}
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro

@@ -1,0 +1,11 @@
+# Every alert goes to tigerduck-oncall. Replaces the whole notification
+# policy tree, so routes added in the UI do not survive a restart.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: tigerduck-oncall
+    group_by: [grafana_folder, alertname]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
