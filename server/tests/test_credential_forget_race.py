@@ -122,3 +122,39 @@ async def test_a_sign_in_during_the_last_sign_out_keeps_its_token(
         await _forget_while_the_other_is_open(signing_in, signing_out, user_id)
 
     assert await _stored(db_session) == 1
+
+
+async def test_a_token_sent_while_the_last_device_signs_out_is_not_stored(client):
+    """PATCH /auth/credentials waits on Moodle with no transaction open; a
+    sign-out of the last device then drops the token, and the PATCH must not
+    store it again for an account with no device left."""
+    client.app.state.moodle_verifier = StaticMoodleVerifier(
+        MoodleVerifyResult(ok=True, username=_STUDENT)
+    )
+    login = await client.post(
+        "/v3/auth/login",
+        json={
+            "student_id": _STUDENT,
+            "moodle_token": "tok-1",
+            "device_info": {"client_device_id": "iphone-1", "platform": "ios"},
+        },
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    class SignedOutWhileVerifying:
+        async def verify(self, *, token, student_id):
+            signed_out = await client.delete("/v3/devices/iphone-1", headers=headers)
+            assert signed_out.status_code == 204
+            return MoodleVerifyResult(ok=True, username=student_id)
+
+    client.app.state.moodle_verifier = SignedOutWhileVerifying()
+    response = await client.patch(
+        "/v3/auth/credentials", headers=headers, json={"moodle_token": "tok-2"}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"updated": False}
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert await _stored(session) == 0

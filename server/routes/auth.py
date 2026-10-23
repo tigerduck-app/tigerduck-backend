@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.dependencies import CurrentAuthDep
@@ -14,6 +14,7 @@ from server.auth.models import (
     CredentialStatus,
     ExternalAccount,
     ExternalAccountCredential,
+    UserDevice,
 )
 
 from server.auth import service
@@ -163,6 +164,17 @@ async def update_credentials(
         ExternalAccount, account.id, populate_existing=True, with_for_update=True
     )
     if account is None:
+        return UpdateCredentialsResponse(updated=False)
+    # The last device may have signed out while Moodle answered, dropping
+    # the token (service.forget_credentials_once_signed_out); keep it dropped.
+    signed_in = await session.scalar(
+        select(
+            exists().where(
+                UserDevice.user_id == auth.user_id, UserDevice.deleted_at.is_(None)
+            )
+        )
+    )
+    if not signed_in:
         return UpdateCredentialsResponse(updated=False)
     credential = await session.get(ExternalAccountCredential, account.id)
     now = datetime.now(UTC)
