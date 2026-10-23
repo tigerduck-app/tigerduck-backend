@@ -446,6 +446,37 @@ async def test_a_job_taken_back_while_the_list_fetch_ran_stores_nothing(
     assert stored == 0
 
 
+async def test_a_failure_after_the_job_was_reclaimed_leaves_the_new_owner_alone(
+    db_session, prepared_engine, test_settings
+):
+    """A fetch that outlasts the stale-lock window can see its job recovered
+    and claimed by another worker; its failure is then not this run's to
+    record."""
+    _, _, job = await _setup_user_job(db_session)
+
+    class ReclaimedThenUnreachable(StubFetcher):
+        async def fetch_assignments(self, *, token):
+            async with prepared_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE sync_jobs SET locked_by = 'worker-b', "
+                        "locked_at = now() WHERE id = :id"
+                    ),
+                    {"id": job.id},
+                )
+            raise MoodleUnreachable("timeout")
+
+    worker = _worker(prepared_engine, test_settings, fetcher=ReclaimedThenUnreachable())
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "running"
+    assert job.locked_by == "worker-b"
+    assert job.attempts == 0
+    assert job.last_error is None
+
+
 async def test_expired_token_disables_job_and_queues_push(
     db_session, prepared_engine, test_settings
 ):
