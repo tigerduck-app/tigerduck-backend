@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ...audit import audit
 from ...db import get_pool
 from .push import run_pipeline_now
 
@@ -100,7 +101,7 @@ async def send_test_reauth_push(
     the copy in each device's own language. It has a dedupe key of its own,
     so it never collides with, or holds back, a real notice.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         uid = await conn.fetchval(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
@@ -129,6 +130,9 @@ async def send_test_reauth_push(
                     "source": "portal_test",
                 }
             ),
+        )
+        await audit(
+            conn, request, "push.test.reauth", user_id=uid, devices=devices
         )
     await run_pipeline_now(request, what="test reauth push")
     return JSONResponse({"ok": True, "push_job_id": job_id, "devices": devices})
@@ -163,7 +167,7 @@ async def start_test_live_activity(
     `/schedule/sync` cancels this device's pending jobs under that prefix
     that its upload does not list, and the app uploads on each foreground.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         device = await conn.fetchrow(
             "SELECT d.id, d.user_id, d.platform FROM user_devices d "
             "JOIN users u ON u.id = d.user_id "
@@ -216,6 +220,15 @@ async def start_test_live_activity(
             now,
             json.dumps(payload),
         )
+        await audit(
+            conn,
+            request,
+            "push.test.live_activity",
+            user_id=device["user_id"],
+            device_id=device["id"],
+            scenario=body.scenario,
+            minutes=body.minutes,
+        )
     await run_pipeline_now(request, what="test Live Activity")
     return JSONResponse(
         {
@@ -240,21 +253,30 @@ async def end_live_activity_now(
     pipeline, so the dismissal can be checked without waiting out the
     countdown. Only a pending end job on this account is touched.
     """
-    async with pool.acquire() as conn:
-        moved = await conn.fetchval(
+    async with pool.acquire() as conn, conn.transaction():
+        moved = await conn.fetchrow(
             "UPDATE push_jobs pj SET fire_at = now(), updated_at = now() "
             "FROM users u "
             "WHERE u.id = pj.user_id AND u.student_id = $1 AND pj.id = $2 "
             "AND pj.channel = 'schedule' "
             "AND pj.payload->>'kind' = 'live_activity_end' "
             "AND pj.status = 'pending' "
-            "RETURNING pj.id",
+            "RETURNING pj.id, pj.user_id, pj.device_id",
             student_id,
             job_id,
         )
+        if moved is not None:
+            await audit(
+                conn,
+                request,
+                "push.test.live_activity_end",
+                user_id=moved["user_id"],
+                device_id=moved["device_id"],
+                push_job_id=job_id,
+            )
     if moved is None:
         return JSONResponse(
             {"ok": False, "error": "no pending Live Activity end with that id"}, 404
         )
     await run_pipeline_now(request, what="Live Activity end-now")
-    return JSONResponse({"ok": True, "push_job_id": moved})
+    return JSONResponse({"ok": True, "push_job_id": moved["id"]})

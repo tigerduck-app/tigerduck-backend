@@ -11,6 +11,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Query, Request
+from ...audit import audit
 from ...db import get_pool
 from ._push_queue import payload_of, recipients, summary
 from ._shared import logger
@@ -62,6 +63,7 @@ async def list_moodle_students(
     }
 @router.get("/sync-events")
 async def sync_events(
+    request: Request,
     student_id: str = Query(..., min_length=1),
     limit: int = Query(default=100, ge=1, le=500),
     pool=Depends(get_pool),
@@ -74,6 +76,7 @@ async def sync_events(
             return {"student_id": student_id, "found": False, "events": []}
 
         uid = user["id"]
+        await audit(conn, request, "user.view", user_id=uid)
 
         jobs = await conn.fetch(
             "SELECT id, job_type, status AS job_status, attempts, "
@@ -357,6 +360,7 @@ def _custom_names(raw: str | dict | None) -> dict | None:
 
 @router.get("/sync-courses")
 async def sync_courses(
+    request: Request,
     student_id: str = Query(..., min_length=1),
     pool=Depends(get_pool),
 ):
@@ -373,6 +377,7 @@ async def sync_courses(
             }
 
         uid = user["id"]
+        await audit(conn, request, "user.view", user_id=uid)
 
         rows = await conn.fetch(
             "SELECT c.id, c.moodle_id, c.course_no, c.course_name, "

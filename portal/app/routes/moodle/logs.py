@@ -3,6 +3,7 @@ it has to live in the same module as the endpoint that sets it."""
 
 from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
+from ...audit import audit
 from ...db import get_pool
 
 router = APIRouter(prefix="/api/moodle")
@@ -11,6 +12,7 @@ router = APIRouter(prefix="/api/moodle")
 _log_table_ready = False
 @router.get("/sync-logs")
 async def sync_logs(
+    request: Request,
     student_id: str = Query(..., min_length=1),
     after_id: int = Query(default=0, ge=0),
     limit: int = Query(default=200, ge=1, le=1000),
@@ -45,6 +47,7 @@ async def sync_logs(
         )
         if not user:
             return {"entries": [], "latest_id": after_id}
+        await audit(conn, request, "user.view", user_id=user["id"])
 
         rows = await conn.fetch(
             "SELECT e.id, e.ts, e.level, e.source, e.message, e.detail, "
