@@ -47,7 +47,11 @@ def _fake_tools(calls: list[str], pg_dump_ok: bool, pg_restore_ok: bool):
 
 
 async def _import(
-    monkeypatch, tmp_path: Path, pg_dump_ok: bool, pg_restore_ok: bool = True
+    monkeypatch,
+    tmp_path: Path,
+    pg_dump_ok: bool,
+    pg_restore_ok: bool = True,
+    audit_fails: bool = False,
 ):
     calls: list[str] = []
     monkeypatch.setattr(backup, "PRE_RESTORE_DIR", tmp_path / "pre-restore")
@@ -59,6 +63,8 @@ async def _import(
 
     async def audit(conn, request, action, **kwargs):
         calls.append(f"audit:{action}")
+        if audit_fails:
+            raise TimeoutError("audit insert timed out")
 
     monkeypatch.setattr(backup, "audit", audit)
     app = FastAPI()
@@ -85,6 +91,16 @@ async def test_restore_takes_a_dump_of_the_live_database_first(
     saved = tmp_path / "pre-restore" / r.json()["pre_restore_dump"]
     assert saved.read_bytes() == b"PGDMP live"
     assert saved.stat().st_mode & 0o777 == 0o600
+
+
+async def test_a_restore_whose_audit_row_fails_still_reports_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    r, calls = await _import(monkeypatch, tmp_path, pg_dump_ok=True, audit_fails=True)
+
+    assert r.status_code == 200
+    assert calls == ["pg_dump", "pg_restore", "audit:backup.import"]
+    assert (tmp_path / "pre-restore" / r.json()["pre_restore_dump"]).exists()
 
 
 async def test_only_the_newest_pre_restore_dumps_are_kept(
