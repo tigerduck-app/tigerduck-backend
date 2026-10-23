@@ -29,7 +29,7 @@ from portal.app.routes.moodle.jobs import (  # noqa: E402
     retry_all_jobs,
     retry_all_moodle,
 )
-from server.auth.models import ExternalAccount, User  # noqa: E402
+from server.auth.models import ExternalAccount, User, UserDevice  # noqa: E402
 from server.syncjobs.models import SyncJob  # noqa: E402
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -145,8 +145,14 @@ async def test_the_expire_notification_goes_only_to_a_student_waiting_to_sign_in
     db_session, portal_pool, button
 ):
     """tigerduck-backend#54: the notification went to every user whose job
-    was pending with no attempts after the retry, a healthy one included."""
-    await _queue(db_session)
+    was pending with no attempts after the retry, a healthy one included.
+    A student with no iPhone or iPad syncing has nothing to receive it."""
+    jobs = await _queue(db_session)
+    await _job(db_session, "b6", status="disabled", last_error="credential_invalid")
+    db_session.add(
+        UserDevice(user_id=jobs["disabled"].user_id, client_device_id="iphone-1", platform="ios")
+    )
+    await db_session.commit()
 
     result = await button(_REQUEST, RetryAllRequest(notify=True), pool=portal_pool)
 
