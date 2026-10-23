@@ -20,6 +20,8 @@ umask 077
 PATH="${PATH}:/opt/homebrew/bin:/usr/local/bin"
 
 REPO_DIR="${TIGERDUCK_REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+TMP_BASE="${TMPDIR:-/tmp}"
+LOCK="${TMP_BASE%/}/tigerduck-backup-lock"
 ENV_FILE="${REPO_DIR}/.env"
 DB_CONTAINER="tigerduck-db"
 PREFIX="postgres"
@@ -31,6 +33,7 @@ SETTINGS="TIGERDUCK_BACKUP_S3_ENDPOINT TIGERDUCK_BACKUP_S3_BUCKET TIGERDUCK_BACK
 
 WORK=""
 DRILL_CONTAINER=""
+LOCKED=""
 
 usage() {
     sed -n 's/^#   \(tigerduck-backup.sh \)/usage: \1/p' "$0" >&2
@@ -53,6 +56,38 @@ cleanup() {
     if [ -n "${WORK}" ]; then
         rm -rf "${WORK}"
     fi
+    if [ -n "${LOCKED}" ]; then
+        rm -f "${LOCK}"
+    fi
+}
+
+# A symlink to the holder's pid: created atomically, and a lock left by a
+# killed run names a pid that is gone.
+acquire_lock() {
+    local holder
+    if ln -s "$$" "${LOCK}" 2>/dev/null; then
+        LOCKED=1
+        return 0
+    fi
+    holder="$(readlink "${LOCK}" || true)"
+    if [ -n "${holder}" ] && kill -0 "${holder}" 2>/dev/null; then
+        log "another run (pid ${holder}) is still going; exiting"
+        exit 0
+    fi
+    rm -f "${LOCK}"
+    ln -s "$$" "${LOCK}" 2>/dev/null || die "cannot take the lock ${LOCK}"
+    LOCKED=1
+}
+
+# Docker Desktop may still be starting after a reboot or a wake at 04:30.
+wait_for_docker() {
+    for _ in $(seq 1 60); do
+        if docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 10
+    done
+    die "docker did not answer for 10 minutes"
 }
 
 # Parsed rather than sourced, so nothing else in .env runs or is exported.
@@ -103,11 +138,11 @@ r2() {
         rclone --config /dev/null --quiet "$@"
 }
 
-# The passphrase goes in on stdin from a builtin, never on a command line.
+# The passphrase comes on fd 3 from a builtin, never on a command line, which
+# leaves stdin and stdout for the data.
 gpg_with_passphrase() {
-    printf '%s\n' "${TIGERDUCK_BACKUP_PASSPHRASE}" |
-        gpg --batch --quiet --yes --pinentry-mode loopback --no-symkey-cache \
-            --passphrase-fd 0 "$@"
+    gpg --batch --quiet --yes --pinentry-mode loopback --no-symkey-cache \
+        --passphrase-fd 3 "$@" 3< <(printf '%s\n' "${TIGERDUCK_BACKUP_PASSPHRASE}")
 }
 
 list_backups() {
@@ -121,12 +156,8 @@ newest_backup() {
     printf '%s' "${newest}"
 }
 
-download_and_decrypt() {
-    local name="$1" out="$2"
-    r2 copyto "${REMOTE}/${name}" "${WORK}/${name}" || die "download of ${name} failed"
-    gpg_with_passphrase --output "${out}" --decrypt "${WORK}/${name}" ||
-        die "decrypting ${name} failed"
-    rm -f "${WORK}/${name}"
+download() {
+    r2 copyto "${REMOTE}/$1" "${WORK}/$1" || die "download of $1 failed"
 }
 
 record_success() {
@@ -139,17 +170,14 @@ SQL
 }
 
 cmd_backup() {
-    local name dump
+    local name
     name="tigerduck-$(date -u +%Y%m%dT%H%M%SZ).dump.gpg"
-    dump="${WORK}/tigerduck.dump"
-    docker exec "${DB_CONTAINER}" \
-        pg_dump -U tigerduck -d tigerduck --format=custom --no-owner >"${dump}" ||
-        die "pg_dump in ${DB_CONTAINER} failed"
-    [ -s "${dump}" ] || die "pg_dump wrote nothing"
-    # pg_dump's custom format is compressed already.
-    gpg_with_passphrase --symmetric --cipher-algo AES256 --compress-algo none \
-        --output "${WORK}/${name}" "${dump}" || die "encryption failed"
-    rm -f "${dump}"
+    # Streamed, so no unencrypted dump touches the disk; custom format is
+    # compressed already.
+    docker exec "${DB_CONTAINER}" pg_dump -U tigerduck -d tigerduck --format=custom --no-owner |
+        gpg_with_passphrase --symmetric --cipher-algo AES256 --compress-algo none \
+            --output "${WORK}/${name}" ||
+        die "pg_dump in ${DB_CONTAINER} or its encryption failed"
     r2 copyto "${WORK}/${name}" "${REMOTE}/${name}" || die "upload of ${name} failed"
     log "uploaded ${name} ($(wc -c <"${WORK}/${name}" | tr -d ' ') bytes)"
     rm -f "${WORK}/${name}"
@@ -175,9 +203,13 @@ drill_sql() {
 }
 
 cmd_drill() {
-    local name revision table count counts=""
+    local name orphan revision table count counts=""
     name="$(newest_backup)"
-    download_and_decrypt "${name}" "${WORK}/drill.dump"
+    download "${name}"
+    # Left by a killed run; the lock means no other drill is going.
+    for orphan in $(docker ps -aq --filter name=tigerduck-backup-drill); do
+        docker rm -f "${orphan}" >/dev/null
+    done
     DRILL_CONTAINER="tigerduck-backup-drill-$$"
     # No network: nothing can reach this copy, and it can reach nothing.
     docker run -d --rm --name "${DRILL_CONTAINER}" --network none \
@@ -186,9 +218,10 @@ cmd_drill() {
         die "could not start the drill container"
     wait_for_drill_postgres
     # Roles are not in the dump; their grants would fail here.
-    docker exec -i "${DRILL_CONTAINER}" pg_restore -U tigerduck -d tigerduck \
-        --no-owner --no-privileges --exit-on-error <"${WORK}/drill.dump" ||
-        die "pg_restore of ${name} failed"
+    gpg_with_passphrase --decrypt "${WORK}/${name}" |
+        docker exec -i "${DRILL_CONTAINER}" pg_restore -U tigerduck -d tigerduck \
+            --no-owner --no-privileges --exit-on-error ||
+        die "decrypting or restoring ${name} failed"
     revision="$(drill_sql 'SELECT version_num FROM alembic_version')" ||
         die "the restored ${name} has no alembic_version"
     [ -n "${revision}" ] || die "the restored ${name} has an empty alembic_version"
@@ -212,7 +245,9 @@ cmd_fetch() {
         */* | ..*) die "not a backup name: ${name}" ;;
     esac
     [ ! -e "${name%.gpg}" ] || die "${name%.gpg} exists already"
-    download_and_decrypt "${name}" "${name%.gpg}"
+    download "${name}"
+    gpg_with_passphrase --output "${name%.gpg}" --decrypt "${WORK}/${name}" ||
+        die "decrypting ${name} failed"
     log "wrote $(pwd)/${name%.gpg}"
 }
 
@@ -235,7 +270,16 @@ main() {
 
     trap cleanup EXIT
     trap 'exit 130' INT TERM HUP
-    WORK="$(mktemp -d "${TMPDIR:-/tmp}/tigerduck-backup.XXXXXX")"
+    case "${command}" in
+        backup | drill | nightly)
+            acquire_lock
+            # Work dirs a killed run left behind.
+            find "${TMP_BASE}" -maxdepth 1 -type d -name 'tigerduck-backup.*' -mtime +0 \
+                -exec rm -rf {} + 2>/dev/null || true
+            wait_for_docker
+            ;;
+    esac
+    WORK="$(mktemp -d "${TMP_BASE%/}/tigerduck-backup.XXXXXX")"
 
     case "${command}" in
         backup) cmd_backup ;;

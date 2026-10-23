@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "backup" / "tigerduck-backup.sh"
@@ -30,11 +31,13 @@ STUBS = {
 echo "argv: $*" >> "$STUB_LOG"
 echo "env secret: ${RCLONE_CONFIG_TIGERDUCK_R2_SECRET_ACCESS_KEY:-}" >> "$STUB_LOG.env"
 """,
-    # Logs argv and the passphrase it read on stdin; writes its --output.
+    # Logs argv, the passphrase it read on fd 3 and the data it read on
+    # stdin; writes its --output.
     "gpg": """#!/bin/bash
 echo "argv: $*" >> "$STUB_LOG"
-read -r passphrase
-echo "stdin passphrase: $passphrase" >> "$STUB_LOG.env"
+read -r passphrase <&3
+echo "fd 3 passphrase: $passphrase" >> "$STUB_LOG.env"
+echo "stdin: $(cat)" >> "$STUB_LOG.env"
 while [ "$#" -gt 0 ]; do
     if [ "$1" = --output ]; then echo encrypted > "$2"; fi
     shift
@@ -132,7 +135,10 @@ def test_backup_keeps_secrets_off_every_command_line(tmp_path):
     assert PASSPHRASE not in result.stdout + result.stderr
     secrets_seen = Path(f"{log}.env").read_text()
     assert f"env secret: {SECRET}" in secrets_seen
-    assert f"stdin passphrase: {PASSPHRASE}" in secrets_seen
+    assert f"fd 3 passphrase: {PASSPHRASE}" in secrets_seen
+    # The dump reaches gpg on a pipe; no unencrypted file is written.
+    assert "stdin: PGDMP" in secrets_seen
+    assert ".dump\n" not in calls
 
     # Quotes around .env values are not part of the bucket name.
     upload = re.search(
@@ -146,11 +152,53 @@ def test_backup_keeps_secrets_off_every_command_line(tmp_path):
     assert "INSERT INTO ops.backup_status" in Path(f"{log}.sql").read_text()
 
 
-def test_backup_removes_its_temporary_files(tmp_path):
+def test_backup_removes_its_temporary_files_and_lock(tmp_path):
     result, _, _ = _run(tmp_path, "backup")
 
     assert result.returncode == 0, result.stderr
-    assert not list(tmp_path.glob("tigerduck-backup.*"))
+    assert not list(tmp_path.glob("tigerduck-backup*"))
+
+
+def test_a_run_while_another_holds_the_lock_exits_cleanly(tmp_path):
+    lock = tmp_path / "tigerduck-backup-lock"
+    lock.symlink_to(str(os.getpid()))
+
+    result, calls, _ = _run(tmp_path, "nightly")
+
+    assert result.returncode == 0, result.stderr
+    assert "still going" in result.stdout
+    assert calls == ""
+    assert lock.is_symlink()
+
+
+def test_a_lock_left_by_a_killed_run_is_taken_over_and_released(tmp_path):
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    dead_pid = gone.pid
+    lock = tmp_path / "tigerduck-backup-lock"
+    lock.symlink_to(str(dead_pid))
+
+    result, calls, _ = _run(tmp_path, "backup")
+
+    assert result.returncode == 0, result.stderr
+    assert "copyto" in calls
+    assert not lock.is_symlink()
+
+
+def test_work_dirs_older_than_a_day_are_removed(tmp_path):
+    stale = tmp_path / "tigerduck-backup.stale1"
+    stale.mkdir()
+    (stale / "tigerduck.dump").write_text("PGDMP")
+    two_days_ago = time.time() - 2 * 86400
+    os.utime(stale, (two_days_ago, two_days_ago))
+    fresh = tmp_path / "tigerduck-backup.fresh1"
+    fresh.mkdir()
+
+    result, _, _ = _run(tmp_path, "backup")
+
+    assert result.returncode == 0, result.stderr
+    assert not stale.exists()
+    assert fresh.exists()
 
 
 def test_fetch_refuses_a_path_as_the_backup_name(tmp_path):
