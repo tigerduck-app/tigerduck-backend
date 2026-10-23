@@ -97,8 +97,10 @@ async def _pre_restore_dump(database_url: str) -> Path:
         raise HTTPException(
             500, f"pre-restore backup failed, nothing was restored: {reason}"
         ) from None
-    # Names sort by time.
-    for old in sorted(PRE_RESTORE_DIR.glob("pre-restore-*.dump"))[:-PRE_RESTORE_KEEP]:
+    # Names sort by time; the new dump stays whatever its name, so a clock
+    # that moved back cannot prune the copy this restore depends on.
+    older = sorted(p for p in PRE_RESTORE_DIR.glob("pre-restore-*.dump") if p != path)
+    for old in older[: max(len(older) - PRE_RESTORE_KEEP + 1, 0)]:
         old.unlink(missing_ok=True)
     return path
 

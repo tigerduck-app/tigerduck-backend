@@ -104,6 +104,23 @@ async def test_only_the_newest_pre_restore_dumps_are_kept(
     assert "pre-restore-20260102T000000Z.dump" not in names
 
 
+async def test_the_new_pre_restore_dump_is_kept_when_its_name_sorts_first(
+    monkeypatch, tmp_path: Path
+) -> None:
+    kept_dir = tmp_path / "pre-restore"
+    kept_dir.mkdir()
+    for day in range(1, 7):
+        (kept_dir / f"pre-restore-2099010{day}T000000Z.dump").write_bytes(b"old")
+
+    r, _ = await _import(monkeypatch, tmp_path, pg_dump_ok=True)
+
+    assert r.status_code == 200
+    names = sorted(p.name for p in kept_dir.iterdir())
+    assert len(names) == backup.PRE_RESTORE_KEEP
+    assert r.json()["pre_restore_dump"] in names
+    assert "pre-restore-20990102T000000Z.dump" not in names
+
+
 async def test_a_failed_restore_names_the_pre_restore_dump(
     monkeypatch, tmp_path: Path
 ) -> None:
