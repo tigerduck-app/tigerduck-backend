@@ -82,6 +82,9 @@ async def sync_schedule(
             replaced += 1
             continue
         surviving_keys.add(job.dedupe_key)
+        if event.fire_at != job.fire_at:
+            # A wait set against the old time would hold the start past its new one.
+            job.available_at = event.fire_at
         job.fire_at = event.fire_at
         job.payload = _start_payload(event)
 
