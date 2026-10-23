@@ -31,6 +31,7 @@ server/
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token)
 ├── system_settings.py         # operator-tunable settings read at runtime
+├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
@@ -295,6 +296,11 @@ into the backend container via `docker-compose.yml`.
 - Do not trust `Cf-Access-Authenticated-User-Email` or any other identity
   header; a client that bypasses Access can set them. The operator is
   `request.state.actor`, taken from the verified token.
+- Do not add a portal route that changes state, or shows one account's or
+  device's data, without an `audit()` call (`portal/app/audit.py`) inside
+  its transaction; `portal/tests/test_audit_coverage.py` fails for a write
+  route without one. `detail` takes counts and filters, never a student id,
+  a typed search, a push body or a token.
 - Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow
