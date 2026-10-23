@@ -3,8 +3,9 @@
 Serves a React SPA (built by `portal/web` and copied to `web/dist`)
 plus a JSON API under `/api/*` that the SPA consumes. Stateless:
 postgres is owned by the backend container, status data is fetched on
-each request. No auth — front with Cloudflare Zero Trust (or any
-other auth-proxy) if you need a gate.
+each request. Every `/api/*` request must carry a valid Cloudflare
+Access JWT outside development (`access.py`); the static bundle and
+`/health` carry no data and are served to anyone.
 
 Routing order matters:
   1. `/static/*` — favicon + logo (legacy assets the layout still uses)
@@ -25,11 +26,13 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .access import build_verifier, require_access
 from .config import Settings
 from .db import close_pool, open_pool
 from .routes import (
     academic_calendar,
     announcement,
+    audit,
     backup,
     custom_push,
     deregister,
@@ -51,6 +54,7 @@ _WEB_DIST = _APP_DIR.parent / "web" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = Settings.from_env()
+    app.state.access_verifier = build_verifier(app.state.settings)
     # Operator routes read/write postgres directly over tigerduck-db.
     await open_pool(app)
     try:
@@ -59,7 +63,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_pool(app)
 
 
-app = FastAPI(title="TigerDuck Backend Portal", lifespan=lifespan)
+# The schema and docs pages sit outside /api, so they would skip the Access check.
+app = FastAPI(
+    title="TigerDuck Backend Portal",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+app.middleware("http")(require_access)
 
 # Legacy static assets (favicon, logo) — kept at /static so deep links
 # from earlier portal versions (e.g. bookmarked icons) still resolve.
@@ -86,6 +98,7 @@ app.include_router(deregister.router)
 app.include_router(devices.router)
 app.include_router(device_lists.router)
 app.include_router(moodle.router)
+app.include_router(audit.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

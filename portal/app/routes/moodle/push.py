@@ -6,6 +6,7 @@ import time
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
+from ...audit import audit
 from ...db import get_pool
 from ._shared import logger
 
@@ -83,17 +84,25 @@ async def force_push_tick(request: Request) -> JSONResponse:
                     "ok": False,
                     "error": f"HTTP {resp.status_code}: {resp.text[:300]}",
                 }
-            return JSONResponse(payload, status_code=resp.status_code)
+        if resp.status_code < 400:
+            try:
+                async with get_pool(request).acquire() as conn:
+                    await audit(conn, request, "push.tick")
+            except Exception:
+                # The tick already ran; answering 500 would tell the operator it did not.
+                logger.exception("push tick ran but its audit row was not written")
+        return JSONResponse(payload, status_code=resp.status_code)
     except Exception as e:
         logger.exception("force push tick proxy failed")
         return JSONResponse({"ok": False, "error": str(e)}, 500)
 @router.post("/push-clear")
 async def clear_push_queue(
+    request: Request,
     student_id: str = Query(..., min_length=1),
     pool=Depends(get_pool),
 ) -> JSONResponse:
     """Cancel all pending/processing push jobs for a user."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
@@ -105,6 +114,9 @@ async def clear_push_queue(
             user["id"],
         )
         count = int(result.split()[-1])
+        await audit(
+            conn, request, "push.clear", user_id=user["id"], cancelled=count
+        )
     return JSONResponse({"ok": True, "cancelled": count})
 @router.post("/push-sync-trigger")
 async def force_sync_trigger(
@@ -113,7 +125,7 @@ async def force_sync_trigger(
     request: Request = None,
 ) -> JSONResponse:
     """Create a fresh sync_trigger push job and execute immediately."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
@@ -130,6 +142,10 @@ async def force_sync_trigger(
             '{"kind":"sync_trigger","source":"portal_force"}',
         )
         job_id = row["id"] if row else None
+        await audit(
+            conn, request, "push.sync_trigger",
+            user_id=uid, deduplicated=job_id is None,
+        )
 
     if job_id:
         await run_pipeline_now(request, what="sync-trigger")
