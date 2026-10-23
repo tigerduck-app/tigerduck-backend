@@ -507,3 +507,59 @@ async def test_stale_rows_flip_to_deleted(
         ).scalar_one()
         assert stale.is_deleted is True
         assert fresh.is_deleted is False
+
+
+@_async
+async def test_operator_announcements_do_not_go_stale(
+    prepared_engine: AsyncEngine, test_settings: Settings
+) -> None:
+    """The scraper never lists a portal announcement or a kept custom push,
+    so they would go stale half an hour after they were posted."""
+    settings = _test_settings_override(test_settings).model_copy(
+        update={"bulletin_stale_cycles": 1, "bulletin_scrape_interval_seconds": 60}
+    )
+    factory = async_sessionmaker(prepared_engine, expire_on_commit=False)
+    old = datetime.now(timezone.utc) - timedelta(days=1)
+
+    async with factory() as session:
+        session.add_all(
+            [
+                Bulletin(
+                    source=source,
+                    external_id=f"{source}-1",
+                    source_url="",
+                    title=source,
+                    first_seen_at=old,
+                    last_seen_at=old,
+                )
+                for source in ("manual", "custom_push")
+            ]
+        )
+        await session.commit()
+
+    transport = _RoutingTransport(
+        {
+            settings.bulletin_list_url: """
+            <html><body><table class="listTB table"><tbody>
+            <tr><td>2026-04-22</td><td>圖書館</td>
+              <td><a href="https://bulletin.ntust.edu.tw/p/450-1045-900502,c0.php">listed</a></td>
+            </tr>
+            </tbody></table></body></html>
+            """,
+        }
+    )
+    await bulletin_jobs.scrape_job(
+        factory,
+        settings,
+        http_client_factory=_http_client_factory(transport),
+    )
+
+    async with factory() as session:
+        deleted = (
+            await session.execute(
+                select(Bulletin.source, Bulletin.is_deleted).where(
+                    Bulletin.source != "ntust_general"
+                )
+            )
+        ).all()
+        assert sorted(deleted) == [("custom_push", False), ("manual", False)]

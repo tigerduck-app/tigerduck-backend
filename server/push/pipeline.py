@@ -68,6 +68,7 @@ from server.auth.schemas import ScheduleScenario
 from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import lift_timeouts, session_scope
+from server.push.apns_client import SendResult
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
@@ -1132,7 +1133,7 @@ async def _send_one(
     delivery.attempts += 1
 
     if delivery.provider == "apns":
-        apns_request = build_apns_for_job(
+        request = build_apns_for_job(
             payload=payload,
             channel=job.channel,
             token_value=token.token_value,
@@ -1146,12 +1147,24 @@ async def _send_one(
                 else None
             ),
         )
-        result = await worker.router.send_apple(apns_request)
+        send = worker.router.send_apple
     else:
-        fcm_request = build_fcm_for_job(
+        request = build_fcm_for_job(
             payload=payload, channel=job.channel, token_value=token.token_value
         )
-        result = await worker.router.send_android(fcm_request)
+        send = worker.router.send_android
+    try:
+        result = await send(request)
+    except Exception as exc:
+        # aioapns raises on connection trouble. Raised past here, it would roll
+        # back the round, and the deliveries it already sent would go out again.
+        logger.warning(
+            "push.send_raised",
+            job_id=job.id,
+            delivery_id=delivery.id,
+            error=type(exc).__name__,
+        )
+        result = SendResult(success=False, status="exception", description=str(exc))
 
     if result.success:
         delivery.status = PushDeliveryStatus.sent.value

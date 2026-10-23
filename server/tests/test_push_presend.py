@@ -1260,6 +1260,27 @@ async def test_a_countdown_start_past_its_countdown_is_cancelled(
     assert moodle.asked == []
 
 
+async def test_a_countdown_start_to_a_moved_deadline_is_cancelled(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """A start filed before the deadline moved would count down to the old
+    one; the device's next sync files it again for the new one."""
+    user, device = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(make_assignment, store_moodle_token, user, 59)
+    job = _countdown_start(user, device, 59, due_at - timedelta(hours=2))
+    db_session.add(job)
+    await db_session.commit()
+
+    moodle = SubmissionStatusStub(OPEN)
+    apple = ScriptedSender()
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle, apple=apple))
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    assert moodle.asked == []
+    assert _reminders_and_starts(apple) == []
+
+
 async def test_a_live_activity_end_is_not_checked(
     db_session, prepared_engine, test_settings
 ):

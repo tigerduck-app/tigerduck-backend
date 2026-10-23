@@ -11,7 +11,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob, PushJobStatus
-from server.auth.schemas import ScheduleSyncV3Request, ScheduleSyncV3Response
+from server.auth.schemas import (
+    ScheduleEventV3,
+    ScheduleSyncV3Request,
+    ScheduleSyncV3Response,
+)
 from server.db import SessionDep
 from server.push.dedupe import LIVE_ACTIVITY_JOB_PRIORITY, SCHEDULE_CHANNEL
 from server.push.dedupe import activity_id as _activity_id
@@ -35,8 +39,8 @@ async def sync_schedule(
             status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
         )
     now = datetime.now(UTC)
-    incoming_keys = {
-        schedule_key(auth.device_id, e.source_id, e.scenario.value)
+    incoming = {
+        schedule_key(auth.device_id, e.source_id, e.scenario.value): e
         for e in payload.events
     }
 
@@ -67,18 +71,24 @@ async def sync_schedule(
     replaced = 0
     surviving_keys: set[str] = set()
     for job in existing:
-        if job.dedupe_key not in incoming_keys:
+        event = incoming.get(job.dedupe_key)
+        # A key the device still posts may come with a new fire time (a
+        # changed lead time, a moved deadline) or snapshot (a renamed course,
+        # a new room); the job takes them. One moved into the past goes, as an
+        # event already past is never filed.
+        if event is None or (event.fire_at != job.fire_at and event.fire_at <= now):
             job.status = PushJobStatus.cancelled.value
             job.cancelled_at = now
             replaced += 1
-        else:
-            surviving_keys.add(job.dedupe_key)
+            continue
+        surviving_keys.add(job.dedupe_key)
+        job.fire_at = event.fire_at
+        job.payload = _start_payload(event)
 
     # Insert new events (dedupe via unique index — already-existing
     # keys are silently skipped).
     values = []
-    for event in payload.events:
-        key = schedule_key(auth.device_id, event.source_id, event.scenario.value)
+    for key, event in incoming.items():
         if key in surviving_keys:
             continue
         if event.fire_at <= now:
@@ -92,23 +102,7 @@ async def sync_schedule(
                 "scenario": event.scenario.value,
                 "fire_at": event.fire_at,
                 "priority": LIVE_ACTIVITY_JOB_PRIORITY,
-                # The snapshot is spread first: the routing keys are ours,
-                # and a snapshot that happened to carry one must not
-                # redirect the job.
-                "payload": {
-                    **event.snapshot,
-                    "kind": "schedule",
-                    "scenario": event.scenario.value,
-                    "source_id": event.source_id,
-                    # The id the started activity carries in its attributes,
-                    # and so the key its update token is filed under when
-                    # the client registers it — see `composedActivityId` on
-                    # the client's LiveActivitySnapshot, which is
-                    # "{scenario}::{sourceId}". Composed here rather than
-                    # sent by the client so the end job's dedupe key and the
-                    # update token's scope always agree with it.
-                    "activity_id": _activity_id(event.source_id, event.scenario.value),
-                },
+                "payload": _start_payload(event),
             }
         )
     created = 0
@@ -120,6 +114,24 @@ async def sync_schedule(
 
     pending = len(surviving_keys) + created
     return ScheduleSyncV3Response(pending=pending, replaced=replaced)
+
+
+def _start_payload(event: ScheduleEventV3) -> dict:
+    # The snapshot is spread first: the routing keys are ours, and a snapshot
+    # that happened to carry one must not redirect the job.
+    return {
+        **event.snapshot,
+        "kind": "schedule",
+        "scenario": event.scenario.value,
+        "source_id": event.source_id,
+        # The id the started activity carries in its attributes, and so the
+        # key its update token is filed under when the client registers it —
+        # see `composedActivityId` on the client's LiveActivitySnapshot, which
+        # is "{scenario}::{sourceId}". Composed here rather than sent by the
+        # client so the end job's dedupe key and the update token's scope
+        # always agree with it.
+        "activity_id": _activity_id(event.source_id, event.scenario.value),
+    }
 
 
 @router.delete(

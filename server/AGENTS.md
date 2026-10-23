@@ -213,7 +213,9 @@ into the backend container via `docker-compose.yml`.
   /sync/courses` all refuse a session without a device id. Neither key
   carries an occurrence because the client's `source_id` already does
   (`{course_no}_{yyyyMMdd}_{period}`); a re-sync of the same occurrence
-  finds its own sent job and leaves it alone.
+  finds its own sent job and leaves it alone. A still-pending start takes
+  the re-synced event's fire time and snapshot, and is cancelled when the
+  new fire time has passed.
 - Every Live Activity start and end is filed at `push_jobs.priority` 10
   (`LIVE_ACTIVITY_JOB_PRIORITY` in `push/dedupe.py`); other jobs keep the
   default 100, and the pipeline claims the lowest first.
