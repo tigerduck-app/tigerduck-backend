@@ -6,6 +6,9 @@ refetch limit run; no test talks to Cloudflare.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import io
 import json
 import time
@@ -16,6 +19,7 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from fastapi import FastAPI, Request
 from jwt import jwks_client
 
@@ -83,6 +87,26 @@ def _token(*, key=SIGNING_KEY, kid: str = KID, **claims) -> str:
     return jwt.encode(_claims(**claims), key, algorithm="RS256", headers={"kid": kid})
 
 
+def _unsigned_token() -> str:
+    return jwt.encode(_claims(), None, algorithm="none", headers={"kid": KID})
+
+
+def _hs256_signed_with_the_public_key() -> str:
+    # Built by hand: PyJWT refuses to use a PEM public key as an HMAC secret.
+    def segment(data: bytes) -> bytes:
+        return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+    header = {"alg": "HS256", "typ": "JWT", "kid": KID}
+    signing_input = (
+        segment(json.dumps(header).encode()) + b"." + segment(json.dumps(_claims()).encode())
+    )
+    secret = SIGNING_KEY.public_key().public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
+    signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+    return (signing_input + b"." + segment(signature)).decode()
+
+
 def _app(env: str = "production", team: str = TEAM, aud: str = AUD) -> FastAPI:
     app = FastAPI()
     settings = Settings.model_construct(
@@ -127,6 +151,8 @@ async def test_a_valid_token_names_the_actor() -> None:
         pytest.param(_token(iss="https://evil.cloudflareaccess.com"), id="wrong-iss"),
         pytest.param(_token(expires_in=-60), id="expired"),
         pytest.param(_token(key=OTHER_KEY), id="bad-signature"),
+        pytest.param(_unsigned_token(), id="alg-none"),
+        pytest.param(_hs256_signed_with_the_public_key(), id="hs256-public-key"),
         pytest.param(_token(email=""), id="no-email"),
         pytest.param("not-a-jwt", id="garbage"),
     ],
