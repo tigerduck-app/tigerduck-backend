@@ -444,7 +444,7 @@
     {
       "type": "stat",
       "title": "Overdue",
-      "description": "Pending jobs more than 10 minutes past run_after, counting only types the worker would claim (policy enabled and inside its active window). The sync tick runs every 30 seconds, so these should be picked up long before.",
+      "description": "Pending jobs more than 10 minutes past run_after, counting only jobs the worker would claim (policy enabled and inside its active window, a device of the user syncing). The sync tick runs every 30 seconds, so these should be picked up long before.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
@@ -456,7 +456,7 @@
             "type": "grafana-postgresql-datasource",
             "uid": "tigerduck-db"
           },
-          "rawSql": "SELECT count(*) AS \"overdue\"\nFROM sync_jobs j\nJOIN sync_policies p ON p.job_type = j.job_type\nWHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'\n  AND p.enabled AND (p.active_from IS NULL OR p.active_from <= now()) AND (p.active_until IS NULL OR p.active_until > now())",
+          "rawSql": "SELECT count(*) AS \"overdue\"\nFROM sync_jobs j\nJOIN sync_policies p ON p.job_type = j.job_type\nWHERE j.job_type IN (${job_type:sqlstring}) AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'\n  AND p.enabled AND (p.active_from IS NULL OR p.active_from <= now()) AND (p.active_until IS NULL OR p.active_until > now()) AND EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = j.user_id AND d.deleted_at IS NULL AND d.cloud_sync_enabled)",
           "format": "table",
           "rawQuery": true,
           "editorMode": "code"

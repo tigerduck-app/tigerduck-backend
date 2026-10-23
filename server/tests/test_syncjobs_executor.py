@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
@@ -104,11 +105,20 @@ async def _setup_user_job(
     token="tok-1",
     password_verified=True,
     job_kwargs=None,
+    syncing_device=True,
 ):
     cipher = _cipher()
     user = User(student_id=student_id)
     session.add(user)
     await session.flush()
+    if syncing_device:
+        # A Mac: it keeps the job claimable and receives neither reminders
+        # nor the reauth push, so no test sees a push it did not set up.
+        session.add(
+            UserDevice(
+                user_id=user.id, client_device_id=f"mac-{student_id}", platform="macos"
+            )
+        )
     account = ExternalAccount(
         user_id=user.id, provider="ntust_sso", external_user_id=student_id
     )
@@ -310,6 +320,106 @@ async def test_policy_active_window_respected(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)
     assert fetcher.calls == []
+
+
+@pytest.mark.parametrize(
+    "device",
+    [None, {"deleted_at": datetime.now(UTC)}, {"cloud_sync_enabled": False}],
+    ids=["never-signed-in", "signed-out", "sync-off"],
+)
+async def test_no_fetch_while_no_device_syncs_and_resume_when_one_does(
+    db_session, prepared_engine, test_settings, device
+):
+    """tigerduck-backend#85: the job stays put, unclaimed, until a device
+    signs in or turns sync on."""
+    user, _, job = await _setup_user_job(db_session, syncing_device=False)
+    if device is not None:
+        db_session.add(
+            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios", **device)
+        )
+        await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 0
+    assert fetcher.calls == []
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+
+    if device is None:
+        db_session.add(
+            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
+        )
+    else:
+        await db_session.execute(
+            update(UserDevice).values(deleted_at=None, cloud_sync_enabled=True)
+        )
+    await db_session.commit()
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+
+
+async def _suspend_sync(conn_or_session) -> None:
+    """What the portal's Suspend sync writes."""
+    until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await conn_or_session.execute(
+        text(
+            "INSERT INTO system_settings (key, value) "
+            "VALUES ('moodle_suspended_until', CAST(:v AS jsonb))"
+        ),
+        {"v": json.dumps({"until": until})},
+    )
+
+
+async def test_a_suspended_sync_claims_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#86: Suspend sync was read only once a run had
+    already failed, so the worker went on calling Moodle."""
+    _, _, job = await _setup_user_job(db_session)
+    await _suspend_sync(db_session)
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 0
+
+    assert fetcher.calls == []
+    assert (await db_session.execute(select(func.count(SyncRun.id)))).scalar_one() == 0
+    await db_session.refresh(job)
+    assert job.status == "pending"
+
+
+async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
+    db_session, prepared_engine, test_settings
+):
+    await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
+    await _setup_user_job(db_session, student_id="b00000002", token="tok-2")
+
+    class SuspendedWhileFetching(StubFetcher):
+        async def fetch_assignments(self, *, token):
+            async with prepared_engine.begin() as conn:
+                await _suspend_sync(conn)
+            return await super().fetch_assignments(token=token)
+
+    fetcher = SuspendedWhileFetching(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_min_interval_seconds": 0}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert len(fetcher.calls) == 1
+    jobs = (await db_session.execute(select(SyncJob))).scalars().all()
+    assert sorted((j.status, j.attempts, j.locked_by, j.last_success_at is None) for j in jobs) == [
+        ("pending", 0, None, False),
+        ("pending", 0, None, True),
+    ]
+    runs = (await db_session.execute(select(SyncRun.status, SyncRun.error))).all()
+    assert sorted(runs) == [("cancelled", "sync_suspended"), ("succeeded", None)]
 
 
 async def test_successful_run_upserts_and_reschedules(
