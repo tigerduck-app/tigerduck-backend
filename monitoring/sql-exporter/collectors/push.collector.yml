@@ -56,11 +56,13 @@ metrics:
 
   - metric_name: tigerduck_push_deliveries_last_hour
     type: gauge
-    help: Deliveries (one per device token) finished in the last hour.
-    key_labels: [provider, token_kind, status]
+    help: Deliveries (one per device token) finished in the last hour. unregistered is true for a failure because APNs or FCM no longer knows the token.
+    key_labels: [provider, token_kind, status, unregistered]
     values: [count]
     query: |
-      SELECT provider, token_kind, status, count(*) AS count
+      SELECT provider, token_kind, status,
+             (COALESCE(failure_code, '') = 'unregistered')::text AS unregistered,
+             count(*) AS count
       FROM push_deliveries
       WHERE status <> 'pending' AND updated_at > now() - interval '1 hour'
-      GROUP BY 1, 2, 3
+      GROUP BY 1, 2, 3, 4

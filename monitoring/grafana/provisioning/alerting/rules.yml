@@ -25,13 +25,13 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [1]}}]}
-        for: 2m
+        for: 5m
         noDataState: Alerting
         execErrState: Error
         annotations:
           __dashboardUid__: tigerduck-backend
           __panelId__: '3'
-          summary: Prometheus cannot scrape the backend.
+          summary: Prometheus has not been able to scrape the backend for 5 minutes.
 
       - uid: td-target-down
         title: Scrape target down
@@ -253,7 +253,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: '(sum(tigerduck_push_deliveries_last_hour{status="failed"}) / sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed"})) and on() (sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed"}) >= 20)'
+              expr: '(sum(tigerduck_push_deliveries_last_hour{status="failed", unregistered="false"}) / sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed", unregistered="false"})) and on() (sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed", unregistered="false"}) >= 20)'
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0.2]}}]}
@@ -263,7 +263,7 @@ groups:
         annotations:
           __dashboardUid__: tigerduck-push-jobs
           __panelId__: '10'
-          summary: Over 20% of push deliveries in the last hour failed (at least 20 attempted).
+          summary: Over 20% of push deliveries in the last hour failed (at least 20 attempted), not counting tokens APNs or FCM no longer know.
 
       - uid: td-push-timeouts
         title: APNs or FCM timing out
