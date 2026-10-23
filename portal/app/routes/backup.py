@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tarfile
@@ -27,6 +28,8 @@ from starlette.background import BackgroundTask
 
 from ..audit import audit
 from ..db import get_pool
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/backup")
 
@@ -251,8 +254,12 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
             pre_restore = await _restore(settings.database_url, pg_dump_path)
 
     # Written after the restore, which replaces admin_audit_log with the dump's copy.
-    async with get_pool(request).acquire() as conn:
-        await audit(conn, request, "backup.import")
+    try:
+        async with get_pool(request).acquire() as conn:
+            await audit(conn, request, "backup.import")
+    except Exception:
+        # The database is already restored; answering 500 would tell the operator it was not.
+        logger.exception("restore finished but its audit row was not written")
     return JSONResponse(
         {
             "ok": True,
