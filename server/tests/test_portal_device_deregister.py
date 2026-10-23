@@ -36,18 +36,19 @@ async def portal_pool(test_settings, db_session):
     await pool.close()
 
 
-async def test_deregistering_the_last_device_drops_the_moodle_token(
+async def test_deregistering_the_last_device_keeps_the_moodle_token(
     db_session, portal_pool
 ):
-    """tigerduck-backend#85: an operator's deregister signs the device out,
-    as the app's own does."""
+    """A deregister leaves the device's sessions live, and its app's next
+    request brings the device back (`require_user`). Its token deleted, the
+    next sync run would find none, mark the account invalid and ask the
+    student to sign in again."""
     user = User(student_id="b1")
     db_session.add(user)
     await db_session.flush()
     account = ExternalAccount(user_id=user.id, provider="ntust_sso", external_user_id="b1")
     phone = UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
-    mac = UserDevice(user_id=user.id, client_device_id="mac-1", platform="macos")
-    db_session.add_all([account, phone, mac])
+    db_session.add_all([account, phone])
     await db_session.flush()
     db_session.add(
         ExternalAccountCredential(
@@ -60,11 +61,10 @@ async def test_deregistering_the_last_device_drops_the_moodle_token(
     )
     await db_session.commit()
 
-    async def stored() -> int:
-        return await portal_pool.fetchval("SELECT count(*) FROM external_account_credentials")
+    result = await deregister_devices(
+        _REQUEST, pool=portal_pool, body={"device_ids": [str(phone.id)]}
+    )
 
-    await deregister_devices(_REQUEST, pool=portal_pool, body={"device_ids": [str(phone.id)]})
-    assert await stored() == 1
-
-    await deregister_devices(_REQUEST, pool=portal_pool, body={"device_ids": [str(mac.id)]})
-    assert await stored() == 0
+    assert result.status_code == 200
+    stored = await portal_pool.fetchval("SELECT count(*) FROM external_account_credentials")
+    assert stored == 1
