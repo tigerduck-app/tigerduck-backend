@@ -361,6 +361,91 @@ async def test_successful_run_upserts_and_reschedules(
     assert len(entries) == 2
 
 
+class _ObservingFetcher(StubFetcher):
+    """Runs `observe()` from inside the Moodle call, then answers."""
+
+    def __init__(self, observe, results):
+        super().__init__(results=results)
+        self.observe = observe
+
+    async def fetch_assignments(self, *, token):
+        await self.observe()
+        return await super().fetch_assignments(token=token)
+
+
+async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
+    db_session, prepared_engine, test_settings
+):
+    """Moodle can take its full fetch timeout; the job's row lock and a
+    pooled connection must not be held while it does."""
+    _, _, job = await _setup_user_job(db_session)
+    seen: dict = {}
+
+    async def observe():
+        async with prepared_engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT id FROM sync_jobs WHERE id = :id FOR UPDATE NOWAIT"),
+                    {"id": job.id},
+                )
+            ).first()
+            seen["lock"] = "acquired" if row is not None else "no row"
+            await conn.rollback()
+            seen["idle_in_transaction"] = (
+                await conn.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() "
+                        "AND state LIKE 'idle in transaction%' "
+                        "AND pid <> pg_backend_pid()"
+                    )
+                )
+            ).scalar_one()
+            await conn.rollback()
+
+    fetcher = _ObservingFetcher(observe, results=[_fa(1)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    assert seen == {"lock": "acquired", "idle_in_transaction": 0}
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.last_success_at is not None
+
+
+async def test_a_job_taken_back_while_the_list_fetch_ran_stores_nothing(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(db_session)
+
+    async def recover_the_job():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE sync_jobs SET status = 'pending', locked_by = NULL, "
+                    "locked_at = NULL, last_error = 'sync_failed:stale_lock' "
+                    "WHERE id = :id"
+                ),
+                {"id": job.id},
+            )
+
+    fetcher = _ObservingFetcher(recover_the_job, results=[_fa(1)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.last_error == "sync_failed:stale_lock"
+    assert job.last_success_at is None
+    stored = await db_session.scalar(
+        select(func.count()).select_from(UserAssignment).where(
+            UserAssignment.user_id == user.id
+        )
+    )
+    assert stored == 0
+
+
 async def test_expired_token_disables_job_and_queues_push(
     db_session, prepared_engine, test_settings
 ):

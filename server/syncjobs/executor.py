@@ -3,8 +3,9 @@
 Claim/execute split: one short transaction recovers stale locks, another
 claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
 joined to an enabled+in-window policy, global running-count cap), then
-each job executes in its own transaction so one failure can't poison the
-batch; an assignments job then probes submission status in transactions
+each job reads its token, fetches from Moodle with no transaction open and
+stores the result in a transaction of its own, so one failure can't poison
+the batch; an assignments job then probes submission status in transactions
 of its own (`_refresh_submission_status`). Jobs run sequentially within a
 tick — deliberate politeness toward the school APIs behind our single
 egress IP.
@@ -42,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -275,90 +277,77 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
 
 
 async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
+    """Run one claimed job: read its token, fetch from Moodle with no
+    transaction open, then store the result under the job's row lock again,
+    re-checked, since the claim may have been taken back meanwhile."""
     try:
-        probe_submissions = False
-        async with session_scope(worker.session_factory) as session:
-            job = (
-                await session.execute(
-                    select(SyncJob).where(SyncJob.id == job_id).with_for_update()
-                )
-            ).scalar_one()
-            run = await session.get(SyncRun, run_id)
-            if (
-                job.status != SyncJobStatus.running.value
-                or job.locked_by != worker.worker_id
-            ):
-                # Stale-recovered (and possibly reclaimed by another worker)
-                # between our claim commit and now — never double-execute.
-                if run is not None and run.status == SyncRunStatus.running.value:
-                    run.status = SyncRunStatus.cancelled.value
-                    run.finished_at = datetime.now(UTC)
-                    run.error = "reclaimed_before_execution"
-                logger.warning(
-                    "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
-                )
-                return
-            policy = (
-                await session.execute(
-                    select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
-                )
-            ).scalar_one_or_none()
-
-            account, blob = await load_credential_blob(
-                session, worker.cipher, external_account_id=job.external_account_id
-            )
-            token = (blob.get("token_cache") or {}).get("moodle_token")
-
-            if not isinstance(token, str) or not token:
-                raise CredentialInvalid("moodle_token_missing")
-
-            from .log_entries import log_sync
-
-            await log_sync(session, user_id=job.user_id, source="executor",
-                           message=f"Job started: {job.job_type}",
-                           detail={"job_id": job.id, "run_id": run_id})
-
-            now = datetime.now(UTC)
-            if job.job_type == SyncJobType.ntust_courses.value:
-                try:
-                    courses = await worker.course_fetcher.fetch_courses(token=token)
-                except MoodleTokenInvalid:
-                    raise CredentialInvalid("moodle_token_invalid")
-                await log_sync(session, user_id=job.user_id, source="executor",
-                               message=f"Fetched {len(courses)} courses from Moodle")
-                stats = await apply_fetched_courses(
-                    session, user_id=job.user_id, fetched=courses, now=now
-                )
-            else:
-                try:
-                    fetched = await worker.fetcher.fetch_assignments(token=token)
-                except MoodleTokenInvalid:
-                    raise CredentialInvalid("moodle_token_invalid")
-                except MoodleNoCourseAccess as exc:
+        started = await _start_run(worker, job_id=job_id, run_id=run_id)
+        if started is None:
+            return
+        job_type, user_id, token = started
+        now = datetime.now(UTC)
+        probe_submissions = job_type != SyncJobType.ntust_courses.value
+        if not probe_submissions:
+            try:
+                fetched = await worker.course_fetcher.fetch_courses(token=token)
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+        else:
+            try:
+                fetched = await worker.fetcher.fetch_assignments(token=token)
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+            except MoodleNoCourseAccess as exc:
+                async with session_scope(worker.session_factory) as session:
+                    owned = await _lock_owned_job(
+                        session, worker, job_id=job_id, run_id=run_id
+                    )
+                    if owned is None:
+                        return
                     await _drop_courses_left_out(
                         session,
-                        run=run,
-                        user_id=job.user_id,
+                        run=owned[1],
+                        user_id=user_id,
                         refused_course_ids=exc.refused_course_ids,
                         now=now,
                     )
-                    raise
-                await log_sync(session, user_id=job.user_id, source="executor",
+                raise
+
+        from .log_entries import log_sync
+
+        async with session_scope(worker.session_factory) as session:
+            owned = await _lock_owned_job(
+                session, worker, job_id=job_id, run_id=run_id
+            )
+            if owned is None:
+                return
+            job, run = owned
+            if probe_submissions:
+                await log_sync(session, user_id=user_id, source="executor",
                                message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
-                    session, user_id=job.user_id, fetched=fetched, now=now
+                    session, user_id=user_id, fetched=fetched, now=now
                 )
-                probe_submissions = True
+            else:
+                await log_sync(session, user_id=user_id, source="executor",
+                               message=f"Fetched {len(fetched)} courses from Moodle")
+                stats = await apply_fetched_courses(
+                    session, user_id=user_id, fetched=fetched, now=now
+                )
 
             if run is not None:
                 run.fetched_count = stats.fetched_count
                 run.changed_count = stats.changed_count
 
             if stats.changed_count > 0:
-                await enqueue_sync_trigger(session, job.user_id)
+                await enqueue_sync_trigger(session, user_id)
 
-            user_id = job.user_id
             if not probe_submissions:
+                policy = (
+                    await session.execute(
+                        select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
+                    )
+                ).scalar_one_or_none()
                 await _mark_succeeded(
                     session, job=job, run=run, policy=policy, stats=stats, now=now
                 )
@@ -413,6 +402,58 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         )
 
 
+async def _lock_owned_job(
+    session: AsyncSession, worker: SyncWorker, *, job_id: int, run_id: int
+) -> tuple[SyncJob, SyncRun | None] | None:
+    """Lock the job and its run, or None if this worker no longer holds it:
+    stale-recovered, and possibly reclaimed by another worker, since the
+    claim. Never double-execute."""
+    job = (
+        await session.execute(
+            select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    run = await session.get(SyncRun, run_id)
+    if (
+        job is None
+        or job.status != SyncJobStatus.running.value
+        or job.locked_by != worker.worker_id
+    ):
+        if run is not None and run.status == SyncRunStatus.running.value:
+            run.status = SyncRunStatus.cancelled.value
+            run.finished_at = datetime.now(UTC)
+            run.error = "reclaimed_before_execution"
+        logger.warning(
+            "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
+        )
+        return None
+    return job, run
+
+
+async def _start_run(
+    worker: SyncWorker, *, job_id: int, run_id: int
+) -> tuple[str, uuid.UUID, str] | None:
+    """The job's type, user and Moodle token, read and logged in a
+    transaction of its own; None if the job is no longer this worker's."""
+    from .log_entries import log_sync
+
+    async with session_scope(worker.session_factory) as session:
+        owned = await _lock_owned_job(session, worker, job_id=job_id, run_id=run_id)
+        if owned is None:
+            return None
+        job, _run = owned
+        _account, blob = await load_credential_blob(
+            session, worker.cipher, external_account_id=job.external_account_id
+        )
+        token = (blob.get("token_cache") or {}).get("moodle_token")
+        if not isinstance(token, str) or not token:
+            raise CredentialInvalid("moodle_token_missing")
+        await log_sync(session, user_id=job.user_id, source="executor",
+                       message=f"Job started: {job.job_type}",
+                       detail={"job_id": job.id, "run_id": run_id})
+        return job.job_type, job.user_id, token
+
+
 async def _drop_courses_left_out(
     session: AsyncSession,
     *,
@@ -424,8 +465,8 @@ async def _drop_courses_left_out(
     """Soft-delete the rows of the courses an answer that lost every course
     left out, a TA's course among them, and keep the refused courses' rows.
 
-    Committed here, with the run's counts: the run then fails like any other
-    unreachable Moodle, which rolls this session back.
+    Committed here, with the run's counts; the run then fails like any other
+    unreachable Moodle.
     """
     from .log_entries import log_sync
 
