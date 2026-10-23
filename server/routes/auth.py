@@ -139,6 +139,8 @@ async def update_credentials(
     if account is None:
         return UpdateCredentialsResponse(updated=False)
 
+    # Committed first, so no connection or row lock is held while Moodle answers.
+    await session.commit()
     # Same live check as login: without it, a stale token would keep
     # flipping the account back to `active` and re-arming disabled sync
     # jobs with attempts=0, defeating the worker's back-off. The endpoint
@@ -155,6 +157,7 @@ async def update_credentials(
         )
         return UpdateCredentialsResponse(updated=False)
 
+    await session.refresh(account)
     credential = await session.get(ExternalAccountCredential, account.id)
     now = datetime.now(UTC)
     new_blob = {

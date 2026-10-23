@@ -165,3 +165,32 @@ async def test_credentials_rate_limited_per_user(client) -> None:
         "/v3/auth/credentials", headers=headers, json={"moodle_token": "tok"}
     )
     assert response.status_code == 429
+
+
+class _PoolWatchingVerifier:
+    """Accepts every token, noting how many pooled connections are checked
+    out while it answers."""
+
+    def __init__(self, engine) -> None:
+        self.engine = engine
+        self.checked_out: int | None = None
+
+    async def verify(self, *, token: str, student_id: str) -> MoodleVerifyResult:
+        self.checked_out = self.engine.pool.checkedout()
+        return MoodleVerifyResult(ok=True, username=student_id.lower())
+
+
+async def test_waiting_on_moodle_holds_no_connection(client) -> None:
+    login = await _login(client)
+    verifier = _PoolWatchingVerifier(client.app.state.engine)
+    client.app.state.moodle_verifier = verifier
+
+    response = await client.patch(
+        "/v3/auth/credentials",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+        json={"moodle_token": "fresh-tok"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["updated"] is True
+    assert verifier.checked_out == 0
