@@ -422,6 +422,7 @@ async def test_a_known_extension_stays_in_the_dates_the_list_writes(db_session):
         extension,
     )
     assert stats.changed_count == 0
+    assert stats.recheck_ids == frozenset()
     assert len(await _changelog(db_session, user.id)) == logged
 
 
@@ -477,3 +478,32 @@ async def test_a_placeholder_with_moodles_date_or_earlier_has_no_extension(db_se
 
     await db_session.refresh(placeholder)
     assert (placeholder.due_at, placeholder.extension_due_at) == (due, None)
+
+
+@pytest.mark.parametrize("moodle_moves", [-48, 48], ids=["earlier", "later"])
+async def test_a_due_date_moved_back_is_handed_to_the_probe(db_session, moodle_moves):
+    """An app's initial upload stores the student's date on a row with a
+    real course id, and a teacher can move a due date earlier: a row whose
+    stored date the list moves back is probed, whose answer may move it
+    forward again. Moodle's date stands meanwhile."""
+    user = await _make_user(db_session)
+    stored = NOW + timedelta(days=7)
+    row = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=7001,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=stored,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    listed = stored + timedelta(hours=moodle_moves)
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=listed)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert row.due_at == listed
+    assert stats.recheck_ids == (frozenset({1}) if moodle_moves < 0 else frozenset())

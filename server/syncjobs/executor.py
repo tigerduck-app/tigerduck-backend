@@ -382,6 +382,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     token=token,
                     now=now,
                     listed={a.moodle_assignment_id: a for a in fetched},
+                    recheck_ids=stats.recheck_ids,
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
@@ -551,9 +552,12 @@ async def _refresh_submission_status(
     token: str,
     now: datetime,
     listed: dict[int, FetchedAssignment],
+    recheck_ids: frozenset[int],
 ) -> None:
     """Best-effort probe of assignments near their due date, or with an
-    extension (`select_assignment_ids`).
+    extension, and of those whose due date the list sync just moved back
+    (`recheck_ids`), whose answer may move it forward again
+    (`select_assignment_ids`).
 
     Runs only after the assignment list sync has committed, in transactions
     of its own, so nothing it does can undo that sync. No transaction is
@@ -608,6 +612,7 @@ async def _refresh_submission_status(
                 user_id=user_id,
                 now=now,
                 window_hours=settings.submission_status_window_hours,
+                also=recheck_ids,
             )
         if not assignment_ids:
             return

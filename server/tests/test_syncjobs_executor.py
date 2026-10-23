@@ -1444,3 +1444,59 @@ async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_
     await _run_when_due(db_session, worker, job)
     assert answers == []
     assert tuple(await stored()) == (extension, extension)
+
+
+@pytest.mark.parametrize(
+    "answer,kept",
+    [("extension", True), ("no-extension", False), ("no-answer", False)],
+)
+async def test_a_date_the_list_moves_back_is_probed_and_the_answer_decides(
+    db_session, prepared_engine, test_settings, monkeypatch, answer, kept
+):
+    """An app's initial upload stored the student's later date on a row with
+    a real course id, or a teacher moved the due date earlier. Both are past
+    the probe window, and the probe is asked anyway: an extension it gives
+    keeps the later date, and without one Moodle's date stands."""
+    user, _, _ = await _setup_user_job(db_session)
+    moodle_due = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    later = moodle_due + timedelta(days=2)
+    db_session.add(
+        UserAssignment(
+            user_id=user.id,
+            moodle_course_id=7001,
+            moodle_assignment_id=1,
+            title="HW1",
+            due_at=later,
+        )
+    )
+    await db_session.commit()
+    probed: list[list[int]] = []
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        probed.append(list(assignment_ids))
+        if answer == "no-answer":
+            return {}
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=later if answer == "extension" else None,
+            )
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=moodle_due)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert probed == [[1]]
+    due_at = (
+        await db_session.execute(
+            select(UserAssignment.due_at)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert due_at == (later if kept else moodle_due)

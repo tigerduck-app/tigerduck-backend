@@ -13,10 +13,11 @@ as it was", never "the row is unsubmitted" or "the extension is gone".
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.sync.changelog import append_change, lock_sync_state
@@ -37,9 +38,11 @@ async def select_assignment_ids(
     user_id: uuid.UUID,
     now: datetime,
     window_hours: int,
+    also: Collection[int] = (),
 ) -> list[int]:
     """Moodle assignment ids worth probing: those due within `window_hours`
-    either side of `now`, and later ones with an extension.
+    either side of `now`, later ones with an extension, and those in `also`
+    whatever their due date.
 
     A row past due stays in for the window, since an extension granted after
     the due date moves it forward; one with an extension stays in whenever
@@ -48,6 +51,13 @@ async def select_assignment_ids(
     with no due date at all (nothing to remind about).
     """
     window = timedelta(hours=window_hours)
+    due_soon = and_(
+        UserAssignment.due_at > now - window,
+        or_(
+            UserAssignment.due_at <= now + window,
+            UserAssignment.extension_due_at.is_not(None),
+        ),
+    )
     rows = (
         await session.execute(
             select(UserAssignment.moodle_assignment_id).where(
@@ -55,11 +65,9 @@ async def select_assignment_ids(
                 UserAssignment.deleted_at.is_(None),
                 UserAssignment.provider_is_submitted.is_(False),
                 UserAssignment.due_at.is_not(None),
-                UserAssignment.due_at > now - window,
-                or_(
-                    UserAssignment.due_at <= now + window,
-                    UserAssignment.extension_due_at.is_not(None),
-                ),
+                or_(due_soon, UserAssignment.moodle_assignment_id.in_(list(also)))
+                if also
+                else due_soon,
             )
         )
     ).scalars().all()

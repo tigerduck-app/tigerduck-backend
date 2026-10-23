@@ -439,14 +439,46 @@ async def test_an_extension_past_the_window_is_still_probed(
     )
     extended.extension_due_at = extended.due_at
     await make_assignment(moodle_assignment_id=2, due_at=NOW + timedelta(hours=200))
-    long_past = await make_assignment(
-        moodle_assignment_id=3, due_at=NOW - timedelta(hours=100)
-    )
-    long_past.extension_due_at = long_past.due_at
     await db_session.flush()
 
     ids = await select_assignment_ids(
         db_session, user_id=extended.user_id, now=NOW, window_hours=48
+    )
+
+    assert ids == [1]
+
+
+async def test_an_extension_due_longer_ago_than_the_window_is_not_probed(
+    db_session, make_assignment
+):
+    row = await make_assignment(
+        moodle_assignment_id=1, due_at=NOW - timedelta(hours=100)
+    )
+    row.extension_due_at = row.due_at
+    await db_session.flush()
+
+    ids = await select_assignment_ids(
+        db_session, user_id=row.user_id, now=NOW, window_hours=48
+    )
+
+    assert ids == []
+
+
+async def test_assignments_asked_for_are_probed_whatever_their_due_date(
+    db_session, make_assignment
+):
+    """The list sync asks for the ones whose due date it moved back."""
+    far = await make_assignment(moodle_assignment_id=1, due_at=NOW + timedelta(hours=200))
+    await make_assignment(moodle_assignment_id=2, due_at=NOW + timedelta(hours=200))
+    await make_assignment(
+        moodle_assignment_id=3,
+        due_at=NOW + timedelta(hours=200),
+        provider_is_submitted=True,
+    )
+    await db_session.flush()
+
+    ids = await select_assignment_ids(
+        db_session, user_id=far.user_id, now=NOW, window_hours=48, also={1, 3}
     )
 
     assert ids == [1]
@@ -576,3 +608,21 @@ async def test_the_same_extension_again_logs_nothing(db_session, make_assignment
 
     assert moved == 0
     assert await _changelog(db_session, row.user_id) == []
+
+
+async def test_an_answer_without_an_extension_moves_both_dates_back(
+    db_session, make_assignment
+):
+    row = await _extended_row(make_assignment, db_session, DUE + timedelta(hours=30))
+
+    await apply_extensions(
+        db_session,
+        user_id=row.user_id,
+        fetched={1: _answer(1, None)},
+        listed={1: _listed(1)},
+    )
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (DUE, CUTOFF, None)
+    entries = await _changelog(db_session, row.user_id)
+    assert [e.payload for e in entries] == [{"fields": ["due_at", "cutoff_at"]}]
