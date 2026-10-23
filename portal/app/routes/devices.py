@@ -125,6 +125,7 @@ def _row_to_device(r) -> dict:
 
 @router.get("")
 async def list_devices(
+    request: Request,
     pool=Depends(get_pool),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -136,6 +137,7 @@ async def list_devices(
     async with pool.acquire() as conn:
         total = await conn.fetchval(_COUNT_SQL, needle)
         rows = await conn.fetch(_LIST_SQL, needle, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
             "items": [_row_to_device(r) for r in rows],

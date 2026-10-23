@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/audit")
@@ -26,6 +27,7 @@ def _str_or_none(value) -> str | None:
 
 @router.get("")
 async def list_audit(
+    request: Request,
     pool=Depends(get_pool),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -33,6 +35,7 @@ async def list_audit(
     async with pool.acquire() as conn:
         total = await conn.fetchval("SELECT count(*) FROM admin_audit_log")
         rows = await conn.fetch(_LIST_SQL, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         {
             "items": [

@@ -24,12 +24,13 @@ from portal.app.routes.deregister import (  # noqa: E402
     DeregisterRequest,
     deregister_student,
 )
+from portal.app.routes.devices import list_devices  # noqa: E402
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
-def _request(actor: str) -> SimpleNamespace:
-    return SimpleNamespace(state=SimpleNamespace(actor=actor))
+def _request(actor: str, path: str = "/api/x") -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace(actor=actor), url=SimpleNamespace(path=path))
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -100,3 +101,31 @@ async def test_a_deregistered_student_leaves_a_record_without_the_student_id(
     )
     assert (row["action"], row["target_user_id"]) == ("user.deregister", user_id)
     assert "B10000001" not in row["detail"]
+
+
+async def test_a_list_is_recorded_once_per_actor_and_route_without_the_search(
+    pool,
+) -> None:
+    await pool.execute(
+        "WITH u AS (INSERT INTO users (student_id) VALUES ('B10000002') RETURNING id)"
+        " INSERT INTO user_devices (user_id, client_device_id, platform)"
+        " SELECT id, 'iphone', 'ios' FROM u"
+    )
+    devices = _request("ops@example.com", "/api/devices")
+
+    for search in ("B10000002", "another"):
+        r = await list_devices(devices, pool=pool, limit=50, offset=0, search=search)
+        assert r.status_code == 200
+    await portal_audit.audit(
+        pool, _request("ops@example.com", "/api/moodle/jobs"), "user.list", count=0
+    )
+
+    rows = await pool.fetch(
+        "SELECT detail::text AS detail FROM admin_audit_log"
+        " WHERE action = 'user.list' ORDER BY id"
+    )
+    assert [json.loads(r["detail"]) for r in rows] == [
+        {"route": "/api/devices", "count": 1},
+        {"route": "/api/moodle/jobs", "count": 0},
+    ]
+    assert "B10000002" not in rows[0]["detail"]

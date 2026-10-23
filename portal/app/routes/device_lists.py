@@ -149,6 +149,7 @@ LIMIT $2 OFFSET $3
 @router.get("/{list_id}/members")
 async def list_members(
     list_id: int,
+    request: Request,
     pool=Depends(get_pool),
     limit: int = Query(default=500, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
@@ -166,6 +167,7 @@ async def list_members(
             list_id,
         )
         rows = await conn.fetch(_MEMBERS_SQL, list_id, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
             "list_id": list_id,

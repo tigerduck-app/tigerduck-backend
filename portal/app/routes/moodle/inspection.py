@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/moodle")
 
 @router.get("/students")
 async def list_moodle_students(
+    request: Request,
     credential_filter: str = Query(default="all"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -56,6 +57,7 @@ async def list_moodle_students(
             ORDER BY ea.updated_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """, *params, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
 
     return {
         "counts": dict(counts) if counts else {"valid": 0, "expired": 0},

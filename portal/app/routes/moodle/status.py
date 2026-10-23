@@ -46,7 +46,7 @@ async def moodle_status(pool=Depends(get_pool)):
         },
     }
 @router.get("/stats")
-async def moodle_stats(pool=Depends(get_pool)):
+async def moodle_stats(request: Request, pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         summary = await conn.fetchrow("""
             SELECT
@@ -72,6 +72,7 @@ async def moodle_stats(pool=Depends(get_pool)):
             ORDER BY sr.started_at DESC
             LIMIT 50
         """)
+        await audit(conn, request, "user.list", count=len(recent))
     return {
         "summary": {
             "succeeded_24h": summary["succeeded_24h"] or 0,

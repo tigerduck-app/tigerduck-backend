@@ -44,7 +44,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   to every API request. A request that skips Access (LAN straight to NPM,
   another container on `proxy-net`) gets 403 too.
 - **Migration `d07bc39dde6c`** adds `admin_audit_log`, where the portal
-  records each change it makes and each look at one student's data. It
+  records each change it makes, each look at one student's data and each
+  list of students or devices. It
   applies on backend start. Rows older than
   `TIGERDUCK_ADMIN_AUDIT_RETENTION_DAYS` (default 365) are deleted daily.
 - **After deploying**, open the portal through Access: the status page

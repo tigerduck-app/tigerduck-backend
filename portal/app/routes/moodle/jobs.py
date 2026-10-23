@@ -99,6 +99,7 @@ async def retry_all_jobs(
     return {"retried": count, "notified": notified}
 @router.get("/jobs")
 async def list_moodle_jobs(
+    request: Request,
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -129,5 +130,6 @@ async def list_moodle_jobs(
             ORDER BY sj.updated_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """, *params, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
 
     return [dict(r) for r in rows]
