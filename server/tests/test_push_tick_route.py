@@ -69,6 +69,35 @@ async def test_a_long_tick_is_reported_still_sending_and_carries_on(
     await asyncio.wait_for(finished.wait(), timeout=2)
 
 
+async def test_calls_while_a_tick_runs_join_it_rather_than_start_another(
+    admin_client, worker, monkeypatch
+):
+    started = 0
+    release = asyncio.Event()
+
+    async def tick(_worker):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return 1
+
+    monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
+    monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(main_module, "_running_ticks", set())
+
+    first = await admin_client.post("/push-tick")
+    second = await admin_client.post("/push-tick")
+    assert first.json() == second.json() == {"ok": True, "done": False}
+    assert started == 1
+
+    (running,) = main_module._running_ticks
+    release.set()
+    await running
+    third = await admin_client.post("/push-tick")
+    assert third.json() == {"ok": True, "done": True, "processed": 1}
+    assert started == 2
+
+
 async def test_the_api_port_does_not_serve_it(client, worker):
     resp = await client.post("/push-tick")
 

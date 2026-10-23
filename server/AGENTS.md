@@ -213,7 +213,7 @@ into the backend container via `docker-compose.yml`.
   that outranks the next one, and if one is waiting hands the rest of the
   batch back and claims again. `POST /push-tick` (X-Push-Token)
   forces one: it waits up to 20s, then answers `done: false` and lets the
-  tick finish on its own.
+  tick finish on its own; a call while that tick runs joins it.
 - The operator endpoints, `POST /push-tick` and `/v3/admin/sync-policies`,
   live on a separate FastAPI app that the admin listener
   (`TIGERDUCK_ADMIN_PORT`, 9001) serves inside the API process, bound to

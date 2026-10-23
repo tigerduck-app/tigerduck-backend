@@ -63,7 +63,7 @@ logger = structlog.get_logger(__name__)
 # is still sending. Under the portal's 30s timeout on the call.
 _PUSH_TICK_WAIT_SECONDS = 20.0
 
-# Ticks `/push-tick` answered before they ended. The loop holds only weak
+# Ticks `/push-tick` started that have not ended. The loop holds only weak
 # references to tasks, so one nothing else references could be collected
 # mid-send.
 _running_ticks: set[asyncio.Task] = set()
@@ -75,16 +75,29 @@ def _forget_tick(task: asyncio.Task) -> None:
         logger.error("push.force_tick_failed", exc_info=task.exception())
 
 
+def _forced_tick(worker) -> asyncio.Task:
+    """The tick `/push-tick` started that is still running, or a new one:
+    repeated calls join a tick rather than pile up beside it."""
+    running = next((t for t in _running_ticks if not t.done()), None)
+    if running is not None:
+        return running
+    from server.push import pipeline
+
+    task = asyncio.create_task(pipeline.run_push_tick(worker))
+    _running_ticks.add(task)
+    task.add_done_callback(_forget_tick)
+    return task
+
+
 # How long shutdown waits for such a tick. Under Docker's 10s stop grace
 # period, so the wait is not itself cut short by SIGKILL.
 _SHUTDOWN_TICK_WAIT_SECONDS = 8.0
 
 
 async def _finish_running_ticks(timeout: float) -> None:
-    """Let ticks `/push-tick` answered early finish before shutdown closes
-    the router and database they send through. A delivery cut off
-    mid-send leaves its job in `processing` until stale recovery, minutes
-    later."""
+    """Let ticks `/push-tick` started finish before shutdown closes the
+    router and database they send through. A delivery cut off mid-send
+    leaves its job in `processing` until stale recovery, minutes later."""
     if _running_ticks:
         await asyncio.wait(set(_running_ticks), timeout=timeout)
 
@@ -365,19 +378,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker = getattr(app.state, "push_worker", None)
         if worker is None:
             return JSONResponse({"ok": False, "error": "push_worker not available"})
-        from server.push import pipeline
-
-        task = asyncio.create_task(pipeline.run_push_tick(worker))
+        task = _forced_tick(worker)
         try:
             processed = await asyncio.wait_for(
                 asyncio.shield(task), timeout=_PUSH_TICK_WAIT_SECONDS
             )
         except TimeoutError:
-            _running_ticks.add(task)
-            task.add_done_callback(_forget_tick)
             return JSONResponse({"ok": True, "done": False})
         except Exception as exc:
-            logger.exception("push.force_tick_failed")
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
         return JSONResponse({"ok": True, "done": True, "processed": processed})
 
