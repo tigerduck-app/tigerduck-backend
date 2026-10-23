@@ -78,6 +78,89 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   the two Access values are unset or do not match the portal's Access
   application.
 
+- **Off-site backups run nightly from launchd.** A launchd job on the host
+  (`deploy/launchd/ai.tigerduck.backup.plist`) runs
+  `deploy/backup/tigerduck-backup.sh nightly` at 04:30: `pg_dump -Fc` of the
+  compose Postgres, encrypted with gpg (AES-256) on its way to a Cloudflare
+  R2 bucket under `postgres/`, and backups there older than 30 days deleted.
+  On Sundays it then restores the newest backup into a throwaway
+  `postgres:17-alpine` container with no network and logs the alembic
+  revision and row counts of the core tables. Each outcome is written to
+  `ops.backup_status` (created by the `monitor-role` service on every
+  `./start.sh`), which sql-exporter exports for the alerts. The host needs
+  `rclone`, `gpg` and `docker`, all from Homebrew.
+
+  1. In Cloudflare R2, create a bucket and an API token with Object Read &
+     Write on that bucket only. Add to `.env`:
+
+     ```bash
+     TIGERDUCK_BACKUP_S3_ENDPOINT=https://<account id>.r2.cloudflarestorage.com
+     TIGERDUCK_BACKUP_S3_BUCKET=<bucket>
+     TIGERDUCK_BACKUP_S3_ACCESS_KEY_ID=<token access key id>
+     TIGERDUCK_BACKUP_S3_SECRET_ACCESS_KEY=<token secret access key>
+     TIGERDUCK_BACKUP_PASSPHRASE=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+     ```
+
+     Keep the passphrase in the password manager, next to `.env`'s
+     `TIGERDUCK_CREDENTIAL_KEYS` and `TIGERDUCK_AUTH_REFRESH_HMAC_KEY` and the
+     files in `server/secrets/`. Without the passphrase no backup can be
+     read; without the others a restored database has Moodle tokens nothing
+     can decrypt, refresh tokens that no longer verify and no APNs key.
+  2. Pull and `./start.sh`, restart `sql-exporter` (it reads its collectors
+     only at start, and `./start.sh` leaves an unchanged container running),
+     then run a backup and a drill by hand and install the job:
+
+     ```bash
+     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+     docker compose restart sql-exporter
+     deploy/backup/tigerduck-backup.sh backup
+     deploy/backup/tigerduck-backup.sh drill
+     ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.backup.plist" ~/Library/LaunchAgents/
+     launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist
+     ```
+
+     The plist points at the checkout in
+     `/Users/xinshoutw/selfhost/Docker/tigerduck-backend`; edit it if yours
+     is elsewhere. Its log is `~/Library/Logs/tigerduck-backup.log`.
+  3. Check: `deploy/backup/tigerduck-backup.sh list` names the new backup,
+     and `docker compose exec -T postgres psql -U tigerduck -d tigerduck -c 'TABLE ops.backup_status'`
+     has a `backup` and a `drill` row, and Prometheus has
+     `tigerduck_backup_last_success_timestamp_seconds` for both kinds. `launchctl kickstart
+     gui/$UID/ai.tigerduck.backup` runs the job now. To remove it:
+     `launchctl bootout gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist`,
+     then delete the symlink.
+
+- **Restore from R2 by hand.** List the backups (the names sort by UTC
+  time) and download one, decrypted, into the current directory:
+
+  ```bash
+  deploy/backup/tigerduck-backup.sh list
+  deploy/backup/tigerduck-backup.sh fetch                                # the newest
+  deploy/backup/tigerduck-backup.sh fetch tigerduck-20261101T203000Z.dump.gpg
+  ```
+
+  That writes `tigerduck-<UTC>.dump`, a plain `pg_dump` file. Restore it
+  with the portal's Restore button, or with the backend stopped:
+
+  ```bash
+  docker compose stop backend
+  docker compose exec -T postgres pg_restore -U tigerduck -d tigerduck \
+    --clean --if-exists --no-owner --single-transaction < tigerduck-<UTC>.dump
+  ./start.sh
+  ```
+
+  Then delete the `.dump` file: it holds every account's data unencrypted.
+
+- **The portal's Restore keeps a copy.** Before it restores an upload, the
+  portal dumps the live database to `pre-restore-<UTC>-<suffix>.dump` in
+  the new `tigerduck_portal_pre_restore` volume, and restores nothing if
+  that dump fails; a second restore started meanwhile is refused. To get
+  one back, list them with
+  `docker compose exec portal ls /var/lib/tigerduck-portal/pre-restore`,
+  then `docker cp tigerduck-portal:/var/lib/tigerduck-portal/pre-restore/<name> .`
+  The volume keeps the newest five. When `pg_restore` itself fails, the
+  error names the dump taken just before.
+
 - **Alerts go to Discord.** Grafana now provisions alert rules
   (`monitoring/grafana/provisioning/alerting/rules.yml`) and sends every
   alert to one Discord channel. In that channel, create a webhook (Server

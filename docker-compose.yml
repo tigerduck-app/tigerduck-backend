@@ -125,6 +125,8 @@ services:
       # Mirror the backend's secrets mount RO so the status page can
       # report "is the .p8 / fcm.json on disk?" without exposing contents.
       - ./server/secrets:/backend-secrets:ro
+      # The dump the Restore button takes of the live database first.
+      - tigerduck_portal_pre_restore:/var/lib/tigerduck-portal/pre-restore
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:40010/ready', timeout=3).status == 200 else 1)"]
       interval: 30s
@@ -346,3 +348,4 @@ volumes:
   tigerduck_grafana:
   tigerduck_loki:
   tigerduck_alloy:
+  tigerduck_portal_pre_restore:
