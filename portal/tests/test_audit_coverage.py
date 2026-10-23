@@ -40,6 +40,7 @@ OTHER_READS = {
     ("moodle/status.py", "moodle_status"),
     ("status.py", "env_info"),
     ("status.py", "health"),
+    ("status.py", "ready"),
     ("status.py", "status_payload"),
 }
 

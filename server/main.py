@@ -17,6 +17,7 @@ import httpx  # noqa: E402
 import structlog  # noqa: E402
 import uvicorn  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
@@ -114,6 +115,25 @@ async def _finish_running_ticks(timeout: float) -> None:
     leaves its job in `processing` until stale recovery, minutes later."""
     if _running_ticks:
         await asyncio.wait(set(_running_ticks), timeout=timeout)
+
+
+# Also bounds the wait for a pool connection, so an exhausted pool reads as not ready.
+_READY_DB_TIMEOUT_SECONDS = 2.0
+
+
+async def _is_ready(app: FastAPI) -> bool:
+    scheduler = getattr(app.state, "scheduler", None)
+    engine = getattr(app.state, "engine", None)
+    if scheduler is None or not scheduler.running or engine is None:
+        return False
+    try:
+        async with asyncio.timeout(_READY_DB_TIMEOUT_SECONDS):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.warning("ready.db_check_failed", error=type(exc).__name__)
+        return False
+    return True
 
 
 class _AdminServer(uvicorn.Server):
@@ -363,6 +383,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
+
+    # Public, so a failure carries no detail.
+    @app.get("/ready", tags=["meta"])
+    async def ready() -> JSONResponse:
+        if not await _is_ready(app):
+            return JSONResponse({"status": "fail"}, status_code=503)
+        metrics.READY_LAST_OK.set_to_current_time()
+        return JSONResponse({"status": "ok"})
 
     @app.get("/version", tags=["meta"])
     async def version() -> dict[str, str]:

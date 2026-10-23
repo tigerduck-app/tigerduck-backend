@@ -1,0 +1,14 @@
+# Where alerts go: one Discord channel. The webhook URL is a secret and only
+# ever comes from TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL in .env, which
+# docker-compose.yml hands to Grafana; Grafana expands it at startup.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: tigerduck-oncall
+    receivers:
+      - uid: tigerduck-oncall-discord
+        type: discord
+        settings:
+          url: $TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL
+          use_discord_username: false
