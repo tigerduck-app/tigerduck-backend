@@ -182,9 +182,9 @@ cmd_backup() {
     r2 copyto "${WORK}/${name}" "${REMOTE}/${name}" || die "upload of ${name} failed"
     log "uploaded ${name} ($(wc -c <"${WORK}/${name}" | tr -d ' ') bytes)"
     rm -f "${WORK}/${name}"
-    record_success backup
     r2 delete --min-age "${RETENTION}" --max-depth 1 --include "${OBJECT_GLOB}" "${REMOTE}/" ||
         die "pruning backups older than ${RETENTION} failed"
+    record_success backup
 }
 
 wait_for_drill_postgres() {

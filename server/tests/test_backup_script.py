@@ -42,6 +42,7 @@ case "$4" in
     copyto)
         case "$5" in tigerduck_r2:*) echo encrypted > "$6" ;; esac
         case "$6" in tigerduck_r2:*) if [ "${STUB_FAIL:-}" = upload ]; then exit 1; fi ;; esac ;;
+    delete) if [ "${STUB_FAIL:-}" = prune ]; then exit 1; fi ;;
 esac
 """,
     # Logs argv, the passphrase from fd 3 and what --symmetric read on
@@ -221,11 +222,14 @@ def test_a_lock_file_nobody_holds_does_not_block(tmp_path):
     assert "copyto" in calls
 
 
-def test_a_failed_backup_is_recorded_as_a_failure(tmp_path):
-    result, calls, log = _run(tmp_path, "backup", STUB_FAIL="upload")
+@pytest.mark.parametrize(
+    ("step", "message"), [("upload", "upload of"), ("prune", "pruning backups")]
+)
+def test_a_failed_backup_is_recorded_as_a_failure(tmp_path, step, message):
+    result, calls, log = _run(tmp_path, "backup", STUB_FAIL=step)
 
     assert result.returncode == 1
-    assert "upload of" in result.stderr
+    assert message in result.stderr
     assert "kind=backup" in calls
     recorded = Path(f"{log}.sql").read_text()
     assert "last_failure_at" in recorded
