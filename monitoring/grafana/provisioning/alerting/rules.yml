@@ -320,7 +320,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: 'delta(sum(tigerduck_external_accounts{credential_status!="active"})[1h:])'
+              expr: 'delta((sum(tigerduck_external_accounts{credential_status!="active"}) or (sum(tigerduck_external_accounts) * 0))[1h:])'
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [30]}}]}
@@ -392,3 +392,23 @@ groups:
         execErrState: Error
         annotations:
           summary: No backup restore drill has succeeded for over 8 days. See ~/Library/Logs/tigerduck-backup.log on the host.
+
+      - uid: td-backup-failed
+        title: Off-site backup or drill failed
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (kind) (tigerduck_backup_last_failure_timestamp_seconds) - max by (kind) (tigerduck_backup_last_success_timestamp_seconds)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: The last off-site backup or restore drill (kind label) failed; it resolves on the next success. See ~/Library/Logs/tigerduck-backup.log on the host.
