@@ -22,11 +22,13 @@ class Settings(BaseSettings):
     )
 
     # --- App ---
-    env: Literal["development", "production"] = "development"
+    # Unset means production, as for ./start.sh: development has to be asked
+    # for, since it lets an empty shared secret through.
+    env: Literal["development", "production"] = "production"
     log_level: str = "INFO"
-    # Shared-secret that clients must send as X-Push-Token on write endpoints.
-    # Empty string disables auth (dev/test convenience). Production must set
-    # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
+    # Shared secret the admin endpoints check in X-Push-Token, on top of
+    # being served on the admin listener only. Empty string disables the
+    # check in development; production refuses to start without one.
     api_shared_secret: str = ""
 
     # --- Metrics ---
@@ -39,6 +41,15 @@ class Settings(BaseSettings):
     # to its address on that network only; binding every interface would
     # also expose it to everything on proxy-net and tigerduck-db.
     metrics_host: str = "0.0.0.0"
+
+    # --- Admin listener ---
+    # Port of the operator endpoints (`POST /push-tick`,
+    # `/v3/admin/sync-policies`), which the API port does not serve. 0 turns
+    # them off.
+    admin_port: int = 9001
+    # Address (or name) it binds to. docker-compose.yml sets the backend's
+    # alias on the internal admin network, which only the portal joins.
+    admin_host: str = "127.0.0.1"
 
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
@@ -92,6 +103,11 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck"
     )
     database_echo: bool = False
+    # Server-side limits on every pooled connection, so a stuck statement or
+    # a transaction left open cannot hold a connection and its locks for
+    # good; 0 turns one off. `db.lift_timeouts` lifts both for a transaction.
+    database_statement_timeout_seconds: float = 30.0
+    database_idle_in_transaction_timeout_seconds: float = 60.0
 
     # --- APNs ---
     apns_bundle_id: str = "org.ntust.app.TigerDuck"
@@ -173,6 +189,8 @@ class Settings(BaseSettings):
     push_retry_round_delay_seconds: int = 60
     push_job_retention_days: int = 7
     push_job_retention_interval_hours: int = 24
+    # Portal audit rows (admin_audit.py) older than this are deleted daily.
+    admin_audit_retention_days: int = 365
     # Pre-send check (push/presend.py). An assignment reminder or countdown
     # start whose submission state nobody could confirm is retried this often
     # until this long after its fire time, and then cancelled.
@@ -302,7 +320,9 @@ class Settings(BaseSettings):
     def validate_production_secrets(self) -> "Settings":
         if self.env == "production" and not self.api_shared_secret:
             raise ValueError(
-                "TIGERDUCK_API_SHARED_SECRET must be set in production"
+                "TIGERDUCK_API_SHARED_SECRET must be set in production. An "
+                "unset TIGERDUCK_ENV now means production; for local "
+                "development set TIGERDUCK_ENV=development."
             )
         return self
 

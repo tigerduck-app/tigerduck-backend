@@ -32,6 +32,173 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.4.0
+
+- **The admin endpoints moved to an internal port.** `POST /push-tick` and
+  `GET/PATCH /v3/admin/sync-policies` are no longer served on `:40000`;
+  they listen on `:9001` (`TIGERDUCK_ADMIN_PORT`), bound to the backend's
+  alias `tigerduck-internal-admin` on a new internal network,
+  `tigerduck-admin`, that only the portal joins. They still check
+  `X-Push-Token`. `docker-compose.yml` adds the network and sets
+  `TIGERDUCK_ADMIN_HOST`, and the portal now calls
+  `http://tigerduck-internal-admin:9001`, so rebuild both with `./start.sh`;
+  nothing changes in nginx-proxy-manager. Anything else that called these
+  paths through `api.tigerduck.app` must call them from inside the stack
+  instead, for example:
+
+  ```bash
+  docker compose exec backend python -c "import httpx, os; print(httpx.get('http://tigerduck-internal-admin:9001/v3/admin/sync-policies', headers={'X-Push-Token': os.environ['TIGERDUCK_API_SHARED_SECRET']}).text)"
+  ```
+
+- **An unset `TIGERDUCK_ENV` now means production** for the backend and the
+  portal, as it already did for `./start.sh`. A production backend refuses
+  to start without `TIGERDUCK_API_SHARED_SECRET`. A development `.env`
+  must say `TIGERDUCK_ENV=development` (`.env.example` does).
+
+- **The portal checks the Cloudflare Access token.** Outside
+  `TIGERDUCK_ENV=development`, every `/api/*` request to the portal needs a
+  `Cf-Access-Jwt-Assertion` that verifies against
+  `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` and `TIGERDUCK_CF_ACCESS_AUD`, the two
+  values Grafana already uses; `docker-compose.yml` now passes them to the
+  portal. With either unset, or `TIGERDUCK_ENV` missing from `.env` (now
+  read as production), the portal logs an error at start and answers 403
+  to every API request. A request that skips Access (LAN straight to NPM,
+  another container on `proxy-net`) gets 403 too.
+
+- **Migration `d07bc39dde6c`** adds `admin_audit_log`, where the portal
+  records each change it makes, each look at one student's data and each
+  list of students or devices. It
+  applies on backend start. Rows older than
+  `TIGERDUCK_ADMIN_AUDIT_RETENTION_DAYS` (default 365) are deleted daily.
+
+- **After deploying**, open the portal through Access: the status page
+  should load and show your email at the top. Then open
+  `https://<portal host>/api/audit` in the same browser; it lists the
+  actions recorded so far, with your email as the actor. A 403 there means
+  the two Access values are unset or do not match the portal's Access
+  application.
+
+- **Off-site backups run nightly from launchd.** A launchd job on the host
+  (`deploy/launchd/ai.tigerduck.backup.plist`) runs
+  `deploy/backup/tigerduck-backup.sh nightly` at 04:30: `pg_dump -Fc` of the
+  compose Postgres, encrypted with gpg (AES-256) on its way to a Cloudflare
+  R2 bucket under `postgres/`, and backups there older than 30 days deleted.
+  On Sundays it then restores the newest backup into a throwaway
+  `postgres:17-alpine` container with no network and logs the alembic
+  revision and row counts of the core tables. Each outcome is written to
+  `ops.backup_status` (created by the `monitor-role` service on every
+  `./start.sh`), which sql-exporter exports for the alerts. The host needs
+  `rclone`, `gpg` and `docker`, all from Homebrew.
+
+  1. In Cloudflare R2, create a bucket and an API token with Object Read &
+     Write on that bucket only. Add to `.env`:
+
+     ```bash
+     TIGERDUCK_BACKUP_S3_ENDPOINT=https://<account id>.r2.cloudflarestorage.com
+     TIGERDUCK_BACKUP_S3_BUCKET=<bucket>
+     TIGERDUCK_BACKUP_S3_ACCESS_KEY_ID=<token access key id>
+     TIGERDUCK_BACKUP_S3_SECRET_ACCESS_KEY=<token secret access key>
+     TIGERDUCK_BACKUP_PASSPHRASE=<python -c "import secrets; print(secrets.token_urlsafe(32))">
+     ```
+
+     Keep the passphrase in the password manager, next to `.env`'s
+     `TIGERDUCK_CREDENTIAL_KEYS` and `TIGERDUCK_AUTH_REFRESH_HMAC_KEY` and the
+     files in `server/secrets/`. Without the passphrase no backup can be
+     read; without the others a restored database has Moodle tokens nothing
+     can decrypt, refresh tokens that no longer verify and no APNs key.
+  2. Pull and `./start.sh`, restart `sql-exporter` (it reads its collectors
+     only at start, and `./start.sh` leaves an unchanged container running),
+     then run a backup and a drill by hand and install the job:
+
+     ```bash
+     export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+     docker compose restart sql-exporter
+     deploy/backup/tigerduck-backup.sh backup
+     deploy/backup/tigerduck-backup.sh drill
+     ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.backup.plist" ~/Library/LaunchAgents/
+     launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist
+     ```
+
+     The plist points at the checkout in
+     `/Users/xinshoutw/selfhost/Docker/tigerduck-backend`; edit it if yours
+     is elsewhere. Its log is `~/Library/Logs/tigerduck-backup.log`.
+  3. Check: `deploy/backup/tigerduck-backup.sh list` names the new backup,
+     and `docker compose exec -T postgres psql -U tigerduck -d tigerduck -c 'TABLE ops.backup_status'`
+     has a `backup` and a `drill` row, and Prometheus has
+     `tigerduck_backup_last_success_timestamp_seconds` for both kinds. `launchctl kickstart
+     gui/$UID/ai.tigerduck.backup` runs the job now. To remove it:
+     `launchctl bootout gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist`,
+     then delete the symlink.
+
+- **Restore from R2 by hand.** List the backups (the names sort by UTC
+  time) and download one, decrypted, into the current directory:
+
+  ```bash
+  deploy/backup/tigerduck-backup.sh list
+  deploy/backup/tigerduck-backup.sh fetch                                # the newest
+  deploy/backup/tigerduck-backup.sh fetch tigerduck-20261101T203000Z.dump.gpg
+  ```
+
+  That writes `tigerduck-<UTC>.dump`, a plain `pg_dump` file. Restore it
+  with the portal's Restore button, or with the backend stopped:
+
+  ```bash
+  docker compose stop backend
+  docker compose exec -T postgres pg_restore -U tigerduck -d tigerduck \
+    --clean --if-exists --no-owner --single-transaction < tigerduck-<UTC>.dump
+  ./start.sh
+  ```
+
+  Then delete the `.dump` file: it holds every account's data unencrypted.
+
+- **The portal's Restore keeps a copy.** Before it restores an upload, the
+  portal dumps the live database to `pre-restore-<UTC>-<suffix>.dump` in
+  the new `tigerduck_portal_pre_restore` volume, and restores nothing if
+  that dump fails; a second restore started meanwhile is refused. To get
+  one back, list them with
+  `docker compose exec portal ls /var/lib/tigerduck-portal/pre-restore`,
+  then `docker cp tigerduck-portal:/var/lib/tigerduck-portal/pre-restore/<name> .`
+  The volume keeps the newest five. When `pg_restore` itself fails, the
+  error names the dump taken just before.
+
+- **Alerts go to Discord.** Grafana now provisions alert rules
+  (`monitoring/grafana/provisioning/alerting/rules.yml`) and sends every
+  alert to one Discord channel. In that channel, create a webhook (Server
+  Settings → Integrations → Webhooks) and add its URL to `.env`, then
+  `./start.sh`:
+
+  ```bash
+  TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+  ```
+
+  Without it Grafana still starts and evaluates the rules, but every
+  notification fails (its log says `Notify for alerts failed`). To check
+  delivery: Grafana → Alerting → Contact points → `tigerduck-oncall` → Test.
+  The backup rules read `tigerduck_backup_last_success_timestamp_seconds`
+  and `tigerduck_backup_last_failure_timestamp_seconds` from the off-site
+  backup job; on a host without that job the staleness rules fire half an
+  hour after the deploy.
+
+- **Readiness checks.** The backend and the portal answer `GET /ready` with
+  200 when they reach Postgres (the backend also needs its scheduler
+  running) and 503 otherwise, and compose health-checks both, so `docker ps`
+  and the portal's Status page show `unhealthy` when one is wedged.
+  `/health` is unchanged.
+
+- **Database timeouts.** Every backend connection now carries
+  `statement_timeout` (`TIGERDUCK_DATABASE_STATEMENT_TIMEOUT_SECONDS`, 30)
+  and `idle_in_transaction_session_timeout`
+  (`TIGERDUCK_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, 60); 0 turns
+  one off. The push sends and the retention purges lift both for their own
+  transactions. Migrations use their own connection and are not affected.
+
+- **A second connection pool.** Scheduled jobs and the sync and push
+  workers use a pool of their own (5 + 5 overflow, like the API's), so the
+  backend may hold up to 20 Postgres connections instead of 10. The
+  `tigerduck_db_pool_*` metrics still describe the API's pool only.
+
+---
+
 ## Upgrading to 3.3.6
 
 - **A course added by hand and removed can come back with the roster.**

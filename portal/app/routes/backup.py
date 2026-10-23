@@ -5,11 +5,15 @@ either an export bundle or a bare pg_dump file (for migrating from a
 pre-portal install). Importing does NOT restart the backend container —
 the portal keeps a read-only docker socket on purpose; the user is told
 to run `./stop.sh && ./start.sh` once the restore finishes.
+
+Before restoring, import dumps the live database into PRE_RESTORE_DIR (a
+named volume) and refuses to restore if that dump fails.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tarfile
@@ -22,9 +26,19 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
+from ..audit import audit
+from ..db import get_pool
+
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/backup")
 
 BUNDLE_VERSION = 1
+
+PRE_RESTORE_DIR = Path("/var/lib/tigerduck-portal/pre-restore")
+PRE_RESTORE_KEEP = 5
+# One restore at a time: two would race on the live database and the pruning.
+_RESTORE_LOCK = asyncio.Lock()
 
 
 def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
@@ -49,6 +63,84 @@ def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
     return args, env
 
 
+async def _pg_dump(database_url: str, out_path: Path) -> None:
+    pg_args, pg_env = _pg_env(database_url)
+    with out_path.open("wb") as fh:
+        proc = await asyncio.create_subprocess_exec(
+            "pg_dump", *pg_args, "--format=custom", "--no-owner",
+            env=pg_env,
+            stdout=fh,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise HTTPException(
+            500,
+            f"pg_dump failed: {stderr.decode(errors='replace')[:500]}",
+        )
+
+
+async def _pre_restore_dump(database_url: str) -> Path:
+    """Dump the live database before a restore replaces it."""
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path: Path | None = None
+    try:
+        PRE_RESTORE_DIR.mkdir(parents=True, exist_ok=True)
+        # A new file of its own, mode 600: it holds every account's data.
+        fd, name = tempfile.mkstemp(
+            prefix=f"pre-restore-{ts}-", suffix=".dump", dir=PRE_RESTORE_DIR
+        )
+        os.close(fd)
+        path = Path(name)
+        await _pg_dump(database_url, path)
+    except (HTTPException, OSError) as exc:
+        if path is not None:
+            path.unlink(missing_ok=True)
+        reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        raise HTTPException(
+            500, f"pre-restore backup failed, nothing was restored: {reason}"
+        ) from None
+    # Names sort by time; the new dump stays whatever its name, so a clock
+    # that moved back cannot prune the copy this restore depends on.
+    older = sorted(p for p in PRE_RESTORE_DIR.glob("pre-restore-*.dump") if p != path)
+    for old in older[: max(len(older) - PRE_RESTORE_KEEP + 1, 0)]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+async def _restore(database_url: str, dump_path: Path) -> Path:
+    """Restore `dump_path` over the live database after dumping it first;
+    returns the pre-restore dump."""
+    pre_restore = await _pre_restore_dump(database_url)
+    pg_args, pg_env = _pg_env(database_url)
+    # Positional file path (not stdin) keeps the dump out of
+    # Python memory and gives pg_restore clearer error output
+    # when the format is wrong.
+    proc = await asyncio.create_subprocess_exec(
+        # --single-transaction makes the restore all-or-nothing: a
+        # failure part-way rolls back instead of leaving the live
+        # schema half dropped. Writers should still be stopped first
+        # (see the module docstring).
+        "pg_restore", *pg_args, "--clean", "--if-exists", "--no-owner",
+        "--single-transaction",
+        str(dump_path),
+        env=pg_env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        # Earlier soft-fail logic grepped stderr for "ERROR" and
+        # missed bad-format uploads (pg_restore writes lowercase
+        # "error:") — treat any non-zero exit as failure.
+        raise HTTPException(
+            500,
+            f"pg_restore failed; the database before it is in "
+            f"{pre_restore.name}: {stderr.decode(errors='replace')[:500]}",
+        )
+    return pre_restore
+
+
 @router.post("/export")
 async def export_bundle(request: Request) -> FileResponse:
     """Build the archive on disk in a temp dir, stream it, then let a
@@ -67,21 +159,7 @@ async def export_bundle(request: Request) -> FileResponse:
         staging = workdir / bundle_name
         staging.mkdir()
 
-        pg_args, pg_env = _pg_env(settings.database_url)
-        pg_dump_path = staging / "postgres.dump"
-        with pg_dump_path.open("wb") as fh:
-            proc = await asyncio.create_subprocess_exec(
-                "pg_dump", *pg_args, "--format=custom", "--no-owner",
-                env=pg_env,
-                stdout=fh,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise HTTPException(
-                500,
-                f"pg_dump failed: {stderr.decode(errors='replace')[:500]}",
-            )
+        await _pg_dump(settings.database_url, staging / "postgres.dump")
 
         manifest = {
             "version": BUNDLE_VERSION,
@@ -93,6 +171,8 @@ async def export_bundle(request: Request) -> FileResponse:
         tar_path = workdir / f"{bundle_name}.tar.gz"
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(staging, arcname=bundle_name)
+        async with get_pool(request).acquire() as conn:
+            await audit(conn, request, "backup.export")
     except Exception:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -168,30 +248,22 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
         if not pg_dump_path.exists():
             raise HTTPException(400, "no postgres.dump in upload")
 
-        pg_args, pg_env = _pg_env(settings.database_url)
-        # Positional file path (not stdin) keeps the dump out of
-        # Python memory and gives pg_restore clearer error output
-        # when the format is wrong.
-        proc = await asyncio.create_subprocess_exec(
-            # --single-transaction makes the restore all-or-nothing: a
-            # failure part-way rolls back instead of leaving the live
-            # schema half dropped. Writers should still be stopped first
-            # (see the module docstring).
-            "pg_restore", *pg_args, "--clean", "--if-exists", "--no-owner",
-            "--single-transaction",
-            str(pg_dump_path),
-            env=pg_env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            # Earlier soft-fail logic grepped stderr for "ERROR" and
-            # missed bad-format uploads (pg_restore writes lowercase
-            # "error:") — treat any non-zero exit as failure.
-            raise HTTPException(
-                500,
-                f"pg_restore failed: {stderr.decode(errors='replace')[:500]}",
-            )
+        if _RESTORE_LOCK.locked():
+            raise HTTPException(409, "another restore is running")
+        async with _RESTORE_LOCK:
+            pre_restore = await _restore(settings.database_url, pg_dump_path)
 
-    return JSONResponse({"ok": True, "imported_at": datetime.now(UTC).isoformat()})
+    # Written after the restore, which replaces admin_audit_log with the dump's copy.
+    try:
+        async with get_pool(request).acquire() as conn:
+            await audit(conn, request, "backup.import")
+    except Exception:
+        # The database is already restored; answering 500 would tell the operator it was not.
+        logger.exception("restore finished but its audit row was not written")
+    return JSONResponse(
+        {
+            "ok": True,
+            "imported_at": datetime.now(UTC).isoformat(),
+            "pre_restore_dump": pre_restore.name,
+        }
+    )

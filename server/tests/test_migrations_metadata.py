@@ -34,6 +34,7 @@ from server import models
 from server.bulletins import models as _bulletin_models
 from server.academic_calendar import models as _academic_calendar_models
 from server import system_settings as _system_settings_models
+from server import admin_audit as _admin_audit_models
 """
 
 

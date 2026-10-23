@@ -1,7 +1,7 @@
 [project]
 name = "tigerduck-portal"
-version = "3.3.7"
-description = "Stateless operator portal for the TigerDuck backend stack. Surfaces stack status, per-container logs, and pg_dump-based export/import. No app-level auth — front with Cloudflare Zero Trust (or any auth-proxy) if a signin gate is required."
+version = "3.4.0"
+description = "Stateless operator portal for the TigerDuck backend stack. Surfaces stack status, per-container logs, and pg_dump-based export/import. Its API requires a Cloudflare Access JWT outside development."
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
@@ -13,6 +13,8 @@ dependencies = [
     "asyncpg>=0.30",
     # Pydantic settings reads TIGERDUCK_* env from the container env.
     "pydantic-settings>=2.7",
+    # access.py passes cooldown_duration, tested on this version.
+    "pyjwt[crypto]>=2.15.1",
 ]
 
 [dependency-groups]

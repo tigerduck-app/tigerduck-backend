@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, Request
-from sqlalchemy import ColumnElement, any_, literal
+from sqlalchemy import ColumnElement, any_, literal, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -49,6 +49,36 @@ def build_engine(settings: Settings) -> AsyncEngine:
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=5,
+        connect_args={
+            "server_settings": {
+                "statement_timeout": _milliseconds(
+                    settings.database_statement_timeout_seconds
+                ),
+                "idle_in_transaction_session_timeout": _milliseconds(
+                    settings.database_idle_in_transaction_timeout_seconds
+                ),
+            }
+        },
+    )
+
+
+def _milliseconds(seconds: float) -> str:
+    return str(int(seconds * 1000))
+
+
+async def lift_timeouts(session: AsyncSession) -> None:
+    """Turn the server-side timeouts off for the rest of the session's
+    current transaction.
+
+    For a transaction that must not be cut off: one that sends pushes before
+    it commits what it sent, where a cancelled commit would send them all
+    again, and a retention purge, whose statements can outlast the limit.
+    """
+    await session.execute(
+        text(
+            "SELECT set_config('statement_timeout', '0', true), "
+            "set_config('idle_in_transaction_session_timeout', '0', true)"
+        )
     )
 
 
@@ -78,4 +108,6 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
         yield session
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+# scope="function" commits before the response goes out, so a write that fails
+# to commit answers 500 rather than a success the client then relies on.
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]

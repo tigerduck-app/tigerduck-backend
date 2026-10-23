@@ -43,8 +43,7 @@ async def env_info(request: Request) -> JSONResponse:
             "apns_config": apns_config(
                 s.apns_env, s.apns_team_id, s.apns_key_id, s.apns_key_path
             ),
-            # Per request, not per process: the same portal answers both
-            # Access-fronted and direct (dev, LAN) traffic.
+            # The operator whose Access token this request carried; null in dev.
             "access": access_session(request),
         },
         # The body names the signed-in operator, so no shared cache in
@@ -107,4 +106,20 @@ liveness_router = APIRouter()
 
 @liveness_router.get("/health")
 async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+_READY_DB_TIMEOUT_SECONDS = 2.0
+
+
+@liveness_router.get("/ready")
+async def ready(request: Request) -> JSONResponse:
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return JSONResponse({"status": "fail"}, status_code=503)
+    try:
+        async with asyncio.timeout(_READY_DB_TIMEOUT_SECONDS):
+            await pool.fetchval("SELECT 1")
+    except Exception:
+        return JSONResponse({"status": "fail"}, status_code=503)
     return JSONResponse({"status": "ok"})

@@ -6,17 +6,21 @@ import time
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
+from ...audit import audit
 from ...db import get_pool
-from ...status import BACKEND_INTERNAL_URL
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
 
+# The backend's admin listener, on the internal network only the portal
+# shares with it (docker-compose.yml); the API port does not serve `/push-tick`.
+BACKEND_ADMIN_URL = "http://tigerduck-internal-admin:9001"
+
 
 def _internal_headers(request: Request | None) -> dict[str, str]:
-    """Auth header for the backend's internal endpoints.
+    """Auth header for the backend's admin endpoints.
 
-    `/push-tick` is behind `require_shared_secret`, which reads
+    `/push-tick` is also behind `require_shared_secret`, which reads
     `X-Push-Token`. Omitted when no secret is configured so a dev stack —
     where the dependency short-circuits on an empty secret — keeps working
     without one.
@@ -41,7 +45,7 @@ async def run_pipeline_now(request: Request | None, *, what: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             tick = await client.post(
-                f"{BACKEND_INTERNAL_URL}/push-tick",
+                f"{BACKEND_ADMIN_URL}/push-tick",
                 headers=_internal_headers(request),
             )
         if tick.status_code >= 400:
@@ -57,18 +61,17 @@ async def run_pipeline_now(request: Request | None, *, what: str) -> None:
 
 @router.post("/push-tick")
 async def force_push_tick(request: Request) -> JSONResponse:
-    """Proxy to the main API server's /push-tick endpoint.
+    """Proxy to the backend's /push-tick endpoint on its admin listener.
 
     Carries the shared secret: `/push-tick` sits behind
     `require_shared_secret`, so an unauthenticated proxy call is refused
     the moment `TIGERDUCK_API_SHARED_SECRET` is set — which it always is
     outside dev, where the dependency short-circuits on an empty secret.
-    That is why this worked locally and not in a real deployment.
     """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{BACKEND_INTERNAL_URL}/push-tick",
+                f"{BACKEND_ADMIN_URL}/push-tick",
                 headers=_internal_headers(request),
             )
             # A non-JSON body (an HTML 502 from a proxy, say) must not
@@ -81,17 +84,25 @@ async def force_push_tick(request: Request) -> JSONResponse:
                     "ok": False,
                     "error": f"HTTP {resp.status_code}: {resp.text[:300]}",
                 }
-            return JSONResponse(payload, status_code=resp.status_code)
+        if resp.status_code < 400:
+            try:
+                async with get_pool(request).acquire() as conn:
+                    await audit(conn, request, "push.tick")
+            except Exception:
+                # The tick already ran; answering 500 would tell the operator it did not.
+                logger.exception("push tick ran but its audit row was not written")
+        return JSONResponse(payload, status_code=resp.status_code)
     except Exception as e:
         logger.exception("force push tick proxy failed")
         return JSONResponse({"ok": False, "error": str(e)}, 500)
 @router.post("/push-clear")
 async def clear_push_queue(
+    request: Request,
     student_id: str = Query(..., min_length=1),
     pool=Depends(get_pool),
 ) -> JSONResponse:
     """Cancel all pending/processing push jobs for a user."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
@@ -103,6 +114,9 @@ async def clear_push_queue(
             user["id"],
         )
         count = int(result.split()[-1])
+        await audit(
+            conn, request, "push.clear", user_id=user["id"], cancelled=count
+        )
     return JSONResponse({"ok": True, "cancelled": count})
 @router.post("/push-sync-trigger")
 async def force_sync_trigger(
@@ -111,7 +125,7 @@ async def force_sync_trigger(
     request: Request = None,
 ) -> JSONResponse:
     """Create a fresh sync_trigger push job and execute immediately."""
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
             "SELECT id FROM users WHERE student_id = $1", student_id
         )
@@ -128,6 +142,10 @@ async def force_sync_trigger(
             '{"kind":"sync_trigger","source":"portal_force"}',
         )
         job_id = row["id"] if row else None
+        await audit(
+            conn, request, "push.sync_trigger",
+            user_id=uid, deduplicated=job_id is None,
+        )
 
     if job_id:
         await run_pipeline_now(request, what="sync-trigger")

@@ -1,0 +1,87 @@
+"""Operator actions recorded in `admin_audit_log` (model: server/admin_audit.py).
+
+Each route that changes state, shows one account's data or lists many
+students or devices calls `audit()` itself once the action has succeeded,
+inside the action's transaction where it has one: a failed or rolled-back
+action leaves no row. Rows name accounts
+and devices by `users.id` and `user_devices.id`; `detail` holds counts and
+filters, never a student id, a typed search, a push body or a token.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from fastapi import Request
+
+# ip stays null: a token holder going around Cloudflare can forge Cf-Connecting-IP.
+_INSERT = """
+INSERT INTO admin_audit_log (actor, action, target_user_id, target_device_id, detail)
+VALUES ($1, $2, $3::uuid, $4::uuid, $5::jsonb)
+"""
+
+# Data Inspection polls every few seconds; one view per actor and account per 10 min.
+_INSERT_VIEW = """
+INSERT INTO admin_audit_log (actor, action, target_user_id)
+SELECT $1::text, 'user.view', $2::uuid
+WHERE NOT EXISTS (
+    SELECT 1 FROM admin_audit_log
+    WHERE target_user_id = $2::uuid AND actor = $1::text
+      AND action = 'user.view' AND ts > now() - interval '10 minutes'
+)
+"""
+
+# Lists are polled as well; one per actor and route per 10 min.
+_INSERT_LIST = """
+INSERT INTO admin_audit_log (actor, action, detail)
+SELECT $1::text, 'user.list', $2::jsonb
+WHERE NOT EXISTS (
+    SELECT 1 FROM admin_audit_log
+    WHERE actor = $1::text AND action = 'user.list'
+      AND detail->>'route' = $3::text AND ts > now() - interval '10 minutes'
+)
+"""
+
+
+async def _insert_once(conn, key: str, sql: str, *args: Any) -> None:
+    """Runs a dedup insert under a lock on `key`, so racing polls add one row.
+
+    The lock waits for the other request's transaction to commit, and the
+    insert, a statement of its own, then sees that row. A savepoint when the
+    caller already holds a transaction; the lock lasts until that one ends.
+    """
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", key)
+        await conn.execute(sql, *args)
+
+
+async def audit(
+    conn,
+    request: Request,
+    action: str,
+    *,
+    user_id: Any = None,
+    device_id: Any = None,
+    **detail: Any,
+) -> None:
+    actor = request.state.actor
+    if action == "user.view":
+        key = f"user.view|{actor}|{user_id}"
+        await _insert_once(conn, key, _INSERT_VIEW, actor, str(user_id))
+        return
+    if action == "user.list":
+        # The path only: a search string stays in the query.
+        route = request.url.path
+        key = f"user.list|{actor}|{route}"
+        await _insert_once(
+            conn, key, _INSERT_LIST, actor, json.dumps({"route": route, **detail}), route
+        )
+        return
+    await conn.execute(
+        _INSERT,
+        actor,
+        action,
+        None if user_id is None else str(user_id),
+        None if device_id is None else str(device_id),
+        json.dumps(detail),
+    )

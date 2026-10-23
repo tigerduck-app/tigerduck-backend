@@ -29,8 +29,9 @@ server/
 ├── db.py                      # Base, async engine/session, SessionDep;
 │                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
-├── security.py                # shared-secret dependency (X-Push-Token)
+├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
+├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
@@ -170,7 +171,15 @@ into the backend container via `docker-compose.yml`.
 
 ## CONVENTIONS
 - All DB timestamps stored as `timestamp with time zone` (UTC in, UTC out)
-- Session management: `SessionDep` in routes auto-commits/rolls-back
+- Session management: `SessionDep` in routes auto-commits/rolls-back,
+  and commits before the response is sent
+- Scheduled work and the workers (`SyncWorker`, `PushPipelineWorker`) use
+  a second engine with its own pool; API requests use `app.state.engine`.
+  A transaction that sends pushes before it commits, or a retention purge,
+  calls `lift_timeouts` (`db.py`) first: the server-side statement and
+  idle-in-transaction timeouts would otherwise cut it off. No request
+  handler may hold a transaction open across a call to Moodle, APNs or
+  FCM; commit first.
 - asyncpg refuses a statement with more than 32,767 bind parameters. A
   filter on ids gathered across users goes through `in_array` (`db.py`),
   one array parameter, rather than `in_()`, which binds one per value, and
@@ -213,7 +222,12 @@ into the backend container via `docker-compose.yml`.
   that outranks the next one, and if one is waiting hands the rest of the
   batch back and claims again. `POST /push-tick` (X-Push-Token)
   forces one: it waits up to 20s, then answers `done: false` and lets the
-  tick finish on its own.
+  tick finish on its own; a call while that tick runs joins it.
+- The operator endpoints, `POST /push-tick` and `/v3/admin/sync-policies`,
+  live on a separate FastAPI app that the admin listener
+  (`TIGERDUCK_ADMIN_PORT`, 9001) serves inside the API process, bound to
+  the backend's alias on the internal `tigerduck-admin` network. The API
+  port never serves them. Add an operator endpoint there, not to the API.
 - The `course` and `assignment` channels deliver to iPhone and iPad only
   (`APPLE_HANDHELD_PLATFORMS`); Android posts its own class reminders.
   The reminder scans file nothing for a user with no such device and
@@ -287,14 +301,19 @@ into the backend container via `docker-compose.yml`.
 - Do not commit `docker-compose.override.yml` — it's the gitignored
   per-machine tweak file. The canonical dev override is the committed
   `docker-compose.dev.yml`.
-- Do not add app-level auth (basic-auth, sessions, JWT…) to the
-  portal. The portal is stateless and trusts whatever is in front of
-  it (Cloudflare Zero Trust in prod, nothing in dev). Add an
-  auth-proxy if a gate becomes necessary, rather than re-introducing
-  an admin list / session store inside the portal.
-- Do not authorize anything on `Cf-Access-Authenticated-User-Email`. The
-  portal reads it (`portal/app/access.py`) only to show who signed in and
-  offer the Access sign-out; a client that bypasses Access can set it.
+- Do not add sign-in, sessions or an admin list to the portal. It
+  stays stateless: `portal/app/access.py` verifies the Cloudflare Access
+  JWT (`Cf-Access-Jwt-Assertion`) on every `/api/*` request, the check
+  Grafana makes, and only `TIGERDUCK_ENV=development` skips it. Paths
+  outside `/api/` are served to anyone, so data goes under `/api/`.
+- Do not trust `Cf-Access-Authenticated-User-Email` or any other identity
+  header; a client that bypasses Access can set them. The operator is
+  `request.state.actor`, taken from the verified token.
+- Do not add a portal route that changes state, shows one account's or
+  device's data, or lists many students or devices without an `audit()`
+  call (`portal/app/audit.py`) inside its transaction;
+  `portal/tests/test_audit_coverage.py` fails for one without it. `detail` takes counts and filters, never a student id,
+  a typed search, a push body or a token.
 - Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow

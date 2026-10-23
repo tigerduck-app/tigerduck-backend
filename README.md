@@ -66,7 +66,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token；sync trigger 用 normal priority、TTL 12 小時；每個 HTTP request 上限 10 秒
-- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Push-Token`；公告讀取開放
+- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點只在內部的 admin port（`:9001`）上提供，並檢查 `X-Push-Token`；公告讀取開放
 
 推播的完整流程圖在 [`docs/push-notification-flows.drawio`](docs/push-notification-flows.drawio)（用 draw.io / diagrams.net 開啟）。
 
@@ -121,7 +121,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 / Grafana 40020 / Prometheus 40021 能 publish 到 host port
 - **`tigerduck-monitoring`**：internal-only bridge，給 Prometheus、Loki 和它們收資料的對象用；監控服務裡只有 Grafana 掛 `proxy-net`，見[監控](#監控grafana)
 - **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
-- **portal**：stateless 只讀的操作介面，本身不做 app-level 登入驗證（dev / prod 都一樣）；若要把關，前面套 Cloudflare Zero Trust Application 或其他 auth-proxy
+- **portal**：stateless 的操作介面，正式環境放在 Cloudflare Access 後面。每個 `/api/*` request 都要帶 Access 加上的 `Cf-Access-Jwt-Assertion`，portal 驗過簽章、issuer 與 audience 才放行，否則回 403；只有 `TIGERDUCK_ENV=development` 不檢查
 
 ## 取得與部署
 
@@ -167,14 +167,14 @@ docker compose exec backend python -c "import urllib.request; print(urllib.reque
 
 ### 管理介面（portal）
 
-`tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。前端是 `portal/web` 的 React SPA，由 Dockerfile 的 node build stage 打包成 `web/dist` 後由 FastAPI 靜態供應，`/api/*` 才是 JSON 端點。dev 模式 publish 到 `http://localhost:40010`，prod 想加登入的話前面套 cloudflared / Cloudflare Zero Trust（portal 本身不擋）。可以做的事：
+`tigerduck-portal` 是另一個 compose service，跟 backend 一起起來。前端是 `portal/web` 的 React SPA，由 Dockerfile 的 node build stage 打包成 `web/dist` 後由 FastAPI 靜態供應，`/api/*` 才是 JSON 端點。dev 模式 publish 到 `http://localhost:40010`，prod 要放在 Cloudflare Access 後面：portal 驗每個 `/api/*` request 的 Access JWT，用的是 Grafana 那兩個 `TIGERDUCK_CF_ACCESS_*` 值（見[監控](#監控grafana)的正式環境設定），沒設的話 API 一律回 403。可以做的事：
 
 - 看 stack 狀態（containers 走 docker engine UDS、postgres rows、LLM 連線、APNs/FCM secrets 在不在）
 - 看每個 container 的 log（6 個 tab：Backend / Announcement / DB / Portal / Android / Apple），每個 tab 自帶搜尋；Announcement / Android / Apple 是針對 backend log 做關鍵字過濾
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
-- 經 Cloudflare Access 進來時顯示登入者 email 與 Sign out 連結，按下會結束其 Access session；dev / LAN 直連沒有 Access session，連結不會出現
+- 顯示 Access token 裡的登入者 email 與 Sign out 連結，按下會結束其 Access session；dev 模式沒有 Access session，連結不會出現
 
 ### 監控（Grafana）
 
@@ -211,7 +211,7 @@ Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單�
 
 **正式環境設定**
 
-1. 在 `.env` 設 `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` 與 `TIGERDUCK_CF_ACCESS_AUD`（portal 那個 Access application 的 AUD tag）。Grafana 沒有自己的登入：它讀 Access 加在每個 request 上的 `Cf-Access-Jwt-Assertion` token，驗過簽章、issuer 與 audience 後直接登入。沒經過 Access 就到達 Grafana 的 request（LAN 直連 NPM、`proxy-net` 上的其他 container）會被拒絕；這兩個值沒設的話，誰都進不去。portal host 不是 `portal.tigerduck.app` 的話，另外設 `TIGERDUCK_GRAFANA_ROOT_URL=https://<portal host>/grafana/`。
+1. 在 `.env` 設 `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` 與 `TIGERDUCK_CF_ACCESS_AUD`（portal 那個 Access application 的 AUD tag）。portal 的 `/api/*` 也用這兩個值驗同一個 token。Grafana 沒有自己的登入：它讀 Access 加在每個 request 上的 `Cf-Access-Jwt-Assertion` token，驗過簽章、issuer 與 audience 後直接登入。沒經過 Access 就到達 Grafana 的 request（LAN 直連 NPM、`proxy-net` 上的其他 container）會被拒絕；這兩個值沒設的話，誰都進不去。portal host 不是 `portal.tigerduck.app` 的話，另外設 `TIGERDUCK_GRAFANA_ROOT_URL=https://<portal host>/grafana/`。
 2. 把 portal host 的 `/grafana` 導到 `tigerduck-grafana:3000`，保留 `/grafana` 前綴：
    - nginx-proxy-manager：在 portal 的 proxy host 加一個 Custom Location `/grafana` → `http`、`tigerduck-grafana`、`3000`，host 後面不要加路徑。要用 Grafana Live 的話，在該 location 的 advanced config 加上 `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`
    - cloudflared 直接指向 portal 的話：在 portal 那條規則之前加一條 ingress rule，`hostname: portal.<your-domain>`、`path: ^/grafana`、`service: http://tigerduck-grafana:3000`。
@@ -347,8 +347,9 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
 | `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh 觸發伺服器代抓（cooldown） | JWT |
-| `GET` | `/v3/admin/sync-policies` | 列出同步策略 | shared secret |
-| `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略 | shared secret |
+| `GET` | `/v3/admin/sync-policies` | 列出同步策略（只在 admin port） | shared secret |
+| `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略（只在 admin port） | shared secret |
+| `POST` | `/push-tick` | 立刻跑一次推播 tick（只在 admin port，portal 呼叫） | shared secret |
 
 ### 基礎
 
