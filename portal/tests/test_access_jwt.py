@@ -1,18 +1,23 @@
 """Every /api request needs a valid Cloudflare Access JWT outside development.
 
-Tokens are signed here with a local RSA key, and the verifier's key-set
-fetch is stubbed to return that key, so no test talks to Cloudflare.
+Tokens are signed here with a local RSA key. The key set is served by a
+stand-in for urllib's opener, below PyJWKClient, so its own fetch, cache and
+refetch limit run; no test talks to Cloudflare.
 """
 from __future__ import annotations
 
+import io
 import json
 import time
+from types import SimpleNamespace
+from urllib.error import URLError
 
 import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI, Request
+from jwt import jwks_client
 
 from app.access import build_verifier, require_access
 from app.config import Settings
@@ -35,21 +40,47 @@ def _jwks() -> dict:
     return {"keys": [jwk]}
 
 
-def _token(
+class _KeyServer:
+    """Answers the key-set fetch and counts it."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+        self.down = False
+
+    def build_opener(self, *handlers):
+        return self
+
+    def open(self, request, timeout: float):
+        self.timeouts.append(timeout)
+        if self.down:
+            raise URLError("unreachable")
+        return io.BytesIO(json.dumps(_jwks()).encode())
+
+
+@pytest.fixture(autouse=True)
+def keys(monkeypatch: pytest.MonkeyPatch) -> _KeyServer:
+    server = _KeyServer()
+    monkeypatch.setattr(jwks_client.urllib.request, "build_opener", server.build_opener)
+    return server
+
+
+def _claims(
     *,
-    key=SIGNING_KEY,
     aud: str = AUD,
     iss: str = f"https://{TEAM}",
     expires_in: int = 300,
     email: str = "ops@example.com",
-) -> str:
-    claims = {
+) -> dict:
+    return {
         "aud": [aud],
         "iss": iss,
         "exp": int(time.time()) + expires_in,
         "email": email,
     }
-    return jwt.encode(claims, key, algorithm="RS256", headers={"kid": KID})
+
+
+def _token(*, key=SIGNING_KEY, kid: str = KID, **claims) -> str:
+    return jwt.encode(_claims(**claims), key, algorithm="RS256", headers={"kid": kid})
 
 
 def _app(env: str = "production", team: str = TEAM, aud: str = AUD) -> FastAPI:
@@ -58,10 +89,7 @@ def _app(env: str = "production", team: str = TEAM, aud: str = AUD) -> FastAPI:
         env=env, cf_access_team_domain=team, cf_access_aud=aud
     )
     app.state.settings = settings
-    verifier = build_verifier(settings)
-    if verifier is not None:
-        verifier.jwks.fetch_data = _jwks
-    app.state.access_verifier = verifier
+    app.state.access_verifier = build_verifier(settings)
     app.middleware("http")(require_access)
     app.include_router(status.router)
     app.include_router(status.liveness_router)
@@ -200,5 +228,42 @@ async def test_development_still_refuses_cross_site_writes() -> None:
     r = await _call(
         _app(env="development"), "POST", "/api/echo", {"Sec-Fetch-Site": "cross-site"}
     )
+
+    assert r.status_code == 403
+
+
+async def test_the_key_fetch_gives_up_after_5_seconds(keys: _KeyServer) -> None:
+    r = await _call(_app(), "POST", "/api/echo", _auth(_token()))
+
+    assert r.status_code == 200
+    assert keys.timeouts == [5]
+
+
+async def test_made_up_kids_refetch_the_keys_at_most_once_a_minute(
+    keys: _KeyServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(jwks_client, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    app = _app()
+
+    async def made_up_kids() -> None:
+        for i in range(5):
+            r = await _call(app, "GET", "/api/env", {JWT_HEADER: _token(kid=f"x{i}")})
+            assert r.status_code == 403
+
+    await made_up_kids()
+    assert len(keys.timeouts) == 1
+    clock[0] += 31
+    await made_up_kids()
+    assert len(keys.timeouts) == 1
+    clock[0] += 30
+    await made_up_kids()
+    assert len(keys.timeouts) == 2
+
+
+async def test_an_unreachable_key_set_refuses_the_request(keys: _KeyServer) -> None:
+    keys.down = True
+
+    r = await _call(_app(), "GET", "/api/env", {JWT_HEADER: _token()})
 
     assert r.status_code == 403

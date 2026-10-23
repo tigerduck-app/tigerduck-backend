@@ -34,6 +34,9 @@ LOGOUT_PATH = "/cdn-cgi/access/logout"
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SAME_SITE_FETCH = frozenset({"same-origin", "none"})
+_JWKS_TIMEOUT_SECONDS = 5
+# A token with a made-up kid may force a key refetch at most this often.
+_UNKNOWN_KID_REFETCH_SECONDS = 60
 
 
 class AccessVerifier:
@@ -42,8 +45,12 @@ class AccessVerifier:
     def __init__(self, team_domain: str, audience: str) -> None:
         self.issuer = f"https://{team_domain}"
         self.audience = audience
-        # Caches keys 5 minutes and refetches on an unknown kid, so rotation works.
-        self.jwks = jwt.PyJWKClient(f"{self.issuer}/cdn-cgi/access/certs")
+        # Caches keys 5 minutes; an unknown kid refetches, so rotation works.
+        self.jwks = jwt.PyJWKClient(
+            f"{self.issuer}/cdn-cgi/access/certs",
+            timeout=_JWKS_TIMEOUT_SECONDS,
+            cooldown_duration=_UNKNOWN_KID_REFETCH_SECONDS,
+        )
 
     def verify(self, token: str) -> str:
         key = self.jwks.get_signing_key_from_jwt(token)
