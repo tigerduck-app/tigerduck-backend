@@ -453,6 +453,13 @@ async def scan_course_reminders(
                 if is_quiet(course.user_id, occurrence_day):
                     continue
                 start_epoch = int(occurrence.timestamp())
+                # The start time and room, as Android's own class reminder shows
+                # them; the same in every language.
+                body = " · ".join(
+                    part
+                    for part in (f"{occurrence.astimezone(tz):%H:%M}", course.classroom)
+                    if part
+                )
                 for offset in offsets:
                     fire_at = occurrence - timedelta(minutes=offset)
                     key = _dedupe_key(course.id, offset, start_epoch)
@@ -461,9 +468,6 @@ async def scan_course_reminders(
                     valid_keys.add((course.user_id, key))
                     if fire_at <= now:
                         continue
-                    body = f"{_fmt_offset(offset)} 分鐘後上課"
-                    if course.classroom:
-                        body += f" · {course.classroom}"
                     values.append(
                         {
                             "user_id": course.user_id,
@@ -473,7 +477,10 @@ async def scan_course_reminders(
                             "fire_at": fire_at,
                             "payload": {
                                 "kind": "course_reminder",
-                                "title": f"上課提醒：{display_name}",
+                                # The title is written in each recipient's
+                                # language at send time
+                                # (`notification_copy.build_course_reminder_payload`).
+                                "course_name": display_name,
                                 "body": body,
                                 "semester": course.semester,
                                 "course_key": course.course_key,

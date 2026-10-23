@@ -15,7 +15,10 @@ from sqlalchemy import func, insert, literal, select
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
+from server.push.apns_client import RecordingSender
 from server.push.course_reminders import scan_course_reminders
+from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.router import PushRouter
 from server.sync.models import (
     UserCourse,
     UserCourseOverride,
@@ -121,8 +124,11 @@ async def test_creates_job_for_default_offset(
     assert job.scenario == "reminder_10m"
     epoch = job.payload["start_epoch"]
     assert job.dedupe_key == f"course:{job.payload['user_course_id']}:reminder_10m:{epoch}"
-    assert "資料結構" in job.payload["title"]
-    assert "TR-212" in job.payload["body"]
+    # The title is written per recipient at send time; the start time and
+    # room read the same in every language.
+    assert job.payload["course_name"] == "資料結構"
+    assert job.payload["body"] == f"{local:%H:%M} · TR-212"
+    assert "title" not in job.payload
 
     # idempotent re-scan
     assert await scan_course_reminders(factory, settings) == 0
@@ -824,6 +830,95 @@ async def test_a_cleared_custom_name_gives_the_reminder_the_course_name(
 
     factory = build_session_factory(prepared_engine)
     assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 2
-    for student_id, title in (("b11203001", "上課提醒：早八"), ("b11203002", "上課提醒：資料結構")):
+    for student_id, name in (("b11203001", "早八"), ("b11203002", "資料結構")):
         (job,) = await _jobs(db_session, user_ids[student_id])
-        assert job.payload["title"] == title
+        assert job.payload["course_name"] == name
+
+
+async def test_a_class_reminder_is_titled_in_each_devices_language(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    english = (await db_session.execute(select(UserDevice))).scalar_one()
+    english.locale = "en-US"
+    chinese = UserDevice(
+        user_id=user.id, client_device_id="ipad", platform="ipados", locale="zh-Hant-TW"
+    )
+    db_session.add(chinese)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=chinese.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-ipad",
+            token_value="tok-ipad",
+        )
+    )
+    local, schedule = _occurrence_in(0.5)
+    db_session.add(_course(user, schedule_json=schedule))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local).model_copy(
+        update={"course_reminder_default_offsets_minutes": [10.0]}
+    )
+    assert await scan_course_reminders(factory, settings) == 1
+    (job,) = await _jobs(db_session, user.id)
+    job.fire_at = job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    apple = RecordingSender()
+    await run_push_tick(
+        PushPipelineWorker(
+            session_factory=factory,
+            settings=settings,
+            router=PushRouter(apple=apple, android=RecordingSender()),
+            worker_id="course-test-worker",
+        )
+    )
+
+    sent = {r.device_token: r.message for r in apple.requests}
+    body = f"{local:%H:%M} · TR-212"
+    assert {token: m["aps"]["alert"] for token, m in sent.items()} == {
+        "tok-b11203058": {"title": "Class starting soon: 資料結構", "body": body},
+        "tok-ipad": {"title": "即將上課：資料結構", "body": body},
+    }
+    assert all("course_name" not in m for m in sent.values())
+
+
+async def test_a_class_reminder_filed_before_send_time_titles_goes_out_as_filed(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    device = (await db_session.execute(select(UserDevice))).scalar_one()
+    device.locale = "en-US"
+    local, schedule = _occurrence_in(0.5)
+    db_session.add(_course(user, schedule_json=schedule))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local).model_copy(
+        update={"course_reminder_default_offsets_minutes": [10.0]}
+    )
+    assert await scan_course_reminders(factory, settings) == 1
+    (job,) = await _jobs(db_session, user.id)
+    filed = {key: value for key, value in job.payload.items() if key != "course_name"}
+    filed |= {"title": "上課提醒：資料結構", "body": "10 分鐘後上課 · TR-212"}
+    job.payload = filed
+    job.fire_at = job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    apple = RecordingSender()
+    await run_push_tick(
+        PushPipelineWorker(
+            session_factory=factory,
+            settings=settings,
+            router=PushRouter(apple=apple, android=RecordingSender()),
+            worker_id="course-test-worker",
+        )
+    )
+
+    (request,) = apple.requests
+    assert request.message["aps"]["alert"] == {
+        "title": "上課提醒：資料結構",
+        "body": "10 分鐘後上課 · TR-212",
+    }
