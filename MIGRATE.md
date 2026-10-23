@@ -34,30 +34,49 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.4.0
 
-### Alerts to Discord
+- **The admin endpoints moved to an internal port.** `POST /push-tick` and
+  `GET/PATCH /v3/admin/sync-policies` are no longer served on `:40000`;
+  they listen on `:9001` (`TIGERDUCK_ADMIN_PORT`), bound to the backend's
+  alias `tigerduck-internal-admin` on a new internal network,
+  `tigerduck-admin`, that only the portal joins. They still check
+  `X-Push-Token`. `docker-compose.yml` adds the network and sets
+  `TIGERDUCK_ADMIN_HOST`, and the portal now calls
+  `http://tigerduck-internal-admin:9001`, so rebuild both with `./start.sh`;
+  nothing changes in nginx-proxy-manager. Anything else that called these
+  paths through `api.tigerduck.app` must call them from inside the stack
+  instead, for example:
 
-Grafana now provisions alert rules
-(`monitoring/grafana/provisioning/alerting/rules.yml`) and sends every alert
-to one Discord channel. In that channel, create a webhook (Server Settings →
-Integrations → Webhooks) and add its URL to `.env`, then `./start.sh`:
+  ```bash
+  docker compose exec backend python -c "import httpx, os; print(httpx.get('http://tigerduck-internal-admin:9001/v3/admin/sync-policies', headers={'X-Push-Token': os.environ['TIGERDUCK_API_SHARED_SECRET']}).text)"
+  ```
 
-```bash
-TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
-```
+- **An unset `TIGERDUCK_ENV` now means production** for the backend and the
+  portal, as it already did for `./start.sh`. A production backend refuses
+  to start without `TIGERDUCK_API_SHARED_SECRET`. A development `.env`
+  must say `TIGERDUCK_ENV=development` (`.env.example` does).
 
-Without it Grafana still starts and evaluates the rules, but every
-notification fails (its log says `Notify for alerts failed`). To check
-delivery: Grafana → Alerting → Contact points → `tigerduck-oncall` → Test.
-The two backup rules read `tigerduck_backup_last_success_timestamp_seconds`
-from the off-site backup job; on a host without that job they fire half an
-hour after the deploy.
+- **Alerts go to Discord.** Grafana now provisions alert rules
+  (`monitoring/grafana/provisioning/alerting/rules.yml`) and sends every
+  alert to one Discord channel. In that channel, create a webhook (Server
+  Settings → Integrations → Webhooks) and add its URL to `.env`, then
+  `./start.sh`:
 
-### Readiness
+  ```bash
+  TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+  ```
 
-The backend and the portal answer `GET /ready` with 200 when they reach
-Postgres (the backend also needs its scheduler running) and 503 otherwise,
-and compose health-checks both, so `docker ps` and the portal's Status page
-show `unhealthy` when one is wedged. `/health` is unchanged.
+  Without it Grafana still starts and evaluates the rules, but every
+  notification fails (its log says `Notify for alerts failed`). To check
+  delivery: Grafana → Alerting → Contact points → `tigerduck-oncall` → Test.
+  The backup rules read `tigerduck_backup_last_success_timestamp_seconds`
+  from the off-site backup job; on a host without that job they fire half
+  an hour after the deploy.
+
+- **Readiness checks.** The backend and the portal answer `GET /ready` with
+  200 when they reach Postgres (the backend also needs its scheduler
+  running) and 503 otherwise, and compose health-checks both, so `docker ps`
+  and the portal's Status page show `unhealthy` when one is wedged.
+  `/health` is unchanged.
 
 ---
 

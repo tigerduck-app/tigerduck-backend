@@ -39,7 +39,7 @@ def test_a_missing_env_points_at_proxy_net_like_start_sh(
     assert settings.backend_public_url == "http://tigerduck-internal:40000"
     assert settings.portal_public_url == "http://tigerduck-portal:40010"
     # The mode itself keeps the backend's fallback.
-    assert settings.env == "development"
+    assert settings.env == "production"
 
 
 def test_production_points_at_proxy_net(monkeypatch: pytest.MonkeyPatch) -> None:

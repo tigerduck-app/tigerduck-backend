@@ -7,12 +7,15 @@ from __future__ import annotations
 from server import _ssl_compat  # noqa: F401, E402
 
 import asyncio  # noqa: E402
+import contextlib  # noqa: E402
+import socket  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
 from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
 import structlog  # noqa: E402
+import uvicorn  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
@@ -61,7 +64,7 @@ logger = structlog.get_logger(__name__)
 # is still sending. Under the portal's 30s timeout on the call.
 _PUSH_TICK_WAIT_SECONDS = 20.0
 
-# Ticks `/push-tick` answered before they ended. The loop holds only weak
+# Ticks `/push-tick` started that have not ended. The loop holds only weak
 # references to tasks, so one nothing else references could be collected
 # mid-send.
 _running_ticks: set[asyncio.Task] = set()
@@ -73,16 +76,43 @@ def _forget_tick(task: asyncio.Task) -> None:
         logger.error("push.force_tick_failed", exc_info=task.exception())
 
 
+# A forced tick running longer than this is taken for hung: calls stop
+# joining it and start a fresh one.
+_FORCED_TICK_JOIN_LIMIT_SECONDS = 120.0
+
+# The forced tick calls join, and when it started (monotonic).
+_joinable_tick: tuple[asyncio.Task, float] | None = None
+
+
+def _forced_tick(worker) -> asyncio.Task:
+    """The tick `/push-tick` started that is still running, or a new one:
+    repeated calls join a tick rather than pile up beside it."""
+    global _joinable_tick
+    if _joinable_tick is not None:
+        task, started = _joinable_tick
+        if (
+            not task.done()
+            and time.monotonic() - started < _FORCED_TICK_JOIN_LIMIT_SECONDS
+        ):
+            return task
+    from server.push import pipeline
+
+    task = asyncio.create_task(pipeline.run_push_tick(worker))
+    _running_ticks.add(task)
+    task.add_done_callback(_forget_tick)
+    _joinable_tick = (task, time.monotonic())
+    return task
+
+
 # How long shutdown waits for such a tick. Under Docker's 10s stop grace
 # period, so the wait is not itself cut short by SIGKILL.
 _SHUTDOWN_TICK_WAIT_SECONDS = 8.0
 
 
 async def _finish_running_ticks(timeout: float) -> None:
-    """Let ticks `/push-tick` answered early finish before shutdown closes
-    the router and database they send through. A delivery cut off
-    mid-send leaves its job in `processing` until stale recovery, minutes
-    later."""
+    """Let ticks `/push-tick` started finish before shutdown closes the
+    router and database they send through. A delivery cut off mid-send
+    leaves its job in `processing` until stale recovery, minutes later."""
     if _running_ticks:
         await asyncio.wait(set(_running_ticks), timeout=timeout)
 
@@ -104,6 +134,56 @@ async def _is_ready(app: FastAPI) -> bool:
         logger.warning("ready.db_check_failed", error=type(exc).__name__)
         return False
     return True
+
+
+class _AdminServer(uvicorn.Server):
+    """Serves on the API's event loop; the API server owns the signals."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+def start_admin_server(
+    app: FastAPI, host: str, port: int
+) -> tuple[_AdminServer, asyncio.Task] | None:
+    """Serve the operator endpoints on `host`:`port`; port 0 serves nothing.
+
+    `host` is an address or a name, as for the metrics port. A host that
+    doesn't resolve or a port that cannot be bound is logged and skipped:
+    the scheduled push tick and the API carry on without them.
+    """
+    if port == 0:
+        return None
+    try:
+        addr = socket.gethostbyname(host)
+        sock = socket.create_server((addr, port))
+    except (OSError, OverflowError) as exc:
+        logger.error("admin.server_failed", host=host, port=port, error=str(exc))
+        return None
+    # log_config=None leaves the API server's logging setup alone.
+    server = _AdminServer(
+        uvicorn.Config(
+            app,
+            lifespan="off",
+            log_config=None,
+            proxy_headers=False,
+            timeout_graceful_shutdown=1,
+        )
+    )
+    task = asyncio.create_task(server.serve(sockets=[sock]))
+    logger.info("admin.serving", host=host, addr=addr, port=port)
+    return server, task
+
+
+async def stop_admin_server(handle: tuple[_AdminServer, asyncio.Task] | None) -> None:
+    if handle is None:
+        return
+    server, task = handle
+    server.should_exit = True
+    await asyncio.wait({task})
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("admin.server_failed", exc_info=task.exception())
 
 
 # How long startup is willing to wait for the LLM endpoint. 60s comfortably
@@ -239,6 +319,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     metrics_server = metrics.start_metrics_server(
         settings.metrics_port, settings.metrics_host
     )
+    admin_server = start_admin_server(
+        app.state.admin_app, settings.admin_host, settings.admin_port
+    )
 
     scheduler.start()
     logger.info("scheduler.started", jobs=len(scheduler.get_jobs()))
@@ -247,6 +330,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         scheduler.shutdown(wait=False)
+        await stop_admin_server(admin_server)
         await _finish_running_ticks(_SHUTDOWN_TICK_WAIT_SECONDS)
         # shutdown() blocks until the server thread's poll loop notices,
         # up to half a second; keep the event loop free while it does.
@@ -316,7 +400,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def ping() -> dict[str, str]:
         return {"pong": "tigerduck"}
 
-    @app.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
+    # The operator endpoints. They share the API's state but are served
+    # only by the admin listener (`start_admin_server`), never on the API port.
+    admin = FastAPI(title="TigerDuck admin", version=__version__, openapi_url=None)
+    admin.state = app.state
+    app.state.admin_app = admin
+
+    @admin.post("/push-tick", tags=["meta"], dependencies=[Depends(require_shared_secret)])
     async def force_push_tick() -> JSONResponse:
         """Run a push tick, and answer with its outcome if it ends in time.
 
@@ -330,19 +420,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker = getattr(app.state, "push_worker", None)
         if worker is None:
             return JSONResponse({"ok": False, "error": "push_worker not available"})
-        from server.push import pipeline
-
-        task = asyncio.create_task(pipeline.run_push_tick(worker))
+        task = _forced_tick(worker)
         try:
             processed = await asyncio.wait_for(
                 asyncio.shield(task), timeout=_PUSH_TICK_WAIT_SECONDS
             )
         except TimeoutError:
-            _running_ticks.add(task)
-            task.add_done_callback(_forget_tick)
             return JSONResponse({"ok": True, "done": False})
         except Exception as exc:
-            logger.exception("push.force_tick_failed")
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
         return JSONResponse({"ok": True, "done": True, "processed": processed})
 
@@ -392,6 +477,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)
+        admin.include_router(
+            sync_jobs_routes.admin_router, prefix=settings.api_v3_base_path
+        )
 
     return app
 
@@ -404,7 +492,6 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(sync_routes.router, prefix=prefix)
     app.include_router(overrides_routes.router, prefix=f"{prefix}/sync")
     app.include_router(sync_jobs_routes.router, prefix=prefix)
-    app.include_router(sync_jobs_routes.admin_router, prefix=prefix)
     app.include_router(academics_routes.courses_router, prefix=prefix)
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
