@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     # --- App ---
     env: Literal["development", "production"] = "development"
     log_level: str = "INFO"
-    # Shared-secret that clients must send as X-Push-Token on write endpoints.
-    # Empty string disables auth (dev/test convenience). Production must set
-    # a non-empty value via TIGERDUCK_API_SHARED_SECRET.
+    # Shared secret the admin endpoints check in X-Push-Token, on top of
+    # being served on the admin listener only. Empty string disables the
+    # check in development; production refuses to start without one.
     api_shared_secret: str = ""
 
     # --- Metrics ---
@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     # to its address on that network only; binding every interface would
     # also expose it to everything on proxy-net and tigerduck-db.
     metrics_host: str = "0.0.0.0"
+
+    # --- Admin listener ---
+    # Port of the operator endpoints (`POST /push-tick`,
+    # `/v3/admin/sync-policies`), which the API port does not serve. 0 turns
+    # them off.
+    admin_port: int = 9001
+    # Address (or name) it binds to. docker-compose.yml sets the backend's
+    # alias on the internal admin network, which only the portal joins.
+    admin_host: str = "127.0.0.1"
 
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
