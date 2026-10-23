@@ -32,6 +32,35 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.4.0
+
+### Alerts to Discord
+
+Grafana now provisions alert rules
+(`monitoring/grafana/provisioning/alerting/rules.yml`) and sends every alert
+to one Discord channel. In that channel, create a webhook (Server Settings →
+Integrations → Webhooks) and add its URL to `.env`, then `./start.sh`:
+
+```bash
+TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+```
+
+Without it Grafana still starts and evaluates the rules, but every
+notification fails (its log says `Notify for alerts failed`). To check
+delivery: Grafana → Alerting → Contact points → `tigerduck-oncall` → Test.
+The two backup rules read `tigerduck_backup_last_success_timestamp_seconds`
+from the off-site backup job; on a host without that job they fire half an
+hour after the deploy.
+
+### Readiness
+
+The backend and the portal answer `GET /ready` with 200 when they reach
+Postgres (the backend also needs its scheduler running) and 503 otherwise,
+and compose health-checks both, so `docker ps` and the portal's Status page
+show `unhealthy` when one is wedged. `/health` is unchanged.
+
+---
+
 ## Upgrading to 3.3.6
 
 - **A course added by hand and removed can come back with the roster.**
