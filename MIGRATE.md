@@ -32,6 +32,109 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.4.1
+
+- **Assignment reminders count from the student's own due date.** An
+  assignment's `due_at` is now the date that applies to the student: the
+  later of Moodle's due date and the student's extension. An extension
+  past the cutoff moves `cutoff_at` to it too. Moodle's list already
+  applies a user or group override; the extension comes from the
+  submission probe (`mod_assign_get_submission_status`), the call that
+  already checks for a submission, so there is no new kind of request.
+  The iPhone app from 2.6.5 uploads the same date for its placeholders,
+  and a fetch that takes one over keeps it.
+- **The probe asks about more assignments.** Besides those due in the
+  next `TIGERDUCK_SUBMISSION_STATUS_WINDOW_HOURS` (72), it now asks about
+  those due in the past 72 hours and not submitted, since an extension
+  granted after the due date moves it forward, and about every one with an
+  extension, so a withdrawn one moves the date back. It also asks, whatever
+  the due date, about each one whose stored date the sync just moved back to
+  Moodle's (an app's upload of the extended date, or a teacher moving the
+  date earlier): an extension in the answer moves it forward again. Each is
+  one request per assignments sync, as before.
+- **A long reminder can miss an early extension.** The server learns of an
+  extension only once its assignment is within 72 hours of the due date,
+  unless an app uploaded the extended date, so a reminder offset longer
+  than that (3 or 7 days) is still filed against Moodle's date.
+- **A probe that fails keeps the dates.** An assignment the probe gets no
+  answer for keeps its last known extension, as does one whose answer gives
+  the extension in a shape that cannot be read. An answer without one moves
+  the dates back to Moodle's.
+- **The pre-send check follows.** A reminder or countdown at the
+  student's extension goes out; one at an extension Moodle no longer
+  gives, or shortened, is cancelled as `stale_before_send` (reason
+  `extension_withdrawn`); its reminders are filed again once the next
+  sync stores the new date. One whose student now has a later extension
+  is cancelled as before (`extension`).
+- **Migration `c5e8a2f71d40`** adds `extension_due_at` (nullable) to
+  `user_assignments` without rewriting the table. Existing rows start
+  without an extension; the first probe of each fills it in, so an
+  extension already granted shows up within one sync interval (8 h) of
+  its assignment entering the probe window.
+- **A send that raises is retried alone.** An APNs connection error used
+  to roll back a job's whole delivery round, so its next round pushed again
+  to the devices it had already reached. The delivery is now recorded as
+  failed (`failure_code` `exception`, log event `push.send_raised`) and
+  retried in the next round like any other transient failure.
+- **A re-synced Live Activity start takes its new time.** `/schedule/sync`
+  moves a pending start to the fire time and snapshot the device posts
+  again (a changed lead time, a moved deadline, a renamed course), and
+  cancels one moved into the past. Before, the old ones stayed.
+- **A countdown start aimed at a moved deadline is cancelled.** The
+  pre-send check cancels an `assignmentUrgent` start whose
+  `countdownTarget` no row of the assignment is due at, as
+  `stale_before_send` (reason `due_changed`); the device's next sync files
+  it for the new date.
+- **Operator announcements stay.** The bulletin stale sweep marks only
+  scraped bulletins (`source = 'ntust_general'`), so portal announcements
+  (`manual`) and kept custom pushes (`custom_push`) no longer disappear
+  about 30 minutes after posting. Ones already hidden stay hidden; the
+  upgrade does not bring them back.
+- **Class reminders are titled in each device's language.** The title is
+  `notification_class_preparing_title` ("即將上課：…", "Class starting soon:
+  …") and the body the class's start time and room ("10:20 · TR-212"), in
+  place of the Chinese-only "上課提醒：…" and "10 分鐘後上課 · …".
+  Reminders filed before the upgrade, up to 48 hours ahead, go out with the
+  old text. None of these five changes needs a migration.
+- **Rolling back.** With 3.4.1 running, run
+  `docker compose exec backend alembic downgrade d07bc39dde6c` first; it
+  drops the column. 3.4.0 then writes Moodle's dates back on its next
+  sync of each account.
+- **A client's sync no longer holds back the server's (#24).** `GET
+  /v3/sync/full` leaves the server's Moodle sync where it is. An
+  assignment upload holds back only the assignment sync, and a course
+  upload only the course sync, by 2 hours as before, but never moves a run
+  earlier and never holds back a job a policy interval (8 h) past its last
+  success. An app uploading every 15 minutes, as Android does, delays the
+  server's sync by at most 2 hours past its schedule.
+- **No server fetch for a student no device syncs (#85).** The worker
+  claims a job only while the student has a device with TigerSync on.
+  Until then the job stays `pending` and is left alone, and it runs at the
+  next tick once a device signs in or turns sync on. Signing out of the
+  last device (the apps delete it) also deletes the stored Moodle token;
+  the next sign-in stores a new one. The portal's deregister keeps it: it
+  leaves the device's sessions live, and the app's next request brings the
+  device back.
+  The overdue metric and the Moodle sync dashboard's Overdue panel leave
+  such jobs out: restart `sql-exporter` after `./start.sh`, which reads
+  its collectors only at start.
+- **Suspend sync stops the fetch (#86).** While the portal's suspension
+  runs, the sync tick claims nothing, and a tick the suspension lands in
+  hands back the jobs it has not started (their runs `cancelled`, error
+  `sync_suspended`). The Moodle maintenance window from `.env` still only
+  reschedules a run that failed inside it.
+- **Assignment sync off keeps the assignment list (#30).** With
+  Assignments off on every device, only the marks (done, ignored) are
+  deleted; the list goes too only once assignment reminders are off on
+  every device as well.
+- **Retry all's expire notification (#54)** goes only to the students
+  with a `disabled` job, the ones waiting for a sign-in, and an iPhone or
+  iPad syncing, rather than to every student with a healthy job.
+- These five need no migration; rolling back to 3.4.0 brings the old
+  behavior back. A token deleted at sign-out stays deleted.
+
+---
+
 ## Upgrading to 3.4.0
 
 - **The admin endpoints moved to an internal port.** `POST /push-tick` and

@@ -1,27 +1,29 @@
 """Narrow-window submission-status refresh.
 
-`apply_fetched_assignments` deliberately never writes submission state — the
-assignment list endpoint does not carry it. This module fills that gap for
-the only assignments whose answer matters soon: the ones about to enter a
-reminder window.
+`apply_fetched_assignments` deliberately never writes submission state or the
+student's extension — the assignment list endpoint carries neither. This
+module fills that gap for the only assignments whose answer matters soon: the
+ones near their due date, and those with an extension.
 
 Kept separate from `assignments.py` because it is a different Moodle call
 with a different failure posture: a missing answer here means "leave the row
-as it was", never "the row is unsubmitted".
+as it was", never "the row is unsubmitted" or "the extension is gone".
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime, timedelta
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import ChangeEntityType, UserAssignment
-from server.syncjobs.moodle_client import FetchedSubmission
+from server.syncjobs.assignments import kept_extension, with_extension
+from server.syncjobs.moodle_client import FetchedAssignment, FetchedSubmission
 
 logger = structlog.get_logger(__name__)
 
@@ -36,14 +38,26 @@ async def select_assignment_ids(
     user_id: uuid.UUID,
     now: datetime,
     window_hours: int,
+    also: Collection[int] = (),
 ) -> list[int]:
-    """Moodle assignment ids worth probing.
+    """Moodle assignment ids worth probing: those due within `window_hours`
+    either side of `now`, later ones with an extension, and those in `also`
+    whatever their due date.
 
-    Excludes soft-deleted rows, rows already marked submitted (Moodle never
-    un-submits), rows already past due (their reminder window has closed),
-    and rows with no due date at all (nothing to remind about).
+    A row past due stays in for the window, since an extension granted after
+    the due date moves it forward; one with an extension stays in whenever
+    it is due, so a withdrawn extension moves it back. Excludes soft-deleted
+    rows, rows already marked submitted (Moodle never un-submits), and rows
+    with no due date at all (nothing to remind about).
     """
-    horizon = now + timedelta(hours=window_hours)
+    window = timedelta(hours=window_hours)
+    due_soon = and_(
+        UserAssignment.due_at > now - window,
+        or_(
+            UserAssignment.due_at <= now + window,
+            UserAssignment.extension_due_at.is_not(None),
+        ),
+    )
     rows = (
         await session.execute(
             select(UserAssignment.moodle_assignment_id).where(
@@ -51,8 +65,9 @@ async def select_assignment_ids(
                 UserAssignment.deleted_at.is_(None),
                 UserAssignment.provider_is_submitted.is_(False),
                 UserAssignment.due_at.is_not(None),
-                UserAssignment.due_at > now,
-                UserAssignment.due_at <= horizon,
+                or_(due_soon, UserAssignment.moodle_assignment_id.in_(list(also)))
+                if also
+                else due_soon,
             )
         )
     ).scalars().all()
@@ -133,4 +148,69 @@ async def apply_submission_status(
         # regardless of what the caller does next.
         await session.flush()
         logger.info("syncjobs.submissions.applied", changed=len(changed))
+    return changed
+
+
+async def apply_extensions(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    fetched: dict[int, FetchedSubmission],
+    listed: dict[int, FetchedAssignment],
+) -> int:
+    """Write each answered assignment's extension, kept only while later
+    than the due date Moodle listed this round (`kept_extension`), and the
+    dates it gives with the listed ones (`with_extension`). Returns how many
+    rows' dates changed.
+
+    No extension in an answer is a withdrawn one, and the dates go back to
+    Moodle's. An assignment whose probe failed has no answer and keeps the
+    extension it had, so a failure never moves a date back. Each date
+    change is logged to the changelog as the list sync logs one.
+    """
+    ids = [aid for aid in fetched if aid in listed]
+    if not ids:
+        return 0
+    locked_state = await lock_sync_state(session, user_id)
+    rows = (
+        await session.execute(
+            select(UserAssignment).where(
+                UserAssignment.user_id == user_id,
+                UserAssignment.deleted_at.is_(None),
+                UserAssignment.moodle_assignment_id.in_(ids),
+            )
+        )
+    ).scalars().all()
+
+    changed = 0
+    for row in rows:
+        listed_item = listed[row.moodle_assignment_id]
+        row.extension_due_at = kept_extension(
+            listed_item, fetched[row.moodle_assignment_id].extension_due_at
+        )
+        dated = with_extension(listed_item, row.extension_due_at)
+        fields = [
+            name
+            for name in ("due_at", "cutoff_at")
+            if getattr(row, name) != getattr(dated, name)
+        ]
+        if not fields:
+            continue
+        for name in fields:
+            setattr(row, name, getattr(dated, name))
+        changed += 1
+        await append_change(
+            session,
+            user_id=user_id,
+            entity_type=ChangeEntityType.assignment.value,
+            entity_id=str(row.id),
+            operation="upsert",
+            payload={"fields": fields},
+            device_id=None,
+            locked_state=locked_state,
+        )
+    # Flushed here for the reason `apply_submission_status` gives.
+    await session.flush()
+    if changed:
+        logger.info("syncjobs.extensions.applied", changed=changed)
     return changed

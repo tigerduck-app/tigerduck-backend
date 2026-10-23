@@ -70,7 +70,8 @@ server/
 │   ├── client_versions.py     # app versions that still schedule assignment reminders locally
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
 │   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
-│   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
+│   ├── notification_copy.py   # per-recipient copy: reauth, assignment and class
+│   │                          #   reminders
 │   ├── session_reauth.py      # asks a device left without a session to sign in again
 │   ├── course_reminders.py    # course reminder scan
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
@@ -213,7 +214,9 @@ into the backend container via `docker-compose.yml`.
   /sync/courses` all refuse a session without a device id. Neither key
   carries an occurrence because the client's `source_id` already does
   (`{course_no}_{yyyyMMdd}_{period}`); a re-sync of the same occurrence
-  finds its own sent job and leaves it alone.
+  finds its own sent job and leaves it alone. A still-pending start takes
+  the re-synced event's fire time and snapshot, and is cancelled when the
+  new fire time has passed.
 - Every Live Activity start and end is filed at `push_jobs.priority` 10
   (`LIVE_ACTIVITY_JOB_PRIORITY` in `push/dedupe.py`); other jobs keep the
   default 100, and the pipeline claims the lowest first.

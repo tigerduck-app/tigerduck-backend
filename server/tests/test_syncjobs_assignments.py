@@ -388,3 +388,151 @@ async def test_a_fetch_listing_an_assignment_under_two_courses_keeps_both(db_ses
         await db_session.execute(select(UserAssignmentOverride.user_assignment_id))
     ).scalars()
     assert list(marks) == [placeholder.id]
+
+
+async def test_a_known_extension_stays_in_the_dates_the_list_writes(db_session):
+    """Moodle's list carries no extension, so a sync keeps the one the probe
+    stored: the due date stays the extension, and an extension past the
+    cutoff moves the cutoff too."""
+    user = await _make_user(db_session)
+    due, cutoff = NOW + timedelta(days=1), NOW + timedelta(days=2)
+    extension = NOW + timedelta(days=3)
+    listed = _fa(1, due_at=due, cutoff_at=cutoff)
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[listed], now=NOW
+    )
+    row = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalar_one()
+    row.due_at = row.cutoff_at = row.extension_due_at = extension
+    await db_session.commit()
+    logged = len(await _changelog(db_session, user.id))
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[listed], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (
+        extension,
+        extension,
+        extension,
+    )
+    assert stats.changed_count == 0
+    assert stats.recheck_ids == frozenset()
+    assert len(await _changelog(db_session, user.id)) == logged
+
+
+async def test_taking_over_a_placeholder_keeps_the_apps_extended_date(db_session):
+    """The app uploads the date that applies to the student. A later one
+    than Moodle's is their extension, kept until the probe answers, so the
+    date does not go back to Moodle's when the fetch takes the row over."""
+    user = await _make_user(db_session)
+    due = NOW + timedelta(days=1)
+    extended = NOW + timedelta(days=3)
+    placeholder = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=0,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=extended,
+    )
+    db_session.add(placeholder)
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1, due_at=due, cutoff_at=due + timedelta(days=1))],
+        now=NOW,
+    )
+    await db_session.commit()
+
+    await db_session.refresh(placeholder)
+    assert (placeholder.due_at, placeholder.cutoff_at) == (extended, extended)
+    assert placeholder.extension_due_at == extended
+    entries = await _changelog(db_session, user.id)
+    assert "due_at" not in entries[0].payload["fields"]
+
+
+async def test_a_placeholder_with_moodles_date_or_earlier_has_no_extension(db_session):
+    user = await _make_user(db_session)
+    due = NOW + timedelta(days=1)
+    placeholder = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=0,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=due - timedelta(hours=1),
+    )
+    db_session.add(placeholder)
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=due)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(placeholder)
+    assert (placeholder.due_at, placeholder.extension_due_at) == (due, None)
+
+
+@pytest.mark.parametrize("moodle_moves", [-48, 48], ids=["earlier", "later"])
+async def test_a_due_date_moved_back_is_handed_to_the_probe(db_session, moodle_moves):
+    """An app's initial upload stores the student's date on a row with a
+    real course id, and a teacher can move a due date earlier: a row whose
+    stored date the list moves back is probed, whose answer may move it
+    forward again. Moodle's date stands meanwhile."""
+    user = await _make_user(db_session)
+    stored = NOW + timedelta(days=7)
+    row = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=7001,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=stored,
+    )
+    db_session.add(row)
+    await db_session.commit()
+    listed = stored + timedelta(hours=moodle_moves)
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=listed)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert row.due_at == listed
+    assert stats.recheck_ids == (frozenset({1}) if moodle_moves < 0 else frozenset())
+
+
+@pytest.mark.parametrize("moved_by", [0, 24], ids=["to-the-extension", "past-it"])
+async def test_an_extension_moodles_due_date_reaches_is_dropped(db_session, moved_by):
+    """A teacher moves the due date to the student's extension or past it:
+    the date no longer comes from the extension, so it is not kept, and a
+    withdrawal of it later cannot cancel a reminder (`push/presend.py`)."""
+    user = await _make_user(db_session)
+    extension = NOW + timedelta(days=3)
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=NOW + timedelta(days=1))], now=NOW
+    )
+    row = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalar_one()
+    row.due_at = row.extension_due_at = extension
+    await db_session.commit()
+    listed = extension + timedelta(hours=moved_by)
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=listed)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.extension_due_at) == (listed, None)
+    assert stats.recheck_ids == frozenset()

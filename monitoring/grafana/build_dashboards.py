@@ -544,9 +544,12 @@ dashboards["devices"] = dashboard(
 # ======================================================================= Moodle sync
 JOB_FILTER = "j.job_type IN (${job_type:sqlstring})"
 # The worker claims a job only when its policy is enabled and inside its
-# active window (server/syncjobs/executor.py); same rule here.
+# active window, and its user has a device syncing (server/syncjobs/executor.py);
+# same rule here.
 POLICY_LIVE = ("p.enabled AND (p.active_from IS NULL OR p.active_from <= now()) "
                "AND (p.active_until IS NULL OR p.active_until > now())")
+SYNCING_DEVICE = ("EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = j.user_id "
+                  "AND d.deleted_at IS NULL AND d.cloud_sync_enabled)")
 STUDENT_FILTER = "(${search:sqlstring} = '' OR COALESCE(u.student_id, '') ILIKE '%' || ${search:sqlstring} || '%')"
 L = Layout()
 L.row("Now")
@@ -562,10 +565,10 @@ SELECT count(*) AS "overdue"
 FROM sync_jobs j
 JOIN sync_policies p ON p.job_type = j.job_type
 WHERE {JOB_FILTER} AND j.status = 'pending' AND j.run_after < now() - interval '10 minutes'
-  AND {POLICY_LIVE}
+  AND {POLICY_LIVE} AND {SYNCING_DEVICE}
 """)],
            thresholds=steps(("orange", 1), ("red", 10)),
-           desc="Pending jobs more than 10 minutes past run_after, counting only types the worker would claim (policy enabled and inside its active window). The sync tick runs every 30 seconds, so these should be picked up long before."), 3, 4)
+           desc="Pending jobs more than 10 minutes past run_after, counting only jobs the worker would claim (policy enabled and inside its active window, a device of the user syncing). The sync tick runs every 30 seconds, so these should be picked up long before."), 3, 4)
 L.add(stat("Stuck", PG, [sql(f"SELECT count(*) AS \"stuck\" FROM sync_jobs j WHERE {JOB_FILTER} AND j.status = 'running' AND j.locked_at < now() - {stale_lock('sync_stale_lock', 600)}")],
            thresholds=steps(("red", 1)),
            desc="Running for longer than the worker's stale-lock limit (TIGERDUCK_SYNC_JOB_STALE_LOCK_MINUTES, read from the backend)."), 3, 4)

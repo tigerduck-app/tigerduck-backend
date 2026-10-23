@@ -29,6 +29,9 @@ REMINDER_COPY_INPUTS = ("assignment_title", "course_name")
 
 _REMINDER_TITLE_KEY = "notification_assignment_reminder_title"
 
+# The title Android gives the class reminders it posts itself.
+_CLASS_REMINDER_TITLE_KEY = "notification_class_preparing_title"
+
 # The bundles use Android/Apple positional placeholders (`%1$s`), and `%%`
 # for a literal percent sign.
 _PLACEHOLDER = re.compile(r"%(\d+)\$s|%%")
@@ -160,4 +163,23 @@ def build_assignment_reminder_payload(
     }
     delivered["title"] = title
     delivered["body"] = body
+    return delivered
+
+
+def build_course_reminder_payload(
+    payload: dict[str, Any], *, locale: str | None
+) -> dict[str, Any]:
+    """The class reminder one recipient receives, titled in `locale`.
+
+    The body, the class's start time and room, reads the same in every
+    language and is written when the scan files the job. A job filed before
+    the title moved to send time carries a Chinese title and goes out as
+    filed; the scan files reminders at most 48 hours ahead.
+    """
+    if "course_name" not in payload:
+        return payload
+    delivered = {key: value for key, value in payload.items() if key != "course_name"}
+    delivered["title"] = _render(
+        translate(_CLASS_REMINDER_TITLE_KEY, locale), str(payload["course_name"] or "")
+    )
     return delivered

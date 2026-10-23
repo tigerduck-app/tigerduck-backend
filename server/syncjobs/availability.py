@@ -42,7 +42,7 @@ async def is_moodle_available(
     if now is None:
         now = datetime.now(UTC)
 
-    resume = await _check_manual_suspend(session, now)
+    resume = await manual_suspend_until(session, now)
     if resume is not None:
         return False, resume
 
@@ -53,7 +53,7 @@ async def is_moodle_available(
     return True, None
 
 
-async def _check_manual_suspend(
+async def manual_suspend_until(
     session: AsyncSession, now: datetime
 ) -> datetime | None:
     row = await session.get(SystemSetting, SUSPENDED_UNTIL_KEY)

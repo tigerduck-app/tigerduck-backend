@@ -2,7 +2,8 @@
 
 Claim/execute split: one short transaction recovers stale locks, another
 claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
-joined to an enabled+in-window policy, global running-count cap), then
+joined to an enabled+in-window policy, of users with a device syncing,
+global running-count cap; none while the portal suspends sync), then
 each job reads its token, fetches from Moodle with no transaction open and
 stores the result in a transaction of its own, so one failure can't poison
 the batch; an assignments job then probes submission status in transactions
@@ -53,11 +54,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import ExternalAccount, ExternalAccountCredential
+from server.auth.models import ExternalAccount, ExternalAccountCredential, UserDevice
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
-from server.syncjobs.availability import is_moodle_available
+from server.syncjobs.availability import is_moodle_available, manual_suspend_until
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
@@ -75,6 +76,7 @@ from server.syncjobs.models import (
 from server.syncjobs.moodle_client import (
     AssignmentFetcher,
     CourseFetcher,
+    FetchedAssignment,
     MoodleClientError,
     MoodleNoCourseAccess,
     MoodleRateLimited,
@@ -83,7 +85,11 @@ from server.syncjobs.moodle_client import (
     SsoUnavailable,
     _without_token,
 )
-from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
+from server.syncjobs.submissions import (
+    apply_extensions,
+    apply_submission_status,
+    select_assignment_ids,
+)
 from server.push.submission_cancel import cancel_for_submitted
 from server.push.sync_trigger import enqueue_sync_trigger
 
@@ -158,12 +164,53 @@ async def run_sync_tick(worker: SyncWorker) -> int:
         )
         return 0
     await _recover_stale_jobs(worker)
+    if await _suspended(worker):
+        return 0
     claimed = await _claim_due_jobs(worker)
     for idx, (job_id, run_id) in enumerate(claimed):
         if idx > 0:
             await asyncio.sleep(worker.settings.sync_job_min_interval_seconds)
+            if await _suspended(worker):
+                await _hand_back(worker, claimed[idx:])
+                return idx
         await _execute_job(worker, job_id=job_id, run_id=run_id)
     return len(claimed)
+
+
+async def _suspended(worker: SyncWorker) -> bool:
+    """Whether an operator suspended sync in the portal (tigerduck-backend#86)."""
+    async with session_scope(worker.session_factory) as session:
+        until = await manual_suspend_until(session, datetime.now(UTC))
+    if until is not None:
+        logger.info("syncjobs.suspended", until=until.isoformat())
+    return until is not None
+
+
+async def _hand_back(worker: SyncWorker, claimed: list[tuple[int, int]]) -> None:
+    """Return claimed jobs untouched, their runs cancelled, so none counts
+    as an attempt."""
+    async with session_scope(worker.session_factory) as session:
+        await session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.id.in_([job_id for job_id, _ in claimed]),
+                SyncJob.status == SyncJobStatus.running.value,
+                SyncJob.locked_by == worker.worker_id,
+            )
+            .values(status=SyncJobStatus.pending.value, locked_by=None, locked_at=None)
+        )
+        await session.execute(
+            update(SyncRun)
+            .where(
+                SyncRun.id.in_([run_id for _, run_id in claimed]),
+                SyncRun.status == SyncRunStatus.running.value,
+            )
+            .values(
+                status=SyncRunStatus.cancelled.value,
+                finished_at=datetime.now(UTC),
+                error="sync_suspended",
+            )
+        )
 
 
 async def _recover_stale_jobs(worker: SyncWorker) -> None:
@@ -218,6 +265,15 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
         )
 
 
+# A fetch serves only a device with TigerSync on; signing out deletes the
+# device. Until one is back, the job waits unclaimed (tigerduck-backend#85).
+_has_syncing_device = sa.exists().where(
+    UserDevice.user_id == SyncJob.user_id,
+    UserDevice.deleted_at.is_(None),
+    UserDevice.cloud_sync_enabled.is_(True),
+)
+
+
 async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
@@ -246,6 +302,7 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                     .where(
                         SyncJob.status == SyncJobStatus.pending.value,
                         SyncJob.run_after <= now,
+                        _has_syncing_device,
                         SyncPolicy.enabled.is_(True),
                         sa.or_(
                             SyncPolicy.active_from.is_(None),
@@ -362,7 +419,12 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             # are already safe.
             try:
                 await _refresh_submission_status(
-                    worker, user_id=user_id, token=token, now=now
+                    worker,
+                    user_id=user_id,
+                    token=token,
+                    now=now,
+                    listed={a.moodle_assignment_id: a for a in fetched},
+                    recheck_ids=stats.recheck_ids,
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
@@ -592,8 +654,13 @@ async def _refresh_submission_status(
     user_id,
     token: str,
     now: datetime,
+    listed: dict[int, FetchedAssignment],
+    recheck_ids: frozenset[int],
 ) -> None:
-    """Best-effort probe of assignments about to enter a reminder window.
+    """Best-effort probe of assignments near their due date, or with an
+    extension, and of those whose due date the list sync just moved back
+    (`recheck_ids`), whose answer may move it forward again
+    (`select_assignment_ids`).
 
     Runs only after the assignment list sync has committed, in transactions
     of its own, so nothing it does can undo that sync. No transaction is
@@ -608,9 +675,12 @@ async def _refresh_submission_status(
     (`cancel_for_submitted`) in the same transaction as the status write:
     "marked submitted, but the reminder was never cancelled" is the broken
     state this probe exists to prevent, so the two stand or fall together.
-    The same transaction enqueues a sync trigger of its own, so the user's
-    other devices fetch the flip (`apply_submission_status` logs it to the
-    changelog) instead of waiting for their next unrelated sync.
+    The same transaction writes each answer's extension and the dates it
+    gives with the ones `listed` by this run's list sync
+    (`apply_extensions`), and enqueues a sync trigger of its own when
+    anything changed, so the user's other devices fetch the flip or the new
+    dates (both logged to the changelog) instead of waiting for their next
+    unrelated sync.
 
     Failures are handled by kind:
 
@@ -626,11 +696,12 @@ async def _refresh_submission_status(
     * Anything else the fetch raises is unanticipated -- swallowed, logged
       at `error`, or at `warning` for a residual `MoodleClientError`,
       matching the probe's own two-tier policy for the same distinction.
-    * A database error from any of the three database calls
+    * A database error from any of the database calls
       (`select_assignment_ids`, `apply_submission_status`,
-      `cancel_for_submitted`) is not a probe failure and is never logged as
-      one. Its own transaction rolls back, and it is logged under a separate
-      event so it cannot be mistaken for routine Moodle noise. It then fails
+      `cancel_for_submitted`, `apply_extensions`) is not a probe failure
+      and is never logged as one. Its own transaction rolls back, and it is
+      logged under a separate event so it cannot be mistaken for routine
+      Moodle noise. It then fails
       the run as `SubmissionStatusDbError`: recorded as a success, the next
       probe would be a whole policy interval away, and until then an
       assignment already submitted keeps its reminder queued and its Live
@@ -644,6 +715,7 @@ async def _refresh_submission_status(
                 user_id=user_id,
                 now=now,
                 window_hours=settings.submission_status_window_hours,
+                also=recheck_ids,
             )
         if not assignment_ids:
             return
@@ -682,6 +754,10 @@ async def _refresh_submission_status(
                     moodle_assignment_ids=changed_ids,
                     now=now,
                 )
+            moved = await apply_extensions(
+                session, user_id=user_id, fetched=fetched, listed=listed
+            )
+            if changed_ids or moved:
                 await enqueue_sync_trigger(session, user_id, source="submissions")
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise

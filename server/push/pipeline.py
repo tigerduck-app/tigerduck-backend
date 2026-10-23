@@ -68,6 +68,7 @@ from server.auth.schemas import ScheduleScenario
 from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import lift_timeouts, session_scope
+from server.push.apns_client import SendResult
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
@@ -77,6 +78,7 @@ from server.push.notification_copy import (
     REAUTH_SCENARIO,
     SESSION_REAUTH_REASON,
     build_assignment_reminder_payload,
+    build_course_reminder_payload,
     build_reauth_payload,
 )
 from server.push.payload import _to_unix_seconds
@@ -1082,7 +1084,7 @@ async def _send_one(
 
     payload = job.payload or {}
     is_reauth = job.scenario == REAUTH_SCENARIO
-    if is_reauth or job.channel == REMINDER_CHANNEL:
+    if is_reauth or job.channel in (REMINDER_CHANNEL, COURSE_CHANNEL):
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
         # languages, so the only place the right language is known is the
@@ -1105,6 +1107,8 @@ async def _send_one(
                 reason=payload.get("reason"),
                 locale=locale,
             )
+        elif job.channel == COURSE_CHANNEL:
+            payload = build_course_reminder_payload(payload, locale=locale)
         else:
             payload = build_assignment_reminder_payload(payload, locale=locale)
         if not _has_copy(payload):
@@ -1132,7 +1136,7 @@ async def _send_one(
     delivery.attempts += 1
 
     if delivery.provider == "apns":
-        apns_request = build_apns_for_job(
+        request = build_apns_for_job(
             payload=payload,
             channel=job.channel,
             token_value=token.token_value,
@@ -1146,12 +1150,24 @@ async def _send_one(
                 else None
             ),
         )
-        result = await worker.router.send_apple(apns_request)
+        send = worker.router.send_apple
     else:
-        fcm_request = build_fcm_for_job(
+        request = build_fcm_for_job(
             payload=payload, channel=job.channel, token_value=token.token_value
         )
-        result = await worker.router.send_android(fcm_request)
+        send = worker.router.send_android
+    try:
+        result = await send(request)
+    except Exception as exc:
+        # aioapns raises on connection trouble. Raised past here, it would roll
+        # back the round, and the deliveries it already sent would go out again.
+        logger.warning(
+            "push.send_raised",
+            job_id=job.id,
+            delivery_id=delivery.id,
+            error=type(exc).__name__,
+        )
+        result = SendResult(success=False, status="exception", description=str(exc))
 
     if result.success:
         delivery.status = PushDeliveryStatus.sent.value

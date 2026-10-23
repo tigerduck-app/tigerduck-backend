@@ -14,8 +14,9 @@ metrics:
       GROUP BY 1, 2
 
   # Only jobs the worker would claim: its policy enabled and inside its
-  # active window (server/syncjobs/executor.py). A switched-off or
-  # out-of-season type keeps pending jobs that aren't late, just parked.
+  # active window, its user with a device syncing (server/syncjobs/executor.py).
+  # A switched-off or out-of-season type, or a user with sync off everywhere,
+  # keeps pending jobs that aren't late, just parked.
   - metric_name: tigerduck_sync_jobs_overdue
     type: gauge
     help: Claimable pending jobs more than 10 minutes past their run_after.
@@ -29,6 +30,8 @@ metrics:
           AND p.enabled
           AND (p.active_from IS NULL OR p.active_from <= now())
           AND (p.active_until IS NULL OR p.active_until > now())
+          AND EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = j.user_id
+                      AND d.deleted_at IS NULL AND d.cloud_sync_enabled)
       GROUP BY 1
 
   # How long the longest-running job of each type has been locked, with no
@@ -85,6 +88,8 @@ metrics:
         AND p.enabled
         AND (p.active_from IS NULL OR p.active_from <= now())
         AND (p.active_until IS NULL OR p.active_until > now())
+        AND EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = j.user_id
+                    AND d.deleted_at IS NULL AND d.cloud_sync_enabled)
       GROUP BY 1
 
   - metric_name: tigerduck_sync_policy_enabled

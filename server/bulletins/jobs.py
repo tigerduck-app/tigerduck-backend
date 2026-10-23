@@ -25,7 +25,11 @@ import structlog
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from server.bulletins.dedup import attach_body_and_dedup, upsert_list_rows
+from server.bulletins.dedup import (
+    SCRAPED_SOURCE,
+    attach_body_and_dedup,
+    upsert_list_rows,
+)
 from server.bulletins.detail import fetch_detail
 from server.bulletins.dispatcher import dispatch_pending_bulletins
 from server.bulletins.llm.base import LLMError, LLMProvider
@@ -130,7 +134,7 @@ async def scrape_job(
 async def _mark_stale_deleted(
     session: AsyncSession, settings: Settings, ts: datetime
 ) -> int:
-    """Flip rows missing from the last N scrape cycles to is_deleted.
+    """Flip scraped rows missing from the last N scrape cycles to is_deleted.
 
     We only mark — we don't notify devices about deletions (the in-app
     list just hides them). Re-appearance later bumps last_seen_at and the
@@ -144,6 +148,7 @@ async def _mark_stale_deleted(
     result = await session.execute(
         update(Bulletin)
         .where(
+            Bulletin.source == SCRAPED_SOURCE,
             Bulletin.is_deleted.is_(False),
             Bulletin.last_seen_at < threshold,
         )

@@ -51,6 +51,11 @@ def compute_content_hash(title: str, body_md: str | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# The `source` of the rows the scraper writes. The portal's announcements and
+# kept custom pushes carry their own and are never listed, so never go stale.
+SCRAPED_SOURCE = "ntust_general"
+
+
 @dataclass(frozen=True)
 class UpsertOutcome:
     inserted_ids: list[int]      # rows that need LLM processing + notification
@@ -62,7 +67,7 @@ async def upsert_list_rows(
     session: AsyncSession,
     rows: list[ListRow],
     *,
-    source: str = "ntust_general",
+    source: str = SCRAPED_SOURCE,
     now: datetime | None = None,
 ) -> UpsertOutcome:
     """Reconcile scraped list rows with the `bulletins` table.

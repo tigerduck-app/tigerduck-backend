@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
@@ -104,11 +105,20 @@ async def _setup_user_job(
     token="tok-1",
     password_verified=True,
     job_kwargs=None,
+    syncing_device=True,
 ):
     cipher = _cipher()
     user = User(student_id=student_id)
     session.add(user)
     await session.flush()
+    if syncing_device:
+        # A Mac: it keeps the job claimable and receives neither reminders
+        # nor the reauth push, so no test sees a push it did not set up.
+        session.add(
+            UserDevice(
+                user_id=user.id, client_device_id=f"mac-{student_id}", platform="macos"
+            )
+        )
     account = ExternalAccount(
         user_id=user.id, provider="ntust_sso", external_user_id=student_id
     )
@@ -310,6 +320,106 @@ async def test_policy_active_window_respected(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     await run_sync_tick(worker)
     assert fetcher.calls == []
+
+
+@pytest.mark.parametrize(
+    "device",
+    [None, {"deleted_at": datetime.now(UTC)}, {"cloud_sync_enabled": False}],
+    ids=["never-signed-in", "signed-out", "sync-off"],
+)
+async def test_no_fetch_while_no_device_syncs_and_resume_when_one_does(
+    db_session, prepared_engine, test_settings, device
+):
+    """tigerduck-backend#85: the job stays put, unclaimed, until a device
+    signs in or turns sync on."""
+    user, _, job = await _setup_user_job(db_session, syncing_device=False)
+    if device is not None:
+        db_session.add(
+            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios", **device)
+        )
+        await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 0
+    assert fetcher.calls == []
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+
+    if device is None:
+        db_session.add(
+            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
+        )
+    else:
+        await db_session.execute(
+            update(UserDevice).values(deleted_at=None, cloud_sync_enabled=True)
+        )
+    await db_session.commit()
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+
+
+async def _suspend_sync(conn_or_session) -> None:
+    """What the portal's Suspend sync writes."""
+    until = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await conn_or_session.execute(
+        text(
+            "INSERT INTO system_settings (key, value) "
+            "VALUES ('moodle_suspended_until', CAST(:v AS jsonb))"
+        ),
+        {"v": json.dumps({"until": until})},
+    )
+
+
+async def test_a_suspended_sync_claims_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#86: Suspend sync was read only once a run had
+    already failed, so the worker went on calling Moodle."""
+    _, _, job = await _setup_user_job(db_session)
+    await _suspend_sync(db_session)
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    assert await run_sync_tick(worker) == 0
+
+    assert fetcher.calls == []
+    assert (await db_session.execute(select(func.count(SyncRun.id)))).scalar_one() == 0
+    await db_session.refresh(job)
+    assert job.status == "pending"
+
+
+async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
+    db_session, prepared_engine, test_settings
+):
+    await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
+    await _setup_user_job(db_session, student_id="b00000002", token="tok-2")
+
+    class SuspendedWhileFetching(StubFetcher):
+        async def fetch_assignments(self, *, token):
+            async with prepared_engine.begin() as conn:
+                await _suspend_sync(conn)
+            return await super().fetch_assignments(token=token)
+
+    fetcher = SuspendedWhileFetching(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_min_interval_seconds": 0}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert len(fetcher.calls) == 1
+    jobs = (await db_session.execute(select(SyncJob))).scalars().all()
+    assert sorted((j.status, j.attempts, j.locked_by, j.last_success_at is None) for j in jobs) == [
+        ("pending", 0, None, False),
+        ("pending", 0, None, True),
+    ]
+    runs = (await db_session.execute(select(SyncRun.status, SyncRun.error))).all()
+    assert sorted(runs) == [("cancelled", "sync_suspended"), ("succeeded", None)]
 
 
 async def test_successful_run_upserts_and_reschedules(
@@ -1586,3 +1696,115 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
     # One from the list sync (it inserted the assignment), one from the probe.
     assert len(keys) == 2
     assert [k for k in keys if k.endswith(":submissions")] != []
+
+
+async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_probe_fails(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The probe's answer moves the due date to the student's extension in
+    the same run as the list sync, and a later run whose probe fails keeps
+    it rather than going back to Moodle's date."""
+    user, _, job = await _setup_user_job(db_session)
+    due_at = (datetime.now(UTC) + timedelta(hours=10)).replace(microsecond=0)
+    extension = due_at + timedelta(days=2)
+    answers = [
+        {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=extension,
+            )
+        },
+        MoodleUnreachable("submission_probe_unreachable"),
+    ]
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    async def stored():
+        return (
+            await db_session.execute(
+                select(UserAssignment.due_at, UserAssignment.extension_due_at)
+                .where(UserAssignment.user_id == user.id)
+                .execution_options(populate_existing=True)
+            )
+        ).one()
+
+    await run_sync_tick(worker)
+    assert tuple(await stored()) == (extension, extension)
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(
+                PushJob.user_id == user.id, PushJob.scenario == "sync_trigger"
+            )
+        )
+    ).scalars().all()
+    assert [k for k in keys if k.endswith(":submissions")] != []
+
+    await _run_when_due(db_session, worker, job)
+    assert answers == []
+    assert tuple(await stored()) == (extension, extension)
+
+
+@pytest.mark.parametrize(
+    "answer,kept",
+    [("extension", True), ("no-extension", False), ("no-answer", False)],
+)
+async def test_a_date_the_list_moves_back_is_probed_and_the_answer_decides(
+    db_session, prepared_engine, test_settings, monkeypatch, answer, kept
+):
+    """An app's initial upload stored the student's later date on a row with
+    a real course id, or a teacher moved the due date earlier. Both are past
+    the probe window, and the probe is asked anyway: an extension it gives
+    keeps the later date, and without one Moodle's date stands."""
+    user, _, _ = await _setup_user_job(db_session)
+    moodle_due = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    later = moodle_due + timedelta(days=2)
+    db_session.add(
+        UserAssignment(
+            user_id=user.id,
+            moodle_course_id=7001,
+            moodle_assignment_id=1,
+            title="HW1",
+            due_at=later,
+        )
+    )
+    await db_session.commit()
+    probed: list[list[int]] = []
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        probed.append(list(assignment_ids))
+        if answer == "no-answer":
+            return {}
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=later if answer == "extension" else None,
+            )
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=moodle_due)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert probed == [[1]]
+    due_at = (
+        await db_session.execute(
+            select(UserAssignment.due_at)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert due_at == (later if kept else moodle_due)

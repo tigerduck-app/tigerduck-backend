@@ -224,6 +224,16 @@ def test_parse_reads_whether_the_student_can_still_submit(body, expected):
     assert parsed.is_submitted is False
 
 
+@pytest.mark.parametrize(
+    "extension", ["1757600000", -1, True, [1_757_600_000]], ids=str
+)
+def test_an_unreadable_extension_is_no_answer(extension):
+    """Read as no extension, it would move the student's dates back."""
+    body = _answer(submission=_OWN_NEW, extensionduedate=extension)
+
+    assert moodle_client._parse_submission_status(77, body) is None
+
+
 # The push pipeline's pre-send check asks about one assignment at a time
 # and must tell Moodle failing for everyone, which opens its breaker, from
 # an answer about one token or assignment, which does not.
