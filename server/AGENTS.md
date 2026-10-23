@@ -170,7 +170,15 @@ into the backend container via `docker-compose.yml`.
 
 ## CONVENTIONS
 - All DB timestamps stored as `timestamp with time zone` (UTC in, UTC out)
-- Session management: `SessionDep` in routes auto-commits/rolls-back
+- Session management: `SessionDep` in routes auto-commits/rolls-back,
+  and commits before the response is sent
+- Scheduled work and the workers (`SyncWorker`, `PushPipelineWorker`) use
+  a second engine with its own pool; API requests use `app.state.engine`.
+  A transaction that sends pushes before it commits, or a retention purge,
+  calls `lift_timeouts` (`db.py`) first: the server-side statement and
+  idle-in-transaction timeouts would otherwise cut it off. No request
+  handler may hold a transaction open across a call to Moodle, APNs or
+  FCM; commit first.
 - asyncpg refuses a statement with more than 32,767 bind parameters. A
   filter on ids gathered across users goes through `in_array` (`db.py`),
   one array parameter, rather than `in_()`, which binds one per value, and
