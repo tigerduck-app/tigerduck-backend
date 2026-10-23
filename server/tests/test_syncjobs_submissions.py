@@ -9,8 +9,9 @@ from sqlalchemy import select
 
 from server.auth.models import User
 from server.sync.models import UserChangeLog, UserSyncState
-from server.syncjobs.moodle_client import FetchedSubmission
+from server.syncjobs.moodle_client import FetchedAssignment, FetchedSubmission
 from server.syncjobs.submissions import (
+    apply_extensions,
     apply_submission_status,
     select_assignment_ids,
 )
@@ -35,7 +36,7 @@ async def test_selects_only_unsubmitted_inside_the_window(db_session, make_assig
         moodle_assignment_id=2, due_at=NOW + timedelta(hours=100)
     )
     await make_assignment(
-        moodle_assignment_id=3, due_at=NOW - timedelta(hours=1)
+        moodle_assignment_id=3, due_at=NOW - timedelta(hours=100)
     )
     await make_assignment(
         moodle_assignment_id=4,
@@ -207,8 +208,10 @@ async def test_due_just_past_the_window_edge_is_excluded(db_session, make_assign
     assert ids == []
 
 
-async def test_due_exactly_now_is_excluded(db_session, make_assignment):
-    row = await make_assignment(moodle_assignment_id=1, due_at=NOW)
+async def test_due_exactly_a_window_ago_is_excluded(db_session, make_assignment):
+    row = await make_assignment(
+        moodle_assignment_id=1, due_at=NOW - timedelta(hours=48)
+    )
     await db_session.flush()
 
     ids = await select_assignment_ids(
@@ -404,3 +407,172 @@ async def test_apply_logs_nothing_when_nothing_flips(db_session, make_assignment
     )
 
     assert await _changelog(db_session, already.user_id) == []
+
+
+# --- Extensions ---------------------------------------------------------
+
+
+async def test_a_recently_due_assignment_is_probed_for_a_late_extension(
+    db_session, make_assignment
+):
+    """An extension granted after the due date moves it forward, so a row
+    stays in for the window after it is due."""
+    row = await make_assignment(
+        moodle_assignment_id=1, due_at=NOW - timedelta(hours=10)
+    )
+    await db_session.flush()
+
+    ids = await select_assignment_ids(
+        db_session, user_id=row.user_id, now=NOW, window_hours=48
+    )
+
+    assert ids == [1]
+
+
+async def test_an_extension_past_the_window_is_still_probed(
+    db_session, make_assignment
+):
+    """So a withdrawn extension moves the date back to Moodle's, which may
+    be well inside the window, before its reminders are due."""
+    extended = await make_assignment(
+        moodle_assignment_id=1, due_at=NOW + timedelta(hours=200)
+    )
+    extended.extension_due_at = extended.due_at
+    await make_assignment(moodle_assignment_id=2, due_at=NOW + timedelta(hours=200))
+    long_past = await make_assignment(
+        moodle_assignment_id=3, due_at=NOW - timedelta(hours=100)
+    )
+    long_past.extension_due_at = long_past.due_at
+    await db_session.flush()
+
+    ids = await select_assignment_ids(
+        db_session, user_id=extended.user_id, now=NOW, window_hours=48
+    )
+
+    assert ids == [1]
+
+
+DUE = NOW + timedelta(hours=10)
+CUTOFF = NOW + timedelta(hours=20)
+
+
+def _listed(aid: int, *, cutoff_at: datetime | None = CUTOFF) -> FetchedAssignment:
+    return FetchedAssignment(
+        moodle_course_id=7001,
+        moodle_assignment_id=aid,
+        course_name=None,
+        title=f"Assignment {aid}",
+        due_at=DUE,
+        cutoff_at=cutoff_at,
+        allow_from_at=None,
+        moodle_url=None,
+        intro_html=None,
+    )
+
+
+def _answer(aid: int, extension: datetime | None) -> FetchedSubmission:
+    return FetchedSubmission(
+        moodle_assignment_id=aid,
+        is_submitted=False,
+        submitted_at=None,
+        extension_due_at=extension,
+    )
+
+
+async def _extended_row(make_assignment, db_session, extension):
+    row = await make_assignment(moodle_assignment_id=1, due_at=DUE)
+    row.cutoff_at = CUTOFF
+    if extension is not None:
+        row.extension_due_at = extension
+        row.due_at = max(DUE, extension)
+        row.cutoff_at = max(CUTOFF, extension)
+    await db_session.flush()
+    return row
+
+
+@pytest.mark.parametrize(
+    "before,after,due,cutoff",
+    [
+        (None, DUE + timedelta(hours=5), DUE + timedelta(hours=5), CUTOFF),
+        (
+            DUE + timedelta(hours=5),
+            DUE + timedelta(hours=30),
+            DUE + timedelta(hours=30),
+            DUE + timedelta(hours=30),
+        ),
+        (DUE + timedelta(hours=30), DUE + timedelta(hours=5), DUE + timedelta(hours=5), CUTOFF),
+        (DUE + timedelta(hours=30), DUE - timedelta(hours=1), DUE, CUTOFF),
+        (DUE + timedelta(hours=30), None, DUE, CUTOFF),
+    ],
+    ids=["granted", "longer-past-cutoff", "shorter", "shorter-than-due", "removed"],
+)
+async def test_an_answer_moves_the_dates_to_the_students(
+    db_session, make_assignment, before, after, due, cutoff
+):
+    row = await _extended_row(make_assignment, db_session, before)
+
+    moved = await apply_extensions(
+        db_session,
+        user_id=row.user_id,
+        fetched={1: _answer(1, after)},
+        listed={1: _listed(1)},
+    )
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (due, cutoff, after)
+    assert moved == 1
+    entries = await _changelog(db_session, row.user_id)
+    assert [(e.entity_id, e.operation) for e in entries] == [(str(row.id), "upsert")]
+    assert set(entries[0].payload["fields"]) <= {"due_at", "cutoff_at"}
+
+
+async def test_an_extension_gives_no_cutoff_to_an_assignment_without_one(
+    db_session, make_assignment
+):
+    row = await make_assignment(moodle_assignment_id=1, due_at=DUE)
+    await db_session.flush()
+    extension = DUE + timedelta(hours=30)
+
+    await apply_extensions(
+        db_session,
+        user_id=row.user_id,
+        fetched={1: _answer(1, extension)},
+        listed={1: _listed(1, cutoff_at=None)},
+    )
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at) == (extension, None)
+
+
+async def test_a_failed_lookup_keeps_the_extension(db_session, make_assignment):
+    """No answer is no news: the row keeps the dates its last extension
+    gave, rather than going back to Moodle's."""
+    extension = DUE + timedelta(hours=30)
+    row = await _extended_row(make_assignment, db_session, extension)
+
+    moved = await apply_extensions(
+        db_session, user_id=row.user_id, fetched={}, listed={1: _listed(1)}
+    )
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (
+        extension,
+        extension,
+        extension,
+    )
+    assert moved == 0
+
+
+async def test_the_same_extension_again_logs_nothing(db_session, make_assignment):
+    extension = DUE + timedelta(hours=30)
+    row = await _extended_row(make_assignment, db_session, extension)
+
+    moved = await apply_extensions(
+        db_session,
+        user_id=row.user_id,
+        fetched={1: _answer(1, extension)},
+        listed={1: _listed(1)},
+    )
+
+    assert moved == 0
+    assert await _changelog(db_session, row.user_id) == []

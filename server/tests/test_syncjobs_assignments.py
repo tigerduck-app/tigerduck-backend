@@ -388,3 +388,92 @@ async def test_a_fetch_listing_an_assignment_under_two_courses_keeps_both(db_ses
         await db_session.execute(select(UserAssignmentOverride.user_assignment_id))
     ).scalars()
     assert list(marks) == [placeholder.id]
+
+
+async def test_a_known_extension_stays_in_the_dates_the_list_writes(db_session):
+    """Moodle's list carries no extension, so a sync keeps the one the probe
+    stored: the due date stays the extension, and an extension past the
+    cutoff moves the cutoff too."""
+    user = await _make_user(db_session)
+    due, cutoff = NOW + timedelta(days=1), NOW + timedelta(days=2)
+    extension = NOW + timedelta(days=3)
+    listed = _fa(1, due_at=due, cutoff_at=cutoff)
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[listed], now=NOW
+    )
+    row = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalar_one()
+    row.due_at = row.cutoff_at = row.extension_due_at = extension
+    await db_session.commit()
+    logged = len(await _changelog(db_session, user.id))
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[listed], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (
+        extension,
+        extension,
+        extension,
+    )
+    assert stats.changed_count == 0
+    assert len(await _changelog(db_session, user.id)) == logged
+
+
+async def test_taking_over_a_placeholder_keeps_the_apps_extended_date(db_session):
+    """The app uploads the date that applies to the student. A later one
+    than Moodle's is their extension, kept until the probe answers, so the
+    date does not go back to Moodle's when the fetch takes the row over."""
+    user = await _make_user(db_session)
+    due = NOW + timedelta(days=1)
+    extended = NOW + timedelta(days=3)
+    placeholder = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=0,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=extended,
+    )
+    db_session.add(placeholder)
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1, due_at=due, cutoff_at=due + timedelta(days=1))],
+        now=NOW,
+    )
+    await db_session.commit()
+
+    await db_session.refresh(placeholder)
+    assert (placeholder.due_at, placeholder.cutoff_at) == (extended, extended)
+    assert placeholder.extension_due_at == extended
+    entries = await _changelog(db_session, user.id)
+    assert "due_at" not in entries[0].payload["fields"]
+
+
+async def test_a_placeholder_with_moodles_date_or_earlier_has_no_extension(db_session):
+    user = await _make_user(db_session)
+    due = NOW + timedelta(days=1)
+    placeholder = UserAssignment(
+        user_id=user.id,
+        moodle_course_id=0,
+        moodle_assignment_id=1,
+        title="HW1",
+        due_at=due - timedelta(hours=1),
+    )
+    db_session.add(placeholder)
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=due)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(placeholder)
+    assert (placeholder.due_at, placeholder.extension_due_at) == (due, None)

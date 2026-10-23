@@ -73,6 +73,7 @@ from server.syncjobs.models import (
 from server.syncjobs.moodle_client import (
     AssignmentFetcher,
     CourseFetcher,
+    FetchedAssignment,
     MoodleClientError,
     MoodleNoCourseAccess,
     MoodleRateLimited,
@@ -81,7 +82,11 @@ from server.syncjobs.moodle_client import (
     SsoUnavailable,
     _without_token,
 )
-from server.syncjobs.submissions import apply_submission_status, select_assignment_ids
+from server.syncjobs.submissions import (
+    apply_extensions,
+    apply_submission_status,
+    select_assignment_ids,
+)
 from server.push.submission_cancel import cancel_for_submitted
 from server.push.sync_trigger import enqueue_sync_trigger
 
@@ -372,7 +377,11 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             # are already safe.
             try:
                 await _refresh_submission_status(
-                    worker, user_id=user_id, token=token, now=now
+                    worker,
+                    user_id=user_id,
+                    token=token,
+                    now=now,
+                    listed={a.moodle_assignment_id: a for a in fetched},
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
@@ -541,8 +550,10 @@ async def _refresh_submission_status(
     user_id,
     token: str,
     now: datetime,
+    listed: dict[int, FetchedAssignment],
 ) -> None:
-    """Best-effort probe of assignments about to enter a reminder window.
+    """Best-effort probe of assignments near their due date, or with an
+    extension (`select_assignment_ids`).
 
     Runs only after the assignment list sync has committed, in transactions
     of its own, so nothing it does can undo that sync. No transaction is
@@ -557,9 +568,12 @@ async def _refresh_submission_status(
     (`cancel_for_submitted`) in the same transaction as the status write:
     "marked submitted, but the reminder was never cancelled" is the broken
     state this probe exists to prevent, so the two stand or fall together.
-    The same transaction enqueues a sync trigger of its own, so the user's
-    other devices fetch the flip (`apply_submission_status` logs it to the
-    changelog) instead of waiting for their next unrelated sync.
+    The same transaction writes each answer's extension and the dates it
+    gives with the ones `listed` by this run's list sync
+    (`apply_extensions`), and enqueues a sync trigger of its own when
+    anything changed, so the user's other devices fetch the flip or the new
+    dates (both logged to the changelog) instead of waiting for their next
+    unrelated sync.
 
     Failures are handled by kind:
 
@@ -575,11 +589,12 @@ async def _refresh_submission_status(
     * Anything else the fetch raises is unanticipated -- swallowed, logged
       at `error`, or at `warning` for a residual `MoodleClientError`,
       matching the probe's own two-tier policy for the same distinction.
-    * A database error from any of the three database calls
+    * A database error from any of the database calls
       (`select_assignment_ids`, `apply_submission_status`,
-      `cancel_for_submitted`) is not a probe failure and is never logged as
-      one. Its own transaction rolls back, and it is logged under a separate
-      event so it cannot be mistaken for routine Moodle noise. It then fails
+      `cancel_for_submitted`, `apply_extensions`) is not a probe failure
+      and is never logged as one. Its own transaction rolls back, and it is
+      logged under a separate event so it cannot be mistaken for routine
+      Moodle noise. It then fails
       the run as `SubmissionStatusDbError`: recorded as a success, the next
       probe would be a whole policy interval away, and until then an
       assignment already submitted keeps its reminder queued and its Live
@@ -631,6 +646,10 @@ async def _refresh_submission_status(
                     moodle_assignment_ids=changed_ids,
                     now=now,
                 )
+            moved = await apply_extensions(
+                session, user_id=user_id, fetched=fetched, listed=listed
+            )
+            if changed_ids or moved:
                 await enqueue_sync_trigger(session, user_id, source="submissions")
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise

@@ -1388,3 +1388,59 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
     # One from the list sync (it inserted the assignment), one from the probe.
     assert len(keys) == 2
     assert [k for k in keys if k.endswith(":submissions")] != []
+
+
+async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_probe_fails(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The probe's answer moves the due date to the student's extension in
+    the same run as the list sync, and a later run whose probe fails keeps
+    it rather than going back to Moodle's date."""
+    user, _, job = await _setup_user_job(db_session)
+    due_at = (datetime.now(UTC) + timedelta(hours=10)).replace(microsecond=0)
+    extension = due_at + timedelta(days=2)
+    answers = [
+        {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=extension,
+            )
+        },
+        MoodleUnreachable("submission_probe_unreachable"),
+    ]
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    async def stored():
+        return (
+            await db_session.execute(
+                select(UserAssignment.due_at, UserAssignment.extension_due_at)
+                .where(UserAssignment.user_id == user.id)
+                .execution_options(populate_existing=True)
+            )
+        ).one()
+
+    await run_sync_tick(worker)
+    assert tuple(await stored()) == (extension, extension)
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(
+                PushJob.user_id == user.id, PushJob.scenario == "sync_trigger"
+            )
+        )
+    ).scalars().all()
+    assert [k for k in keys if k.endswith(":submissions")] != []
+
+    await _run_when_due(db_session, worker, job)
+    assert answers == []
+    assert tuple(await stored()) == (extension, extension)
