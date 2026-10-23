@@ -47,17 +47,25 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   next `TIGERDUCK_SUBMISSION_STATUS_WINDOW_HOURS` (72), it now asks about
   those due in the past 72 hours and not submitted, since an extension
   granted after the due date moves it forward, and about every one with an
-  extension, so a withdrawn one moves the date back. Each is one request
-  per assignments sync, as before.
+  extension, so a withdrawn one moves the date back. It also asks, whatever
+  the due date, about each one whose stored date the sync just moved back to
+  Moodle's (an app's upload of the extended date, or a teacher moving the
+  date earlier): an extension in the answer moves it forward again. Each is
+  one request per assignments sync, as before.
+- **A long reminder can miss an early extension.** The server learns of an
+  extension only once its assignment is within 72 hours of the due date,
+  unless an app uploaded the extended date, so a reminder offset longer
+  than that (3 or 7 days) is still filed against Moodle's date.
 - **A probe that fails keeps the dates.** An assignment the probe gets no
-  answer for keeps its last known extension. An answer without one moves
+  answer for keeps its last known extension, as does one whose answer gives
+  the extension in a shape that cannot be read. An answer without one moves
   the dates back to Moodle's.
 - **The pre-send check follows.** A reminder or countdown at the
   student's extension goes out; one at an extension Moodle no longer
   gives, or shortened, is cancelled as `stale_before_send` (reason
   `extension_withdrawn`); its reminders are filed again once the next
-  sync stores the new date. One whose student now has a later extension is cancelled as
-  before (`extension`).
+  sync stores the new date. One whose student now has a later extension
+  is cancelled as before (`extension`).
 - **Migration `c5e8a2f71d40`** adds `extension_due_at` (nullable) to
   `user_assignments` without rewriting the table. Existing rows start
   without an extension; the first probe of each fills it in, so an
