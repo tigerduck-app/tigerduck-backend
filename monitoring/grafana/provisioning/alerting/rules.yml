@@ -1,0 +1,414 @@
+# Alert rules, routed to tigerduck-oncall by policies.yml. Provisioned rules
+# can't be edited in the UI; change them here and restart Grafana.
+# Each rule is a Prometheus query (A) and a threshold on it (C). A gauge the
+# backend sets only after startup falls back to the process start time, so a
+# deploy does not page. Annotations hold aggregate numbers, never user data.
+# Grafana reads a dollar sign and a name here as an environment variable, so
+# the file must not contain one.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: tigerduck
+    folder: TigerDuck alerts
+    interval: 1m
+    rules:
+      # --- Availability ---------------------------------------------------
+      - uid: td-backend-down
+        title: Backend down
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'up{job="backend"}'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        for: 5m
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '3'
+          summary: Prometheus has not been able to scrape the backend for 5 minutes.
+
+      - uid: td-target-down
+        title: Scrape target down
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'up{job!="backend"}'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-overview
+          __panelId__: '9'
+          summary: A monitoring target (the job label says which) cannot be scraped.
+
+      - uid: td-postgres-down
+        title: Postgres down
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'pg_up'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-postgres
+          __panelId__: '2'
+          summary: postgres-exporter cannot reach Postgres.
+
+      - uid: td-backend-not-ready
+        title: Backend not ready
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - (max(tigerduck_ready_last_ok_timestamp_seconds > 0) or max(process_start_time_seconds{job="backend"}))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [180]}}]}
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '3'
+          summary: GET /ready has not answered ok for over 3 minutes (seconds since in the value); the database or the scheduler is down.
+
+      - uid: td-http-5xx
+        title: Backend 5xx ratio
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: '(sum(rate(tigerduck_http_requests_total{status=~"5.."}[5m])) / sum(rate(tigerduck_http_requests_total[5m]))) and on() (sum(rate(tigerduck_http_requests_total[5m])) > 0.1)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0.05]}}]}
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '5'
+          summary: Over 5% of API requests answered 5xx for 10 minutes.
+
+      # --- Database -------------------------------------------------------
+      - uid: td-db-connections
+        title: Postgres connections nearly used up
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'sum(pg_stat_activity_count) / max(pg_settings_max_connections)'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0.8]}}]}
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-postgres
+          __panelId__: '4'
+          summary: Over 80% of max_connections in use for 5 minutes.
+
+      - uid: td-db-pool
+        title: Backend DB pool nearly exhausted
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'sum(tigerduck_db_pool_connections{state="checked_out"}) / (sum(tigerduck_db_pool_size) + sum(tigerduck_db_pool_max_overflow))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0.8]}}]}
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '20'
+          summary: Over 80% of the backend's SQLAlchemy pool (pool_size plus max_overflow) checked out for 5 minutes.
+
+      # --- Push and scheduler ---------------------------------------------
+      - uid: td-push-tick-stalled
+        title: Push tick stalled
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="push_pipeline_tick"}) or max(process_start_time_seconds{job="backend"}))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [120]}}]}
+        for: 2m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '15'
+          summary: push_pipeline_tick has not succeeded for over 2 minutes (seconds since in the value).
+
+      - uid: td-scheduler-errors
+        title: Scheduler job erroring
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'sum by (job_id) (increase(tigerduck_scheduler_job_runs_total{outcome="error"}[30m]))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [3]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '18'
+          summary: A scheduler job (job_id label) raised more than 3 times in 30 minutes.
+
+      - uid: td-push-delay
+        title: Push delayed
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'max(tigerduck_push_oldest_due_seconds)'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [300]}}]}
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-push-jobs
+          __panelId__: '12'
+          summary: The oldest due push job has waited over 5 minutes.
+
+      - uid: td-push-stuck
+        title: Push job stuck in processing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max(tigerduck_push_oldest_lock_age_seconds) - max(tigerduck_stale_lock_seconds{queue="push"})'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-push-jobs
+          __panelId__: '5'
+          summary: A push job has been locked longer than the stale-lock limit.
+
+      - uid: td-push-failures
+        title: Push delivery failure ratio
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: '(sum(tigerduck_push_deliveries_last_hour{status="failed", unregistered="false"}) / sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed", unregistered="false"})) and on() (sum(tigerduck_push_deliveries_last_hour{status=~"sent|failed", unregistered="false"}) >= 20)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0.2]}}]}
+        for: 30m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-push-jobs
+          __panelId__: '10'
+          summary: Over 20% of push deliveries in the last hour failed (at least 20 attempted), not counting tokens APNs or FCM no longer know.
+
+      - uid: td-push-timeouts
+        title: APNs or FCM timing out
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'sum by (provider) (rate(tigerduck_push_send_duration_seconds_count{outcome="timeout"}[10m]))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 10m
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-push-jobs
+          __panelId__: '14'
+          summary: Sends to a push provider (provider label) kept timing out for 10 minutes.
+
+      # --- Bulletins and accounts -----------------------------------------
+      - uid: td-bulletin-scrape-empty
+        title: Bulletin scrape reads nothing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job="backend"}))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [3600]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-bulletins
+          __panelId__: '6'
+          summary: No bulletin scrape has parsed a row for over an hour; NTUST may have changed the page.
+
+      - uid: td-relogin-surge
+        title: Many accounts need to sign in again
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'delta((sum(tigerduck_external_accounts{credential_status!="active"}) or (sum(tigerduck_external_accounts) * 0))[1h:])'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [30]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-overview
+          __panelId__: '7'
+          summary: Over 30 more linked accounts need a new sign-in than an hour ago; the school sign-in may have changed.
+
+      - uid: td-refresh-reuse
+        title: Refresh token reuse
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'max(tigerduck_auth_reuse_detected_24h)'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [20]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-devices
+          __panelId__: '9'
+          summary: Over 20 refresh-token reuse detections in 24 hours.
+
+      # --- Backups (deploy/backup/tigerduck-backup.sh) ---------------------
+      # 0 until the first success; no data means sql-exporter cannot read it.
+      - uid: td-backup-stale
+        title: Off-site backup stale
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - max(tigerduck_backup_last_success_timestamp_seconds{kind="backup"})'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [93600]}}]}
+        for: 30m
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: No off-site backup has succeeded for over 26 hours. See ~/Library/Logs/tigerduck-backup.log on the host.
+
+      - uid: td-backup-drill-stale
+        title: Backup restore drill stale
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - max(tigerduck_backup_last_success_timestamp_seconds{kind="drill"})'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [691200]}}]}
+        for: 30m
+        noDataState: Alerting
+        execErrState: Error
+        annotations:
+          summary: No backup restore drill has succeeded for over 8 days. See ~/Library/Logs/tigerduck-backup.log on the host.
+
+      - uid: td-backup-failed
+        title: Off-site backup or drill failed
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (kind) (tigerduck_backup_last_failure_timestamp_seconds) - max by (kind) (tigerduck_backup_last_success_timestamp_seconds)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: The last off-site backup or restore drill (kind label) failed; it resolves on the next success. See ~/Library/Logs/tigerduck-backup.log on the host.

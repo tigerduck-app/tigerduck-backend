@@ -107,3 +107,19 @@ liveness_router = APIRouter()
 @liveness_router.get("/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+_READY_DB_TIMEOUT_SECONDS = 2.0
+
+
+@liveness_router.get("/ready")
+async def ready(request: Request) -> JSONResponse:
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        return JSONResponse({"status": "fail"}, status_code=503)
+    try:
+        async with asyncio.timeout(_READY_DB_TIMEOUT_SECONDS):
+            await pool.fetchval("SELECT 1")
+    except Exception:
+        return JSONResponse({"status": "fail"}, status_code=503)
+    return JSONResponse({"status": "ok"})
