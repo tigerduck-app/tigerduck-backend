@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/announcement")
@@ -193,14 +194,14 @@ class _CreateSubmission(BaseModel):
 
 @router.post("")
 async def create_bulletin(
-    payload: _CreateSubmission, pool=Depends(get_pool)
+    payload: _CreateSubmission, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
     if payload.canonical_org not in _ORG_IDS:
         raise HTTPException(status_code=422, detail="unknown canonical_org")
     tags = [t for t in payload.content_tags if t in _TAG_IDS]
     # Born processed so the v3 user_dispatch tick fans it out to subscribers.
     external_id = f"manual-{int(time.time() * 1000)}"
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             f"""
             INSERT INTO bulletins (
@@ -225,6 +226,7 @@ async def create_bulletin(
             tags,
             payload.importance,
         )
+        await audit(conn, request, "bulletin.create", bulletin_id=row["id"])
     return JSONResponse(status_code=201, content=_detail(row))
 
 
@@ -266,7 +268,7 @@ async def update_bulletin(
         params.append(value)
         cast = "::varchar[]" if key == "content_tags" else ""
         sets.append(f"{key} = ${len(params)}{cast}")
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         exists = await conn.fetchval(
             "SELECT 1 FROM bulletins WHERE id = $1", bulletin_id
         )
@@ -279,6 +281,10 @@ async def update_bulletin(
                 f"WHERE id = ${len(params)}",
                 *params,
             )
+        await audit(
+            conn, request, "bulletin.update",
+            bulletin_id=bulletin_id, fields=sorted(data),
+        )
         row = await conn.fetchrow(
             f"SELECT {_COLS} FROM bulletins WHERE id = $1", bulletin_id
         )

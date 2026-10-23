@@ -43,8 +43,7 @@ async def env_info(request: Request) -> JSONResponse:
             "apns_config": apns_config(
                 s.apns_env, s.apns_team_id, s.apns_key_id, s.apns_key_path
             ),
-            # Per request, not per process: the same portal answers both
-            # Access-fronted and direct (dev, LAN) traffic.
+            # The operator whose Access token this request carried; null in dev.
             "access": access_session(request),
         },
         # The body names the signed-in operator, so no shared cache in

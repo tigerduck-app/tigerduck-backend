@@ -3,6 +3,7 @@
 from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
+from ...audit import audit
 from ...db import get_pool
 
 router = APIRouter(prefix="/api/moodle")
@@ -11,11 +12,13 @@ router = APIRouter(prefix="/api/moodle")
 class RetryAllRequest(BaseModel):
     notify: bool = False
 @router.post("/retry-all")
-async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)):
+async def retry_all_moodle(
+    request: Request, req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)
+):
     # A job whose last run failed on the school's side stays pending until
     # its policy interval (server/syncjobs/executor.py), and keeps its
     # last_error until a run succeeds.
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         result = await conn.execute("""
             UPDATE sync_jobs
             SET status = 'pending',
@@ -47,11 +50,17 @@ async def retry_all_moodle(req: RetryAllRequest = RetryAllRequest(), pool=Depend
                 ON CONFLICT DO NOTHING
             """)
             notified = int(notified_result.split()[-1]) if notified_result else 0
+        await audit(
+            conn, request, "sync.retry_failed",
+            notify=req.notify, retried=count, notified=notified,
+        )
 
     return {"retried": count, "notified": notified}
 @router.post("/retry-all-jobs")
-async def retry_all_jobs(req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)):
-    async with pool.acquire() as conn:
+async def retry_all_jobs(
+    request: Request, req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)
+):
+    async with pool.acquire() as conn, conn.transaction():
         result = await conn.execute("""
             UPDATE sync_jobs
             SET status = 'pending',
@@ -82,10 +91,15 @@ async def retry_all_jobs(req: RetryAllRequest = RetryAllRequest(), pool=Depends(
                 ON CONFLICT DO NOTHING
             """)
             notified = int(notified_result.split()[-1]) if notified_result else 0
+        await audit(
+            conn, request, "sync.retry_all",
+            notify=req.notify, retried=count, notified=notified,
+        )
 
     return {"retried": count, "notified": notified}
 @router.get("/jobs")
 async def list_moodle_jobs(
+    request: Request,
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -116,5 +130,6 @@ async def list_moodle_jobs(
             ORDER BY sj.updated_at DESC
             LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}
         """, *params, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
 
     return [dict(r) for r in rows]

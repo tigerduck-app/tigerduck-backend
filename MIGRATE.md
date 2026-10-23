@@ -55,6 +55,29 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   to start without `TIGERDUCK_API_SHARED_SECRET`. A development `.env`
   must say `TIGERDUCK_ENV=development` (`.env.example` does).
 
+- **The portal checks the Cloudflare Access token.** Outside
+  `TIGERDUCK_ENV=development`, every `/api/*` request to the portal needs a
+  `Cf-Access-Jwt-Assertion` that verifies against
+  `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` and `TIGERDUCK_CF_ACCESS_AUD`, the two
+  values Grafana already uses; `docker-compose.yml` now passes them to the
+  portal. With either unset, or `TIGERDUCK_ENV` missing from `.env` (now
+  read as production), the portal logs an error at start and answers 403
+  to every API request. A request that skips Access (LAN straight to NPM,
+  another container on `proxy-net`) gets 403 too.
+
+- **Migration `d07bc39dde6c`** adds `admin_audit_log`, where the portal
+  records each change it makes, each look at one student's data and each
+  list of students or devices. It
+  applies on backend start. Rows older than
+  `TIGERDUCK_ADMIN_AUDIT_RETENTION_DAYS` (default 365) are deleted daily.
+
+- **After deploying**, open the portal through Access: the status page
+  should load and show your email at the top. Then open
+  `https://<portal host>/api/audit` in the same browser; it lists the
+  actions recorded so far, with your email as the actor. A 403 there means
+  the two Access values are unset or do not match the portal's Access
+  application.
+
 - **Off-site backups run nightly from launchd.** A launchd job on the host
   (`deploy/launchd/ai.tigerduck.backup.plist`) runs
   `deploy/backup/tigerduck-backup.sh nightly` at 04:30: `pg_dump -Fc` of the

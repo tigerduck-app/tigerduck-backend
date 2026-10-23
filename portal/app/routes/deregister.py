@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/deregister")
@@ -24,6 +25,7 @@ class DeregisterRequest(BaseModel):
 @router.post("")
 async def deregister_student(
     body: DeregisterRequest,
+    request: Request,
     pool=Depends(get_pool),
 ) -> JSONResponse:
     student_id = body.student_id.strip()
@@ -119,6 +121,9 @@ async def deregister_student(
                 "DELETE FROM external_accounts WHERE user_id = $1", user_id
             )
             await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+            await audit(
+                conn, request, "user.deregister", user_id=user_id, devices=len(devices)
+            )
 
     report = {
         "deleted": True,

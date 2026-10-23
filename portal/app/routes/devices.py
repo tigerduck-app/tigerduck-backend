@@ -16,9 +16,10 @@ Field mapping (v2 device_registrations → v3):
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query, Request
 from fastapi.responses import JSONResponse
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/devices")
@@ -124,6 +125,7 @@ def _row_to_device(r) -> dict:
 
 @router.get("")
 async def list_devices(
+    request: Request,
     pool=Depends(get_pool),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
@@ -135,6 +137,7 @@ async def list_devices(
     async with pool.acquire() as conn:
         total = await conn.fetchval(_COUNT_SQL, needle)
         rows = await conn.fetch(_LIST_SQL, needle, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
             "items": [_row_to_device(r) for r in rows],
@@ -145,6 +148,7 @@ async def list_devices(
 
 @router.post("/deregister")
 async def deregister_devices(
+    request: Request,
     pool=Depends(get_pool),
     body: dict = Body(default={}),
 ) -> JSONResponse:
@@ -156,13 +160,19 @@ async def deregister_devices(
         # autocommits, and a crash between them would leave a soft-deleted
         # device with still-active push tokens.
         async with conn.transaction():
-            result = await conn.execute("""
+            deleted = await conn.fetch("""
                 UPDATE user_devices
                 SET deleted_at = now()
                 WHERE id::text = ANY($1::text[])
                   AND deleted_at IS NULL
+                RETURNING id, user_id
             """, device_ids)
-            count = int(result.split()[-1]) if result else 0
+            count = len(deleted)
+            for d in deleted:
+                await audit(
+                    conn, request, "device.deregister",
+                    user_id=d["user_id"], device_id=d["id"],
+                )
             if count > 0:
                 await conn.execute("""
                     UPDATE device_push_tokens

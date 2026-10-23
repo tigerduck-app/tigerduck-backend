@@ -1,6 +1,11 @@
-"""Restore dumps the live database first and refuses to restore without it."""
+"""Restore dumps the live database first and refuses to restore without it.
+
+`calls` lists the tools run and, as `audit:<action>`, the audit rows written:
+only a restore that succeeds writes one.
+"""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -20,6 +25,12 @@ class _Proc:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return b"", self._stderr
+
+
+class _Pool:
+    @asynccontextmanager
+    async def acquire(self):
+        yield object()
 
 
 def _fake_tools(calls: list[str], pg_dump_ok: bool, pg_restore_ok: bool):
@@ -45,10 +56,16 @@ async def _import(
         "create_subprocess_exec",
         _fake_tools(calls, pg_dump_ok, pg_restore_ok),
     )
+
+    async def audit(conn, request, action, **kwargs):
+        calls.append(f"audit:{action}")
+
+    monkeypatch.setattr(backup, "audit", audit)
     app = FastAPI()
     app.state.settings = Settings.model_construct(
         database_url="postgresql+asyncpg://tigerduck:pw@tigerduck-db:5432/tigerduck"
     )
+    app.state.pool = _Pool()
     app.include_router(backup.router)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://portal") as client:
@@ -64,7 +81,7 @@ async def test_restore_takes_a_dump_of_the_live_database_first(
     r, calls = await _import(monkeypatch, tmp_path, pg_dump_ok=True)
 
     assert r.status_code == 200
-    assert calls == ["pg_dump", "pg_restore"]
+    assert calls == ["pg_dump", "pg_restore", "audit:backup.import"]
     saved = tmp_path / "pre-restore" / r.json()["pre_restore_dump"]
     assert saved.read_bytes() == b"PGDMP live"
     assert saved.stat().st_mode & 0o777 == 0o600
