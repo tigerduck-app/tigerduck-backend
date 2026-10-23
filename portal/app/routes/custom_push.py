@@ -18,10 +18,11 @@ import json
 import secrets
 from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/custom-push")
@@ -160,7 +161,9 @@ async def preview(filt: _TargetFilter, pool=Depends(get_pool)) -> JSONResponse:
 
 
 @router.post("")
-async def send(body: _SendRequest, pool=Depends(get_pool)) -> JSONResponse:
+async def send(
+    body: _SendRequest, request: Request, pool=Depends(get_pool)
+) -> JSONResponse:
     where, params = _targeting_where(body)
     sql = (
         f"SELECT ud.id::text AS device_id, ud.user_id::text AS user_id "
@@ -257,6 +260,21 @@ async def send(body: _SendRequest, pool=Depends(get_pool)) -> JSONResponse:
                         for t in targets
                     ],
                 )
+            # A user or device filter matches one account or device.
+            first = targets[0] if targets else None
+            await audit(
+                conn,
+                request,
+                "push.custom.send",
+                user_id=first["user_id"] if first and body.user_id else None,
+                device_id=first["device_id"] if first and body.device_id else None,
+                request_id=request_id,
+                kind=kind,
+                target_classes=list(body.target_classes),
+                list_id=body.list_id,
+                force_ring=body.force_ring,
+                matched=matched,
+            )
     return JSONResponse(
         content={
             "request_id": request_id,

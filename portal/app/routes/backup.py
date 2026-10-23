@@ -22,6 +22,9 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 
+from ..audit import audit
+from ..db import get_pool
+
 router = APIRouter(prefix="/api/backup")
 
 BUNDLE_VERSION = 1
@@ -93,6 +96,8 @@ async def export_bundle(request: Request) -> FileResponse:
         tar_path = workdir / f"{bundle_name}.tar.gz"
         with tarfile.open(tar_path, "w:gz") as tar:
             tar.add(staging, arcname=bundle_name)
+        async with get_pool(request).acquire() as conn:
+            await audit(conn, request, "backup.export")
     except Exception:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
@@ -194,4 +199,7 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
                 f"pg_restore failed: {stderr.decode(errors='replace')[:500]}",
             )
 
+    # Written after the restore, which replaces admin_audit_log with the dump's copy.
+    async with get_pool(request).acquire() as conn:
+        await audit(conn, request, "backup.import")
     return JSONResponse({"ok": True, "imported_at": datetime.now(UTC).isoformat()})

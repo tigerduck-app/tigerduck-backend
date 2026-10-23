@@ -1,0 +1,295 @@
+"""Every /api request needs a valid Cloudflare Access JWT outside development.
+
+Tokens are signed here with a local RSA key. The key set is served by a
+stand-in for urllib's opener, below PyJWKClient, so its own fetch, cache and
+refetch limit run; no test talks to Cloudflare.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import io
+import json
+import time
+from types import SimpleNamespace
+from urllib.error import URLError
+
+import httpx
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from fastapi import FastAPI, Request
+from jwt import jwks_client
+
+from app.access import build_verifier, require_access
+from app.config import Settings
+from app.routes import status
+
+pytestmark = pytest.mark.anyio
+
+TEAM = "team.cloudflareaccess.com"
+AUD = "portal-aud-tag"
+KID = "test-key"
+JWT_HEADER = "Cf-Access-Jwt-Assertion"
+
+SIGNING_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+OTHER_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def _jwks() -> dict:
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(SIGNING_KEY.public_key()))
+    jwk.update(kid=KID, alg="RS256", use="sig")
+    return {"keys": [jwk]}
+
+
+class _KeyServer:
+    """Answers the key-set fetch and counts it."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+        self.down = False
+
+    def build_opener(self, *handlers):
+        return self
+
+    def open(self, request, timeout: float):
+        self.timeouts.append(timeout)
+        if self.down:
+            raise URLError("unreachable")
+        return io.BytesIO(json.dumps(_jwks()).encode())
+
+
+@pytest.fixture(autouse=True)
+def keys(monkeypatch: pytest.MonkeyPatch) -> _KeyServer:
+    server = _KeyServer()
+    monkeypatch.setattr(jwks_client.urllib.request, "build_opener", server.build_opener)
+    return server
+
+
+def _claims(
+    *,
+    aud: str = AUD,
+    iss: str = f"https://{TEAM}",
+    expires_in: int = 300,
+    email: str = "ops@example.com",
+) -> dict:
+    return {
+        "aud": [aud],
+        "iss": iss,
+        "exp": int(time.time()) + expires_in,
+        "email": email,
+    }
+
+
+def _token(*, key=SIGNING_KEY, kid: str = KID, **claims) -> str:
+    return jwt.encode(_claims(**claims), key, algorithm="RS256", headers={"kid": kid})
+
+
+def _unsigned_token() -> str:
+    return jwt.encode(_claims(), None, algorithm="none", headers={"kid": KID})
+
+
+def _hs256_signed_with_the_public_key() -> str:
+    # Built by hand: PyJWT refuses to use a PEM public key as an HMAC secret.
+    def segment(data: bytes) -> bytes:
+        return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+    header = {"alg": "HS256", "typ": "JWT", "kid": KID}
+    signing_input = (
+        segment(json.dumps(header).encode()) + b"." + segment(json.dumps(_claims()).encode())
+    )
+    secret = SIGNING_KEY.public_key().public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
+    signature = hmac.new(secret, signing_input, hashlib.sha256).digest()
+    return (signing_input + b"." + segment(signature)).decode()
+
+
+def _app(env: str = "production", team: str = TEAM, aud: str = AUD) -> FastAPI:
+    app = FastAPI()
+    settings = Settings.model_construct(
+        env=env, cf_access_team_domain=team, cf_access_aud=aud
+    )
+    app.state.settings = settings
+    app.state.access_verifier = build_verifier(settings)
+    app.middleware("http")(require_access)
+    app.include_router(status.router)
+    app.include_router(status.liveness_router)
+
+    @app.post("/api/echo")
+    async def echo(request: Request) -> dict:
+        return {"actor": request.state.actor}
+
+    return app
+
+
+async def _call(
+    app: FastAPI, method: str, path: str, headers: dict[str, str] | None = None
+) -> httpx.Response:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://portal") as c:
+        return await c.request(method, path, headers=headers)
+
+
+def _auth(token: str, **extra: str) -> dict[str, str]:
+    return {JWT_HEADER: token, "Sec-Fetch-Site": "same-origin", **extra}
+
+
+async def test_a_valid_token_names_the_actor() -> None:
+    r = await _call(_app(), "POST", "/api/echo", _auth(_token()))
+
+    assert r.status_code == 200
+    assert r.json() == {"actor": "ops@example.com"}
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        pytest.param(_token(aud="another-app"), id="wrong-aud"),
+        pytest.param(_token(iss="https://evil.cloudflareaccess.com"), id="wrong-iss"),
+        pytest.param(_token(expires_in=-60), id="expired"),
+        pytest.param(_token(key=OTHER_KEY), id="bad-signature"),
+        pytest.param(_unsigned_token(), id="alg-none"),
+        pytest.param(_hs256_signed_with_the_public_key(), id="hs256-public-key"),
+        pytest.param(_token(email=""), id="no-email"),
+        pytest.param("not-a-jwt", id="garbage"),
+    ],
+)
+async def test_a_bad_token_is_refused(token: str) -> None:
+    r = await _call(_app(), "GET", "/api/env", {JWT_HEADER: token})
+
+    assert r.status_code == 403
+
+
+async def test_a_missing_token_is_refused() -> None:
+    # The email header alone was trusted before; it proves nothing.
+    r = await _call(
+        _app(), "GET", "/api/env", {"Cf-Access-Authenticated-User-Email": "ops@example.com"}
+    )
+
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize("team,aud", [("", AUD), (TEAM, ""), ("", "")])
+async def test_production_without_access_config_refuses_everything(
+    team: str, aud: str
+) -> None:
+    r = await _call(_app(team=team, aud=aud), "GET", "/api/env", {JWT_HEADER: _token()})
+
+    assert r.status_code == 403
+
+
+async def test_development_skips_the_check_and_calls_the_actor_dev() -> None:
+    app = _app(env="development", team="", aud="")
+
+    echo = await _call(app, "POST", "/api/echo")
+    env = await _call(app, "GET", "/api/env")
+
+    assert echo.json() == {"actor": "dev"}
+    assert env.json()["access"] is None
+
+
+async def test_health_needs_no_token() -> None:
+    r = await _call(_app(), "GET", "/health")
+
+    assert r.status_code == 200
+
+
+async def test_env_shows_the_verified_identity_not_the_email_header() -> None:
+    r = await _call(
+        _app(),
+        "GET",
+        "/api/env",
+        _auth(_token(), **{"Cf-Access-Authenticated-User-Email": "spoof@example.com"}),
+    )
+
+    assert r.status_code == 200
+    assert r.json()["access"] == {
+        "email": "ops@example.com",
+        "logout_url": "/cdn-cgi/access/logout",
+    }
+    # The body names the operator, so no shared cache may keep it.
+    assert r.headers["cache-control"] == "private, no-store"
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+async def test_a_cross_site_write_is_refused(site: str) -> None:
+    r = await _call(
+        _app(), "POST", "/api/echo", {JWT_HEADER: _token(), "Sec-Fetch-Site": site}
+    )
+
+    assert r.status_code == 403
+
+
+async def test_a_cross_site_read_is_allowed() -> None:
+    r = await _call(
+        _app(), "GET", "/api/env", {JWT_HEADER: _token(), "Sec-Fetch-Site": "cross-site"}
+    )
+
+    assert r.status_code == 200
+
+
+async def test_without_sec_fetch_site_a_foreign_origin_write_is_refused() -> None:
+    r = await _call(
+        _app(),
+        "POST",
+        "/api/echo",
+        {JWT_HEADER: _token(), "Origin": "https://evil.example"},
+    )
+
+    assert r.status_code == 403
+
+
+async def test_without_sec_fetch_site_a_same_origin_write_is_allowed() -> None:
+    r = await _call(
+        _app(), "POST", "/api/echo", {JWT_HEADER: _token(), "Origin": "http://portal"}
+    )
+
+    assert r.status_code == 200
+
+
+async def test_development_still_refuses_cross_site_writes() -> None:
+    r = await _call(
+        _app(env="development"), "POST", "/api/echo", {"Sec-Fetch-Site": "cross-site"}
+    )
+
+    assert r.status_code == 403
+
+
+async def test_the_key_fetch_gives_up_after_5_seconds(keys: _KeyServer) -> None:
+    r = await _call(_app(), "POST", "/api/echo", _auth(_token()))
+
+    assert r.status_code == 200
+    assert keys.timeouts == [5]
+
+
+async def test_made_up_kids_refetch_the_keys_at_most_once_a_minute(
+    keys: _KeyServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(jwks_client, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    app = _app()
+
+    async def made_up_kids() -> None:
+        for i in range(5):
+            r = await _call(app, "GET", "/api/env", {JWT_HEADER: _token(kid=f"x{i}")})
+            assert r.status_code == 403
+
+    await made_up_kids()
+    assert len(keys.timeouts) == 1
+    clock[0] += 31
+    await made_up_kids()
+    assert len(keys.timeouts) == 1
+    clock[0] += 30
+    await made_up_kids()
+    assert len(keys.timeouts) == 2
+
+
+async def test_an_unreachable_key_set_refuses_the_request(keys: _KeyServer) -> None:
+    keys.down = True
+
+    r = await _call(_app(), "GET", "/api/env", {JWT_HEADER: _token()})
+
+    assert r.status_code == 403

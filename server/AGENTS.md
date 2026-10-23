@@ -31,6 +31,7 @@ server/
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
+├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
@@ -292,14 +293,19 @@ into the backend container via `docker-compose.yml`.
 - Do not commit `docker-compose.override.yml` — it's the gitignored
   per-machine tweak file. The canonical dev override is the committed
   `docker-compose.dev.yml`.
-- Do not add app-level auth (basic-auth, sessions, JWT…) to the
-  portal. The portal is stateless and trusts whatever is in front of
-  it (Cloudflare Zero Trust in prod, nothing in dev). Add an
-  auth-proxy if a gate becomes necessary, rather than re-introducing
-  an admin list / session store inside the portal.
-- Do not authorize anything on `Cf-Access-Authenticated-User-Email`. The
-  portal reads it (`portal/app/access.py`) only to show who signed in and
-  offer the Access sign-out; a client that bypasses Access can set it.
+- Do not add sign-in, sessions or an admin list to the portal. It
+  stays stateless: `portal/app/access.py` verifies the Cloudflare Access
+  JWT (`Cf-Access-Jwt-Assertion`) on every `/api/*` request, the check
+  Grafana makes, and only `TIGERDUCK_ENV=development` skips it. Paths
+  outside `/api/` are served to anyone, so data goes under `/api/`.
+- Do not trust `Cf-Access-Authenticated-User-Email` or any other identity
+  header; a client that bypasses Access can set them. The operator is
+  `request.state.actor`, taken from the verified token.
+- Do not add a portal route that changes state, shows one account's or
+  device's data, or lists many students or devices without an `audit()`
+  call (`portal/app/audit.py`) inside its transaction;
+  `portal/tests/test_audit_coverage.py` fails for one without it. `detail` takes counts and filters, never a student id,
+  a typed search, a push body or a token.
 - Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
   belongs to the host operator running `./start.sh`. The import flow

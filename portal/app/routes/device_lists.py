@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/device-lists")
@@ -48,7 +49,7 @@ async def create_list(request: Request, pool=Depends(get_pool)) -> JSONResponse:
     if not name:
         return JSONResponse(status_code=400, content={"detail": "name required"})
     description = body.get("description")
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         existing = await conn.fetchval(
             "SELECT 1 FROM device_lists WHERE name = $1", name
         )
@@ -65,6 +66,7 @@ async def create_list(request: Request, pool=Depends(get_pool)) -> JSONResponse:
             name,
             description,
         )
+        await audit(conn, request, "device_list.create", list_id=row["id"])
     return JSONResponse(content=_list_to_dict({**dict(row), "member_count": 0}))
 
 
@@ -82,7 +84,7 @@ async def update_list(
     list_id: int, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
     body = await request.json()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         exists = await conn.fetchval(
             "SELECT 1 FROM device_lists WHERE id = $1", list_id
         )
@@ -109,14 +111,18 @@ async def update_list(
             "description" in body,
             body.get("description"),
         )
+        await audit(conn, request, "device_list.update", list_id=list_id)
         row = await conn.fetchrow(_LIST_SELECT + " WHERE dl.id = $1", list_id)
     return JSONResponse(content=_list_to_dict(row))
 
 
 @router.delete("/{list_id}")
-async def delete_list(list_id: int, pool=Depends(get_pool)) -> Response:
-    async with pool.acquire() as conn:
+async def delete_list(
+    list_id: int, request: Request, pool=Depends(get_pool)
+) -> Response:
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute("DELETE FROM device_lists WHERE id = $1", list_id)
+        await audit(conn, request, "device_list.delete", list_id=list_id)
     return Response(status_code=204)
 
 
@@ -143,6 +149,7 @@ LIMIT $2 OFFSET $3
 @router.get("/{list_id}/members")
 async def list_members(
     list_id: int,
+    request: Request,
     pool=Depends(get_pool),
     limit: int = Query(default=500, ge=1, le=2000),
     offset: int = Query(default=0, ge=0),
@@ -160,6 +167,7 @@ async def list_members(
             list_id,
         )
         rows = await conn.fetch(_MEMBERS_SQL, list_id, limit, offset)
+        await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
             "list_id": list_id,
@@ -193,7 +201,7 @@ async def add_members(
         return JSONResponse(
             status_code=400, content={"detail": "device_ids required"}
         )
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         exists = await conn.fetchval(
             "SELECT 1 FROM device_lists WHERE id = $1", list_id
         )
@@ -236,6 +244,10 @@ async def add_members(
                 """,
                 [(list_id, d) for d in to_add],
             )
+        await audit(
+            conn, request, "device_list.members.add",
+            list_id=list_id, added=len(to_add),
+        )
     unknown = [d for d in device_ids if d not in known]
     return JSONResponse(
         content={
@@ -248,9 +260,9 @@ async def add_members(
 
 @router.delete("/{list_id}/members/{device_id}")
 async def remove_member(
-    list_id: int, device_id: str, pool=Depends(get_pool)
+    list_id: int, device_id: str, request: Request, pool=Depends(get_pool)
 ) -> Response:
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             """
             DELETE FROM device_list_members
@@ -258,6 +270,10 @@ async def remove_member(
             """,
             list_id,
             device_id,
+        )
+        await audit(
+            conn, request, "device_list.members.remove",
+            device_id=device_id, list_id=list_id,
         )
     return Response(status_code=204)
 
