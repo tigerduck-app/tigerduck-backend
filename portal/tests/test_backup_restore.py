@@ -107,3 +107,32 @@ async def test_restore_is_refused_when_the_pre_restore_dump_fails(
     assert "nothing was restored" in r.json()["detail"]
     assert calls == ["pg_dump"]
     assert list((tmp_path / "pre-restore").iterdir()) == []
+
+
+async def test_dumps_taken_in_the_same_second_get_files_of_their_own(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(backup, "PRE_RESTORE_DIR", tmp_path / "pre-restore")
+    monkeypatch.setattr(
+        backup.asyncio,
+        "create_subprocess_exec",
+        _fake_tools(calls, pg_dump_ok=True, pg_restore_ok=True),
+    )
+    url = "postgresql+asyncpg://tigerduck:pw@tigerduck-db:5432/tigerduck"
+
+    first = await backup._pre_restore_dump(url)
+    second = await backup._pre_restore_dump(url)
+
+    assert first != second
+    assert first.read_bytes() == second.read_bytes() == b"PGDMP live"
+
+
+async def test_a_second_restore_is_refused_while_one_runs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    async with backup._RESTORE_LOCK:
+        r, calls = await _import(monkeypatch, tmp_path, pg_dump_ok=True)
+
+    assert r.status_code == 409
+    assert calls == []
