@@ -67,7 +67,7 @@ from server.auth.models import (
 from server.auth.schemas import ScheduleScenario
 from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
-from server.db import session_scope
+from server.db import lift_timeouts, session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
@@ -321,6 +321,7 @@ async def _process_job(
         # Moodle, and no transaction stays open while it does.
         check = await check_before_send(worker, job_id=job_id, breaker=breaker)
         async with session_scope(worker.session_factory) as session:
+            await lift_timeouts(session)
             job = (
                 await session.execute(
                     select(PushJob).where(PushJob.id == job_id).with_for_update()
