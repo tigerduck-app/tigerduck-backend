@@ -11,6 +11,36 @@ router = APIRouter(prefix="/api/moodle")
 
 class RetryAllRequest(BaseModel):
     notify: bool = False
+
+
+async def _waiting_to_sign_in(conn) -> list:
+    """The users with a disabled job, the ones waiting for a sign-in, locked
+    for the reset that follows: only they get the expire notification
+    (tigerduck-backend#54)."""
+    rows = await conn.fetch("""
+        SELECT user_id FROM sync_jobs
+        WHERE job_type IN ('moodle_assignments', 'ntust_courses')
+          AND status = 'disabled'
+        FOR UPDATE
+    """)
+    return list({r["user_id"] for r in rows})
+
+
+async def _notify_expired(conn, user_ids: list) -> int:
+    if not user_ids:
+        return 0
+    result = await conn.execute("""
+        INSERT INTO push_jobs (user_id, dedupe_key, channel, scenario, fire_at, payload)
+        SELECT u,
+               'system:moodle_expired:' || u::text,
+               'system',
+               'reauth_required',
+               now(),
+               '{"reason": "operator_retry", "provider": "ntust_sso"}'::jsonb
+        FROM unnest($1::uuid[]) AS u
+        ON CONFLICT DO NOTHING
+    """, user_ids)
+    return int(result.split()[-1]) if result else 0
 @router.post("/retry-all")
 async def retry_all_moodle(
     request: Request, req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)
@@ -19,6 +49,7 @@ async def retry_all_moodle(
     # its policy interval (server/syncjobs/executor.py), and keeps its
     # last_error until a run succeeds.
     async with pool.acquire() as conn, conn.transaction():
+        waiting = await _waiting_to_sign_in(conn) if req.notify else []
         result = await conn.execute("""
             UPDATE sync_jobs
             SET status = 'pending',
@@ -32,24 +63,7 @@ async def retry_all_moodle(
                    OR (status = 'pending' AND last_error IS NOT NULL))
         """)
         count = int(result.split()[-1]) if result else 0
-
-        notified = 0
-        if req.notify and count > 0:
-            notified_result = await conn.execute("""
-                INSERT INTO push_jobs (user_id, dedupe_key, channel, scenario, fire_at, payload)
-                SELECT DISTINCT sj.user_id,
-                       'system:moodle_expired:' || sj.user_id::text,
-                       'system',
-                       'reauth_required',
-                       now(),
-                       '{"reason": "operator_retry", "provider": "ntust_sso"}'::jsonb
-                FROM sync_jobs sj
-                WHERE sj.job_type IN ('moodle_assignments', 'ntust_courses')
-                  AND sj.status = 'pending'
-                  AND sj.attempts = 0
-                ON CONFLICT DO NOTHING
-            """)
-            notified = int(notified_result.split()[-1]) if notified_result else 0
+        notified = await _notify_expired(conn, waiting)
         await audit(
             conn, request, "sync.retry_failed",
             notify=req.notify, retried=count, notified=notified,
@@ -61,6 +75,7 @@ async def retry_all_jobs(
     request: Request, req: RetryAllRequest = RetryAllRequest(), pool=Depends(get_pool)
 ):
     async with pool.acquire() as conn, conn.transaction():
+        waiting = await _waiting_to_sign_in(conn) if req.notify else []
         result = await conn.execute("""
             UPDATE sync_jobs
             SET status = 'pending',
@@ -73,24 +88,7 @@ async def retry_all_jobs(
               AND status IN ('pending', 'disabled', 'failed')
         """)
         count = int(result.split()[-1]) if result else 0
-
-        notified = 0
-        if req.notify and count > 0:
-            notified_result = await conn.execute("""
-                INSERT INTO push_jobs (user_id, dedupe_key, channel, scenario, fire_at, payload)
-                SELECT DISTINCT sj.user_id,
-                       'system:moodle_expired:' || sj.user_id::text,
-                       'system',
-                       'reauth_required',
-                       now(),
-                       '{"reason": "operator_retry", "provider": "ntust_sso"}'::jsonb
-                FROM sync_jobs sj
-                WHERE sj.job_type IN ('moodle_assignments', 'ntust_courses')
-                  AND sj.status = 'pending'
-                  AND sj.attempts = 0
-                ON CONFLICT DO NOTHING
-            """)
-            notified = int(notified_result.split()[-1]) if notified_result else 0
+        notified = await _notify_expired(conn, waiting)
         await audit(
             conn, request, "sync.retry_all",
             notify=req.notify, retried=count, notified=notified,

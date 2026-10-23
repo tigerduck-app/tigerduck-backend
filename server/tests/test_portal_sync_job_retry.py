@@ -138,3 +138,20 @@ async def test_retry_all_takes_every_job_but_a_running_one(db_session, portal_po
     assert await _requeued(db_session, jobs) == {
         "failed", "disabled", "retrying", "healthy",
     }
+
+
+@pytest.mark.parametrize("button", [retry_all_moodle, retry_all_jobs])
+async def test_the_expire_notification_goes_only_to_a_student_waiting_to_sign_in(
+    db_session, portal_pool, button
+):
+    """tigerduck-backend#54: the notification went to every user whose job
+    was pending with no attempts after the retry, a healthy one included."""
+    await _queue(db_session)
+
+    result = await button(_REQUEST, RetryAllRequest(notify=True), pool=portal_pool)
+
+    assert result["notified"] == 1
+    notified = await portal_pool.fetch(
+        "SELECT u.student_id, p.scenario FROM push_jobs p JOIN users u ON u.id = p.user_id"
+    )
+    assert [tuple(r) for r in notified] == [("b2", "reauth_required")]
