@@ -61,7 +61,7 @@ from server.syncjobs.availability import is_moodle_available
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
-    load_credential_blob,
+    load_credential,
     mark_credentials_invalid,
 )
 from server.syncjobs.models import (
@@ -450,19 +450,18 @@ async def _start_run(
         if owned is None:
             return None
         job, _run = owned
-        _account, blob = await load_credential_blob(
+        _account, credential, blob = await load_credential(
             session, worker.cipher, external_account_id=job.external_account_id
         )
+        # One row read gives both the token and the nonce a rejection compares.
+        nonce = credential.nonce
         token = (blob.get("token_cache") or {}).get("moodle_token")
         if not isinstance(token, str) or not token:
             raise CredentialInvalid("moodle_token_missing")
         await log_sync(session, user_id=job.user_id, source="executor",
                        message=f"Job started: {job.job_type}",
                        detail={"job_id": job.id, "run_id": run_id})
-        credential = await session.get(
-            ExternalAccountCredential, job.external_account_id
-        )
-        return job.job_type, job.user_id, token, credential.nonce
+        return job.job_type, job.user_id, token, nonce
 
 
 async def _drop_courses_left_out(

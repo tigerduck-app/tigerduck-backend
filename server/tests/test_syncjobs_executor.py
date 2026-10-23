@@ -557,6 +557,48 @@ async def test_a_token_stored_while_moodle_rejected_the_old_one_stays_valid(
     assert pushes == []
 
 
+async def test_a_token_stored_right_after_the_run_read_its_own_stays_valid(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The nonce a rejection compares must come from the row the token was
+    decrypted from. A fresh token stored just after that read must not be
+    taken for the one Moodle rejected, as a second read would."""
+    user, account, job = await _setup_user_job(db_session)
+    real_load = executor_module.load_credential
+
+    async def load_then_fresh_token_stored(session, cipher, *, external_account_id):
+        loaded = await real_load(
+            session, cipher, external_account_id=external_account_id
+        )
+        fresh = _cipher().encrypt(
+            {"token_cache": {"moodle_token": "tok-2"}},
+            build_credential_aad(account.id, "ntust_sso"),
+        )
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE external_account_credentials SET "
+                    "ciphertext = :c, nonce = :n WHERE external_account_id = :a"
+                ),
+                {"c": fresh.ciphertext, "n": fresh.nonce, "a": account.id},
+            )
+        return loaded
+
+    monkeypatch.setattr(
+        executor_module, "load_credential", load_then_fresh_token_stored
+    )
+    fetcher = StubFetcher(errors=[MoodleTokenInvalid("dead")])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    assert fetcher.calls == ["tok-1"]
+    await db_session.refresh(account)
+    assert account.credential_status == "active"
+    await db_session.refresh(job)
+    assert job.status == "pending"
+
+
 async def _run_when_due(db_session, worker, job) -> None:
     job.run_after = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
