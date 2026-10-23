@@ -10,9 +10,11 @@ of its own.
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import asyncpg
 import pytest
@@ -33,6 +35,7 @@ from server.syncjobs.models import SyncJob  # noqa: E402
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 _LATER = timedelta(hours=8)
+_REQUEST = SimpleNamespace(state=SimpleNamespace(actor="ops@example.com"))
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -114,10 +117,13 @@ async def test_retry_all_failed_takes_a_job_that_keeps_retrying(
     running jobs alone."""
     jobs = await _queue(db_session)
 
-    result = await retry_all_moodle(RetryAllRequest(), pool=portal_pool)
+    result = await retry_all_moodle(_REQUEST, RetryAllRequest(), pool=portal_pool)
 
     assert result == {"retried": 3, "notified": 0}
     assert await _requeued(db_session, jobs) == {"failed", "disabled", "retrying"}
+    audit = await portal_pool.fetchrow("SELECT actor, action, detail FROM admin_audit_log")
+    assert (audit["actor"], audit["action"]) == ("ops@example.com", "sync.retry_failed")
+    assert json.loads(audit["detail"]) == {"notify": False, "retried": 3, "notified": 0}
 
 
 async def test_retry_all_takes_every_job_but_a_running_one(db_session, portal_pool):
@@ -126,7 +132,7 @@ async def test_retry_all_takes_every_job_but_a_running_one(db_session, portal_po
     all failed did, and from now on less."""
     jobs = await _queue(db_session)
 
-    result = await retry_all_jobs(RetryAllRequest(), pool=portal_pool)
+    result = await retry_all_jobs(_REQUEST, RetryAllRequest(), pool=portal_pool)
 
     assert result == {"retried": 4, "notified": 0}
     assert await _requeued(db_session, jobs) == {

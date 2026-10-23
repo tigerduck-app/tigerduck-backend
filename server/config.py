@@ -184,6 +184,8 @@ class Settings(BaseSettings):
     push_retry_round_delay_seconds: int = 60
     push_job_retention_days: int = 7
     push_job_retention_interval_hours: int = 24
+    # Portal audit rows (admin_audit.py) older than this are deleted daily.
+    admin_audit_retention_days: int = 365
     # Pre-send check (push/presend.py). An assignment reminder or countdown
     # start whose submission state nobody could confirm is retried this often
     # until this long after its fire time, and then cancelled.

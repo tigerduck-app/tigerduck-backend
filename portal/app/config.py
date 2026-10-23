@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     apns_key_id: str = ""
     fcm_credentials_path: str = ""
     fcm_project_id: str = ""
+    # For the API's Access JWT check (access.py); Grafana reads the same two.
+    cf_access_team_domain: str = ""
+    cf_access_aud: str = ""
 
     # Public URLs surfaced on the status page so an operator can hop
     # straight from "is it up?" to "open the thing." Defaults match
@@ -52,15 +55,11 @@ class Settings(BaseSettings):
         import os
 
         env = os.environ
-        # Default matches the backend's fallback when TIGERDUCK_ENV is
-        # unset: production, as for _compose-files.sh.
-        env_mode = env.get("TIGERDUCK_ENV", "production")
+        # Unset counts as production (as in _compose-files.sh), so Access is checked.
+        env_mode = env.get("TIGERDUCK_ENV") or "production"
         # Match _compose-files.sh's URL choices so the status page and
-        # the start.sh stdout never disagree. It loads the dev override
-        # (published localhost ports) only on an exact "development" and
-        # treats a missing key as prod, so the URLs read the raw value
-        # rather than env_mode's default.
-        if env.get("TIGERDUCK_ENV") == "development":
+        # the start.sh stdout never disagree.
+        if env_mode == "development":
             default_backend = "http://localhost:40000"
             default_portal = "http://localhost:40010"
         else:
@@ -84,6 +83,10 @@ class Settings(BaseSettings):
                 "TIGERDUCK_FCM_CREDENTIALS_PATH", ""
             ),
             fcm_project_id=env.get("TIGERDUCK_FCM_PROJECT_ID", ""),
+            cf_access_team_domain=env.get(
+                "TIGERDUCK_CF_ACCESS_TEAM_DOMAIN", ""
+            ).strip(),
+            cf_access_aud=env.get("TIGERDUCK_CF_ACCESS_AUD", "").strip(),
             backend_public_url=env.get(
                 "TIGERDUCK_BACKEND_PUBLIC_URL", default_backend
             ),

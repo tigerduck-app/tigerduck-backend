@@ -29,6 +29,7 @@ from server import models  # noqa: F401  (register tables on Base.metadata)
 from server.bulletins import models as _bulletin_models  # noqa: F401
 from server.academic_calendar import models as _academic_calendar_models  # noqa: F401
 from server import system_settings as _system_settings_models  # noqa: F401
+from server import admin_audit as _admin_audit_models  # noqa: F401
 
 config = context.config
 

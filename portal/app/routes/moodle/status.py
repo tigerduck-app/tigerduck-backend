@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
+from ...audit import audit
 from ...db import get_pool
 
 router = APIRouter(prefix="/api/moodle")
@@ -45,7 +46,7 @@ async def moodle_status(pool=Depends(get_pool)):
         },
     }
 @router.get("/stats")
-async def moodle_stats(pool=Depends(get_pool)):
+async def moodle_stats(request: Request, pool=Depends(get_pool)):
     async with pool.acquire() as conn:
         summary = await conn.fetchrow("""
             SELECT
@@ -71,6 +72,7 @@ async def moodle_stats(pool=Depends(get_pool)):
             ORDER BY sr.started_at DESC
             LIMIT 50
         """)
+        await audit(conn, request, "user.list", count=len(recent))
     return {
         "summary": {
             "succeeded_24h": summary["succeeded_24h"] or 0,
@@ -95,19 +97,23 @@ async def moodle_stats(pool=Depends(get_pool)):
         ],
     }
 @router.post("/suspend")
-async def suspend_moodle(req: SuspendRequest, pool=Depends(get_pool)):
+async def suspend_moodle(
+    req: SuspendRequest, request: Request, pool=Depends(get_pool)
+):
     until = datetime.now(UTC) + timedelta(hours=req.hours)
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute("""
             INSERT INTO system_settings (key, value, updated_at)
             VALUES ('moodle_suspended_until', $1::jsonb, now())
             ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = now()
         """, f'{{"until": "{until.isoformat()}"}}')
+        await audit(conn, request, "sync.suspend", hours=req.hours)
     return {"suspended_until": until.isoformat()}
 @router.post("/resume")
-async def resume_moodle(pool=Depends(get_pool)):
-    async with pool.acquire() as conn:
+async def resume_moodle(request: Request, pool=Depends(get_pool)):
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             "DELETE FROM system_settings WHERE key = 'moodle_suspended_until'"
         )
+        await audit(conn, request, "sync.resume")
     return {"resumed": True}

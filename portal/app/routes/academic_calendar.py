@@ -17,6 +17,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
+from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/academic-calendar")
@@ -140,7 +141,7 @@ async def upsert_term(code: str, request: Request, pool=Depends(get_pool)) -> JS
     if isinstance(parsed, JSONResponse):
         return parsed
     start, end = parsed
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             "INSERT INTO semester_terms (code, start_date, end_date, name_zh, name_en) "
             "VALUES ($1,$2,$3,$4,$5) "
@@ -154,13 +155,17 @@ async def upsert_term(code: str, request: Request, pool=Depends(get_pool)) -> JS
             (body.get("name_zh") or "").strip(),
             (body.get("name_en") or "").strip(),
         )
+        await audit(conn, request, "calendar.term.upsert", code=code)
     return JSONResponse(content=_term_to_dict(row))
 
 
 @router.delete("/terms/{code}")
-async def delete_term(code: str, pool=Depends(get_pool)) -> JSONResponse:
-    async with pool.acquire() as conn:
+async def delete_term(
+    code: str, request: Request, pool=Depends(get_pool)
+) -> JSONResponse:
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute("DELETE FROM semester_terms WHERE code = $1", code)
+        await audit(conn, request, "calendar.term.delete", code=code)
     return JSONResponse(content={"deleted": code})
 
 
@@ -178,7 +183,7 @@ async def create_holiday(request: Request, pool=Depends(get_pool)) -> JSONRespon
     if isinstance(parsed, JSONResponse):
         return parsed
     start, end = parsed
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             "INSERT INTO academic_holidays (name_zh, name_en, start_date, end_date) "
             "VALUES ($1,$2,$3,$4) "
@@ -188,6 +193,7 @@ async def create_holiday(request: Request, pool=Depends(get_pool)) -> JSONRespon
             start,
             end,
         )
+        await audit(conn, request, "calendar.holiday.create", holiday_id=row["id"])
     return JSONResponse(content=_holiday_to_dict(row))
 
 
@@ -207,7 +213,7 @@ async def update_holiday(
     if isinstance(parsed, JSONResponse):
         return parsed
     start, end = parsed
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         row = await conn.fetchrow(
             "UPDATE academic_holidays SET name_zh=$2, name_en=$3, start_date=$4, "
             "end_date=$5, updated_at=now() WHERE id=$1 "
@@ -218,19 +224,26 @@ async def update_holiday(
             start,
             end,
         )
+        if row is not None:
+            await audit(
+                conn, request, "calendar.holiday.update", holiday_id=holiday_id
+            )
     if row is None:
         return JSONResponse(status_code=404, content={"detail": "holiday not found"})
     return JSONResponse(content=_holiday_to_dict(row))
 
 
 @router.delete("/holidays/{holiday_id}")
-async def delete_holiday(holiday_id: int, pool=Depends(get_pool)) -> JSONResponse:
+async def delete_holiday(
+    holiday_id: int, request: Request, pool=Depends(get_pool)
+) -> JSONResponse:
     """Deleting a holiday also drops every user's override for it.
 
     The `user_holiday_overrides` foreign key cascades, which is what we
     want: an override is "notify me anyway on *this* holiday", and it has no
     meaning once the holiday is gone.
     """
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
         await conn.execute("DELETE FROM academic_holidays WHERE id = $1", holiday_id)
+        await audit(conn, request, "calendar.holiday.delete", holiday_id=holiday_id)
     return JSONResponse(content={"deleted": holiday_id})
