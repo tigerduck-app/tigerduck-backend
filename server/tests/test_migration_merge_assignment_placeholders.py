@@ -188,6 +188,16 @@ async def _state(conn: AsyncConnection, user: uuid.UUID) -> dict[int, list[tuple
     return state
 
 
+async def _add_extension_column(conn: AsyncConnection) -> None:
+    """Today's models read a column a later migration adds."""
+    await conn.execute(
+        text(
+            "ALTER TABLE user_assignments"
+            " ADD COLUMN IF NOT EXISTS extension_due_at TIMESTAMP WITH TIME ZONE"
+        )
+    )
+
+
 async def _shown(engine, user: uuid.UUID) -> set[tuple[int, str]]:
     """The marks `/sync/full` keys to a Moodle id, which the apps show."""
     async with build_session_factory(engine)() as session:
@@ -216,13 +226,14 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
     try:
         async with engine.begin() as conn:
             user, other = await _seed(conn)
-            # Today's snapshot also reads a column a later migration adds.
+            # Today's snapshot also reads columns later migrations add.
             await conn.execute(
                 text(
                     "ALTER TABLE user_course_tombstones"
                     " ADD COLUMN IF NOT EXISTS user_added BOOLEAN NOT NULL DEFAULT false"
                 )
             )
+            await _add_extension_column(conn)
         shown = await _shown(engine, user)
 
         _alembic(migration_db_url, "upgrade", "head")
@@ -414,6 +425,7 @@ async def test_the_merged_rows_keep_the_reminder_scan_quiet(
     try:
         due = datetime.now(UTC) + timedelta(hours=30)
         async with engine.begin() as conn:
+            await _add_extension_column(conn)
             user = await _user(conn)
             device = (
                 await conn.execute(

@@ -50,6 +50,10 @@ class UserAssignment(Base):
     cutoff_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Moodle's last word on the student's extension, already in due_at and cutoff_at.
+    extension_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     allow_from_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
