@@ -111,7 +111,8 @@ portal dumps the live database to `pre-restore-<UTC>.dump` in the new
 `tigerduck_portal_pre_restore` volume, and restores nothing if that dump
 fails. To get one back:
 `docker cp tigerduck-portal:/var/lib/tigerduck-portal/pre-restore/pre-restore-<UTC>.dump .`
-Nothing prunes the volume; delete old dumps from it by hand.
+The volume keeps the newest five. When `pg_restore` itself fails, the error
+names the dump taken just before.
 
 ---
 

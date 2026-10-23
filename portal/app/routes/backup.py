@@ -30,6 +30,7 @@ router = APIRouter(prefix="/api/backup")
 BUNDLE_VERSION = 1
 
 PRE_RESTORE_DIR = Path("/var/lib/tigerduck-portal/pre-restore")
+PRE_RESTORE_KEEP = 5
 
 
 def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
@@ -77,6 +78,8 @@ async def _pre_restore_dump(database_url: str) -> Path:
     path = PRE_RESTORE_DIR / f"pre-restore-{ts}.dump"
     try:
         PRE_RESTORE_DIR.mkdir(parents=True, exist_ok=True)
+        # It holds every account's data; created before pg_dump opens it.
+        path.touch(mode=0o600)
         await _pg_dump(database_url, path)
     except (HTTPException, OSError) as exc:
         path.unlink(missing_ok=True)
@@ -84,6 +87,9 @@ async def _pre_restore_dump(database_url: str) -> Path:
         raise HTTPException(
             500, f"pre-restore backup failed, nothing was restored: {reason}"
         ) from None
+    # Names sort by time.
+    for old in sorted(PRE_RESTORE_DIR.glob("pre-restore-*.dump"))[:-PRE_RESTORE_KEEP]:
+        old.unlink(missing_ok=True)
     return path
 
 
@@ -216,7 +222,8 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
             # "error:") — treat any non-zero exit as failure.
             raise HTTPException(
                 500,
-                f"pg_restore failed: {stderr.decode(errors='replace')[:500]}",
+                f"pg_restore failed; the database before it is in "
+                f"{pre_restore.name}: {stderr.decode(errors='replace')[:500]}",
             )
 
     return JSONResponse(
