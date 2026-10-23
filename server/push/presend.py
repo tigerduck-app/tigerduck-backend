@@ -305,11 +305,12 @@ async def _database_verdict(
     alive = [row for row in assignments if row.deleted_at is None]
     if not alive:
         return _gone("no_row")
-    if job.channel == REMINDER_CHANNEL and not any(
+    if (job.channel == REMINDER_CHANNEL or due_epoch is not None) and not any(
         row.due_at is not None and int(row.due_at.timestamp()) == due_epoch
         for row in alive
     ):
-        # The scan files the reminder for the new due time.
+        # The scan files the reminder for the new due time, and the device's
+        # next `/schedule/sync` the countdown start.
         return _gone("due_changed")
     if due_epoch is not None and due_epoch <= now.timestamp():
         # Deferred past it, or claimed late: "due in 5 minutes" would be
