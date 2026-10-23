@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TigerDuck nightly off-site backup: encrypted pg_dump to Cloudflare R2, plus
+  the restore drill on Sundays. See deploy/backup/tigerduck-backup.sh and the
+  "Upgrading to 3.4.0" section of MIGRATE.md.
+
+  Install:
+    ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.backup.plist" ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist
+
+  Tear down:
+    launchctl bootout gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist
+    rm ~/Library/LaunchAgents/ai.tigerduck.backup.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.tigerduck.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/xinshoutw/selfhost/Docker/tigerduck-backend/deploy/backup/tigerduck-backup.sh</string>
+        <string>nightly</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- 04:30 host time, the quietest hour. A run missed while the Mac
+         slept starts when it wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/xinshoutw/Library/Logs/tigerduck-backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/xinshoutw/Library/Logs/tigerduck-backup.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -118,6 +118,8 @@ services:
       # Mirror the backend's secrets mount RO so the status page can
       # report "is the .p8 / fcm.json on disk?" without exposing contents.
       - ./server/secrets:/backend-secrets:ro
+      # The dump the Restore button takes of the live database first.
+      - tigerduck_portal_pre_restore:/var/lib/tigerduck-portal/pre-restore
 
   # --- Monitoring -----------------------------------------------------------
   # Metrics: postgres-exporter, sql-exporter, backend :9000 → Prometheus.
@@ -330,3 +332,4 @@ volumes:
   tigerduck_grafana:
   tigerduck_loki:
   tigerduck_alloy:
+  tigerduck_portal_pre_restore:

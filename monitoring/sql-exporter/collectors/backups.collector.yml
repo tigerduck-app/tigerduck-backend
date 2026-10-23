@@ -1,0 +1,24 @@
+# Off-site backups and their restore drill, as deploy/backup/tigerduck-backup.sh
+# records them in ops.backup_status (created by monitoring/postgres/monitor-role.sh).
+collector_name: tigerduck_backups
+
+metrics:
+  - metric_name: tigerduck_backup_last_success_timestamp_seconds
+    type: gauge
+    help: Unix time the off-site backup (kind=backup) or its restore drill (kind=drill) last succeeded; 0 if never.
+    key_labels: [kind]
+    values: [ts]
+    query: |
+      SELECT k.kind, COALESCE(extract(epoch FROM s.last_success_at), 0) AS ts
+      FROM (VALUES ('backup'), ('drill')) AS k (kind)
+      LEFT JOIN ops.backup_status AS s USING (kind)
+
+  - metric_name: tigerduck_backup_last_failure_timestamp_seconds
+    type: gauge
+    help: Unix time the off-site backup (kind=backup) or its restore drill (kind=drill) last failed; 0 if never.
+    key_labels: [kind]
+    values: [ts]
+    query: |
+      SELECT k.kind, COALESCE(extract(epoch FROM s.last_failure_at), 0) AS ts
+      FROM (VALUES ('backup'), ('drill')) AS k (kind)
+      LEFT JOIN ops.backup_status AS s USING (kind)
