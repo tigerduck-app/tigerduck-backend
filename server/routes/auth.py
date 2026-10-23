@@ -157,8 +157,11 @@ async def update_credentials(
         )
         return UpdateCredentialsResponse(updated=False)
 
-    # Read again: the account may have changed, or gone, while Moodle answered.
-    account = await session.get(ExternalAccount, account.id, populate_existing=True)
+    # Read again, locked: the account may have changed, or gone, while Moodle
+    # answered, and a sync run's invalidation must not land between here and commit.
+    account = await session.get(
+        ExternalAccount, account.id, populate_existing=True, with_for_update=True
+    )
     if account is None:
         return UpdateCredentialsResponse(updated=False)
     credential = await session.get(ExternalAccountCredential, account.id)

@@ -517,6 +517,46 @@ async def test_expired_token_disables_job_and_queues_push(
     assert push.scenario == "reauth_required"
 
 
+async def test_a_token_stored_while_moodle_rejected_the_old_one_stays_valid(
+    db_session, prepared_engine, test_settings
+):
+    """The fetch runs with no transaction open, so the app can store a fresh
+    token through PATCH /v3/auth/credentials meanwhile. Moodle rejecting the
+    old token must not invalidate the fresh one or disable the jobs."""
+    user, account, job = await _setup_user_job(db_session)
+
+    class FreshTokenStoredThenRejected(StubFetcher):
+        async def fetch_assignments(self, *, token):
+            fresh = _cipher().encrypt(
+                {"token_cache": {"moodle_token": "tok-2"}},
+                build_credential_aad(account.id, "ntust_sso"),
+            )
+            async with prepared_engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "UPDATE external_account_credentials SET "
+                        "ciphertext = :c, nonce = :n WHERE external_account_id = :a"
+                    ),
+                    {"c": fresh.ciphertext, "n": fresh.nonce, "a": account.id},
+                )
+            raise MoodleTokenInvalid("dead")
+
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=FreshTokenStoredThenRejected()
+    )
+    await run_sync_tick(worker)
+
+    await db_session.refresh(account)
+    assert account.credential_status == "active"
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    assert job.locked_by is None
+    pushes = (
+        await db_session.execute(select(PushJob).where(PushJob.user_id == user.id))
+    ).scalars().all()
+    assert pushes == []
+
+
 async def _run_when_due(db_session, worker, job) -> None:
     job.run_after = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()

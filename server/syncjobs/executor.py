@@ -53,7 +53,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import ExternalAccount
+from server.auth.models import ExternalAccount, ExternalAccountCredential
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -280,11 +280,12 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
     """Run one claimed job: read its token, fetch from Moodle with no
     transaction open, then store the result under the job's row lock again,
     re-checked, since the claim may have been taken back meanwhile."""
+    credential_nonce = None
     try:
         started = await _start_run(worker, job_id=job_id, run_id=run_id)
         if started is None:
             return
-        job_type, user_id, token = started
+        job_type, user_id, token, credential_nonce = started
         now = datetime.now(UTC)
         probe_submissions = job_type != SyncJobType.ntust_courses.value
         if not probe_submissions:
@@ -372,7 +373,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
             error=ERROR_CREDENTIAL_INVALID, detail=exc.reason,
-            is_token_invalid=True,
+            is_token_invalid=True, credential_nonce=credential_nonce,
         )
     except MoodleRateLimited:
         await _record_failure(
@@ -438,9 +439,10 @@ async def _lock_owned_job(
 
 async def _start_run(
     worker: SyncWorker, *, job_id: int, run_id: int
-) -> tuple[str, uuid.UUID, str] | None:
-    """The job's type, user and Moodle token, read and logged in a
-    transaction of its own; None if the job is no longer this worker's."""
+) -> tuple[str, uuid.UUID, str, bytes] | None:
+    """The job's type, user and Moodle token, and the nonce of the stored
+    credential it came from, read and logged in a transaction of its own;
+    None if the job is no longer this worker's."""
     from .log_entries import log_sync
 
     async with session_scope(worker.session_factory) as session:
@@ -457,7 +459,10 @@ async def _start_run(
         await log_sync(session, user_id=job.user_id, source="executor",
                        message=f"Job started: {job.job_type}",
                        detail={"job_id": job.id, "run_id": run_id})
-        return job.job_type, job.user_id, token
+        credential = await session.get(
+            ExternalAccountCredential, job.external_account_id
+        )
+        return job.job_type, job.user_id, token, credential.nonce
 
 
 async def _drop_courses_left_out(
@@ -695,6 +700,7 @@ async def _handle_moodle_failure(
     detail: str | None = None,
     is_token_invalid: bool,
     keep_retrying: bool = False,
+    credential_nonce: bytes | None = None,
 ) -> None:
     """Check availability windows before disabling a sync job.
 
@@ -735,12 +741,32 @@ async def _handle_moodle_failure(
         await _record_failure(
             worker, job_id=job_id, run_id=run_id,
             error=error, disable=True, detail=detail,
+            credential_nonce=credential_nonce,
         )
     else:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id,
             error=error, keep_retrying=keep_retrying,
         )
+
+
+async def _rejected_token_still_stored(
+    session: AsyncSession, external_account_id: int, credential_nonce: bytes | None
+) -> bool:
+    """Whether the credential stored under `credential_nonce` is still the
+    account's: the app may have stored a fresh token while Moodle rejected
+    the old one. The account row is locked before the credential's, the
+    order PATCH /v3/auth/credentials writes them in."""
+    await session.get(ExternalAccount, external_account_id, with_for_update=True)
+    if credential_nonce is None:
+        return True
+    credential = await session.get(
+        ExternalAccountCredential,
+        external_account_id,
+        with_for_update=True,
+        populate_existing=True,
+    )
+    return credential is not None and credential.nonce == credential_nonce
 
 
 async def _record_failure(
@@ -752,9 +778,14 @@ async def _record_failure(
     disable: bool = False,
     detail: str | None = None,
     keep_retrying: bool = False,
+    credential_nonce: bytes | None = None,
 ) -> None:
     """Record a failure in a FRESH session — the work session may have
     rolled back (or be poisoned by a DB error).
+
+    `disable` invalidates the account's credential only while the rejected
+    token, the one stored under `credential_nonce`, is still the stored
+    one; a token the app stored since is left alone and the job retried.
 
     With `keep_retrying`, a job past its max_attempts is not left 'failed'
     but runs again after its policy interval, with its attempts and
@@ -783,7 +814,9 @@ async def _record_failure(
         job.last_failure_at = now
         job.last_error = error
 
-        if disable:
+        if disable and await _rejected_token_still_stored(
+            session, job.external_account_id, credential_nonce
+        ):
             # Keep the ORM object in line with the bulk UPDATE inside
             # mark_credentials_invalid — later code in this session must
             # not observe a stale 'running'.
@@ -795,6 +828,9 @@ async def _record_failure(
                 )
             logger.warning("syncjobs.run_disabled", job_id=job_id, error=error)
             return
+        if disable:
+            logger.info("syncjobs.rejected_token_replaced", job_id=job_id)
+            keep_retrying = True
 
         job.attempts += 1
         if job.attempts >= job.max_attempts and keep_retrying:
