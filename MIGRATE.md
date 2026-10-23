@@ -75,6 +75,36 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `docker compose exec backend alembic downgrade d07bc39dde6c` first; it
   drops the column. 3.4.0 then writes Moodle's dates back on its next
   sync of each account.
+- **A client's sync no longer holds back the server's (#24).** `GET
+  /v3/sync/full` leaves the server's Moodle sync where it is. An
+  assignment upload holds back only the assignment sync, and a course
+  upload only the course sync, by 2 hours as before, but never moves a run
+  earlier and never holds back a job a policy interval (8 h) past its last
+  success. An app uploading every 15 minutes, as Android does, delays the
+  server's sync by at most 2 hours past its schedule.
+- **No server fetch for a student no device syncs (#85).** The worker
+  claims a job only while the student has a device with TigerSync on.
+  Until then the job stays `pending` and is left alone, and it runs at the
+  next tick once a device signs in or turns sync on. Signing out of the
+  last device (the apps delete it), or deregistering it in the portal,
+  also deletes the stored Moodle token; the next sign-in stores a new one.
+  The overdue metric and the Moodle sync dashboard's Overdue panel leave
+  such jobs out: restart `sql-exporter` after `./start.sh`, which reads
+  its collectors only at start.
+- **Suspend sync stops the fetch (#86).** While the portal's suspension
+  runs, the sync tick claims nothing, and a tick the suspension lands in
+  hands back the jobs it has not started (their runs `cancelled`, error
+  `sync_suspended`). The Moodle maintenance window from `.env` still only
+  reschedules a run that failed inside it.
+- **Assignment sync off keeps the assignment list (#30).** With
+  Assignments off on every device, only the marks (done, ignored) are
+  deleted; the list goes too only once assignment reminders are off on
+  every device as well.
+- **Retry all's expire notification (#54)** goes only to the students
+  with a `disabled` job, the ones waiting for a sign-in, rather than to
+  every student with a healthy job.
+- These five need no migration; rolling back to 3.4.0 brings the old
+  behavior back. A token deleted at sign-out stays deleted.
 
 ---
 
