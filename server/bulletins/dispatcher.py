@@ -28,7 +28,7 @@ from server.bulletins.models import (
     BulletinProcessingState,
 )
 from server.config import Settings
-from server.db import INSERT_CHUNK_ROWS
+from server.db import INSERT_CHUNK_ROWS, lift_timeouts
 from server.models import DevicePlatform, DeviceRegistration
 from server.push.apns_client import SendResult
 from server.push.custom_push_targeting import (
@@ -206,6 +206,7 @@ async def _dispatch_one(
     # Step 2: for each pending dispatch, join the device row and send.
     sent_count = failed_count = cancelled_count = 0
     async with session_factory() as session:
+        await lift_timeouts(session)
         pending_rows = (
             await session.execute(
                 select(BulletinDispatch, DeviceRegistration, Bulletin)

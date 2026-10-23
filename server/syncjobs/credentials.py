@@ -73,6 +73,21 @@ async def load_credential_blob(
     *,
     external_account_id: int,
 ) -> tuple[ExternalAccount, dict]:
+    account, _credential, blob = await load_credential(
+        session, cipher, external_account_id=external_account_id
+    )
+    return account, blob
+
+
+async def load_credential(
+    session: AsyncSession,
+    cipher: CredentialCipher,
+    *,
+    external_account_id: int,
+) -> tuple[ExternalAccount, ExternalAccountCredential, dict]:
+    """The account, its credential row and the blob decrypted from that row,
+    so the caller can tell later whether the stored credential is still the
+    one its token came from (the row's nonce changes on every write)."""
     account = await session.get(ExternalAccount, external_account_id)
     if account is None:
         raise CredentialInvalid("account_missing")
@@ -97,7 +112,7 @@ async def load_credential_blob(
         )
         raise CredentialInvalid("decrypt_failed") from exc
     credential.last_used_at = datetime.now(UTC)
-    return account, blob
+    return account, credential, blob
 
 
 async def load_moodle_token(
