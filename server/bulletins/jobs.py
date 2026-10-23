@@ -32,6 +32,7 @@ from server.bulletins.llm.base import LLMError, LLMProvider
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.scraper import fetch_list
 from server.config import Settings
+from server.db import lift_timeouts
 from server.metrics import observe_bulletin_scrape
 from server.push.router import PushRouter
 
@@ -372,6 +373,7 @@ async def retention_job(
         days=settings.bulletin_retention_days
     )
     async with session_factory() as session:
+        await lift_timeouts(session)
         result = await session.execute(
             delete(Bulletin).where(
                 Bulletin.is_deleted.is_(True),

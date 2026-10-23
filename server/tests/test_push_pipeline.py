@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -22,7 +23,7 @@ from server.auth.models import (
     UserDevice,
 )
 from server.auth.models import push as push_models_module
-from server.db import build_session_factory
+from server.db import build_engine, build_session_factory
 from server.push import pipeline as pipeline_module
 from server.push.apns_client import SendResult
 from server.push.dedupe import activity_end_key, schedule_key
@@ -144,6 +145,51 @@ async def test_due_job_claimed_and_sent(
     ).scalar_one()
     assert delivery.status == "sent"
     assert delivery.provider == "apns"
+
+
+class _SlowSender(ScriptedSender):
+    def __init__(self, seconds):
+        super().__init__()
+        self.seconds = seconds
+
+    async def send(self, request):
+        await asyncio.sleep(self.seconds)
+        return await super().send(request)
+
+
+async def test_a_send_that_outlasts_the_idle_timeout_is_still_recorded(
+    db_session, test_settings
+):
+    """A job's deliveries commit after they are sent. Cut off by the
+    idle-in-transaction timeout, the commit would fail and the next round
+    would send them all again."""
+    settings = test_settings.model_copy(
+        update={"database_idle_in_transaction_timeout_seconds": 0.5}
+    )
+    user, _, _ = await _setup_user_device_token(db_session)
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    engine = build_engine(settings)
+    try:
+        apple = _SlowSender(1.0)
+        await run_push_tick(
+            PushPipelineWorker(
+                session_factory=build_session_factory(engine),
+                settings=settings,
+                router=PushRouter(apple=apple, android=ScriptedSender()),
+                worker_id="push-test-worker",
+                cipher=CredentialCipher.from_settings(settings),
+                fetcher=SubmissionStatusStub(),
+            )
+        )
+    finally:
+        await engine.dispose()
+
+    assert len(apple.requests) == 1
+    await db_session.refresh(job)
+    assert job.status == "sent"
 
 
 @pytest.mark.parametrize(

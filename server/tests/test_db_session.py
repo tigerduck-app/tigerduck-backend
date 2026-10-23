@@ -1,11 +1,13 @@
-"""`SessionDep` commits before the response is sent."""
+"""Pooled sessions: when `SessionDep` commits, and the server-side timeouts."""
 
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
 
-from server.db import SessionDep
+from server.db import SessionDep, lift_timeouts
 
 
 class _CommitFails:
@@ -35,3 +37,23 @@ async def test_a_write_that_fails_to_commit_is_not_answered_as_a_success():
         resp = await client.post("/write")
 
     assert resp.status_code == 500
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_pooled_connections_carry_the_server_side_timeouts(db_session):
+    assert await db_session.scalar(text("SHOW statement_timeout")) == "30s"
+    assert (
+        await db_session.scalar(text("SHOW idle_in_transaction_session_timeout"))
+        == "1min"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_lifted_timeouts_last_one_transaction(db_session):
+    await lift_timeouts(db_session)
+    assert await db_session.scalar(text("SHOW statement_timeout")) == "0"
+    assert await db_session.scalar(text("SHOW idle_in_transaction_session_timeout")) == "0"
+    await db_session.commit()
+
+    assert await db_session.scalar(text("SHOW statement_timeout")) == "30s"
+
