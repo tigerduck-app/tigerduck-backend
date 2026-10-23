@@ -89,8 +89,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   scraped bulletins (`source = 'ntust_general'`), so portal announcements
   (`manual`) and kept custom pushes (`custom_push`) no longer disappear
   about 30 minutes after posting. Ones already hidden stay hidden; the
-  upgrade does not bring them back. None of these four changes needs a
-  migration.
+  upgrade does not bring them back.
+- **Class reminders are titled in each device's language.** The title is
+  `notification_class_preparing_title` ("即將上課：…", "Class starting soon:
+  …") and the body the class's start time and room ("10:20 · TR-212"), in
+  place of the Chinese-only "上課提醒：…" and "10 分鐘後上課 · …".
+  Reminders filed before the upgrade, up to 48 hours ahead, go out with the
+  old text. None of these five changes needs a migration.
 - **Rolling back.** With 3.4.1 running, run
   `docker compose exec backend alembic downgrade d07bc39dde6c` first; it
   drops the column. 3.4.0 then writes Moodle's dates back on its next
