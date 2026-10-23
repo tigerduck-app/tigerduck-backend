@@ -9,10 +9,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import uuid
 
 import structlog
 from fastapi import HTTPException, status
-from sqlalchemy import select, true, update
+from sqlalchemy import delete, exists, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -566,6 +567,24 @@ async def logout(session: AsyncSession, *, session_id: int) -> None:
     logger.info("auth.logout", session_id=session_id)
 
 
+async def forget_credentials_once_signed_out(
+    session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """Drop the stored Moodle token once the user has no device left: the
+    apps delete the device on sign-out, and the next sign-in stores a fresh
+    token (tigerduck-backend#85)."""
+    await session.execute(
+        delete(ExternalAccountCredential).where(
+            ExternalAccountCredential.external_account_id.in_(
+                select(ExternalAccount.id).where(ExternalAccount.user_id == user_id)
+            ),
+            ~exists().where(
+                UserDevice.user_id == user_id, UserDevice.deleted_at.is_(None)
+            ),
+        )
+    )
+
+
 async def _find_or_create_user(
     session: AsyncSession, *, student_id: str, now: datetime
 ) -> User:
@@ -698,6 +717,8 @@ async def _upsert_device(
         await session.delete(old)
     if old_devices:
         await session.flush()
+    for old_user_id in {old.user_id for old in old_devices}:
+        await forget_credentials_once_signed_out(session, old_user_id)
 
     device = (
         await session.execute(

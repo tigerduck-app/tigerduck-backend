@@ -180,4 +180,16 @@ async def deregister_devices(
                     WHERE device_id::text = ANY($1::text[])
                       AND status = 'active'
                 """, device_ids)
+                # As server.auth.service.forget_credentials_once_signed_out
+                # does for the app's own sign-out.
+                await conn.execute("""
+                    DELETE FROM external_account_credentials c
+                    USING external_accounts a
+                    WHERE c.external_account_id = a.id
+                      AND a.user_id = ANY($1::uuid[])
+                      AND NOT EXISTS (
+                          SELECT 1 FROM user_devices d
+                          WHERE d.user_id = a.user_id AND d.deleted_at IS NULL
+                      )
+                """, list({d["user_id"] for d in deleted}))
     return JSONResponse(content={"deleted": count})

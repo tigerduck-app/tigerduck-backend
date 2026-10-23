@@ -345,6 +345,32 @@ async def test_v3_device_delete_clears_marker(client) -> None:
     assert await _linked_user_id(client) is None
 
 
+async def test_signing_out_of_the_last_device_drops_the_moodle_token(client) -> None:
+    """tigerduck-backend#85: the token is kept while any device is signed
+    in, and the next sign-in stores a new one."""
+    from server.auth.models import ExternalAccountCredential
+
+    factory = build_session_factory(client.app.state.engine)
+
+    async def stored() -> int:
+        async with factory() as session:
+            return len((await session.execute(select(ExternalAccountCredential))).all())
+
+    phone = await do_login(client)
+    ipad = await do_login(client, device="ipad-1")
+
+    response = await client.delete("/v3/devices/iphone-abc", headers=bearer(phone))
+    assert response.status_code == 204
+    assert await stored() == 1
+
+    response = await client.delete("/v3/devices/ipad-1", headers=bearer(ipad))
+    assert response.status_code == 204
+    assert await stored() == 0
+
+    await do_login(client)
+    assert await stored() == 1
+
+
 async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> None:
     """Disabling the last device's sync categories must delete the orphaned
     server data AND record per-entity `delete` changelog entries — using only

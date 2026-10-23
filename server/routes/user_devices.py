@@ -18,6 +18,7 @@ from sqlalchemy import delete as sa_delete, func, select, update
 from server.models import DevicePlatform, DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
+from server.auth.service import forget_credentials_once_signed_out
 from server.auth.models import (
     AuthSession,
     DevicePushToken,
@@ -450,6 +451,8 @@ async def delete_device(
     ).scalars()
     for token in tokens:
         token.status = PushTokenStatus.invalidated.value
+
+    await forget_credentials_once_signed_out(session, auth.user_id)
 
     # Unlink the matching anonymous registration (if any) so the device
     # falls back to the anonymous bulletin pipeline after sign-out.
