@@ -32,6 +32,7 @@ from .db import close_pool, open_pool
 from .routes import (
     academic_calendar,
     announcement,
+    audit,
     backup,
     custom_push,
     deregister,
@@ -90,6 +91,7 @@ app.include_router(deregister.router)
 app.include_router(devices.router)
 app.include_router(device_lists.router)
 app.include_router(moodle.router)
+app.include_router(audit.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
