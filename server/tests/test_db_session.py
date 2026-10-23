@@ -57,3 +57,11 @@ async def test_lifted_timeouts_last_one_transaction(db_session):
 
     assert await db_session.scalar(text("SHOW statement_timeout")) == "30s"
 
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_scheduled_work_draws_on_a_pool_of_its_own(test_settings, db_session):
+    from server.main import create_app, lifespan
+
+    app = create_app(test_settings.model_copy(update={"skip_llm_probe": True}))
+    async with lifespan(app):
+        assert app.state.push_worker.session_factory.kw["bind"] is not app.state.engine

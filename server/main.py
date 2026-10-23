@@ -160,6 +160,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     engine = build_engine(settings)
     session_factory = build_session_factory(engine)
+    # Scheduled work gets a pool of its own: a push round holds its
+    # connection while it sends, and API requests must not queue behind it.
+    jobs_engine = build_engine(settings)
+    jobs_session_factory = build_session_factory(jobs_engine)
     async with session_scope(session_factory) as seed_session:
         await ensure_default_policies(seed_session)
     router = build_router(settings)
@@ -172,7 +176,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     sync_worker = None
     if cipher is not None:
         sync_worker = SyncWorker(
-            session_factory=session_factory,
+            session_factory=jobs_session_factory,
             settings=settings,
             cipher=cipher,
             fetcher=assignment_fetcher,
@@ -185,7 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.warning("syncjobs.disabled_no_credential_keys")
     push_worker = PushPipelineWorker(
-        session_factory=session_factory,
+        session_factory=jobs_session_factory,
         settings=settings,
         router=router,
         worker_id=default_worker_id(),
@@ -193,7 +197,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fetcher=assignment_fetcher,
     )
     scheduler = build_scheduler(
-        session_factory,
+        jobs_session_factory,
         router,
         settings,
         sync_worker=sync_worker,
@@ -234,6 +238,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         metrics.bind_engine(None)
         await router.close()
         await engine.dispose()
+        await jobs_engine.dispose()
         logger.info("server.shutdown")
 
 
