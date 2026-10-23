@@ -1,6 +1,6 @@
 # launchd services
 
-Version-controlled launchd plists for TigerDuck services that run NATIVE on the host (not inside Docker). Currently just llama-server — the backend runs in Docker compose.
+Version-controlled launchd plists for TigerDuck services that run NATIVE on the host (not inside Docker): llama-server and the nightly off-site backup. The backend runs in Docker compose.
 
 ## ai.tigerduck.llm
 
@@ -61,3 +61,7 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.tigerduck.llm.plist
 | Service flaps / KeepAlive restart loop | `tail -100 ~/Library/Logs/tigerduck-llm.err.log` |
 | Container can't reach llama | `docker exec tigerduck-internal curl -sS http://host.docker.internal:40001/v1/models` — if 0 bytes, the `--host 0.0.0.0` line in the plist got edited to `127.0.0.1` |
 | High CPU / fan noise | Either --threads is too high for your Mac, or a runaway prompt > `_MAX_BODY_CHARS` is being sent |
+
+## ai.tigerduck.backup
+
+Runs `deploy/backup/tigerduck-backup.sh nightly` at 04:30: an encrypted `pg_dump` to Cloudflare R2, and on Sundays a restore drill into a throwaway container. Install, verify and restore steps are in MIGRATE.md under "Upgrading to 3.4.0". Log: `~/Library/Logs/tigerduck-backup.log`.

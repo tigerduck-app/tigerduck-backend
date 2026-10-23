@@ -21,6 +21,10 @@
 #                     the ALTER.
 # lock_timeout      — and one stuck behind such an ALTER gives up instead of
 #                     adding to the queue.
+#
+# Also creates ops.backup_status, where deploy/backup/tigerduck-backup.sh
+# records its last successes for sql-exporter. It lives outside Alembic's
+# schema, so autogenerate never proposes dropping it.
 set -eu
 
 : "${MONITOR_DB_PASSWORD:?TIGERDUCK_MONITOR_DB_PASSWORD is not set in .env. ./start.sh generates one; or add it yourself: python -c 'import secrets; print(secrets.token_urlsafe(32))'}"
@@ -38,6 +42,11 @@ ALTER ROLE tigerduck_monitor SET default_transaction_read_only = on;
 ALTER ROLE tigerduck_monitor SET statement_timeout = '30s';
 ALTER ROLE tigerduck_monitor SET lock_timeout = '5s';
 GRANT pg_monitor, pg_read_all_data TO tigerduck_monitor;
+CREATE SCHEMA IF NOT EXISTS ops;
+CREATE TABLE IF NOT EXISTS ops.backup_status (
+    kind text PRIMARY KEY,
+    last_success_at timestamptz NOT NULL
+);
 SQL
 
 echo "[monitor-role] tigerduck_monitor is ready"
