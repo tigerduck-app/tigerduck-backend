@@ -18,6 +18,7 @@ from sqlalchemy import delete as sa_delete, func, select, update
 from server.models import DevicePlatform, DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
+from server.auth.service import forget_credentials_once_signed_out, lock_accounts
 from server.auth.models import (
     AuthSession,
     DevicePushToken,
@@ -202,14 +203,17 @@ async def register_device(
     """Upsert the calling user's device (and optionally one push token).
     Idempotent — called on every app launch."""
     now = datetime.now(UTC)
-    device = (
-        await session.execute(
-            select(UserDevice).where(
-                UserDevice.user_id == auth.user_id,
-                UserDevice.client_device_id == payload.client_device_id,
-            )
-        )
-    ).scalar_one_or_none()
+    find = select(UserDevice).where(
+        UserDevice.user_id == auth.user_id,
+        UserDevice.client_device_id == payload.client_device_id,
+    )
+    device = (await session.execute(find)).scalar_one_or_none()
+    if device is not None and device.deleted_at is not None:
+        # Brought back below: lock first, as require_user does, and read again.
+        await lock_accounts(session, auth.user_id)
+        device = (
+            await session.execute(find.execution_options(populate_existing=True))
+        ).scalar_one_or_none()
     is_new = device is None
     if is_new:
         device = UserDevice(
@@ -404,6 +408,7 @@ async def delete_device(
     UUID) — the identifier the clients hold — scoped to the authed user, not
     the server-side row PK.
     """
+    await lock_accounts(session, auth.user_id)
     device = (
         await session.execute(
             select(UserDevice).where(
@@ -450,6 +455,8 @@ async def delete_device(
     ).scalars()
     for token in tokens:
         token.status = PushTokenStatus.invalidated.value
+
+    await forget_credentials_once_signed_out(session, auth.user_id)
 
     # Unlink the matching anonymous registration (if any) so the device
     # falls back to the anonymous bulletin pipeline after sign-out.
@@ -546,6 +553,8 @@ async def _cleanup_orphaned_sync_data(
     /changes drop their stale local copies. Overrides ride along via the
     ON DELETE CASCADE on their parent rows and the client-side cascade,
     and tombstones are server-side bookkeeping with no changelog type.
+    Assignment marks dropped on their own get no entry either: both apps
+    read marks from /sync/full only.
     """
     from server.sync.changelog import append_change, lock_sync_state
     from server.sync.models import (
@@ -568,6 +577,8 @@ async def _cleanup_orphaned_sync_data(
 
     any_courses = any(d.sync_courses for d in active_devices)
     any_assignments = any(d.sync_assignments for d in active_devices)
+    # The assignment switch covers the marks; the list also feeds reminders.
+    any_reminders = any(d.sync_assignment_reminders for d in active_devices)
     # (entity_type, entity_id, payload) for the per-row delete entries
     deleted_entries: list[tuple[str, str, dict | None]] = []
 
@@ -600,6 +611,7 @@ async def _cleanup_orphaned_sync_data(
                 UserAssignmentOverride.user_id == user_id
             )
         )
+    if not any_assignments and not any_reminders:
         rows = (
             await session.execute(
                 sa_delete(UserAssignment)

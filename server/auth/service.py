@@ -9,10 +9,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import uuid
 
 import structlog
 from fastapi import HTTPException, status
-from sqlalchemy import select, true, update
+from sqlalchemy import delete, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -41,6 +42,10 @@ from server.db import in_array
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
+
+# Namespace ("TDSI") of the per-device sign-in lock. Its two-int4 key form
+# cannot collide with the one-bigint advisory locks used elsewhere.
+_DEVICE_SIGN_IN_LOCK = 0x54445349
 
 PROVIDER_NTUST_SSO = "ntust_sso"
 
@@ -132,7 +137,27 @@ async def login(
 
     now = datetime.now(UTC)
     try:
+        # One sign-in per physical device at a time, so the owners read below
+        # are still its owners when `_upsert_device` takes it over.
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    _DEVICE_SIGN_IN_LOCK, func.hashtext(device_info.client_device_id)
+                )
+            )
+        )
         user = await _find_or_create_user(session, student_id=student_id, now=now)
+        # Also the accounts of other students on this device, whose rows
+        # `_upsert_device` deletes.
+        previous_owners = (
+            await session.execute(
+                select(UserDevice.user_id).where(
+                    UserDevice.client_device_id == device_info.client_device_id,
+                    UserDevice.user_id != user.id,
+                )
+            )
+        ).scalars().all()
+        await lock_accounts(session, user.id, *previous_owners)
         account = await _upsert_external_account(
             session, user=user, student_id=student_id
         )
@@ -566,6 +591,42 @@ async def logout(session: AsyncSession, *, session_id: int) -> None:
     logger.info("auth.logout", session_id=session_id)
 
 
+async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:
+    """Lock the students' accounts, lowest id first, until the transaction
+    ends. Every path that signs a device in or out takes them before it
+    touches a device or its sessions, so no two of them can deadlock."""
+    await session.execute(
+        select(ExternalAccount.id)
+        .where(ExternalAccount.user_id.in_(user_ids))
+        .order_by(ExternalAccount.id)
+        .with_for_update()
+    )
+
+
+async def forget_credentials_once_signed_out(
+    session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """Drop the stored Moodle token once the user has no device left: the
+    apps delete the device on sign-out, and the next sign-in stores a fresh
+    token (tigerduck-backend#85).
+
+    Decides under the student's account lock (`lock_accounts`, which the
+    callers already hold), so a sign-out racing another sign-out or a
+    sign-in decides by the devices they committed."""
+    await session.flush()
+    await lock_accounts(session, user_id)
+    await session.execute(
+        delete(ExternalAccountCredential).where(
+            ExternalAccountCredential.external_account_id.in_(
+                select(ExternalAccount.id).where(ExternalAccount.user_id == user_id)
+            ),
+            ~exists().where(
+                UserDevice.user_id == user_id, UserDevice.deleted_at.is_(None)
+            ),
+        )
+    )
+
+
 async def _find_or_create_user(
     session: AsyncSession, *, student_id: str, now: datetime
 ) -> User:
@@ -698,6 +759,8 @@ async def _upsert_device(
         await session.delete(old)
     if old_devices:
         await session.flush()
+    for old_user_id in {old.user_id for old in old_devices}:
+        await forget_credentials_once_signed_out(session, old_user_id)
 
     device = (
         await session.execute(

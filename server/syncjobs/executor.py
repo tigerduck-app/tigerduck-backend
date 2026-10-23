@@ -2,7 +2,8 @@
 
 Claim/execute split: one short transaction recovers stale locks, another
 claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
-joined to an enabled+in-window policy, global running-count cap), then
+joined to an enabled+in-window policy, of users with a device syncing,
+global running-count cap; none while the portal suspends sync), then
 each job reads its token, fetches from Moodle with no transaction open and
 stores the result in a transaction of its own, so one failure can't poison
 the batch; an assignments job then probes submission status in transactions
@@ -53,11 +54,11 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import ExternalAccount, ExternalAccountCredential
+from server.auth.models import ExternalAccount, ExternalAccountCredential, UserDevice
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
-from server.syncjobs.availability import is_moodle_available
+from server.syncjobs.availability import is_moodle_available, manual_suspend_until
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
@@ -163,12 +164,53 @@ async def run_sync_tick(worker: SyncWorker) -> int:
         )
         return 0
     await _recover_stale_jobs(worker)
+    if await _suspended(worker):
+        return 0
     claimed = await _claim_due_jobs(worker)
     for idx, (job_id, run_id) in enumerate(claimed):
         if idx > 0:
             await asyncio.sleep(worker.settings.sync_job_min_interval_seconds)
+            if await _suspended(worker):
+                await _hand_back(worker, claimed[idx:])
+                return idx
         await _execute_job(worker, job_id=job_id, run_id=run_id)
     return len(claimed)
+
+
+async def _suspended(worker: SyncWorker) -> bool:
+    """Whether an operator suspended sync in the portal (tigerduck-backend#86)."""
+    async with session_scope(worker.session_factory) as session:
+        until = await manual_suspend_until(session, datetime.now(UTC))
+    if until is not None:
+        logger.info("syncjobs.suspended", until=until.isoformat())
+    return until is not None
+
+
+async def _hand_back(worker: SyncWorker, claimed: list[tuple[int, int]]) -> None:
+    """Return claimed jobs untouched, their runs cancelled, so none counts
+    as an attempt."""
+    async with session_scope(worker.session_factory) as session:
+        await session.execute(
+            update(SyncJob)
+            .where(
+                SyncJob.id.in_([job_id for job_id, _ in claimed]),
+                SyncJob.status == SyncJobStatus.running.value,
+                SyncJob.locked_by == worker.worker_id,
+            )
+            .values(status=SyncJobStatus.pending.value, locked_by=None, locked_at=None)
+        )
+        await session.execute(
+            update(SyncRun)
+            .where(
+                SyncRun.id.in_([run_id for _, run_id in claimed]),
+                SyncRun.status == SyncRunStatus.running.value,
+            )
+            .values(
+                status=SyncRunStatus.cancelled.value,
+                finished_at=datetime.now(UTC),
+                error="sync_suspended",
+            )
+        )
 
 
 async def _recover_stale_jobs(worker: SyncWorker) -> None:
@@ -223,6 +265,15 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
         )
 
 
+# A fetch serves only a device with TigerSync on; signing out deletes the
+# device. Until one is back, the job waits unclaimed (tigerduck-backend#85).
+_has_syncing_device = sa.exists().where(
+    UserDevice.user_id == SyncJob.user_id,
+    UserDevice.deleted_at.is_(None),
+    UserDevice.cloud_sync_enabled.is_(True),
+)
+
+
 async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
@@ -251,6 +302,7 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                     .where(
                         SyncJob.status == SyncJobStatus.pending.value,
                         SyncJob.run_after <= now,
+                        _has_syncing_device,
                         SyncPolicy.enabled.is_(True),
                         sa.or_(
                             SyncPolicy.active_from.is_(None),
