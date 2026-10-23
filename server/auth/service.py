@@ -134,6 +134,17 @@ async def login(
     now = datetime.now(UTC)
     try:
         user = await _find_or_create_user(session, student_id=student_id, now=now)
+        # Also the accounts of other students on this device, whose rows
+        # `_upsert_device` deletes.
+        previous_owners = (
+            await session.execute(
+                select(UserDevice.user_id).where(
+                    UserDevice.client_device_id == device_info.client_device_id,
+                    UserDevice.user_id != user.id,
+                )
+            )
+        ).scalars().all()
+        await lock_accounts(session, user.id, *previous_owners)
         account = await _upsert_external_account(
             session, user=user, student_id=student_id
         )
@@ -567,6 +578,18 @@ async def logout(session: AsyncSession, *, session_id: int) -> None:
     logger.info("auth.logout", session_id=session_id)
 
 
+async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:
+    """Lock the students' accounts, lowest id first, until the transaction
+    ends. Every path that signs a device in or out takes them before it
+    touches a device or its sessions, so no two of them can deadlock."""
+    await session.execute(
+        select(ExternalAccount.id)
+        .where(ExternalAccount.user_id.in_(user_ids))
+        .order_by(ExternalAccount.id)
+        .with_for_update()
+    )
+
+
 async def forget_credentials_once_signed_out(
     session: AsyncSession, user_id: uuid.UUID
 ) -> None:
@@ -574,14 +597,11 @@ async def forget_credentials_once_signed_out(
     apps delete the device on sign-out, and the next sign-in stores a fresh
     token (tigerduck-backend#85).
 
-    Locks the student's account first, as `login` does, so a sign-out racing
-    another sign-out or a sign-in decides by the devices they committed."""
+    Decides under the student's account lock (`lock_accounts`, which the
+    callers already hold), so a sign-out racing another sign-out or a
+    sign-in decides by the devices they committed."""
     await session.flush()
-    await session.execute(
-        select(ExternalAccount.id)
-        .where(ExternalAccount.user_id == user_id)
-        .with_for_update()
-    )
+    await lock_accounts(session, user_id)
     await session.execute(
         delete(ExternalAccountCredential).where(
             ExternalAccountCredential.external_account_id.in_(
@@ -635,15 +655,12 @@ async def _find_or_create_user(
 async def _upsert_external_account(
     session: AsyncSession, *, user: User, student_id: str
 ) -> ExternalAccount:
-    # Locked until the sign-in commits; see forget_credentials_once_signed_out.
     account = (
         await session.execute(
-            select(ExternalAccount)
-            .where(
+            select(ExternalAccount).where(
                 ExternalAccount.user_id == user.id,
                 ExternalAccount.provider == PROVIDER_NTUST_SSO,
             )
-            .with_for_update()
         )
     ).scalar_one_or_none()
     if account is None:

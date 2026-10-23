@@ -18,7 +18,7 @@ from sqlalchemy import delete as sa_delete, func, select, update
 from server.models import DevicePlatform, DeviceRegistration
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.service import forget_credentials_once_signed_out
+from server.auth.service import forget_credentials_once_signed_out, lock_accounts
 from server.auth.models import (
     AuthSession,
     DevicePushToken,
@@ -405,6 +405,7 @@ async def delete_device(
     UUID) — the identifier the clients hold — scoped to the authed user, not
     the server-side row PK.
     """
+    await lock_accounts(session, auth.user_id)
     device = (
         await session.execute(
             select(UserDevice).where(
