@@ -43,6 +43,18 @@ WHERE NOT EXISTS (
 """
 
 
+async def _insert_once(conn, key: str, sql: str, *args: Any) -> None:
+    """Runs a dedup insert under a lock on `key`, so racing polls add one row.
+
+    The lock waits for the other request's transaction to commit, and the
+    insert, a statement of its own, then sees that row. A savepoint when the
+    caller already holds a transaction; the lock lasts until that one ends.
+    """
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", key)
+        await conn.execute(sql, *args)
+
+
 async def audit(
     conn,
     request: Request,
@@ -54,13 +66,15 @@ async def audit(
 ) -> None:
     actor = request.state.actor
     if action == "user.view":
-        await conn.execute(_INSERT_VIEW, actor, str(user_id))
+        key = f"user.view|{actor}|{user_id}"
+        await _insert_once(conn, key, _INSERT_VIEW, actor, str(user_id))
         return
     if action == "user.list":
         # The path only: a search string stays in the query.
         route = request.url.path
-        await conn.execute(
-            _INSERT_LIST, actor, json.dumps({"route": route, **detail}), route
+        key = f"user.list|{actor}|{route}"
+        await _insert_once(
+            conn, key, _INSERT_LIST, actor, json.dumps({"route": route, **detail}), route
         )
         return
     await conn.execute(

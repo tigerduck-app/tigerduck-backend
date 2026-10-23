@@ -6,6 +6,7 @@ where the schema the backend migrates is at hand.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import uuid
@@ -33,11 +34,16 @@ def _request(actor: str, path: str = "/api/x") -> SimpleNamespace:
     return SimpleNamespace(state=SimpleNamespace(actor=actor), url=SimpleNamespace(path=path))
 
 
+async def _audit(pool, *args, **kwargs) -> None:
+    async with pool.acquire() as conn:
+        await portal_audit.audit(conn, *args, **kwargs)
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def pool(db_session, test_settings):
     # db_session resets the schema; the portal speaks plain asyncpg.
     p = await asyncpg.create_pool(
-        _asyncpg_dsn(test_settings.database_url), min_size=1, max_size=2
+        _asyncpg_dsn(test_settings.database_url), min_size=1, max_size=5
     )
     try:
         yield p
@@ -48,7 +54,7 @@ async def pool(db_session, test_settings):
 async def test_an_action_row_names_the_actor_targets_and_counts(pool) -> None:
     user_id, device_id = uuid.uuid4(), uuid.uuid4()
 
-    await portal_audit.audit(
+    await _audit(
         pool, _request("ops@example.com"), "device.deregister",
         user_id=user_id, device_id=str(device_id), count=2,
     )
@@ -68,16 +74,16 @@ async def test_a_view_is_recorded_once_per_actor_and_account_per_10_minutes(
     user_id = uuid.uuid4()
 
     for _ in range(3):
-        await portal_audit.audit(
+        await _audit(
             pool, _request("a@example.com"), "user.view", user_id=user_id
         )
-    await portal_audit.audit(
+    await _audit(
         pool, _request("b@example.com"), "user.view", user_id=user_id
     )
     assert await pool.fetchval("SELECT count(*) FROM admin_audit_log") == 2
 
     await pool.execute("UPDATE admin_audit_log SET ts = now() - interval '11 minutes'")
-    await portal_audit.audit(
+    await _audit(
         pool, _request("a@example.com"), "user.view", user_id=user_id
     )
     assert await pool.fetchval("SELECT count(*) FROM admin_audit_log") == 3
@@ -116,7 +122,7 @@ async def test_a_list_is_recorded_once_per_actor_and_route_without_the_search(
     for search in ("B10000002", "another"):
         r = await list_devices(devices, pool=pool, limit=50, offset=0, search=search)
         assert r.status_code == 200
-    await portal_audit.audit(
+    await _audit(
         pool, _request("ops@example.com", "/api/moodle/jobs"), "user.list", count=0
     )
 
@@ -129,3 +135,22 @@ async def test_a_list_is_recorded_once_per_actor_and_route_without_the_search(
         {"route": "/api/moodle/jobs", "count": 0},
     ]
     assert "B10000002" not in rows[0]["detail"]
+
+
+@pytest.mark.parametrize("action", ["user.view", "user.list"])
+async def test_racing_requests_record_one_row(pool, action: str) -> None:
+    """The Sync tab asks for three views of a student at once, each on its own
+    connection; each holds its transaction a moment so the inserts overlap."""
+    user_id = uuid.uuid4()
+
+    async def request() -> None:
+        async with pool.acquire() as conn, conn.transaction():
+            await portal_audit.audit(
+                conn, _request("ops@example.com", "/api/devices"), action,
+                user_id=user_id, count=1,
+            )
+            await asyncio.sleep(0.2)
+
+    await asyncio.gather(*(request() for _ in range(5)))
+
+    assert await pool.fetchval("SELECT count(*) FROM admin_audit_log") == 1
