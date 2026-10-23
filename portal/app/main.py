@@ -63,7 +63,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await close_pool(app)
 
 
-app = FastAPI(title="TigerDuck Backend Portal", lifespan=lifespan)
+# The schema and docs pages sit outside /api, so they would skip the Access check.
+app = FastAPI(
+    title="TigerDuck Backend Portal",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 app.middleware("http")(require_access)
 
 # Legacy static assets (favicon, logo) — kept at /static so deep links
