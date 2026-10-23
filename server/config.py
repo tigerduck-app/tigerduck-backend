@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     )
 
     # --- App ---
-    env: Literal["development", "production"] = "development"
+    # Unset means production, as for ./start.sh: development has to be asked
+    # for, since it lets an empty shared secret through.
+    env: Literal["development", "production"] = "production"
     log_level: str = "INFO"
     # Shared secret the admin endpoints check in X-Push-Token, on top of
     # being served on the admin listener only. Empty string disables the

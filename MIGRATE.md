@@ -50,6 +50,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   docker compose exec backend python -c "import httpx, os; print(httpx.get('http://tigerduck-internal-admin:9001/v3/admin/sync-policies', headers={'X-Push-Token': os.environ['TIGERDUCK_API_SHARED_SECRET']}).text)"
   ```
 
+- **An unset `TIGERDUCK_ENV` now means production** for the backend and the
+  portal, as it already did for `./start.sh`. A production backend refuses
+  to start without `TIGERDUCK_API_SHARED_SECRET`. A development `.env`
+  must say `TIGERDUCK_ENV=development` (`.env.example` does).
+
 ## Upgrading to 3.3.6
 
 - **A course added by hand and removed can come back with the roster.**
