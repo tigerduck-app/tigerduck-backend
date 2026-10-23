@@ -572,7 +572,16 @@ async def forget_credentials_once_signed_out(
 ) -> None:
     """Drop the stored Moodle token once the user has no device left: the
     apps delete the device on sign-out, and the next sign-in stores a fresh
-    token (tigerduck-backend#85)."""
+    token (tigerduck-backend#85).
+
+    Locks the student's account first, as `login` does, so a sign-out racing
+    another sign-out or a sign-in decides by the devices they committed."""
+    await session.flush()
+    await session.execute(
+        select(ExternalAccount.id)
+        .where(ExternalAccount.user_id == user_id)
+        .with_for_update()
+    )
     await session.execute(
         delete(ExternalAccountCredential).where(
             ExternalAccountCredential.external_account_id.in_(
@@ -626,12 +635,15 @@ async def _find_or_create_user(
 async def _upsert_external_account(
     session: AsyncSession, *, user: User, student_id: str
 ) -> ExternalAccount:
+    # Locked until the sign-in commits; see forget_credentials_once_signed_out.
     account = (
         await session.execute(
-            select(ExternalAccount).where(
+            select(ExternalAccount)
+            .where(
                 ExternalAccount.user_id == user.id,
                 ExternalAccount.provider == PROVIDER_NTUST_SSO,
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if account is None:
