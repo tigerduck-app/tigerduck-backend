@@ -24,6 +24,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs.log_entries import log_sync
+from server.syncjobs.models import SyncJobType
 from ._shared import _push_back_sync_jobs
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -148,5 +149,5 @@ async def upload_assignments(
         device_id=auth.device_id,
         detail={"upserted": upserted},
     )
-    await _push_back_sync_jobs(session, auth.user_id)
+    await _push_back_sync_jobs(session, auth.user_id, SyncJobType.moodle_assignments.value)
     return {"upserted": upserted}

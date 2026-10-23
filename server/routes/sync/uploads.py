@@ -28,6 +28,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs.log_entries import log_sync
+from server.syncjobs.models import SyncJobType
 from ._shared import _push_back_sync_jobs, _trigger_push_tick, logger
 
 router = APIRouter(prefix="/sync", tags=["sync"])
@@ -350,7 +351,7 @@ async def upload_courses(
             "course_nos": course_nos,
         },
     )
-    await _push_back_sync_jobs(session, auth.user_id)
+    await _push_back_sync_jobs(session, auth.user_id, SyncJobType.ntust_courses.value)
     if auth.device_id:
         device = await session.get(UserDevice, auth.device_id)
         if device:

@@ -27,7 +27,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs.log_entries import log_sync
-from ._shared import MAX_SYNC_LIMIT, _cancel_pending_deliveries_for_device, _push_back_sync_jobs, logger
+from ._shared import MAX_SYNC_LIMIT, _cancel_pending_deliveries_for_device, logger
 
 router = APIRouter(prefix="/sync", tags=["sync"])
 
@@ -107,8 +107,6 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         message="Full sync fetched",
         device_id=auth.device_id,
     )
-    await _push_back_sync_jobs(session, auth.user_id)
-
     if auth.device_id:
         await _cancel_pending_deliveries_for_device(session, auth.user_id, auth.device_id)
         device = await session.get(UserDevice, auth.device_id)

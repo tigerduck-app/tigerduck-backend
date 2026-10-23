@@ -8,9 +8,9 @@ from datetime import UTC, datetime, timedelta
 import asyncio
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Query, Request
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, literal_column, select, text, update
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
-from server.syncjobs.models import SyncJob, SyncJobStatus
+from server.syncjobs.models import SyncJob, SyncJobStatus, SyncPolicy
 
 
 logger = structlog.get_logger(__name__)
@@ -87,19 +87,29 @@ async def _cancel_pending_deliveries_for_device(session, user_id, device_id) -> 
             device_id=str(device_id),
             deliveries_skipped=delivery_count,
         )
-async def _push_back_sync_jobs(session, user_id, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS) -> None:
-    """Push all pending sync jobs for *user_id* to ``now + seconds``.
+async def _push_back_sync_jobs(
+    session, user_id, job_type: str, *, seconds: int = _CLIENT_SYNC_PUSHBACK_SECONDS
+) -> None:
+    """Hold off the server's own `job_type` sync for *user_id* until
+    ``now + seconds``: the client just uploaded what it would fetch.
 
-    Called after a client sync or upload so the server's own sync cycle
-    defers — the client just delivered fresh data, no need for the server
-    to re-fetch from Moodle immediately.
+    Never pulls a run forward, and leaves a job alone once a policy interval
+    has passed since its last success, so a client uploading every few
+    minutes delays the server's run by at most `seconds` past its schedule
+    (tigerduck-backend#24).
     """
-    run_after = datetime.now(UTC) + timedelta(seconds=seconds)
+    now = datetime.now(UTC)
+    interval = literal_column("interval '1 second'") * SyncPolicy.default_interval_seconds
     await session.execute(
         update(SyncJob)
         .where(
             SyncJob.user_id == user_id,
+            SyncJob.job_type == job_type,
             SyncJob.status == SyncJobStatus.pending.value,
+            SyncPolicy.job_type == SyncJob.job_type,
+            SyncJob.last_success_at + interval > now,
         )
-        .values(run_after=run_after)
+        .values(
+            run_after=func.greatest(SyncJob.run_after, now + timedelta(seconds=seconds))
+        )
     )
