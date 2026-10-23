@@ -121,7 +121,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 - **`tigerduck-host` (dev only)**: bridge added by `docker-compose.dev.yml` so backend `:40000`, portal `:40010`, Grafana `:40020` and Prometheus `:40021` can publish to host ports.
 - **`tigerduck-monitoring`**: internal-only bridge for Prometheus, Loki and what they collect from. Grafana is the one monitoring service on `proxy-net`; see [Monitoring](#monitoring-grafana).
 - **llama-server**: runs natively on the host (Docker Desktop / macOS can't pass through Metal GPU). The backend reaches it via `host.docker.internal`.
-- **portal**: stateless read-only operator UI. Ships without an app-level auth gate — front it with Cloudflare Zero Trust Application (or any auth-proxy) if you need one.
+- **portal**: stateless operator UI, behind Cloudflare Access in production. Every `/api/*` request must carry the `Cf-Access-Jwt-Assertion` token Access adds; the portal checks its signature, issuer and audience and answers 403 otherwise. Only `TIGERDUCK_ENV=development` skips the check.
 
 ## Deployment
 
@@ -167,14 +167,14 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 
 ### Operator portal
 
-`tigerduck-portal` is a sibling compose service that comes up alongside the backend. Its frontend is the React SPA in `portal/web`, compiled to `web/dist` by the Dockerfile's node build stage and served statically by FastAPI; `/api/*` carries the JSON endpoints. Dev mode publishes it at `http://localhost:40010`; production typically lives behind cloudflared / Cloudflare Zero Trust if you want a signin gate (the portal itself does not enforce one). It can:
+`tigerduck-portal` is a sibling compose service that comes up alongside the backend. Its frontend is the React SPA in `portal/web`, compiled to `web/dist` by the Dockerfile's node build stage and served statically by FastAPI; `/api/*` carries the JSON endpoints. Dev mode publishes it at `http://localhost:40010`; in production it sits behind Cloudflare Access and checks the Access JWT on every `/api/*` request, with the same two `TIGERDUCK_CF_ACCESS_*` values Grafana uses (see the production setup under Monitoring); with them unset the API answers 403. It can:
 
 - Show stack status (every field `./start.sh` prints, plus containers via the docker engine UDS, backend version via `/version`, postgres row counts, LLM reachability, APNs/FCM secret presence, host LAN IPs as clickable links)
 - Stream the last N lines of each container's logs in 6 tabs (Backend / Announcement / DB / Portal / Android / Apple) with per-tab search; the Announcement / Android / Apple tabs are substring-filtered slices of the backend log
 - Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 - Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
-- Show who signed in through Cloudflare Access, with a Sign out link that ends their Access session. Dev and LAN visits have no Access session, so the link stays hidden there
+- Show who signed in, from the Access token, with a Sign out link that ends their Access session. Development has no Access session, so the link stays hidden there
 
 ### Monitoring (Grafana)
 
@@ -211,7 +211,7 @@ Charts drawn from Prometheus start on the day monitoring is first deployed; SQL 
 
 **Production setup**
 
-1. In `.env`, set `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` and `TIGERDUCK_CF_ACCESS_AUD`, the AUD tag of the portal's Access application. Grafana has no login of its own: it signs people in from the `Cf-Access-Jwt-Assertion` token Access adds to every request, after checking its signature, issuer and audience. A request that reaches Grafana without going through Access (LAN straight to NPM, another container on `proxy-net`) is refused, and with the two values unset nobody gets in. If the portal host isn't `portal.tigerduck.app`, also set `TIGERDUCK_GRAFANA_ROOT_URL=https://<portal host>/grafana/`.
+1. In `.env`, set `TIGERDUCK_CF_ACCESS_TEAM_DOMAIN` and `TIGERDUCK_CF_ACCESS_AUD`, the AUD tag of the portal's Access application. The portal's `/api/*` checks the same token against them. Grafana has no login of its own: it signs people in from the `Cf-Access-Jwt-Assertion` token Access adds to every request, after checking its signature, issuer and audience. A request that reaches Grafana without going through Access (LAN straight to NPM, another container on `proxy-net`) is refused, and with the two values unset nobody gets in. If the portal host isn't `portal.tigerduck.app`, also set `TIGERDUCK_GRAFANA_ROOT_URL=https://<portal host>/grafana/`.
 2. Route `/grafana` on the portal host to `tigerduck-grafana:3000`, keeping the `/grafana` prefix:
    - nginx-proxy-manager: on the portal's proxy host, add a Custom Location `/grafana` → `http`, `tigerduck-grafana`, `3000`, with no path after the host. For Grafana Live, add `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";` to the location's advanced config.
    - cloudflared pointing straight at the portal: add an ingress rule above the portal's, with `hostname: portal.<your-domain>`, `path: ^/grafana`, `service: http://tigerduck-grafana:3000`.
