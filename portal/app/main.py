@@ -3,8 +3,9 @@
 Serves a React SPA (built by `portal/web` and copied to `web/dist`)
 plus a JSON API under `/api/*` that the SPA consumes. Stateless:
 postgres is owned by the backend container, status data is fetched on
-each request. No auth — front with Cloudflare Zero Trust (or any
-other auth-proxy) if you need a gate.
+each request. Every `/api/*` request must carry a valid Cloudflare
+Access JWT outside development (`access.py`); the static bundle and
+`/health` carry no data and are served to anyone.
 
 Routing order matters:
   1. `/static/*` — favicon + logo (legacy assets the layout still uses)
@@ -25,6 +26,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .access import build_verifier, require_access
 from .config import Settings
 from .db import close_pool, open_pool
 from .routes import (
@@ -51,6 +53,7 @@ _WEB_DIST = _APP_DIR.parent / "web" / "dist"
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = Settings.from_env()
+    app.state.access_verifier = build_verifier(app.state.settings)
     # Operator routes read/write postgres directly over tigerduck-db.
     await open_pool(app)
     try:
@@ -60,6 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="TigerDuck Backend Portal", lifespan=lifespan)
+app.middleware("http")(require_access)
 
 # Legacy static assets (favicon, logo) — kept at /static so deep links
 # from earlier portal versions (e.g. bookmarked icons) still resolve.

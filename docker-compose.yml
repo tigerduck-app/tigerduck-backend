@@ -97,6 +97,9 @@ services:
       # no view of the host's network interfaces from inside its netns,
       # so we hand it the comma-joined IPs to render on the status page.
       TIGERDUCK_HOST_LAN_IPS: ${TIGERDUCK_HOST_LAN_IPS:-}
+      # The portal checks each /api request's Access JWT against these, like Grafana.
+      TIGERDUCK_CF_ACCESS_TEAM_DOMAIN: ${TIGERDUCK_CF_ACCESS_TEAM_DOMAIN:-}
+      TIGERDUCK_CF_ACCESS_AUD: ${TIGERDUCK_CF_ACCESS_AUD:-}
     volumes:
       # Read-only docker socket lets the status page talk to the engine
       # API (HTTP-over-UDS) for `containers/{name}/json` + `logs`. NO
