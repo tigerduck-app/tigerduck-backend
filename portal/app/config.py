@@ -52,11 +52,9 @@ class Settings(BaseSettings):
         import os
 
         env = os.environ
-        # Default matches the backend's pydantic-settings fallback when
-        # TIGERDUCK_ENV is unset — both sides agree the key-missing case
-        # is "development". Prod deploys must set TIGERDUCK_ENV=production
-        # explicitly (see .env.example and the README's Deployment section).
-        env_mode = env.get("TIGERDUCK_ENV", "development")
+        # Default matches the backend's fallback when TIGERDUCK_ENV is
+        # unset: production, as for _compose-files.sh.
+        env_mode = env.get("TIGERDUCK_ENV", "production")
         # Match _compose-files.sh's URL choices so the status page and
         # the start.sh stdout never disagree. It loads the dev override
         # (published localhost ports) only on an exact "development" and

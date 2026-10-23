@@ -112,9 +112,9 @@ def test_settings() -> Settings:
     # CI/container setup where Postgres lives on a different host (e.g. the
     # compose `postgres` service) without editing this file.
     #
-    # `metrics_port=0` keeps a test that runs the lifespan from binding the
-    # fixed :9000, where two concurrent test runs, or anything else on the
-    # host already listening there, would collide.
+    # `metrics_port=0` and `admin_port=0` keep a test that runs the lifespan
+    # from binding the fixed :9000 and :9001, where two concurrent test runs,
+    # or anything else on the host already listening there, would collide.
     database_url = os.environ.get(
         "TIGERDUCK_TEST_DATABASE_URL",
         "postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck_test",
@@ -124,6 +124,7 @@ def test_settings() -> Settings:
         database_url=database_url,
         apns_env="development",
         metrics_port=0,
+        admin_port=0,
         sync_job_tick_seconds=99999,
         push_pipeline_tick_seconds=99999,
         assignment_reminder_scan_interval_seconds=99999,
@@ -182,6 +183,16 @@ async def client(
         # Expose the app so tests can override app.state collaborators
         # (e.g. swap in a StaticMoodleVerifier for /v3 auth tests).
         ac.app = app
+        yield ac
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def admin_client(client: AsyncClient) -> AsyncIterator[AsyncClient]:
+    """The operator endpoints, as the admin listener serves them. Shares
+    `client`'s app state, so a collaborator swapped on one is seen by both."""
+    transport = ASGITransport(app=client.app.state.admin_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        ac.app = client.app
         yield ac
 
 
