@@ -71,6 +71,26 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   without an extension; the first probe of each fills it in, so an
   extension already granted shows up within one sync interval (8 h) of
   its assignment entering the probe window.
+- **A send that raises is retried alone.** An APNs connection error used
+  to roll back a job's whole delivery round, so its next round pushed again
+  to the devices it had already reached. The delivery is now recorded as
+  failed (`failure_code` `exception`, log event `push.send_raised`) and
+  retried in the next round like any other transient failure.
+- **A re-synced Live Activity start takes its new time.** `/schedule/sync`
+  moves a pending start to the fire time and snapshot the device posts
+  again (a changed lead time, a moved deadline, a renamed course), and
+  cancels one moved into the past. Before, the old ones stayed.
+- **A countdown start aimed at a moved deadline is cancelled.** The
+  pre-send check cancels an `assignmentUrgent` start whose
+  `countdownTarget` no row of the assignment is due at, as
+  `stale_before_send` (reason `due_changed`); the device's next sync files
+  it for the new date.
+- **Operator announcements stay.** The bulletin stale sweep marks only
+  scraped bulletins (`source = 'ntust_general'`), so portal announcements
+  (`manual`) and kept custom pushes (`custom_push`) no longer disappear
+  about 30 minutes after posting. Ones already hidden stay hidden; the
+  upgrade does not bring them back. None of these four changes needs a
+  migration.
 - **Rolling back.** With 3.4.1 running, run
   `docker compose exec backend alembic downgrade d07bc39dde6c` first; it
   drops the column. 3.4.0 then writes Moodle's dates back on its next
