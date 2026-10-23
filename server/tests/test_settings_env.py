@@ -19,5 +19,5 @@ def test_an_unset_env_is_production():
 
 
 def test_an_unset_env_refuses_to_start_without_a_shared_secret():
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="TIGERDUCK_ENV=development"):
         Settings(_env_file=None)

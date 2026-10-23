@@ -313,7 +313,9 @@ class Settings(BaseSettings):
     def validate_production_secrets(self) -> "Settings":
         if self.env == "production" and not self.api_shared_secret:
             raise ValueError(
-                "TIGERDUCK_API_SHARED_SECRET must be set in production"
+                "TIGERDUCK_API_SHARED_SECRET must be set in production. An "
+                "unset TIGERDUCK_ENV now means production; for local "
+                "development set TIGERDUCK_ENV=development."
             )
         return self
 
