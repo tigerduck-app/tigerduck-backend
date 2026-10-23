@@ -78,6 +78,7 @@ from server.push.notification_copy import (
     REAUTH_SCENARIO,
     SESSION_REAUTH_REASON,
     build_assignment_reminder_payload,
+    build_course_reminder_payload,
     build_reauth_payload,
 )
 from server.push.payload import _to_unix_seconds
@@ -1083,7 +1084,7 @@ async def _send_one(
 
     payload = job.payload or {}
     is_reauth = job.scenario == REAUTH_SCENARIO
-    if is_reauth or job.channel == REMINDER_CHANNEL:
+    if is_reauth or job.channel in (REMINDER_CHANNEL, COURSE_CHANNEL):
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
         # languages, so the only place the right language is known is the
@@ -1106,6 +1107,8 @@ async def _send_one(
                 reason=payload.get("reason"),
                 locale=locale,
             )
+        elif job.channel == COURSE_CHANNEL:
+            payload = build_course_reminder_payload(payload, locale=locale)
         else:
             payload = build_assignment_reminder_payload(payload, locale=locale)
         if not _has_copy(payload):

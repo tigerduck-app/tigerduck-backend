@@ -70,7 +70,8 @@ server/
 │   ├── client_versions.py     # app versions that still schedule assignment reminders locally
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
 │   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
-│   ├── notification_copy.py   # per-recipient copy: reauth, assignment reminders
+│   ├── notification_copy.py   # per-recipient copy: reauth, assignment and class
+│   │                          #   reminders
 │   ├── session_reauth.py      # asks a device left without a session to sign in again
 │   ├── course_reminders.py    # course reminder scan
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
