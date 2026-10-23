@@ -78,4 +78,6 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
         yield session
 
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+# scope="function" commits before the response goes out, so a write that fails
+# to commit answers 500 rather than a success the client then relies on.
+SessionDep = Annotated[AsyncSession, Depends(get_session, scope="function")]
