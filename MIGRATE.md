@@ -126,10 +126,12 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   Then delete the `.dump` file: it holds every account's data unencrypted.
 
 - **The portal's Restore keeps a copy.** Before it restores an upload, the
-  portal dumps the live database to `pre-restore-<UTC>.dump` in the new
-  `tigerduck_portal_pre_restore` volume, and restores nothing if that dump
-  fails. To get one back:
-  `docker cp tigerduck-portal:/var/lib/tigerduck-portal/pre-restore/pre-restore-<UTC>.dump .`
+  portal dumps the live database to `pre-restore-<UTC>-<suffix>.dump` in
+  the new `tigerduck_portal_pre_restore` volume, and restores nothing if
+  that dump fails; a second restore started meanwhile is refused. To get
+  one back, list them with
+  `docker compose exec portal ls /var/lib/tigerduck-portal/pre-restore`,
+  then `docker cp tigerduck-portal:/var/lib/tigerduck-portal/pre-restore/<name> .`
   The volume keeps the newest five. When `pg_restore` itself fails, the
   error names the dump taken just before.
 
