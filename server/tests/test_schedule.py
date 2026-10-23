@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -236,6 +237,97 @@ async def test_resync_does_not_revive_already_sent_push(
         assert jobs[0].status == PushJobStatus.sent.value, (
             f"expected sent after re-sync, got {jobs[0].status}"
         )
+
+
+async def _start_jobs(prepared_engine) -> list[PushJob]:
+    async with build_session_factory(prepared_engine)() as s:
+        return list(
+            (await s.execute(select(PushJob).where(PushJob.channel == "schedule")))
+            .scalars()
+            .all()
+        )
+
+
+async def test_a_resync_moves_a_pending_start_to_its_new_time_and_content(
+    client: AsyncClient, prepared_engine
+):
+    """A changed lead time, a moved deadline or a renamed course re-posts
+    the same key with a new fire time or snapshot."""
+    login = await _login(client)
+    fire = datetime.now(timezone.utc) + timedelta(hours=1)
+    await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+
+    moved = fire - timedelta(minutes=20)
+    resync = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", moved, "Renamed")]},
+    )
+    assert resync.json() == {"pending": 1, "replaced": 0}
+
+    [job] = await _start_jobs(prepared_engine)
+    assert job.status == PushJobStatus.pending.value
+    assert job.fire_at == moved
+    assert job.payload["title"] == "Renamed"
+    assert job.payload["activity_id"] == "classPreparing::slot-1"
+
+
+async def test_a_resync_cancels_a_pending_start_moved_into_the_past(
+    client: AsyncClient, prepared_engine
+):
+    login = await _login(client)
+    fire = datetime.now(timezone.utc) + timedelta(hours=1)
+    await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", fire, "A")]},
+    )
+
+    passed = datetime.now(timezone.utc) - timedelta(minutes=1)
+    resync = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", passed, "A")]},
+    )
+    assert resync.json() == {"pending": 0, "replaced": 1}
+
+    [job] = await _start_jobs(prepared_engine)
+    assert job.status == PushJobStatus.cancelled.value
+    assert job.fire_at == fire
+
+
+async def test_a_resync_keeps_a_due_start_whose_time_did_not_change(
+    client: AsyncClient, prepared_engine
+):
+    """A start the pipeline has not claimed yet is still due, not stale."""
+    login = await _login(client)
+    due = datetime.now(timezone.utc) - timedelta(seconds=10)
+    async with build_session_factory(prepared_engine)() as s:
+        s.add(
+            PushJob(
+                user_id=uuid.UUID(login["user"]["id"]),
+                device_id=uuid.UUID(login["device_id"]),
+                dedupe_key=f"schedule:{login['device_id']}:slot-1:classPreparing",
+                channel="schedule",
+                scenario="classPreparing",
+                fire_at=due,
+                payload={"kind": "schedule", "title": "A"},
+            )
+        )
+        await s.commit()
+
+    resync = await client.post(
+        "/v3/schedule/sync",
+        headers=_bearer(login),
+        json={"events": [_event("slot-1", "classPreparing", due, "A")]},
+    )
+    assert resync.json() == {"pending": 1, "replaced": 0}
+    [job] = await _start_jobs(prepared_engine)
+    assert (job.status, job.fire_at) == (PushJobStatus.pending.value, due)
 
 
 async def test_cancel_by_source_removes_all_scenarios(client: AsyncClient):
