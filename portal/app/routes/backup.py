@@ -5,6 +5,9 @@ either an export bundle or a bare pg_dump file (for migrating from a
 pre-portal install). Importing does NOT restart the backend container —
 the portal keeps a read-only docker socket on purpose; the user is told
 to run `./stop.sh && ./start.sh` once the restore finishes.
+
+Before restoring, import dumps the live database into PRE_RESTORE_DIR (a
+named volume) and refuses to restore if that dump fails.
 """
 from __future__ import annotations
 
@@ -25,6 +28,8 @@ from starlette.background import BackgroundTask
 router = APIRouter(prefix="/api/backup")
 
 BUNDLE_VERSION = 1
+
+PRE_RESTORE_DIR = Path("/var/lib/tigerduck-portal/pre-restore")
 
 
 def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
@@ -49,6 +54,39 @@ def _pg_env(database_url: str) -> tuple[list[str], dict[str, str]]:
     return args, env
 
 
+async def _pg_dump(database_url: str, out_path: Path) -> None:
+    pg_args, pg_env = _pg_env(database_url)
+    with out_path.open("wb") as fh:
+        proc = await asyncio.create_subprocess_exec(
+            "pg_dump", *pg_args, "--format=custom", "--no-owner",
+            env=pg_env,
+            stdout=fh,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise HTTPException(
+            500,
+            f"pg_dump failed: {stderr.decode(errors='replace')[:500]}",
+        )
+
+
+async def _pre_restore_dump(database_url: str) -> Path:
+    """Dump the live database before a restore replaces it."""
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = PRE_RESTORE_DIR / f"pre-restore-{ts}.dump"
+    try:
+        PRE_RESTORE_DIR.mkdir(parents=True, exist_ok=True)
+        await _pg_dump(database_url, path)
+    except (HTTPException, OSError) as exc:
+        path.unlink(missing_ok=True)
+        reason = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        raise HTTPException(
+            500, f"pre-restore backup failed, nothing was restored: {reason}"
+        ) from None
+    return path
+
+
 @router.post("/export")
 async def export_bundle(request: Request) -> FileResponse:
     """Build the archive on disk in a temp dir, stream it, then let a
@@ -67,21 +105,7 @@ async def export_bundle(request: Request) -> FileResponse:
         staging = workdir / bundle_name
         staging.mkdir()
 
-        pg_args, pg_env = _pg_env(settings.database_url)
-        pg_dump_path = staging / "postgres.dump"
-        with pg_dump_path.open("wb") as fh:
-            proc = await asyncio.create_subprocess_exec(
-                "pg_dump", *pg_args, "--format=custom", "--no-owner",
-                env=pg_env,
-                stdout=fh,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise HTTPException(
-                500,
-                f"pg_dump failed: {stderr.decode(errors='replace')[:500]}",
-            )
+        await _pg_dump(settings.database_url, staging / "postgres.dump")
 
         manifest = {
             "version": BUNDLE_VERSION,
@@ -168,6 +192,7 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
         if not pg_dump_path.exists():
             raise HTTPException(400, "no postgres.dump in upload")
 
+        pre_restore = await _pre_restore_dump(settings.database_url)
         pg_args, pg_env = _pg_env(settings.database_url)
         # Positional file path (not stdin) keeps the dump out of
         # Python memory and gives pg_restore clearer error output
@@ -194,4 +219,10 @@ async def import_bundle(request: Request, file: UploadFile) -> JSONResponse:
                 f"pg_restore failed: {stderr.decode(errors='replace')[:500]}",
             )
 
-    return JSONResponse({"ok": True, "imported_at": datetime.now(UTC).isoformat()})
+    return JSONResponse(
+        {
+            "ok": True,
+            "imported_at": datetime.now(UTC).isoformat(),
+            "pre_restore_dump": pre_restore.name,
+        }
+    )
