@@ -371,6 +371,25 @@ async def test_signing_out_of_the_last_device_drops_the_moodle_token(client) -> 
     assert await stored() == 1
 
 
+async def test_another_student_signing_in_on_the_device_drops_the_token(client) -> None:
+    from server.auth.models import ExternalAccount, ExternalAccountCredential
+
+    await do_login(client, student_id="B11015000")
+    await do_login(client, student_id="B11015001")
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        kept = (
+            await session.execute(
+                select(ExternalAccount.external_user_id).join(
+                    ExternalAccountCredential,
+                    ExternalAccountCredential.external_account_id == ExternalAccount.id,
+                )
+            )
+        ).scalars().all()
+    assert kept == ["B11015001"]
+
+
 async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> None:
     """Disabling the last device's sync categories must delete the orphaned
     server data AND record per-entity `delete` changelog entries — using only
