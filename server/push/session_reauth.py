@@ -27,7 +27,6 @@ from server.auth.models import (
     PushTokenStatus,
     SessionRevokedReason,
     UserDevice,
-    UserDevicePlatform,
 )
 from server.config import Settings
 from server.db import in_array, session_scope
@@ -37,8 +36,9 @@ from server.push.reminders import file_jobs
 
 logger = structlog.get_logger(__name__)
 
-# Both apps show a `reauth_required` push; macOS takes none.
-_PLATFORMS = (*APPLE_HANDHELD_PLATFORMS, UserDevicePlatform.android.value)
+# macOS takes no `reauth_required` push. Android is left out until its 2.4.0
+# ships: 2.3.1 keeps a live session it stops using, so it would be asked weekly.
+_PLATFORMS = APPLE_HANDHELD_PLATFORMS
 # The apps announce the device on every launch (`POST /v3/devices/anonymous`),
 # signed in or not; a device not announced for this long is not in use.
 _SEEN_WITHIN = timedelta(days=3)
