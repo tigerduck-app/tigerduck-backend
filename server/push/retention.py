@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.models import PushJob
 from server.config import Settings
+from server.db import lift_timeouts
 
 logger = structlog.get_logger(__name__)
 
@@ -24,6 +25,7 @@ async def prune_terminal_push_jobs(
         days=settings.push_job_retention_days
     )
     async with session_factory() as session:
+        await lift_timeouts(session)
         result = await session.execute(
             delete(PushJob).where(
                 PushJob.status.in_(_TERMINAL_STATES),

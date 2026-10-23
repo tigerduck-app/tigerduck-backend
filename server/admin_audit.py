@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.config import Settings
-from server.db import Base
+from server.db import Base, lift_timeouts
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +57,7 @@ async def prune_admin_audit_log(
         days=settings.admin_audit_retention_days
     )
     async with session_factory() as session:
+        await lift_timeouts(session)
         result = await session.execute(
             delete(AdminAuditLog).where(AdminAuditLog.ts < cutoff)
         )

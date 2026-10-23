@@ -86,6 +86,13 @@ services:
     # explicit entry is harmless).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # The start period covers the LLM probe and migrations.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:40000/ready', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
 
   portal:
     build: ./portal
@@ -118,6 +125,14 @@ services:
       # Mirror the backend's secrets mount RO so the status page can
       # report "is the .p8 / fcm.json on disk?" without exposing contents.
       - ./server/secrets:/backend-secrets:ro
+      # The dump the Restore button takes of the live database first.
+      - tigerduck_portal_pre_restore:/var/lib/tigerduck-portal/pre-restore
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:40010/ready', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # --- Monitoring -----------------------------------------------------------
   # Metrics: postgres-exporter, sql-exporter, backend :9000 → Prometheus.
@@ -301,6 +316,9 @@ services:
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: "false"
       # Read by monitoring/grafana/provisioning/datasources/datasources.yml.
       TIGERDUCK_MONITOR_DB_PASSWORD: ${TIGERDUCK_MONITOR_DB_PASSWORD:-}
+      # Read by monitoring/grafana/provisioning/alerting/contact-points.yml. Grafana
+      # will not start with an empty URL, so unset means a local dead end.
+      TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL: ${TIGERDUCK_ALERT_DISCORD_WEBHOOK_URL:-http://127.0.0.1:9/discord-webhook-not-set}
     volumes:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
@@ -330,3 +348,4 @@ volumes:
   tigerduck_grafana:
   tigerduck_loki:
   tigerduck_alloy:
+  tigerduck_portal_pre_restore:

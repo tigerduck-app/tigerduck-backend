@@ -103,6 +103,11 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck"
     )
     database_echo: bool = False
+    # Server-side limits on every pooled connection, so a stuck statement or
+    # a transaction left open cannot hold a connection and its locks for
+    # good; 0 turns one off. `db.lift_timeouts` lifts both for a transaction.
+    database_statement_timeout_seconds: float = 30.0
+    database_idle_in_transaction_timeout_seconds: float = 60.0
 
     # --- APNs ---
     apns_bundle_id: str = "org.ntust.app.TigerDuck"

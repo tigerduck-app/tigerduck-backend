@@ -3,8 +3,9 @@
 Claim/execute split: one short transaction recovers stale locks, another
 claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
 joined to an enabled+in-window policy, global running-count cap), then
-each job executes in its own transaction so one failure can't poison the
-batch; an assignments job then probes submission status in transactions
+each job reads its token, fetches from Moodle with no transaction open and
+stores the result in a transaction of its own, so one failure can't poison
+the batch; an assignments job then probes submission status in transactions
 of its own (`_refresh_submission_status`). Jobs run sequentially within a
 tick — deliberate politeness toward the school APIs behind our single
 egress IP.
@@ -42,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -51,7 +53,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import ExternalAccount
+from server.auth.models import ExternalAccount, ExternalAccountCredential
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -59,7 +61,7 @@ from server.syncjobs.availability import is_moodle_available
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
-    load_credential_blob,
+    load_credential,
     mark_credentials_invalid,
 )
 from server.syncjobs.models import (
@@ -280,90 +282,78 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
 
 
 async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
+    """Run one claimed job: read its token, fetch from Moodle with no
+    transaction open, then store the result under the job's row lock again,
+    re-checked, since the claim may have been taken back meanwhile."""
+    credential_nonce = None
     try:
-        probe_submissions = False
-        async with session_scope(worker.session_factory) as session:
-            job = (
-                await session.execute(
-                    select(SyncJob).where(SyncJob.id == job_id).with_for_update()
-                )
-            ).scalar_one()
-            run = await session.get(SyncRun, run_id)
-            if (
-                job.status != SyncJobStatus.running.value
-                or job.locked_by != worker.worker_id
-            ):
-                # Stale-recovered (and possibly reclaimed by another worker)
-                # between our claim commit and now — never double-execute.
-                if run is not None and run.status == SyncRunStatus.running.value:
-                    run.status = SyncRunStatus.cancelled.value
-                    run.finished_at = datetime.now(UTC)
-                    run.error = "reclaimed_before_execution"
-                logger.warning(
-                    "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
-                )
-                return
-            policy = (
-                await session.execute(
-                    select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
-                )
-            ).scalar_one_or_none()
-
-            account, blob = await load_credential_blob(
-                session, worker.cipher, external_account_id=job.external_account_id
-            )
-            token = (blob.get("token_cache") or {}).get("moodle_token")
-
-            if not isinstance(token, str) or not token:
-                raise CredentialInvalid("moodle_token_missing")
-
-            from .log_entries import log_sync
-
-            await log_sync(session, user_id=job.user_id, source="executor",
-                           message=f"Job started: {job.job_type}",
-                           detail={"job_id": job.id, "run_id": run_id})
-
-            now = datetime.now(UTC)
-            if job.job_type == SyncJobType.ntust_courses.value:
-                try:
-                    courses = await worker.course_fetcher.fetch_courses(token=token)
-                except MoodleTokenInvalid:
-                    raise CredentialInvalid("moodle_token_invalid")
-                await log_sync(session, user_id=job.user_id, source="executor",
-                               message=f"Fetched {len(courses)} courses from Moodle")
-                stats = await apply_fetched_courses(
-                    session, user_id=job.user_id, fetched=courses, now=now
-                )
-            else:
-                try:
-                    fetched = await worker.fetcher.fetch_assignments(token=token)
-                except MoodleTokenInvalid:
-                    raise CredentialInvalid("moodle_token_invalid")
-                except MoodleNoCourseAccess as exc:
+        started = await _start_run(worker, job_id=job_id, run_id=run_id)
+        if started is None:
+            return
+        job_type, user_id, token, credential_nonce = started
+        now = datetime.now(UTC)
+        probe_submissions = job_type != SyncJobType.ntust_courses.value
+        if not probe_submissions:
+            try:
+                fetched = await worker.course_fetcher.fetch_courses(token=token)
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+        else:
+            try:
+                fetched = await worker.fetcher.fetch_assignments(token=token)
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+            except MoodleNoCourseAccess as exc:
+                async with session_scope(worker.session_factory) as session:
+                    owned = await _lock_owned_job(
+                        session, worker, job_id=job_id, run_id=run_id
+                    )
+                    if owned is None:
+                        return
                     await _drop_courses_left_out(
                         session,
-                        run=run,
-                        user_id=job.user_id,
+                        run=owned[1],
+                        user_id=user_id,
                         refused_course_ids=exc.refused_course_ids,
                         now=now,
                     )
-                    raise
-                await log_sync(session, user_id=job.user_id, source="executor",
+                raise
+
+        from .log_entries import log_sync
+
+        async with session_scope(worker.session_factory) as session:
+            owned = await _lock_owned_job(
+                session, worker, job_id=job_id, run_id=run_id
+            )
+            if owned is None:
+                return
+            job, run = owned
+            if probe_submissions:
+                await log_sync(session, user_id=user_id, source="executor",
                                message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
-                    session, user_id=job.user_id, fetched=fetched, now=now
+                    session, user_id=user_id, fetched=fetched, now=now
                 )
-                probe_submissions = True
+            else:
+                await log_sync(session, user_id=user_id, source="executor",
+                               message=f"Fetched {len(fetched)} courses from Moodle")
+                stats = await apply_fetched_courses(
+                    session, user_id=user_id, fetched=fetched, now=now
+                )
 
             if run is not None:
                 run.fetched_count = stats.fetched_count
                 run.changed_count = stats.changed_count
 
             if stats.changed_count > 0:
-                await enqueue_sync_trigger(session, job.user_id)
+                await enqueue_sync_trigger(session, user_id)
 
-            user_id = job.user_id
             if not probe_submissions:
+                policy = (
+                    await session.execute(
+                        select(SyncPolicy).where(SyncPolicy.job_type == job.job_type)
+                    )
+                ).scalar_one_or_none()
                 await _mark_succeeded(
                     session, job=job, run=run, policy=policy, stats=stats, now=now
                 )
@@ -393,7 +383,7 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
             error=ERROR_CREDENTIAL_INVALID, detail=exc.reason,
-            is_token_invalid=True,
+            is_token_invalid=True, credential_nonce=credential_nonce,
         )
     except MoodleRateLimited:
         await _record_failure(
@@ -423,6 +413,67 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         )
 
 
+def _owned(job: SyncJob | None, worker: SyncWorker) -> bool:
+    """Whether `job` is still this worker's run: stale recovery may have
+    taken it back, and another worker claimed it, while Moodle answered."""
+    return (
+        job is not None
+        and job.status == SyncJobStatus.running.value
+        and job.locked_by == worker.worker_id
+    )
+
+
+async def _lock_owned_job(
+    session: AsyncSession, worker: SyncWorker, *, job_id: int, run_id: int
+) -> tuple[SyncJob, SyncRun | None] | None:
+    """Lock the job and its run, or None if this worker no longer holds it:
+    stale-recovered, and possibly reclaimed by another worker, since the
+    claim. Never double-execute."""
+    job = (
+        await session.execute(
+            select(SyncJob).where(SyncJob.id == job_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    run = await session.get(SyncRun, run_id)
+    if not _owned(job, worker):
+        if run is not None and run.status == SyncRunStatus.running.value:
+            run.status = SyncRunStatus.cancelled.value
+            run.finished_at = datetime.now(UTC)
+            run.error = "reclaimed_before_execution"
+        logger.warning(
+            "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
+        )
+        return None
+    return job, run
+
+
+async def _start_run(
+    worker: SyncWorker, *, job_id: int, run_id: int
+) -> tuple[str, uuid.UUID, str, bytes] | None:
+    """The job's type, user and Moodle token, and the nonce of the stored
+    credential it came from, read and logged in a transaction of its own;
+    None if the job is no longer this worker's."""
+    from .log_entries import log_sync
+
+    async with session_scope(worker.session_factory) as session:
+        owned = await _lock_owned_job(session, worker, job_id=job_id, run_id=run_id)
+        if owned is None:
+            return None
+        job, _run = owned
+        _account, credential, blob = await load_credential(
+            session, worker.cipher, external_account_id=job.external_account_id
+        )
+        # One row read gives both the token and the nonce a rejection compares.
+        nonce = credential.nonce
+        token = (blob.get("token_cache") or {}).get("moodle_token")
+        if not isinstance(token, str) or not token:
+            raise CredentialInvalid("moodle_token_missing")
+        await log_sync(session, user_id=job.user_id, source="executor",
+                       message=f"Job started: {job.job_type}",
+                       detail={"job_id": job.id, "run_id": run_id})
+        return job.job_type, job.user_id, token, nonce
+
+
 async def _drop_courses_left_out(
     session: AsyncSession,
     *,
@@ -434,8 +485,8 @@ async def _drop_courses_left_out(
     """Soft-delete the rows of the courses an answer that lost every course
     left out, a TA's course among them, and keep the refused courses' rows.
 
-    Committed here, with the run's counts: the run then fails like any other
-    unreachable Moodle, which rolls this session back.
+    Committed here, with the run's counts; the run then fails like any other
+    unreachable Moodle.
     """
     from .log_entries import log_sync
 
@@ -672,6 +723,7 @@ async def _handle_moodle_failure(
     detail: str | None = None,
     is_token_invalid: bool,
     keep_retrying: bool = False,
+    credential_nonce: bytes | None = None,
 ) -> None:
     """Check availability windows before disabling a sync job.
 
@@ -695,7 +747,7 @@ async def _handle_moodle_failure(
                     select(SyncJob).where(SyncJob.id == job_id).with_for_update()
                 )
             ).scalar_one_or_none()
-            if job is not None:
+            if _owned(job, worker):
                 run = await session.get(SyncRun, run_id)
                 if run is not None and run.status == SyncRunStatus.running.value:
                     run.status = SyncRunStatus.failed.value
@@ -712,12 +764,32 @@ async def _handle_moodle_failure(
         await _record_failure(
             worker, job_id=job_id, run_id=run_id,
             error=error, disable=True, detail=detail,
+            credential_nonce=credential_nonce,
         )
     else:
         await _record_failure(
             worker, job_id=job_id, run_id=run_id,
             error=error, keep_retrying=keep_retrying,
         )
+
+
+async def _rejected_token_still_stored(
+    session: AsyncSession, external_account_id: int, credential_nonce: bytes | None
+) -> bool:
+    """Whether the credential stored under `credential_nonce` is still the
+    account's: the app may have stored a fresh token while Moodle rejected
+    the old one. The account row is locked before the credential's, the
+    order PATCH /v3/auth/credentials writes them in."""
+    await session.get(ExternalAccount, external_account_id, with_for_update=True)
+    if credential_nonce is None:
+        return True
+    credential = await session.get(
+        ExternalAccountCredential,
+        external_account_id,
+        with_for_update=True,
+        populate_existing=True,
+    )
+    return credential is not None and credential.nonce == credential_nonce
 
 
 async def _record_failure(
@@ -729,9 +801,14 @@ async def _record_failure(
     disable: bool = False,
     detail: str | None = None,
     keep_retrying: bool = False,
+    credential_nonce: bytes | None = None,
 ) -> None:
     """Record a failure in a FRESH session — the work session may have
     rolled back (or be poisoned by a DB error).
+
+    `disable` invalidates the account's credential only while the rejected
+    token, the one stored under `credential_nonce`, is still the stored
+    one; a token the app stored since is left alone and the job retried.
 
     With `keep_retrying`, a job past its max_attempts is not left 'failed'
     but runs again after its policy interval, with its attempts and
@@ -743,7 +820,10 @@ async def _record_failure(
                 select(SyncJob).where(SyncJob.id == job_id).with_for_update()
             )
         ).scalar_one_or_none()
-        if job is None:
+        if not _owned(job, worker):
+            logger.warning(
+                "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
+            )
             return
         now = datetime.now(UTC)
         run = await session.get(SyncRun, run_id)
@@ -757,7 +837,9 @@ async def _record_failure(
         job.last_failure_at = now
         job.last_error = error
 
-        if disable:
+        if disable and await _rejected_token_still_stored(
+            session, job.external_account_id, credential_nonce
+        ):
             # Keep the ORM object in line with the bulk UPDATE inside
             # mark_credentials_invalid — later code in this session must
             # not observe a stale 'running'.
@@ -769,6 +851,9 @@ async def _record_failure(
                 )
             logger.warning("syncjobs.run_disabled", job_id=job_id, error=error)
             return
+        if disable:
+            logger.info("syncjobs.rejected_token_replaced", job_id=job_id)
+            keep_retrying = True
 
         job.attempts += 1
         if job.attempts >= job.max_attempts and keep_retrying:
