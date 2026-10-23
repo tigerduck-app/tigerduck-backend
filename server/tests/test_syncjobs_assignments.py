@@ -507,3 +507,32 @@ async def test_a_due_date_moved_back_is_handed_to_the_probe(db_session, moodle_m
     await db_session.refresh(row)
     assert row.due_at == listed
     assert stats.recheck_ids == (frozenset({1}) if moodle_moves < 0 else frozenset())
+
+
+@pytest.mark.parametrize("moved_by", [0, 24], ids=["to-the-extension", "past-it"])
+async def test_an_extension_moodles_due_date_reaches_is_dropped(db_session, moved_by):
+    """A teacher moves the due date to the student's extension or past it:
+    the date no longer comes from the extension, so it is not kept, and a
+    withdrawal of it later cannot cancel a reminder (`push/presend.py`)."""
+    user = await _make_user(db_session)
+    extension = NOW + timedelta(days=3)
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=NOW + timedelta(days=1))], now=NOW
+    )
+    row = (
+        await db_session.execute(
+            select(UserAssignment).where(UserAssignment.user_id == user.id)
+        )
+    ).scalar_one()
+    row.due_at = row.extension_due_at = extension
+    await db_session.commit()
+    listed = extension + timedelta(hours=moved_by)
+
+    stats = await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1, due_at=listed)], now=NOW
+    )
+    await db_session.commit()
+
+    await db_session.refresh(row)
+    assert (row.due_at, row.extension_due_at) == (listed, None)
+    assert stats.recheck_ids == frozenset()

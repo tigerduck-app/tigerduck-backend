@@ -58,6 +58,16 @@ def with_extension(
     )
 
 
+def kept_extension(
+    item: FetchedAssignment, extension: datetime | None
+) -> datetime | None:
+    """`extension` while it is later than the due date Moodle listed, else
+    None, so a stored extension always means the due date comes from it."""
+    if extension is None or (item.due_at is not None and extension <= item.due_at):
+        return None
+    return extension
+
+
 @dataclass(frozen=True)
 class AssignmentSyncStats:
     fetched_count: int
@@ -168,6 +178,7 @@ async def apply_fetched_assignments(
             await log(str(row.id), "upsert", {"fields": list(_PROVIDER_FIELDS)})
             continue
 
+        row.extension_due_at = kept_extension(item, row.extension_due_at)
         item = with_extension(item, row.extension_due_at)
         if row.due_at and item.due_at and row.due_at > item.due_at:
             # Maybe an extension an app uploaded; the probe after this sync decides.

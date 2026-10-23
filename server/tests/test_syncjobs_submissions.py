@@ -551,7 +551,9 @@ async def test_an_answer_moves_the_dates_to_the_students(
     )
 
     await db_session.refresh(row)
-    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (due, cutoff, after)
+    # Kept only while later than Moodle's due date.
+    kept = after if after is not None and after > DUE else None
+    assert (row.due_at, row.cutoff_at, row.extension_due_at) == (due, cutoff, kept)
     assert moved == 1
     entries = await _changelog(db_session, row.user_id)
     assert [(e.entity_id, e.operation) for e in entries] == [(str(row.id), "upsert")]

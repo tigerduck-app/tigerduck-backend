@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import ChangeEntityType, UserAssignment
-from server.syncjobs.assignments import with_extension
+from server.syncjobs.assignments import kept_extension, with_extension
 from server.syncjobs.moodle_client import FetchedAssignment, FetchedSubmission
 
 logger = structlog.get_logger(__name__)
@@ -158,9 +158,10 @@ async def apply_extensions(
     fetched: dict[int, FetchedSubmission],
     listed: dict[int, FetchedAssignment],
 ) -> int:
-    """Write each answered assignment's extension, and the dates it gives
-    with the ones Moodle listed this round (`with_extension`). Returns how
-    many rows' dates changed.
+    """Write each answered assignment's extension, kept only while later
+    than the due date Moodle listed this round (`kept_extension`), and the
+    dates it gives with the listed ones (`with_extension`). Returns how many
+    rows' dates changed.
 
     No extension in an answer is a withdrawn one, and the dates go back to
     Moodle's. An assignment whose probe failed has no answer and keeps the
@@ -183,9 +184,11 @@ async def apply_extensions(
 
     changed = 0
     for row in rows:
-        extension = fetched[row.moodle_assignment_id].extension_due_at
-        dated = with_extension(listed[row.moodle_assignment_id], extension)
-        row.extension_due_at = extension
+        listed_item = listed[row.moodle_assignment_id]
+        row.extension_due_at = kept_extension(
+            listed_item, fetched[row.moodle_assignment_id].extension_due_at
+        )
+        dated = with_extension(listed_item, row.extension_due_at)
         fields = [
             name
             for name in ("due_at", "cutoff_at")
