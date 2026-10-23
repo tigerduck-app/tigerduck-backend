@@ -32,6 +32,52 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.4.1
+
+- **Assignment reminders count from the student's own due date.** An
+  assignment's `due_at` is now the date that applies to the student: the
+  later of Moodle's due date and the student's extension. An extension
+  past the cutoff moves `cutoff_at` to it too. Moodle's list already
+  applies a user or group override; the extension comes from the
+  submission probe (`mod_assign_get_submission_status`), the call that
+  already checks for a submission, so there is no new kind of request.
+  The iPhone app from 2.6.5 uploads the same date for its placeholders,
+  and a fetch that takes one over keeps it.
+- **The probe asks about more assignments.** Besides those due in the
+  next `TIGERDUCK_SUBMISSION_STATUS_WINDOW_HOURS` (72), it now asks about
+  those due in the past 72 hours and not submitted, since an extension
+  granted after the due date moves it forward, and about every one with an
+  extension, so a withdrawn one moves the date back. It also asks, whatever
+  the due date, about each one whose stored date the sync just moved back to
+  Moodle's (an app's upload of the extended date, or a teacher moving the
+  date earlier): an extension in the answer moves it forward again. Each is
+  one request per assignments sync, as before.
+- **A long reminder can miss an early extension.** The server learns of an
+  extension only once its assignment is within 72 hours of the due date,
+  unless an app uploaded the extended date, so a reminder offset longer
+  than that (3 or 7 days) is still filed against Moodle's date.
+- **A probe that fails keeps the dates.** An assignment the probe gets no
+  answer for keeps its last known extension, as does one whose answer gives
+  the extension in a shape that cannot be read. An answer without one moves
+  the dates back to Moodle's.
+- **The pre-send check follows.** A reminder or countdown at the
+  student's extension goes out; one at an extension Moodle no longer
+  gives, or shortened, is cancelled as `stale_before_send` (reason
+  `extension_withdrawn`); its reminders are filed again once the next
+  sync stores the new date. One whose student now has a later extension
+  is cancelled as before (`extension`).
+- **Migration `c5e8a2f71d40`** adds `extension_due_at` (nullable) to
+  `user_assignments` without rewriting the table. Existing rows start
+  without an extension; the first probe of each fills it in, so an
+  extension already granted shows up within one sync interval (8 h) of
+  its assignment entering the probe window.
+- **Rolling back.** With 3.4.1 running, run
+  `docker compose exec backend alembic downgrade d07bc39dde6c` first; it
+  drops the column. 3.4.0 then writes Moodle's dates back on its next
+  sync of each account.
+
+---
+
 ## Upgrading to 3.4.0
 
 - **The admin endpoints moved to an internal port.** `POST /push-tick` and

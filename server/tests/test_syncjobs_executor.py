@@ -1586,3 +1586,115 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
     # One from the list sync (it inserted the assignment), one from the probe.
     assert len(keys) == 2
     assert [k for k in keys if k.endswith(":submissions")] != []
+
+
+async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_probe_fails(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The probe's answer moves the due date to the student's extension in
+    the same run as the list sync, and a later run whose probe fails keeps
+    it rather than going back to Moodle's date."""
+    user, _, job = await _setup_user_job(db_session)
+    due_at = (datetime.now(UTC) + timedelta(hours=10)).replace(microsecond=0)
+    extension = due_at + timedelta(days=2)
+    answers = [
+        {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=extension,
+            )
+        },
+        MoodleUnreachable("submission_probe_unreachable"),
+    ]
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=due_at)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    async def stored():
+        return (
+            await db_session.execute(
+                select(UserAssignment.due_at, UserAssignment.extension_due_at)
+                .where(UserAssignment.user_id == user.id)
+                .execution_options(populate_existing=True)
+            )
+        ).one()
+
+    await run_sync_tick(worker)
+    assert tuple(await stored()) == (extension, extension)
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(
+                PushJob.user_id == user.id, PushJob.scenario == "sync_trigger"
+            )
+        )
+    ).scalars().all()
+    assert [k for k in keys if k.endswith(":submissions")] != []
+
+    await _run_when_due(db_session, worker, job)
+    assert answers == []
+    assert tuple(await stored()) == (extension, extension)
+
+
+@pytest.mark.parametrize(
+    "answer,kept",
+    [("extension", True), ("no-extension", False), ("no-answer", False)],
+)
+async def test_a_date_the_list_moves_back_is_probed_and_the_answer_decides(
+    db_session, prepared_engine, test_settings, monkeypatch, answer, kept
+):
+    """An app's initial upload stored the student's later date on a row with
+    a real course id, or a teacher moved the due date earlier. Both are past
+    the probe window, and the probe is asked anyway: an extension it gives
+    keeps the later date, and without one Moodle's date stands."""
+    user, _, _ = await _setup_user_job(db_session)
+    moodle_due = (datetime.now(UTC) + timedelta(days=5)).replace(microsecond=0)
+    later = moodle_due + timedelta(days=2)
+    db_session.add(
+        UserAssignment(
+            user_id=user.id,
+            moodle_course_id=7001,
+            moodle_assignment_id=1,
+            title="HW1",
+            due_at=later,
+        )
+    )
+    await db_session.commit()
+    probed: list[list[int]] = []
+
+    async def probe(*, token, assignment_ids, max_concurrency):
+        probed.append(list(assignment_ids))
+        if answer == "no-answer":
+            return {}
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=False,
+                submitted_at=None,
+                extension_due_at=later if answer == "extension" else None,
+            )
+        }
+
+    fetcher = StubFetcher(results=[_fa(1, due_at=moodle_due)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert probed == [[1]]
+    due_at = (
+        await db_session.execute(
+            select(UserAssignment.due_at)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert due_at == (later if kept else moodle_due)

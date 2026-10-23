@@ -18,7 +18,7 @@ Changelog appends run under the per-user sync-state lock
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import structlog
@@ -43,10 +43,37 @@ _PROVIDER_FIELDS = (
 )
 
 
+def with_extension(
+    item: FetchedAssignment, extension: datetime | None
+) -> FetchedAssignment:
+    """`item` with the dates that apply to a student with `extension`: an
+    extension later than the due date or the cutoff moves it there. An
+    assignment without a cutoff has none to move."""
+    if extension is None:
+        return item
+    return replace(
+        item,
+        due_at=max(item.due_at, extension) if item.due_at else extension,
+        cutoff_at=max(item.cutoff_at, extension) if item.cutoff_at else None,
+    )
+
+
+def kept_extension(
+    item: FetchedAssignment, extension: datetime | None
+) -> datetime | None:
+    """`extension` while it is later than the due date Moodle listed, else
+    None, so a stored extension always means the due date comes from it."""
+    if extension is None or (item.due_at is not None and extension <= item.due_at):
+        return None
+    return extension
+
+
 @dataclass(frozen=True)
 class AssignmentSyncStats:
     fetched_count: int
     changed_count: int
+    # Assignments whose stored due date this sync moved back to Moodle's.
+    recheck_ids: frozenset[int] = frozenset()
 
 
 async def apply_fetched_assignments(
@@ -107,6 +134,7 @@ async def apply_fetched_assignments(
 
     changed = 0
     seen: set[tuple[int, int]] = set()
+    recheck: set[int] = set()
 
     for item in fetched:
         key = (item.moodle_course_id, item.moodle_assignment_id)
@@ -122,6 +150,9 @@ async def apply_fetched_assignments(
             row.moodle_course_id = item.moodle_course_id
             existing[key] = row
             fields.append("moodle_course_id")
+            # The app uploads the student's date; the probe right after checks it.
+            if row.due_at and item.due_at and row.due_at > item.due_at:
+                row.extension_due_at = row.due_at
 
         if row is None:
             row = UserAssignment(
@@ -147,6 +178,11 @@ async def apply_fetched_assignments(
             await log(str(row.id), "upsert", {"fields": list(_PROVIDER_FIELDS)})
             continue
 
+        row.extension_due_at = kept_extension(item, row.extension_due_at)
+        item = with_extension(item, row.extension_due_at)
+        if row.due_at and item.due_at and row.due_at > item.due_at:
+            # Maybe an extension an app uploaded; the probe after this sync decides.
+            recheck.add(item.moodle_assignment_id)
         for field_name in _PROVIDER_FIELDS:
             new_value = getattr(item, field_name)
             if getattr(row, field_name) != new_value:
@@ -182,4 +218,8 @@ async def apply_fetched_assignments(
         fetched=len(fetched),
         changed=changed,
     )
-    return AssignmentSyncStats(fetched_count=len(fetched), changed_count=changed)
+    return AssignmentSyncStats(
+        fetched_count=len(fetched),
+        changed_count=changed,
+        recheck_ids=frozenset(recheck),
+    )
