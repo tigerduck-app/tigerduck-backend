@@ -66,7 +66,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **通知分組** — iOS 的 `thread-id` 分 `course` / `assignment` / `other` 三組。課程與作業提醒不帶共用的 collapse id，所以會疊在一起，不會互相取代
 - **APNs** — JWT 認證、Push-to-Start、Live Activity update / end；連線送完後保持開著（TCP keepalive），單次發送上限 15 秒
 - **FCM** — 批次 fan-out、`UNREGISTERED` / `SENDER_ID_MISMATCH` 自動清 token；sync trigger 用 normal priority、TTL 12 小時；每個 HTTP request 上限 10 秒
-- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點走 `X-Push-Token`；公告讀取開放
+- **認證** — 所有 v3 路由走 `Authorization: Bearer <JWT>`；管理端點只在內部的 admin port（`:9001`）上提供，並檢查 `X-Push-Token`；公告讀取開放
 
 推播的完整流程圖在 [`docs/push-notification-flows.drawio`](docs/push-notification-flows.drawio)（用 draw.io / diagrams.net 開啟）。
 
@@ -347,8 +347,9 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
 | `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh 觸發伺服器代抓（cooldown） | JWT |
-| `GET` | `/v3/admin/sync-policies` | 列出同步策略 | shared secret |
-| `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略 | shared secret |
+| `GET` | `/v3/admin/sync-policies` | 列出同步策略（只在 admin port） | shared secret |
+| `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略（只在 admin port） | shared secret |
+| `POST` | `/push-tick` | 立刻跑一次推播 tick（只在 admin port，portal 呼叫） | shared secret |
 
 ### 基礎
 

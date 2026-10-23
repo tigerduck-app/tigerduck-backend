@@ -1,4 +1,4 @@
-"""Shared-secret auth for write endpoints.
+"""Shared-secret auth for the admin endpoints.
 
 Checked via the `X-Push-Token` header. If `settings.api_shared_secret` is
 unset (empty string) the dependency is a no-op — convenient for local dev

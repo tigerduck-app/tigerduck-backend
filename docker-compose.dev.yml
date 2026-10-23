@@ -43,9 +43,11 @@ services:
     networks: !override
       tigerduck-db:
       tigerduck-host:
-      # Same alias as the base file: the metrics port binds to it.
+      # Same aliases as the base file: the metrics and admin ports bind to them.
       tigerduck-monitoring:
         aliases: [tigerduck-internal-metrics]
+      tigerduck-admin:
+        aliases: [tigerduck-internal-admin]
     ports:
       - "40000:40000"
   portal:
@@ -54,6 +56,7 @@ services:
     networks: !override
       - tigerduck-db
       - tigerduck-host
+      - tigerduck-admin
     ports:
       - "40010:40010"
   prometheus:

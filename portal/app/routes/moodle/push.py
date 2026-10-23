@@ -8,16 +8,19 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from ...audit import audit
 from ...db import get_pool
-from ...status import BACKEND_INTERNAL_URL
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
 
+# The backend's admin listener, on the internal network only the portal
+# shares with it (docker-compose.yml); the API port does not serve `/push-tick`.
+BACKEND_ADMIN_URL = "http://tigerduck-internal-admin:9001"
+
 
 def _internal_headers(request: Request | None) -> dict[str, str]:
-    """Auth header for the backend's internal endpoints.
+    """Auth header for the backend's admin endpoints.
 
-    `/push-tick` is behind `require_shared_secret`, which reads
+    `/push-tick` is also behind `require_shared_secret`, which reads
     `X-Push-Token`. Omitted when no secret is configured so a dev stack —
     where the dependency short-circuits on an empty secret — keeps working
     without one.
@@ -42,7 +45,7 @@ async def run_pipeline_now(request: Request | None, *, what: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             tick = await client.post(
-                f"{BACKEND_INTERNAL_URL}/push-tick",
+                f"{BACKEND_ADMIN_URL}/push-tick",
                 headers=_internal_headers(request),
             )
         if tick.status_code >= 400:
@@ -58,18 +61,17 @@ async def run_pipeline_now(request: Request | None, *, what: str) -> None:
 
 @router.post("/push-tick")
 async def force_push_tick(request: Request) -> JSONResponse:
-    """Proxy to the main API server's /push-tick endpoint.
+    """Proxy to the backend's /push-tick endpoint on its admin listener.
 
     Carries the shared secret: `/push-tick` sits behind
     `require_shared_secret`, so an unauthenticated proxy call is refused
     the moment `TIGERDUCK_API_SHARED_SECRET` is set — which it always is
     outside dev, where the dependency short-circuits on an empty secret.
-    That is why this worked locally and not in a real deployment.
     """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{BACKEND_INTERNAL_URL}/push-tick",
+                f"{BACKEND_ADMIN_URL}/push-tick",
                 headers=_internal_headers(request),
             )
             # A non-JSON body (an HTML 502 from a proxy, say) must not

@@ -66,7 +66,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Notification stacks** — iOS `thread-id` is `course`, `assignment` or `other`. Class and homework reminders carry no shared collapse id, so they stack instead of replacing one another
 - **APNs** — JWT auth, Push-to-Start, Live Activity update / end; the connection stays open between sends (TCP keepalive), and one send is capped at 15 seconds
 - **FCM** — Batched fan-out, automatic cleanup on `UNREGISTERED` / `SENDER_ID_MISMATCH`; sync triggers go at normal priority with a 12-hour TTL; each HTTP request is capped at 10 seconds
-- **Auth** — All v3 routes use `Authorization: Bearer <JWT>`; admin endpoints use `X-Push-Token`; bulletin reads are public
+- **Auth** — All v3 routes use `Authorization: Bearer <JWT>`; admin endpoints are served only on the internal admin port (`:9001`) and check `X-Push-Token`; bulletin reads are public
 
 The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/push-notification-flows.drawio) (open with draw.io / diagrams.net).
 
@@ -347,8 +347,9 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `POST` | `/v3/sync-jobs/run-now` | Pull-to-refresh server fetch trigger (cooldown) | JWT |
-| `GET` | `/v3/admin/sync-policies` | List sync policies | shared secret |
-| `PATCH` | `/v3/admin/sync-policies/{job_type}` | Update sync policy | shared secret |
+| `GET` | `/v3/admin/sync-policies` | List sync policies (admin port only) | shared secret |
+| `PATCH` | `/v3/admin/sync-policies/{job_type}` | Update sync policy (admin port only) | shared secret |
+| `POST` | `/push-tick` | Run a push tick now (admin port only; the portal calls it) | shared secret |
 
 ### Meta
 
