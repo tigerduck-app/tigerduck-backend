@@ -13,7 +13,7 @@ import uuid
 
 import structlog
 from fastapi import HTTPException, status
-from sqlalchemy import delete, exists, select, true, update
+from sqlalchemy import delete, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -42,6 +42,10 @@ from server.db import in_array
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
+
+# Namespace ("TDSI") of the per-device sign-in lock. Its two-int4 key form
+# cannot collide with the one-bigint advisory locks used elsewhere.
+_DEVICE_SIGN_IN_LOCK = 0x54445349
 
 PROVIDER_NTUST_SSO = "ntust_sso"
 
@@ -133,6 +137,15 @@ async def login(
 
     now = datetime.now(UTC)
     try:
+        # One sign-in per physical device at a time, so the owners read below
+        # are still its owners when `_upsert_device` takes it over.
+        await session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    _DEVICE_SIGN_IN_LOCK, func.hashtext(device_info.client_device_id)
+                )
+            )
+        )
         user = await _find_or_create_user(session, student_id=student_id, now=now)
         # Also the accounts of other students on this device, whose rows
         # `_upsert_device` deletes.

@@ -9,6 +9,7 @@ import base64
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import func, select, text, update
 
 from server.auth import service
@@ -295,3 +296,56 @@ async def test_a_sign_out_from_a_deregistered_device_and_a_sign_in_do_not_deadlo
         await signing_out.commit()
 
     assert await _stored(db_session) == 0
+
+
+async def test_two_sign_ins_taking_over_a_device_and_a_sign_out_do_not_deadlock(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """B and C both found A owning the device. B took it over first; C then
+    held only A's and C's accounts, deleted B's device row, and waited for
+    B's account, which B's sign-out held while it waited for that row."""
+    await _student(db_session, ["shared"], student_id="b00000001")
+    b_id = await _student(db_session, [], student_id="b00000002")
+    await _student(db_session, [], student_id="b00000003")
+    factory = build_session_factory(prepared_engine)
+    reached, release = _hold_logins_before_the_device(monkeypatch)
+    forgetting_b, go_on = asyncio.Event(), asyncio.Event()
+    real_forget = service.forget_credentials_once_signed_out
+
+    async def forget_held_for_b(session, user_id):
+        if user_id == b_id:
+            forgetting_b.set()
+            await go_on.wait()
+        await real_forget(session, user_id)
+
+    monkeypatch.setattr(service, "forget_credentials_once_signed_out", forget_held_for_b)
+
+    async with factory() as as_b, factory() as as_c, factory() as signing_out:
+        b_in = asyncio.create_task(_login(as_b, test_settings, "b00000002", "shared"))
+        await _until(prepared_engine, lambda: "shared" in reached)
+        c_in = asyncio.create_task(_login(as_c, test_settings, "b00000003", "shared"))
+        await _until(prepared_engine, c_in.done)
+        release.set()
+        await b_in
+        await as_b.commit()
+        await _until(prepared_engine, forgetting_b.is_set)
+        b_out = asyncio.create_task(
+            delete_device(
+                "shared", CurrentAuth(user_id=b_id, session_id=0, device_id=None), signing_out
+            )
+        )
+        await _until(prepared_engine, b_out.done)
+        go_on.set()
+        await c_in
+        await as_c.commit()
+        # The device was C's by the time B's sign-out could look for it.
+        with pytest.raises(HTTPException) as gone:
+            await b_out
+        assert gone.value.status_code == 404
+
+    owner = (
+        await db_session.execute(
+            select(User.student_id).join(UserDevice, UserDevice.user_id == User.id)
+        )
+    ).scalars().all()
+    assert owner == ["b00000003"]
