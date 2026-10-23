@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.config import Settings
+from server.db import lift_timeouts
 from server.models import (
     CustomPushDispatch,
     CustomPushStatus,
@@ -61,6 +62,7 @@ async def _dispatch_pending_custom_pushes_locked(
     ts = datetime.now(timezone.utc)
 
     async with session_factory() as session:
+        await lift_timeouts(session)
         rows = (
             await session.execute(
                 select(CustomPushDispatch, DeviceRegistration)

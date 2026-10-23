@@ -19,6 +19,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.config import Settings
+from server.db import lift_timeouts
 from server.sync.models import UserChangeLog, UserSyncState
 
 logger = structlog.get_logger(__name__)
@@ -36,6 +37,7 @@ async def purge_expired_changelog(
     total_deleted = 0
 
     async with session_factory() as session:
+        await lift_timeouts(session)
         watermarks = (
             await session.execute(
                 select(

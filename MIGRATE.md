@@ -76,6 +76,18 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   the two Access values are unset or do not match the portal's Access
   application.
 
+- **Database timeouts.** Every backend connection now carries
+  `statement_timeout` (`TIGERDUCK_DATABASE_STATEMENT_TIMEOUT_SECONDS`, 30)
+  and `idle_in_transaction_session_timeout`
+  (`TIGERDUCK_DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`, 60); 0 turns
+  one off. The push sends and the retention purges lift both for their own
+  transactions. Migrations use their own connection and are not affected.
+
+- **A second connection pool.** Scheduled jobs and the sync and push
+  workers use a pool of their own (5 + 5 overflow, like the API's), so the
+  backend may hold up to 20 Postgres connections instead of 10. The
+  `tigerduck_db_pool_*` metrics still describe the API's pool only.
+
 ---
 
 ## Upgrading to 3.3.6
