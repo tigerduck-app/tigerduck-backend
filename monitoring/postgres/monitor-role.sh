@@ -23,8 +23,8 @@
 #                     adding to the queue.
 #
 # Also creates ops.backup_status, where deploy/backup/tigerduck-backup.sh
-# records its last successes for sql-exporter. It lives outside Alembic's
-# schema, so autogenerate never proposes dropping it.
+# records its last success and failure for sql-exporter. It lives outside
+# Alembic's schema, so autogenerate never proposes dropping it.
 set -eu
 
 : "${MONITOR_DB_PASSWORD:?TIGERDUCK_MONITOR_DB_PASSWORD is not set in .env. ./start.sh generates one; or add it yourself: python -c 'import secrets; print(secrets.token_urlsafe(32))'}"
@@ -45,7 +45,8 @@ GRANT pg_monitor, pg_read_all_data TO tigerduck_monitor;
 CREATE SCHEMA IF NOT EXISTS ops;
 CREATE TABLE IF NOT EXISTS ops.backup_status (
     kind text PRIMARY KEY,
-    last_success_at timestamptz NOT NULL
+    last_success_at timestamptz,
+    last_failure_at timestamptz
 );
 SQL
 

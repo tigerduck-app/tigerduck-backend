@@ -1,17 +1,21 @@
 """deploy/backup/tigerduck-backup.sh, run against stub rclone, gpg and docker.
 
 No test reaches R2, a database or Docker: the stubs on PATH log how they
-were called. What matters is that the script refuses to run half
-configured and that no secret ever lands on a command line.
+were called, and STUB_FAIL makes one step fail. What matters is that the
+script refuses to run half configured, that no secret ever lands on a
+command line, and that every outcome of a backup or drill is recorded.
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "backup" / "tigerduck-backup.sh"
 
@@ -25,36 +29,71 @@ SETTINGS = {
     "TIGERDUCK_BACKUP_PASSPHRASE": PASSPHRASE,
 }
 
+NEWEST = "tigerduck-20260102T000000Z.dump.gpg"
+
 STUBS = {
-    # Logs argv, and whether the remote came through the environment.
+    # Logs argv and whether the remote came through the environment; lists
+    # two backups, newest last once sorted; a download writes the file.
     "rclone": """#!/bin/bash
 echo "argv: $*" >> "$STUB_LOG"
 echo "env secret: ${RCLONE_CONFIG_TIGERDUCK_R2_SECRET_ACCESS_KEY:-}" >> "$STUB_LOG.env"
+case "$4" in
+    lsf) printf '%s\\n' tigerduck-20260102T000000Z.dump.gpg tigerduck-20260101T000000Z.dump.gpg ;;
+    copyto)
+        case "$5" in tigerduck_r2:*) echo encrypted > "$6" ;; esac
+        case "$6" in tigerduck_r2:*) if [ "${STUB_FAIL:-}" = upload ]; then exit 1; fi ;; esac ;;
+esac
 """,
-    # Logs argv, the passphrase it read on fd 3 and the data it read on
-    # stdin; writes its --output.
+    # Logs argv, the passphrase from fd 3 and what --symmetric read on
+    # stdin; writes --output, or the decrypted dump to stdout.
     "gpg": """#!/bin/bash
 echo "argv: $*" >> "$STUB_LOG"
 read -r passphrase <&3
 echo "fd 3 passphrase: $passphrase" >> "$STUB_LOG.env"
-echo "stdin: $(cat)" >> "$STUB_LOG.env"
-while [ "$#" -gt 0 ]; do
-    if [ "$1" = --output ]; then echo encrypted > "$2"; fi
-    shift
-done
+case " $* " in
+    *" --symmetric "*) echo "stdin: $(cat)" >> "$STUB_LOG.env" ;;
+esac
+case " $* " in
+    *" --output "*)
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = --output ]; then echo encrypted > "$2"; fi
+            shift
+        done ;;
+    *" --decrypt "*)
+        if [ "${STUB_FAIL:-}" = decrypt ]; then exit 2; fi
+        echo PGDMP-decrypted ;;
+esac
 """,
-    # pg_dump writes a dump; psql reads its SQL from stdin.
+    # The live database and the drill container: pg_dump writes a dump,
+    # pg_restore and the recording psql read stdin, drill queries answer.
     "docker": """#!/bin/bash
 echo "argv: $*" >> "$STUB_LOG"
 case "$*" in
+    "ps -aq"*) echo orphan123 ;;
     *pg_dump*) echo PGDMP ;;
+    *pg_restore*)
+        echo "restore stdin: $(cat)" >> "$STUB_LOG.env"
+        if [ "${STUB_FAIL:-}" = pg_restore ]; then exit 1; fi ;;
+    *"SELECT version_num"*) echo 516f9bad27f0 ;;
+    *"FROM users"*)
+        if [ "${STUB_FAIL:-}" = table ]; then exit 1; fi
+        echo 3 ;;
+    *"SELECT count"*) echo 3 ;;
     *psql*) cat >> "$STUB_LOG.sql" ;;
 esac
+""",
+    "date": """#!/bin/bash
+if [ "$1" = +%u ]; then echo "${STUB_WEEKDAY:-3}"; else exec /bin/date "$@"; fi
 """,
 }
 
 
-def _run(tmp_path: Path, *args: str, settings: dict[str, str] = SETTINGS):
+def _run(
+    tmp_path: Path,
+    *args: str,
+    settings: dict[str, str] = SETTINGS,
+    **stub_env: str,
+):
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     lines = ["POSTGRES_PASSWORD=unrelated"]
@@ -73,10 +112,12 @@ def _run(tmp_path: Path, *args: str, settings: dict[str, str] = SETTINGS):
         "TMPDIR": str(tmp_path),
         "TIGERDUCK_REPO_DIR": str(repo),
         "STUB_LOG": str(log),
+        **stub_env,
     }
     result = subprocess.run(
         ["bash", str(SCRIPT), *args],
         env=env,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         timeout=30,
@@ -152,37 +193,90 @@ def test_backup_keeps_secrets_off_every_command_line(tmp_path):
     assert "INSERT INTO ops.backup_status" in Path(f"{log}.sql").read_text()
 
 
-def test_backup_removes_its_temporary_files_and_lock(tmp_path):
+def test_backup_removes_its_temporary_files(tmp_path):
     result, _, _ = _run(tmp_path, "backup")
 
     assert result.returncode == 0, result.stderr
-    assert not list(tmp_path.glob("tigerduck-backup*"))
+    assert not [p for p in tmp_path.glob("tigerduck-backup.*") if p.is_dir()]
 
 
 def test_a_run_while_another_holds_the_lock_exits_cleanly(tmp_path):
-    lock = tmp_path / "tigerduck-backup-lock"
-    lock.symlink_to(str(os.getpid()))
+    with open(tmp_path / "tigerduck-backup.lock", "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    result, calls, _ = _run(tmp_path, "nightly")
+        result, calls, _ = _run(tmp_path, "nightly")
 
     assert result.returncode == 0, result.stderr
     assert "still going" in result.stdout
     assert calls == ""
-    assert lock.is_symlink()
 
 
-def test_a_lock_left_by_a_killed_run_is_taken_over_and_released(tmp_path):
-    gone = subprocess.Popen(["true"])
-    gone.wait()
-    dead_pid = gone.pid
-    lock = tmp_path / "tigerduck-backup-lock"
-    lock.symlink_to(str(dead_pid))
+def test_a_lock_file_nobody_holds_does_not_block(tmp_path):
+    # What a killed run leaves: the file, but no lock on it.
+    (tmp_path / "tigerduck-backup.lock").touch()
 
     result, calls, _ = _run(tmp_path, "backup")
 
     assert result.returncode == 0, result.stderr
     assert "copyto" in calls
-    assert not lock.is_symlink()
+
+
+def test_a_failed_backup_is_recorded_as_a_failure(tmp_path):
+    result, calls, log = _run(tmp_path, "backup", STUB_FAIL="upload")
+
+    assert result.returncode == 1
+    assert "upload of" in result.stderr
+    assert "kind=backup" in calls
+    recorded = Path(f"{log}.sql").read_text()
+    assert "last_failure_at" in recorded
+    assert "last_success_at" not in recorded
+
+
+def test_drill_restores_the_newest_backup_and_records_success(tmp_path):
+    result, calls, log = _run(tmp_path, "drill")
+
+    assert result.returncode == 0, result.stderr
+    assert f"drill restored {NEWEST}: alembic=516f9bad27f0 users=3" in result.stdout
+    assert f"copyto tigerduck_r2:tigerduck-backups/postgres/{NEWEST}" in calls
+    assert "rm -f orphan123" in calls
+    drill = re.search(r"run -d --rm --name (tigerduck-backup-drill-\d+) --network none", calls)
+    assert drill, calls
+    assert f"rm -f {drill.group(1)}" in calls
+    # Decrypted on a pipe straight into pg_restore.
+    assert "restore stdin: PGDMP-decrypted" in Path(f"{log}.env").read_text()
+    assert "--output" not in calls.split("--decrypt")[0].splitlines()[-1]
+    assert "kind=drill" in calls
+    assert "last_success_at" in Path(f"{log}.sql").read_text()
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ("decrypt", "decrypting or restoring"),
+        ("pg_restore", "decrypting or restoring"),
+        ("table", "has no users table"),
+    ],
+)
+def test_a_failed_drill_is_recorded_and_cleaned_up(tmp_path, step, message):
+    result, calls, log = _run(tmp_path, "drill", STUB_FAIL=step)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    drill = re.search(r"--name (tigerduck-backup-drill-\d+)", calls)
+    assert drill, calls
+    assert f"rm -f {drill.group(1)}" in calls
+    recorded = Path(f"{log}.sql").read_text()
+    assert "last_failure_at" in recorded
+    assert "last_success_at" not in recorded
+
+
+@pytest.mark.parametrize(("weekday", "drills"), [("7", True), ("3", False)])
+def test_nightly_drills_on_sundays_only(tmp_path, weekday, drills):
+    result, calls, _ = _run(tmp_path, "nightly", STUB_WEEKDAY=weekday)
+
+    assert result.returncode == 0, result.stderr
+    assert "pg_dump" in calls
+    assert ("pg_restore" in calls) is drills
 
 
 def test_work_dirs_older_than_a_day_are_removed(tmp_path):

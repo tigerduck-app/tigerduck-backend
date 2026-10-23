@@ -21,7 +21,7 @@ PATH="${PATH}:/opt/homebrew/bin:/usr/local/bin"
 
 REPO_DIR="${TIGERDUCK_REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 TMP_BASE="${TMPDIR:-/tmp}"
-LOCK="${TMP_BASE%/}/tigerduck-backup-lock"
+LOCK="${TMP_BASE%/}/tigerduck-backup.lock"
 ENV_FILE="${REPO_DIR}/.env"
 DB_CONTAINER="tigerduck-db"
 PREFIX="postgres"
@@ -33,7 +33,7 @@ SETTINGS="TIGERDUCK_BACKUP_S3_ENDPOINT TIGERDUCK_BACKUP_S3_BUCKET TIGERDUCK_BACK
 
 WORK=""
 DRILL_CONTAINER=""
-LOCKED=""
+RUNNING=""
 
 usage() {
     sed -n 's/^#   \(tigerduck-backup.sh \)/usage: \1/p' "$0" >&2
@@ -50,33 +50,26 @@ log() {
 }
 
 cleanup() {
+    local status=$?
     if [ -n "${DRILL_CONTAINER}" ]; then
         docker rm -f "${DRILL_CONTAINER}" >/dev/null 2>&1 || true
     fi
     if [ -n "${WORK}" ]; then
         rm -rf "${WORK}"
     fi
-    if [ -n "${LOCKED}" ]; then
-        rm -f "${LOCK}"
+    if [ "${status}" -ne 0 ] && [ -n "${RUNNING}" ]; then
+        record last_failure_at "${RUNNING}" >/dev/null 2>&1 || true
     fi
 }
 
-# A symlink to the holder's pid: created atomically, and a lock left by a
-# killed run names a pid that is gone.
+# A kernel lock on fd 9, which this shell holds until it exits however it
+# exits, so a killed run leaves nothing stale. macOS has no flock(1); its perl does it.
 acquire_lock() {
-    local holder
-    if ln -s "$$" "${LOCK}" 2>/dev/null; then
-        LOCKED=1
-        return 0
-    fi
-    holder="$(readlink "${LOCK}" || true)"
-    if [ -n "${holder}" ] && kill -0 "${holder}" 2>/dev/null; then
-        log "another run (pid ${holder}) is still going; exiting"
+    exec 9>>"${LOCK}"
+    if ! perl -MFcntl=:flock -e 'open(my $fh, ">&=", 9) or die "fd 9: $!\n"; flock($fh, LOCK_EX | LOCK_NB) or exit 1'; then
+        log "another run is still going; exiting"
         exit 0
     fi
-    rm -f "${LOCK}"
-    ln -s "$$" "${LOCK}" 2>/dev/null || die "cannot take the lock ${LOCK}"
-    LOCKED=1
 }
 
 # Docker Desktop may still be starting after a reboot or a wake at 04:30.
@@ -139,10 +132,11 @@ r2() {
 }
 
 # The passphrase comes on fd 3 from a builtin, never on a command line, which
-# leaves stdin and stdout for the data.
+# leaves stdin and stdout for the data. fd 9 is closed so a gpg-agent it
+# starts cannot keep holding the lock.
 gpg_with_passphrase() {
     gpg --batch --quiet --yes --pinentry-mode loopback --no-symkey-cache \
-        --passphrase-fd 3 "$@" 3< <(printf '%s\n' "${TIGERDUCK_BACKUP_PASSPHRASE}")
+        --passphrase-fd 3 "$@" 3< <(printf '%s\n' "${TIGERDUCK_BACKUP_PASSPHRASE}") 9>&-
 }
 
 list_backups() {
@@ -160,17 +154,24 @@ download() {
     r2 copyto "${REMOTE}/$1" "${WORK}/$1" || die "download of $1 failed"
 }
 
-record_success() {
+# record last_success_at|last_failure_at backup|drill
+record() {
     docker exec -i "${DB_CONTAINER}" psql -U tigerduck -d tigerduck -q \
-        -v ON_ERROR_STOP=1 -v kind="$1" >/dev/null <<'SQL' ||
-INSERT INTO ops.backup_status (kind, last_success_at) VALUES (:'kind', now())
-ON CONFLICT (kind) DO UPDATE SET last_success_at = EXCLUDED.last_success_at;
+        -v ON_ERROR_STOP=1 -v kind="$2" >/dev/null <<SQL
+INSERT INTO ops.backup_status (kind, $1) VALUES (:'kind', now())
+ON CONFLICT (kind) DO UPDATE SET $1 = EXCLUDED.$1;
 SQL
+}
+
+record_success() {
+    record last_success_at "$1" ||
         die "could not record the $1 in ops.backup_status (run ./start.sh so monitor-role creates it)"
+    RUNNING=""
 }
 
 cmd_backup() {
     local name
+    RUNNING=backup
     name="tigerduck-$(date -u +%Y%m%dT%H%M%SZ).dump.gpg"
     # Streamed, so no unencrypted dump touches the disk; custom format is
     # compressed already.
@@ -204,6 +205,7 @@ drill_sql() {
 
 cmd_drill() {
     local name orphan revision table count counts=""
+    RUNNING=drill
     name="$(newest_backup)"
     download "${name}"
     # Left by a killed run; the lock means no other drill is going.
