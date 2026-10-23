@@ -369,6 +369,15 @@ def bind_engine(engine: AsyncEngine | None) -> None:
     _db_pool_collector.engine = engine
 
 
+# --- Readiness ---
+
+READY_LAST_OK = Gauge(
+    "tigerduck_ready_last_ok_timestamp_seconds",
+    "Unix time GET /ready last answered ok; the compose healthcheck calls it "
+    "every 30s. 0 until the first such answer since the process started.",
+)
+
+
 # --- Settings the dashboards compare against ---
 
 # The stale-lock thresholds the workers actually run with. The dashboards'
