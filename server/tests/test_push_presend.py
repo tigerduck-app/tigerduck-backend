@@ -413,6 +413,79 @@ async def test_an_extension_before_the_due_time_still_reminds(
     assert (await _reload(db_session, job)).status == "sent"
 
 
+async def _extended_assignment(make_assignment, store_moodle_token, user, aid):
+    """An assignment whose due date is the student's extension, as the
+    probe stores it."""
+    extension = _tomorrow()
+    row = await make_assignment(
+        user_id=user.id, moodle_assignment_id=aid, due_at=extension
+    )
+    row.extension_due_at = extension
+    await store_moodle_token(user.id)
+    return extension
+
+
+async def test_a_reminder_at_the_students_extension_is_sent(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    user, _ = await _iphone_user(db_session)
+    extension = await _extended_assignment(
+        make_assignment, store_moodle_token, user, 17
+    )
+    job = _reminder(user, 17, extension)
+    db_session.add(job)
+    await db_session.commit()
+
+    moodle = SubmissionStatusStub({**OPEN, "extension_due_at": extension})
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle))
+
+    assert (await _reload(db_session, job)).status == "sent"
+
+
+@pytest.mark.parametrize(
+    "now_extended_by", [None, timedelta(hours=-2)], ids=["withdrawn", "shortened"]
+)
+async def test_a_reminder_at_an_extension_moodle_no_longer_gives_is_cancelled(
+    db_session,
+    prepared_engine,
+    test_settings,
+    make_assignment,
+    store_moodle_token,
+    monkeypatch,
+    now_extended_by,
+):
+    user, _ = await _iphone_user(db_session)
+    extension = await _extended_assignment(
+        make_assignment, store_moodle_token, user, 18
+    )
+    job = _reminder(user, 18, extension)
+    db_session.add(job)
+    await db_session.commit()
+
+    answer = {
+        **OPEN,
+        "extension_due_at": (
+            None if now_extended_by is None else extension + now_extended_by
+        ),
+    }
+    monkeypatch.setattr(
+        pipeline_module, "logger", structlog.get_logger(pipeline_module.__name__)
+    )
+    apple = ScriptedSender()
+    worker = _worker(
+        prepared_engine, test_settings, SubmissionStatusStub(answer), apple=apple
+    )
+    with capture_logs() as logs:
+        await run_push_tick(worker)
+
+    job = await _reload(db_session, job)
+    assert (job.status, job.last_error) == ("cancelled", "stale_before_send")
+    assert apple.requests == []
+    assert [
+        log["reason"] for log in logs if log["event"] == "push.presend_check"
+    ] == ["extension_withdrawn"]
+
+
 @pytest.mark.parametrize("meanwhile", ["probe-finds-it-submitted", "marked-done"])
 async def test_what_the_rows_learn_during_the_moodle_call_is_not_sent_past(
     db_session,

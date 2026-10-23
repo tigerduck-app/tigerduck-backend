@@ -14,7 +14,8 @@ when the database cannot settle it, and acts on the verdict:
   (`record_submitted`).
 * `gone`: the job is no longer one to send. No row is left; a done, ignored
   or archived mark or an ignored course; a moved or passed due time; or
-  Moodle says the student cannot submit, or has an extension past it.
+  Moodle says the student cannot submit, has an extension past it, or no
+  longer has the extension it is due at.
 * `send`: Moodle says the assignment is still open.
 * `unverified`: nobody could say. Nothing is sent: the job is retried for a
   while, then cancelled, since a missed reminder is better than a wrong one.
@@ -131,7 +132,9 @@ async def check_before_send(
         assignment_id = _assignment_id(job)
         if assignment_id is None:
             return _gone("no_assignment_id")
-        settled, due_epoch = await _rows_verdict(session, job, assignment_id, now)
+        settled, due_epoch, extended = await _rows_verdict(
+            session, job, assignment_id, now
+        )
         if settled is not None:
             return settled
         fetcher = worker.fetcher
@@ -151,6 +154,7 @@ async def check_before_send(
         token=token,
         assignment_id=assignment_id,
         due_epoch=due_epoch,
+        extended=extended,
         breaker=breaker,
     )
 
@@ -165,7 +169,7 @@ async def recheck_rows(
     assignment_id = _assignment_id(job)
     if assignment_id is None:
         return _gone("no_assignment_id")
-    settled, _ = await _rows_verdict(session, job, assignment_id, now)
+    settled, _, _ = await _rows_verdict(session, job, assignment_id, now)
     return settled
 
 
@@ -254,13 +258,20 @@ async def _assignment_rows(
 
 async def _rows_verdict(
     session: AsyncSession, job: PushJob, assignment_id: int, now: datetime
-) -> tuple[PresendCheck | None, int | None]:
+) -> tuple[PresendCheck | None, int | None, bool]:
     """What the user's rows of the assignment settle, or None to ask Moodle,
-    and when the job's assignment is due (`_due_epoch`)."""
+    when the job's assignment is due (`_due_epoch`), and whether that is the
+    student's extension as a row stores it."""
     rows = await _assignment_rows(session, job.user_id, assignment_id)
-    due_epoch = _due_epoch(job, [row for row, _ in rows if row.deleted_at is None])
+    alive = [row for row, _ in rows if row.deleted_at is None]
+    due_epoch = _due_epoch(job, alive)
     verdict = await _database_verdict(session, job, assignment_id, rows, due_epoch, now)
-    return verdict, due_epoch
+    extended = due_epoch is not None and any(
+        row.extension_due_at is not None
+        and int(row.extension_due_at.timestamp()) == due_epoch
+        for row in alive
+    )
+    return verdict, due_epoch, extended
 
 
 async def _database_verdict(
@@ -331,6 +342,7 @@ async def _ask_moodle(
     token: str,
     assignment_id: int,
     due_epoch: int | None,
+    extended: bool,
     breaker: MoodleBreaker,
 ) -> PresendCheck:
     try:
@@ -371,11 +383,16 @@ async def _ask_moodle(
         return _gone("submissions_disabled")
     if answer.locked:
         return _gone("locked")
-    if answer.extension_due_at is not None and (
-        due_epoch is None or answer.extension_due_at.timestamp() > due_epoch
+    extension = answer.extension_due_at
+    extension_epoch = None if extension is None else int(extension.timestamp())
+    if extension_epoch is not None and (
+        due_epoch is None or extension_epoch > due_epoch
     ):
         # The job counts down to a deadline this student no longer has.
         return _gone("extension")
+    if extended and (extension_epoch is None or extension_epoch < due_epoch):
+        # The extension the job counts down to was shortened or withdrawn.
+        return _gone("extension_withdrawn")
     return PresendCheck("send", "moodle", assignment_id)
 
 
