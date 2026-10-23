@@ -192,6 +192,73 @@ async def test_a_send_that_outlasts_the_idle_timeout_is_still_recorded(
     assert job.status == "sent"
 
 
+class _ConnectionDropsOnce(ScriptedSender):
+    """Raises for `token` the first time, as aioapns does when its
+    connection drops, and sends everything else."""
+
+    def __init__(self, token):
+        super().__init__()
+        self.token = token
+
+    async def send(self, request):
+        if request.device_token == self.token:
+            self.token = None
+            self.requests.append(request)
+            raise ConnectionError("connection lost")
+        return await super().send(request)
+
+
+async def test_a_connection_error_resends_only_the_deliveries_that_did_not_go_out(
+    db_session, prepared_engine, test_settings
+):
+    user, _, _ = await _setup_user_device_token(db_session)
+    device2 = UserDevice(user_id=user.id, client_device_id="dev-2", platform="ios")
+    db_session.add(device2)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=device2.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-tok-2",
+            token_value="tok-2",
+        )
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    apple = _ConnectionDropsOnce("tok-2")
+    worker = _worker(prepared_engine, test_settings, apple=apple)
+    await run_push_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "pending"
+    deliveries = (
+        (
+            await db_session.execute(
+                select(PushDelivery).where(PushDelivery.push_job_id == job.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert {d.token_hash: d.status for d in deliveries} == {
+        "hash-tok-1": "sent",
+        "hash-tok-2": "pending",
+    }
+
+    job.available_at = datetime.now(UTC) - timedelta(minutes=5)
+    for delivery in deliveries:
+        delivery.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    await run_push_tick(worker)
+
+    await db_session.refresh(job)
+    assert job.status == "sent"
+    assert sorted(r.device_token for r in apple.requests) == ["tok-1", "tok-2", "tok-2"]
+
+
 @pytest.mark.parametrize(
     "database_clock_lead",
     [timedelta(seconds=-5), timedelta(0), timedelta(seconds=5)],
