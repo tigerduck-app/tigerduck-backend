@@ -263,6 +263,14 @@ main() {
         *) usage ;;
     esac
 
+    # Set before the checks, so a run that cannot start is recorded as failed.
+    case "${command}" in
+        backup | nightly) RUNNING=backup ;;
+        drill) RUNNING=drill ;;
+    esac
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM HUP
+
     load_settings
     case "${command}" in
         list) require_tools rclone ;;
@@ -270,8 +278,6 @@ main() {
         *) require_tools rclone gpg docker ;;
     esac
 
-    trap cleanup EXIT
-    trap 'exit 130' INT TERM HUP
     case "${command}" in
         backup | drill | nightly)
             acquire_lock

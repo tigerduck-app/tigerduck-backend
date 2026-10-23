@@ -146,14 +146,14 @@ def test_extra_arguments_print_usage(tmp_path):
     assert calls == ""
 
 
-def test_missing_settings_are_named_and_nothing_runs(tmp_path):
+def test_missing_settings_are_named_and_recorded_and_nothing_else_runs(tmp_path):
     partial = {
         "TIGERDUCK_BACKUP_S3_ENDPOINT": "https://r2.invalid",
         "TIGERDUCK_BACKUP_S3_SECRET_ACCESS_KEY": SECRET,
         "TIGERDUCK_BACKUP_PASSPHRASE": "",
     }
 
-    result, calls, _ = _run(tmp_path, "backup", settings=partial)
+    result, calls, log = _run(tmp_path, "backup", settings=partial)
 
     assert result.returncode == 1
     for name in (
@@ -164,7 +164,8 @@ def test_missing_settings_are_named_and_nothing_runs(tmp_path):
         assert name in result.stderr
     assert "TIGERDUCK_BACKUP_S3_ENDPOINT" not in result.stderr
     assert SECRET not in result.stdout + result.stderr
-    assert calls == ""
+    assert "rclone" not in calls and "pg_dump" not in calls
+    assert "last_failure_at" in Path(f"{log}.sql").read_text()
 
 
 def test_backup_keeps_secrets_off_every_command_line(tmp_path):
