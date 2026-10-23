@@ -157,7 +157,10 @@ async def update_credentials(
         )
         return UpdateCredentialsResponse(updated=False)
 
-    await session.refresh(account)
+    # Read again: the account may have changed, or gone, while Moodle answered.
+    account = await session.get(ExternalAccount, account.id, populate_existing=True)
+    if account is None:
+        return UpdateCredentialsResponse(updated=False)
     credential = await session.get(ExternalAccountCredential, account.id)
     now = datetime.now(UTC)
     new_blob = {
