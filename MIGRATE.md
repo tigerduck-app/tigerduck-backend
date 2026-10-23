@@ -106,11 +106,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
      files in `server/secrets/`. Without the passphrase no backup can be
      read; without the others a restored database has Moodle tokens nothing
      can decrypt, refresh tokens that no longer verify and no APNs key.
-  2. Pull and `./start.sh`, then run a backup and a drill by hand and
-     install the job:
+  2. Pull and `./start.sh`, restart `sql-exporter` (it reads its collectors
+     only at start, and `./start.sh` leaves an unchanged container running),
+     then run a backup and a drill by hand and install the job:
 
      ```bash
      export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+     docker compose restart sql-exporter
      deploy/backup/tigerduck-backup.sh backup
      deploy/backup/tigerduck-backup.sh drill
      ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.backup.plist" ~/Library/LaunchAgents/
@@ -122,7 +124,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
      is elsewhere. Its log is `~/Library/Logs/tigerduck-backup.log`.
   3. Check: `deploy/backup/tigerduck-backup.sh list` names the new backup,
      and `docker compose exec -T postgres psql -U tigerduck -d tigerduck -c 'TABLE ops.backup_status'`
-     has a `backup` and a `drill` row. `launchctl kickstart
+     has a `backup` and a `drill` row, and Prometheus has
+     `tigerduck_backup_last_success_timestamp_seconds` for both kinds. `launchctl kickstart
      gui/$UID/ai.tigerduck.backup` runs the job now. To remove it:
      `launchctl bootout gui/$UID ~/Library/LaunchAgents/ai.tigerduck.backup.plist`,
      then delete the symlink.
