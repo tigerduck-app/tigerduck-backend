@@ -84,6 +84,7 @@ async def test_calls_while_a_tick_runs_join_it_rather_than_start_another(
     monkeypatch.setattr(pipeline_module, "run_push_tick", tick)
     monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
     monkeypatch.setattr(main_module, "_running_ticks", set())
+    monkeypatch.setattr(main_module, "_joinable_tick", None)
 
     first = await admin_client.post("/push-tick")
     second = await admin_client.post("/push-tick")
@@ -96,6 +97,33 @@ async def test_calls_while_a_tick_runs_join_it_rather_than_start_another(
     third = await admin_client.post("/push-tick")
     assert third.json() == {"ok": True, "done": True, "processed": 1}
     assert started == 2
+
+
+async def test_a_tick_running_past_the_join_limit_is_not_joined(
+    admin_client, worker, monkeypatch
+):
+    started = 0
+    release = asyncio.Event()
+
+    async def hung_tick(_worker):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return 0
+
+    monkeypatch.setattr(pipeline_module, "run_push_tick", hung_tick)
+    monkeypatch.setattr(main_module, "_PUSH_TICK_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(main_module, "_FORCED_TICK_JOIN_LIMIT_SECONDS", 0.1)
+    monkeypatch.setattr(main_module, "_running_ticks", set())
+    monkeypatch.setattr(main_module, "_joinable_tick", None)
+
+    await admin_client.post("/push-tick")
+    await asyncio.sleep(0.15)
+    await admin_client.post("/push-tick")
+
+    assert started == 2
+    release.set()
+    await asyncio.wait(set(main_module._running_ticks), timeout=1)
 
 
 async def test_the_api_port_does_not_serve_it(client, worker):

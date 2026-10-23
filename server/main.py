@@ -75,17 +75,31 @@ def _forget_tick(task: asyncio.Task) -> None:
         logger.error("push.force_tick_failed", exc_info=task.exception())
 
 
+# A forced tick running longer than this is taken for hung: calls stop
+# joining it and start a fresh one.
+_FORCED_TICK_JOIN_LIMIT_SECONDS = 120.0
+
+# The forced tick calls join, and when it started (monotonic).
+_joinable_tick: tuple[asyncio.Task, float] | None = None
+
+
 def _forced_tick(worker) -> asyncio.Task:
     """The tick `/push-tick` started that is still running, or a new one:
     repeated calls join a tick rather than pile up beside it."""
-    running = next((t for t in _running_ticks if not t.done()), None)
-    if running is not None:
-        return running
+    global _joinable_tick
+    if _joinable_tick is not None:
+        task, started = _joinable_tick
+        if (
+            not task.done()
+            and time.monotonic() - started < _FORCED_TICK_JOIN_LIMIT_SECONDS
+        ):
+            return task
     from server.push import pipeline
 
     task = asyncio.create_task(pipeline.run_push_tick(worker))
     _running_ticks.add(task)
     task.add_done_callback(_forget_tick)
+    _joinable_tick = (task, time.monotonic())
     return task
 
 
