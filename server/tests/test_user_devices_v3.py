@@ -388,7 +388,11 @@ async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> Non
     response = await client.patch(
         "/v3/devices/iphone-abc/preferences",
         headers=bearer(login),
-        json={"sync_courses": False, "sync_assignments": False},
+        json={
+            "sync_courses": False,
+            "sync_assignments": False,
+            "sync_assignment_reminders": False,
+        },
     )
     assert response.status_code == 200, response.text
 
@@ -415,6 +419,55 @@ async def test_disable_sync_categories_cleans_up_and_logs_deletes(client) -> Non
         # polling /changes actually see them.
         state = (await session.execute(select(UserSyncState))).scalar_one()
         assert state.current_revision == max(e.revision for e in entries)
+
+
+async def test_assignment_sync_off_keeps_the_list_reminders_use(client) -> None:
+    """The Assignments switch covers the marks only (tigerduck-backend#30):
+    turning it off everywhere drops the marks and keeps the assignment
+    list, which reminders read, until reminders are off too."""
+    from server.sync.models import (
+        UserAssignment,
+        UserAssignmentOverride,
+        UserChangeLog,
+    )
+
+    login = await do_login(client)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        user_id = (
+            await session.execute(select(UserDevice.user_id))
+        ).scalar_one()
+        assignment = UserAssignment(
+            user_id=user_id, moodle_course_id=1, moodle_assignment_id=2, title="HW1"
+        )
+        session.add(assignment)
+        await session.flush()
+        session.add(
+            UserAssignmentOverride(
+                user_id=user_id,
+                user_assignment_id=assignment.id,
+                local_status="locally_completed",
+            )
+        )
+        await session.commit()
+
+    async def patch(body: dict) -> None:
+        response = await client.patch(
+            "/v3/devices/iphone-abc/preferences", headers=bearer(login), json=body
+        )
+        assert response.status_code == 200, response.text
+
+    await patch({"sync_assignments": False})
+
+    async with factory() as session:
+        assert (await session.execute(select(UserAssignmentOverride))).first() is None
+        assert len((await session.execute(select(UserAssignment))).all()) == 1
+        assert (await session.execute(select(UserChangeLog))).first() is None
+
+    await patch({"sync_assignment_reminders": False})
+
+    async with factory() as session:
+        assert (await session.execute(select(UserAssignment))).first() is None
 
 
 async def test_rotated_token_retires_its_predecessor(client) -> None:

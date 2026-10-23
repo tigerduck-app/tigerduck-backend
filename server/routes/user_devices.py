@@ -546,6 +546,8 @@ async def _cleanup_orphaned_sync_data(
     /changes drop their stale local copies. Overrides ride along via the
     ON DELETE CASCADE on their parent rows and the client-side cascade,
     and tombstones are server-side bookkeeping with no changelog type.
+    Assignment marks dropped on their own get no entry either: both apps
+    read marks from /sync/full only.
     """
     from server.sync.changelog import append_change, lock_sync_state
     from server.sync.models import (
@@ -568,6 +570,8 @@ async def _cleanup_orphaned_sync_data(
 
     any_courses = any(d.sync_courses for d in active_devices)
     any_assignments = any(d.sync_assignments for d in active_devices)
+    # The assignment switch covers the marks; the list also feeds reminders.
+    any_reminders = any(d.sync_assignment_reminders for d in active_devices)
     # (entity_type, entity_id, payload) for the per-row delete entries
     deleted_entries: list[tuple[str, str, dict | None]] = []
 
@@ -600,6 +604,7 @@ async def _cleanup_orphaned_sync_data(
                 UserAssignmentOverride.user_id == user_id
             )
         )
+    if not any_assignments and not any_reminders:
         rows = (
             await session.execute(
                 sa_delete(UserAssignment)
