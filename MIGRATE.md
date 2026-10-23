@@ -69,8 +69,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   notification fails (its log says `Notify for alerts failed`). To check
   delivery: Grafana → Alerting → Contact points → `tigerduck-oncall` → Test.
   The backup rules read `tigerduck_backup_last_success_timestamp_seconds`
-  from the off-site backup job; on a host without that job they fire half
-  an hour after the deploy.
+  and `tigerduck_backup_last_failure_timestamp_seconds` from the off-site
+  backup job; on a host without that job the staleness rules fire half an
+  hour after the deploy.
 
 - **Readiness checks.** The backend and the portal answer `GET /ready` with
   200 when they reach Postgres (the backend also needs its scheduler
