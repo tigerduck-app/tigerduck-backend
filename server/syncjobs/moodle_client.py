@@ -365,11 +365,18 @@ def _parse_submission_status(
     and the caller leaves the row alone.
 
     `submissionsenabled` and `locked` are booleans and `extensionduedate`
-    unix seconds or null; a value of another shape reads as the default,
-    an open assignment without an extension.
+    unix seconds or null; a flag of another shape reads as the default, an
+    open assignment. An `extensionduedate` of another shape, or negative,
+    yields None too: read as no extension, it would move the student's
+    dates back (`submissions.apply_extensions`).
     """
     last = body.get("lastattempt")
     if not isinstance(last, dict):
+        return None
+    extension = last.get("extensionduedate")
+    if extension is not None and (
+        type(extension) not in (int, float) or extension < 0
+    ):
         return None
     submitted = next(
         (
@@ -388,7 +395,7 @@ def _parse_submission_status(
         ),
         submissions_enabled=last.get("submissionsenabled") is not False,
         locked=last.get("locked") is True,
-        extension_due_at=_ts(last.get("extensionduedate")),
+        extension_due_at=_ts(extension),
     )
 
 
