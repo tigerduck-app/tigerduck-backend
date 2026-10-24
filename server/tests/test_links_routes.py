@@ -20,6 +20,11 @@ CALENDAR = "https://www.academic.ntust.edu.tw/p/404-1048-78935.php"
 ACTOR = {"X-Admin-Actor": "ops@example.com"}
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch) -> None:
+    monkeypatch.setattr(checker, "RETRY_PAUSE_SECONDS", 0)
+
+
 async def _add(client: AsyncClient, name: str, target: str = CALENDAR, **fields) -> None:
     async with client.app.state.session_factory() as session:
         session.add(Link(name=name, target_url=target, updated_by="test", **fields))

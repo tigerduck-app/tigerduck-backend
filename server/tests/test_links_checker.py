@@ -20,6 +20,7 @@ from server.links.checker import (
     MAX_BODY_BYTES,
     USER_AGENT,
     CheckFailure,
+    Unreachable,
     fetch,
     next_alert_state,
 )
@@ -41,6 +42,11 @@ DNS = {
     "www.academic.ntust.edu.tw": ["140.118.31.10"],
     "www.ntust.edu.tw": ["140.118.31.20", "2001:288:6008::20"],
 }
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_pause(monkeypatch) -> None:
+    monkeypatch.setattr(checker, "RETRY_PAUSE_SECONDS", 0)
 
 
 class Resolver:
@@ -293,6 +299,36 @@ def test_a_transport_error_fails_the_check() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("timed out"),
+        httpx.ReadError("connection reset"),
+        httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    ],
+)
+def test_a_timeout_or_a_lost_connection_is_a_failure_that_may_pass(error) -> None:
+    def fail(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    with pytest.raises(Unreachable, match=f"fetch: {type(error).__name__}"):
+        fetch(
+            "https://www.ntust.edu.tw/",
+            ALLOWED,
+            resolve=Resolver(DNS),
+            transport=httpx.MockTransport(fail),
+        )
+
+
+def test_a_failure_that_would_repeat_is_not_one_that_may_pass() -> None:
+    dns = {"www.ntust.edu.tw": ["10.0.0.8"]}
+
+    with pytest.raises(CheckFailure) as raised:
+        _fetch("https://www.ntust.edu.tw/", Server({}), dns)
+
+    assert not isinstance(raised.value, Unreachable)
+
+
 # --- rules ------------------------------------------------------------------
 
 
@@ -465,7 +501,8 @@ async def test_a_link_alerts_once_as_it_fails_and_once_as_it_recovers(
     pages = Pages(
         _page(),
         _page(status=503),
-        CheckFailure("fetch: ConnectError: refused"),
+        _page(status=503),
+        CheckFailure("redirect: more than 5 redirects"),
         _page(),
     )
     monkeypatch.setattr(checker, "fetch", pages)
@@ -487,7 +524,7 @@ async def test_a_link_alerts_once_as_it_fails_and_once_as_it_recovers(
     await checker.check_link(factory, test_settings, link_name)
     row = await _row(factory, link_name)
     assert row.alert_state == ALERT_FAILING
-    assert row.last_check_detail == "fetch: ConnectError: refused"
+    assert row.last_check_detail == "redirect: more than 5 redirects"
     assert row.alert_detail == "status: expected 200, found 503"
     assert _failing_series(link_name) == {"status: expected 200, found 503": 1}
 
@@ -519,7 +556,7 @@ async def test_a_restart_exports_the_stored_alert_state_before_any_check(
         alert_detail="status: expected 200, found 503",
     )
     _new_process(link_name)
-    pages = Pages(_page(status=502), _page())
+    pages = Pages(_page(status=502), _page(status=502), _page())
     monkeypatch.setattr(checker, "fetch", pages)
 
     # Checked 10 minutes ago, due in 60: the startup run only exports.
@@ -545,7 +582,9 @@ async def test_a_restart_right_after_a_recovery_exports_the_cleared_alert(
     factory, link_name, test_settings, monkeypatch
 ) -> None:
     await _add_link(factory, link_name)
-    monkeypatch.setattr(checker, "fetch", Pages(_page(status=503), _page()))
+    monkeypatch.setattr(
+        checker, "fetch", Pages(_page(status=503), _page(status=503), _page())
+    )
     await checker.check_link(factory, test_settings, link_name)
     await checker.check_link(factory, test_settings, link_name)
     # Restarted before Prometheus scraped the 0.
@@ -731,6 +770,56 @@ async def test_a_check_runs_the_fetch_in_a_thread_with_the_allowed_hosts(
 
     assert seen["thread"] is not threading.main_thread()
     assert seen["allowed"] == test_settings.links_allowed_hosts
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        Unreachable("fetch: ReadTimeout: timed out"),
+        Unreachable("fetch: no answer in time"),
+        _page(status=503),
+    ],
+)
+@db_test
+async def test_a_fetch_that_may_pass_is_asked_again_once(first, monkeypatch) -> None:
+    pages = Pages(first, _page())
+    monkeypatch.setattr(checker, "fetch", pages)
+
+    result = await checker.run_check(CALENDAR, CALENDAR_RULES, ALLOWED)
+
+    assert result.ok
+    assert pages.urls == [CALENDAR, CALENDAR]
+
+
+@db_test
+async def test_a_second_failed_fetch_is_the_one_recorded(monkeypatch) -> None:
+    pages = Pages(_page(status=503), _page(status=502))
+    monkeypatch.setattr(checker, "fetch", pages)
+
+    result = await checker.run_check(CALENDAR, CALENDAR_RULES, ALLOWED)
+
+    assert result.detail == "status: expected 200, found 502"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _page(body="<html></html>"),
+        _page(url="https://www.ntust.edu.tw/"),
+        CheckFailure("fetch: www.ntust.edu.tw resolves to 10.0.0.8, not a public address"),
+    ],
+)
+@db_test
+async def test_a_failed_rule_or_a_refused_fetch_is_not_asked_again(
+    answer, monkeypatch
+) -> None:
+    pages = Pages(answer, _page())
+    monkeypatch.setattr(checker, "fetch", pages)
+
+    result = await checker.run_check(CALENDAR, CALENDAR_RULES, ALLOWED)
+
+    assert not result.ok
+    assert pages.urls == [CALENDAR]
 
 
 @pytest.mark.parametrize(("tick", "scheduled"), [(60, True), (0, False)])

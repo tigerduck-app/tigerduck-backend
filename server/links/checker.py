@@ -47,12 +47,18 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 # The whole check, every hop included; each request also has its own limit.
 CHECK_TIMEOUT_SECONDS = 30.0
 REQUEST_TIMEOUT_SECONDS = 10.0
+RETRY_PAUSE_SECONDS = 3.0
 
 Resolver = Callable[[str, int], Sequence[str]]
 
 
 class CheckFailure(Exception):
     """A check that failed before its rules ran: `<rule>: <what was found>`."""
+
+
+class Unreachable(CheckFailure):
+    """A timeout or a connection error, which NTUST's sites give for a
+    moment now and then."""
 
 
 @dataclass(frozen=True)
@@ -81,7 +87,7 @@ def _public_addresses(host: str, resolve: Resolver) -> list[str]:
     except OSError:
         addresses = []
     if not addresses:
-        raise CheckFailure(f"fetch: {host} does not resolve")
+        raise Unreachable(f"fetch: {host} does not resolve")
     for raw in addresses:
         address = ipaddress.ip_address(raw)
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
@@ -113,7 +119,7 @@ def _read_capped(response: httpx.Response, deadline: float) -> bytes:
         if len(body) >= MAX_BODY_BYTES:
             break
         if time.monotonic() > deadline:
-            raise CheckFailure("fetch: the page took too long to load")
+            raise Unreachable("fetch: the page took too long to load")
     return bytes(body[:MAX_BODY_BYTES])
 
 
@@ -122,7 +128,7 @@ def _request(
 ) -> Page | str:
     """The page at `url`, asked of `address`, or the Location it redirects to."""
     if time.monotonic() > deadline:
-        raise CheckFailure("fetch: the page took too long to load")
+        raise Unreachable("fetch: the page took too long to load")
     parts = urlsplit(url)
     netloc = f"[{address}]" if ":" in address else address
     with client.stream(
@@ -180,27 +186,52 @@ def fetch(
                     break
                 except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
                     unreachable = exc
+                except (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    raise Unreachable(_describe(exc)) from exc
                 except httpx.HTTPError as exc:
                     raise CheckFailure(_describe(exc)) from exc
             else:
-                raise CheckFailure(_describe(unreachable)) from unreachable
+                raise Unreachable(_describe(unreachable)) from unreachable
             if isinstance(answer, Page):
                 return answer
             url = _next_hop(url, answer, allowed_hosts)
         raise CheckFailure(f"redirect: more than {MAX_REDIRECTS} redirects")
 
 
+async def _fetch_in_thread(target_url: str, allowed_hosts: list[str]) -> Page:
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(fetch, target_url, allowed_hosts),
+            timeout=CHECK_TIMEOUT_SECONDS + 5,
+        )
+    except TimeoutError:
+        raise Unreachable("fetch: no answer in time") from None
+
+
+async def _fetch_page(target_url: str, allowed_hosts: list[str]) -> Page:
+    """The page, asked for again once after a pause when the first answer is
+    a timeout, a connection error or a 5xx status, so a moment's outage
+    does not alert. A rule's failure is not asked again."""
+    try:
+        page = await _fetch_in_thread(target_url, allowed_hosts)
+        if page.status < 500:
+            return page
+    except Unreachable:
+        pass
+    await asyncio.sleep(RETRY_PAUSE_SECONDS)
+    return await _fetch_in_thread(target_url, allowed_hosts)
+
+
 async def run_check(
     target_url: str, expectations: list[dict], allowed_hosts: Iterable[str]
 ) -> CheckResult:
     try:
-        page = await asyncio.wait_for(
-            asyncio.to_thread(fetch, target_url, list(allowed_hosts)),
-            timeout=CHECK_TIMEOUT_SECONDS + 5,
-        )
+        page = await _fetch_page(target_url, list(allowed_hosts))
         failure = first_failure(page, expectations)
-    except TimeoutError:
-        return CheckResult(False, "fetch: no answer in time")
     except CheckFailure as exc:
         return CheckResult(False, str(exc))
     except Exception as exc:

@@ -19,8 +19,9 @@ from .moodle.push import BACKEND_ADMIN_URL, _internal_headers
 
 router = APIRouter(prefix="/api/links")
 
-# A check may take the backend 35s (server/links/checker.py).
-_TIMEOUT_SECONDS = 45
+# A check may take the backend two 35s fetches and a 3s pause
+# (server/links/checker.py); Cloudflare gives up after 100s.
+_TIMEOUT_SECONDS = 85
 # The backend's link names; anything else could rewrite the forwarded path.
 _NAME = re.compile(r"[a-z0-9-]{1,64}")
 
