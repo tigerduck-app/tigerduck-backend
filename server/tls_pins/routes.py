@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
@@ -60,6 +60,9 @@ async def tls_pin_document(
 admin_router = APIRouter(
     prefix="/tls-pins", tags=["admin"], dependencies=[Depends(require_shared_secret)]
 )
+
+# Two years, leap day included; a mistyped year would make a set that never expires.
+MAX_EXPIRY_AHEAD = timedelta(days=731)
 
 ActorDep = Annotated[str, Header(alias="X-Portal-Actor", min_length=1, max_length=320)]
 
@@ -229,6 +232,8 @@ async def extend_expiry(
     # The apps take the later of their built-in expiry and the document's.
     if body.expires_at <= pin_set.expires_at:
         raise HTTPException(status.HTTP_409_CONFLICT, detail="expiry_not_later")
+    if body.expires_at > datetime.now(UTC) + MAX_EXPIRY_AHEAD:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="expiry_too_far")
     pin_set.expires_at = body.expires_at
     return await _finish(
         session, request, actor, "extend_expiry",

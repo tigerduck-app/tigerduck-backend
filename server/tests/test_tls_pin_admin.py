@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import socket
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -247,6 +247,17 @@ async def test_an_expiry_can_only_move_later(admin_client, stored) -> None:
 
     assert earlier.status_code == 409 and later.status_code == 200
     assert document_sets(await _latest(stored))[0]["expires_at"] == "2028-08-18T00:00:00Z"
+
+
+async def test_an_expiry_more_than_two_years_ahead_is_refused(admin_client, stored) -> None:
+    far = (datetime.now(UTC) + timedelta(days=732)).isoformat()
+
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at", json={"expires_at": far}, headers=ACTOR
+    )
+
+    assert resp.status_code == 409 and resp.json()["detail"] == "expiry_too_far"
+    assert (await _set(stored)).expires_at == datetime(2027, 8, 18, tzinfo=UTC)
 
 
 async def test_auto_publish_is_toggled_and_recorded(admin_client, stored) -> None:
