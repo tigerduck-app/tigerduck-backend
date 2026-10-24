@@ -61,6 +61,19 @@ async def test_an_action_carries_the_secret_the_operator_and_the_body(backend) -
     assert json.loads(sent.content) == {"spki": "x", "label": "y"}
 
 
+async def test_publish_now_sends_the_pending_pins_it_showed(backend) -> None:
+    transport = httpx.ASGITransport(app=_portal())
+    async with RealAsyncClient(transport=transport, base_url="http://portal") as c:
+        r = await c.post(
+            "/api/tls-pins/publish",
+            json={"approve": {"ntust": ["x"]}},
+            headers={"Sec-Fetch-Site": "same-origin"},
+        )
+
+    assert r.status_code == 200
+    assert json.loads(backend[0].content) == {"approve": {"ntust": ["x"]}}
+
+
 async def test_a_validation_error_comes_back_as_one_message(backend) -> None:
     transport = httpx.ASGITransport(app=_portal())
     async with RealAsyncClient(transport=transport, base_url="http://portal") as c:

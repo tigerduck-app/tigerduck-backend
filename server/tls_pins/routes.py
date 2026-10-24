@@ -106,6 +106,11 @@ class ExpiryIn(BaseModel):
     expires_at: AwareDatetime
 
 
+class PublishIn(BaseModel):
+    # The pending pins the operator was shown, by set id.
+    approve: dict[str, list[str]] = {}
+
+
 class AutoPublishIn(BaseModel):
     enabled: bool
 
@@ -264,16 +269,22 @@ def _require_signer(request: Request) -> None:
 
 
 @admin_router.post("/publish")
-async def publish_document(request: Request, session: SessionDep, actor: ActorDep) -> dict:
-    """Sign the stored sets, approving the pins the watcher found while a
-    set's auto publish was off."""
+async def publish_document(
+    request: Request, session: SessionDep, actor: ActorDep, body: PublishIn | None = None
+) -> dict:
+    """Sign the stored sets, approving the pending pins the operator was
+    shown. A pin the watcher added since then stays pending."""
     _require_signer(request)
     await lock_pin_state(session)
+    approve = body.approve if body else {}
     approved = {}
     for pin_set in (await session.execute(select(TlsPinSet))).scalars():
-        pending = [pin["spki"] for pin in pin_set.pins if pin.get("pending")]
+        shown = set(approve.get(pin_set.id, ()))
+        pending = [p["spki"] for p in pin_set.pins if p.get("pending") and p["spki"] in shown]
         if pending:
-            pin_set.pins = [{**pin, "pending": False} for pin in pin_set.pins]
+            pin_set.pins = [
+                {**pin, "pending": False} if pin["spki"] in shown else pin for pin in pin_set.pins
+            ]
             pin_set.updated_at = datetime.now(UTC)
             pin_set.updated_by = actor
             approved[pin_set.id] = pending

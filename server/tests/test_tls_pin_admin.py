@@ -298,7 +298,9 @@ async def test_a_pending_pin_stays_out_of_documents_until_publish_now(
     assert added.status_code == 200 and extended.status_code == 200
     assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, other]
 
-    published = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+    published = await admin_client.post(
+        "/tls-pins/publish", json={"approve": {"ntust": [NEW_PIN]}}, headers=ACTOR
+    )
 
     assert published.status_code == 200
     assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, NEW_PIN, other]
@@ -308,6 +310,27 @@ async def test_a_pending_pin_stays_out_of_documents_until_publish_now(
         "tls_pins.publish",
         {"approved": {"ntust": [NEW_PIN]}, "serial": published.json()["serial"]},
     )
+
+
+async def test_publish_now_leaves_a_pin_found_after_the_page_loaded_pending(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+    later = "Ugw0DiiUBBgk/lTl4qpL+9Ss3NJzM2S6vEJ/D1XlvXQ="
+    pin_set = await _set(stored)
+    pin_set.pins = [*pin_set.pins, {"spki": later, "label": "CN=Later", "pending": True}]
+    await stored.commit()
+
+    resp = await admin_client.post(
+        "/tls-pins/publish", json={"approve": {"ntust": [NEW_PIN]}}, headers=ACTOR
+    )
+    bare = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+
+    assert resp.status_code == 200 and bare.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, NEW_PIN]
+    assert [p.get("pending", False) for p in (await _set(stored)).pins] == [
+        False, False, False, True
+    ]
 
 
 async def test_the_last_published_pin_stays_even_with_a_pending_one(

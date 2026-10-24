@@ -103,6 +103,12 @@ const STATUS_VARIANT = {
   error: "warning",
 } as const;
 
+// Publish now approves only the pending pins on screen, not ones found since.
+const shownPending = (data?: TlsPinsResponse) =>
+  Object.fromEntries(
+    (data?.sets ?? []).map((s) => [s.id, s.pins.filter((p) => p.pending).map((p) => p.spki)]),
+  );
+
 export function TlsPinsPage() {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -191,7 +197,12 @@ export function TlsPinsPage() {
               size="sm"
               disabled={action.isPending}
               onClick={() =>
-                action.mutate({ path: "/publish", method: "POST", publishes: true })
+                action.mutate({
+                  path: "/publish",
+                  method: "POST",
+                  json: { approve: shownPending(data) },
+                  publishes: true,
+                })
               }
             >
               <Send className="mr-1 h-4 w-4" /> Publish now

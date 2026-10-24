@@ -136,8 +136,8 @@ async def set_auto_publish(
 
 
 @router.post("/publish")
-async def publish(request: Request) -> JSONResponse:
-    return await _proxy(request, "POST", "/publish")
+async def publish(request: Request, body: JsonBody) -> JSONResponse:
+    return await _proxy(request, "POST", "/publish", body)
 
 
 @router.post("/resign")
