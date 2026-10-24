@@ -548,7 +548,7 @@ TLS_CHAIN_INFO = Gauge(
 )
 TLS_PIN_DOCUMENT_EXPIRY = Gauge(
     "tigerduck_tls_pin_document_expiry_timestamp",
-    "Unix time the served pin document expires. Absent before the first one.",
+    "Unix time the served pin document expires; 0 before the first one.",
 )
 TLS_PIN_SET_EXPIRY = Gauge(
     "tigerduck_tls_pin_set_expiry_timestamp",

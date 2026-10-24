@@ -445,7 +445,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: 'max(tigerduck_tls_pin_document_expiry_timestamp) - time()'
+              expr: 'max(tigerduck_tls_pin_document_expiry_timestamp > 0) - time()'
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [259200]}}]}
