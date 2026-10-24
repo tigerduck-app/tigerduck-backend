@@ -270,8 +270,8 @@ export function TlsPinsPage() {
               <TableBody>
                 {s.pins.map((p) => (
                   <TableRow key={p.spki}>
-                    <TableCell className="max-w-64 break-words">{p.label}</TableCell>
-                    <TableCell className="font-mono text-xs break-all">{p.spki}</TableCell>
+                    <TableCell className="min-w-40 max-w-64 break-words">{p.label}</TableCell>
+                    <TableCell className="min-w-72 font-mono text-xs break-all">{p.spki}</TableCell>
                     <TableCell>{p.source}</TableCell>
                     <TableCell className="whitespace-nowrap">{day(p.first_seen_at)}</TableCell>
                     <TableCell className="whitespace-nowrap">
@@ -319,11 +319,11 @@ export function TlsPinsPage() {
                   const r = s.watch_results[host];
                   return (
                     <TableRow key={host}>
-                      <TableCell className="font-medium">{host}</TableCell>
+                      <TableCell className="whitespace-nowrap font-medium">{host}</TableCell>
                       <TableCell className="whitespace-nowrap">
                         {r ? time(r.checked_at) : "—"}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="min-w-40">
                         {r && (
                           <div className="space-y-1">
                             <Badge variant={STATUS_VARIANT[r.status]}>{r.status}</Badge>
@@ -339,7 +339,7 @@ export function TlsPinsPage() {
                           </div>
                         )}
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="min-w-80 text-xs">
                         {r?.chain.map((c) => (
                           <div key={c.spki} className="break-words">
                             {c.subject}
