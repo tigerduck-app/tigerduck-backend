@@ -252,6 +252,30 @@ async def test_edit_and_disable_are_audited_by_what_changed(admin_client, client
     ]
 
 
+@pytest.mark.parametrize(
+    ("change", "rechecked"),
+    [
+        ({"target_url": "https://www.ntust.edu.tw/calendar"}, True),
+        ({"expectations": [{"type": "contains", "text": "行事曆"}]}, True),
+        ({"check_interval_minutes": 30}, False),
+        ({"enabled": False}, False),
+    ],
+)
+async def test_a_new_target_or_new_rules_are_checked_at_the_next_tick(
+    admin_client, client, change, rechecked
+) -> None:
+    from datetime import UTC, datetime
+
+    checked = datetime.now(UTC)
+    await _add(client, "ntust-calendar", last_check_at=checked)
+
+    resp = await admin_client.patch("/admin/links/ntust-calendar", headers=ACTOR, json=change)
+
+    assert resp.status_code == 200, resp.text
+    row = await _row(client, "ntust-calendar")
+    assert row.last_check_at == (None if rechecked else checked)
+
+
 async def test_edit_refuses_an_invalid_target_and_an_unknown_link(admin_client, client) -> None:
     await _add(client, "ntust-calendar")
 

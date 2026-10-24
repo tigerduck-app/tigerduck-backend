@@ -174,6 +174,9 @@ async def update_link(
             setattr(link, field, value)
         link.updated_at = datetime.now(UTC)
         link.updated_by = actor
+        if changes.keys() & {"target_url", "expectations"}:
+            # Due at once: the next tick checks what was saved.
+            link.last_check_at = None
         session.add(
             AdminAuditLog(
                 actor=actor,
