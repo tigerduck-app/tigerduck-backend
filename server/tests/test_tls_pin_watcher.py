@@ -550,6 +550,37 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_a_host_removed_while_probed_adds_and_publishes_nothing(
+    pki, db_session, factory, signer
+) -> None:
+    await _store_set(db_session, [HOST], [UNRELATED_PIN], auto_publish=True)
+    async with factory() as session:
+        await publish(session, signer, reason="initial", now=NOW)
+        await session.commit()
+    started, release = threading.Event(), threading.Event()
+
+    def changed_chain(target: str) -> Probe:
+        started.set()
+        release.wait(5)
+        return Probe("trusted", (pki.leaf.cert, pki.intermediate.cert, pki.root.cert))
+
+    watch = asyncio.create_task(
+        run_pin_watch(factory, signer, timeout=10, probe_fn=changed_chain, now=NOW)
+    )
+    await asyncio.to_thread(started.wait, 5)
+    async with factory() as session:
+        (await session.get(TlsPinSet, "ntust")).monitored_hosts = []
+        await session.commit()
+    release.set()
+    await watch
+
+    pin_set = await _stored_set(factory)
+    assert [p["spki"] for p in pin_set.pins] == [UNRELATED_PIN]
+    assert HOST not in pin_set.watch_results
+    assert len(await _documents(factory)) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_a_host_waiting_for_a_thread_still_gets_its_whole_timeout() -> None:
     def slow(target: str) -> Probe:
         time.sleep(0.4)

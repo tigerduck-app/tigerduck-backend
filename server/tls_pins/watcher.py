@@ -422,7 +422,8 @@ async def run_pin_watch(
         should_publish = False
         for (set_id, host, _), result in zip(targets, results, strict=True):
             pin_set = sets.get(set_id)
-            if pin_set is None:
+            # An operator may have removed the host while it was probed.
+            if pin_set is None or host not in pin_set.monitored_hosts:
                 continue
             added = _apply(pin_set, host, result, published.get(set_id), now)
             should_publish |= bool(added) and pin_set.auto_publish
