@@ -235,6 +235,64 @@ async def test_auto_publish_is_toggled_and_recorded(admin_client, stored) -> Non
     )
 
 
+async def _add_pending_pin(db_session) -> None:
+    pin_set = await _set(db_session)
+    pin_set.pins = [
+        *pin_set.pins,
+        {"spki": NEW_PIN, "label": "CN=New CA", "source": "watcher", "pending": True},
+    ]
+    await db_session.commit()
+
+
+async def test_a_pending_pin_stays_out_of_documents_until_publish_now(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+
+    other = "Ugw0DiiUBBgk/lTl4qpL+9Ss3NJzM2S6vEJ/D1XlvXQ="
+    added = await admin_client.post(
+        "/tls-pins/sets/ntust/pins", json={"spki": other, "label": "x"}, headers=ACTOR
+    )
+    extended = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at",
+        json={"expires_at": "2027-12-01T00:00:00Z"},
+        headers=ACTOR,
+    )
+    assert added.status_code == 200 and extended.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, other]
+
+    published = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+
+    assert published.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, NEW_PIN, other]
+    assert not any(p.get("pending") for p in (await _set(stored)).pins)
+    assert (await _audit(stored))[-1] == (
+        "ops@example.com",
+        "tls_pins.publish",
+        {"approved": {"ntust": [NEW_PIN]}, "serial": published.json()["serial"]},
+    )
+
+
+async def test_the_last_published_pin_stays_even_with_a_pending_one(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+
+    removed = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_A}, headers=ACTOR
+    )
+    last = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_B}, headers=ACTOR
+    )
+    rejected = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": NEW_PIN}, headers=ACTOR
+    )
+
+    assert removed.status_code == 200 and last.status_code == 409
+    assert rejected.status_code == 200
+    assert [p["spki"] for p in (await _set(stored)).pins] == [PIN_B]
+
+
 async def test_publish_and_resign_now(admin_client, stored) -> None:
     published = await admin_client.post("/tls-pins/publish", headers=ACTOR)
     await admin_client.post(

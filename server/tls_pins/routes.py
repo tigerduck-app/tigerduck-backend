@@ -172,8 +172,8 @@ async def remove_pin(
     remaining = [pin for pin in pin_set.pins if pin["spki"] != body.spki]
     if len(remaining) == len(pin_set.pins):
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="pin_not_found")
-    if not remaining:
-        # A set with no pins would fail every chain on its hosts.
+    if not any(not pin.get("pending") for pin in remaining):
+        # A set with no published pins would fail every chain on its hosts.
         raise HTTPException(status.HTTP_409_CONFLICT, detail="last_pin")
     pin_set.pins = remaining
     return await _finish(
@@ -253,9 +253,21 @@ def _require_signer(request: Request) -> None:
 
 @admin_router.post("/publish")
 async def publish_document(request: Request, session: SessionDep, actor: ActorDep) -> dict:
-    """Sign the stored sets as they are."""
+    """Sign the stored sets, approving the pins the watcher found while a
+    set's auto publish was off."""
     _require_signer(request)
-    return await _finish(session, request, actor, "publish", {}, publish_now=True)
+    await lock_pin_state(session)
+    approved = {}
+    for pin_set in (await session.execute(select(TlsPinSet))).scalars():
+        pending = [pin["spki"] for pin in pin_set.pins if pin.get("pending")]
+        if pending:
+            pin_set.pins = [{**pin, "pending": False} for pin in pin_set.pins]
+            pin_set.updated_at = datetime.now(UTC)
+            pin_set.updated_by = actor
+            approved[pin_set.id] = pending
+    return await _finish(
+        session, request, actor, "publish", {"approved": approved}, publish_now=True
+    )
 
 
 @admin_router.post("/resign")

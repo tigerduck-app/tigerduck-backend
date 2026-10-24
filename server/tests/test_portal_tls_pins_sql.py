@@ -43,7 +43,8 @@ async def test_the_page_lists_sets_stale_pins_results_and_documents(db_session, 
                 {"spki": "fresh", "label": "a", "first_seen_at": timestamp(now),
                  "last_seen_at": timestamp(now), "source": "builtin"},
                 {"spki": "old", "label": "b", "first_seen_at": None,
-                 "last_seen_at": timestamp(now - timedelta(days=91)), "source": "watcher"},
+                 "last_seen_at": timestamp(now - timedelta(days=91)), "source": "watcher",
+                 "pending": True},
                 {"spki": "never", "label": "c", "first_seen_at": None,
                  "last_seen_at": None, "source": "builtin"},
             ],
@@ -60,6 +61,7 @@ async def test_the_page_lists_sets_stale_pins_results_and_documents(db_session, 
 
     (pin_set,) = body["sets"]
     assert [p["stale"] for p in pin_set["pins"]] == [False, True, False]
+    assert [p.get("pending", False) for p in pin_set["pins"]] == [False, True, False]
     assert pin_set["watch_results"] == {"www.ntust.edu.tw": {"status": "trusted"}}
     assert pin_set["monitored_hosts"] == ["www.ntust.edu.tw"]
     assert [d["reason"] for d in body["documents"]] == ["initial"]

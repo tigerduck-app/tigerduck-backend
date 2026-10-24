@@ -376,8 +376,16 @@ async def test_with_auto_publish_off_the_pins_are_added_but_not_published(
             now=NOW,
         )
 
-    assert len((await _stored_set(factory)).pins) == 3
+    pins = (await _stored_set(factory)).pins
+    assert [p.get("pending", False) for p in pins] == [False, True, True]
     assert [d.serial for d in await _documents(factory)] == [first.serial]
+    assert _gauge("tigerduck_tls_chain_matches", HOST) == 0
+
+    # An unrelated publish, such as another set's auto publish, leaves them out.
+    async with factory() as session:
+        later = await publish(session, signer, reason="watcher", now=NOW + timedelta(hours=1))
+        await session.commit()
+    assert document_sets(later)[0]["pins"] == [UNRELATED_PIN]
 
 
 @pytest.mark.asyncio(loop_scope="session")

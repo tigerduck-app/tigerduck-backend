@@ -35,6 +35,7 @@ from server.tls_pins.document import (
     ensure_current_document,
     lock_pin_state,
     publish,
+    published_pins,
     spki_sha256,
     timestamp,
 )
@@ -281,10 +282,11 @@ def _apply(
     pin_set: TlsPinSet,
     target: str,
     result: Probe,
-    published_pins: set[str] | None,
+    served: set[str] | None,
     now: datetime,
 ) -> list[str]:
-    """Record one host's result on its set; returns the pins it added."""
+    """Record one host's result on its set; returns the pins it added.
+    `served` holds the set's pins in the current document, if there is one."""
     seen_at = timestamp(now)
     described = _describe(result.chain)
     record = {
@@ -315,6 +317,8 @@ def _apply(
                             "first_seen_at": seen_at,
                             "last_seen_at": seen_at,
                             "source": "watcher",
+                            # Left out of every document until Publish now.
+                            "pending": not pin_set.auto_publish,
                         }
                     )
         pin_set.pins = [
@@ -328,7 +332,7 @@ def _apply(
             for pin in pin_set.pins
         ] + added
         record["added"] = [pin["spki"] for pin in added]
-        effective = published_pins if published_pins is not None else known
+        effective = served if served is not None else set(published_pins(pin_set))
         metrics.TLS_CHAIN_MATCHES.labels(**labels).set(1 if effective & seen else 0)
         metrics.TLS_CHAIN_TRUSTED.labels(**labels).set(1)
         _set_chain_info(pin_set.id, target, _chain_label(described))

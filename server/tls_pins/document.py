@@ -98,12 +98,17 @@ def timestamp(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def published_pins(pin_set: TlsPinSet) -> list[str]:
+    """The pins a document may carry: pending ones wait for an operator."""
+    return [pin["spki"] for pin in pin_set.pins if not pin.get("pending")]
+
+
 def set_entry(pin_set: TlsPinSet) -> dict:
     """`pin_set` as the document lists it."""
     return {
         "id": pin_set.id,
         "domains": pin_set.domains,
-        "pins": [pin["spki"] for pin in pin_set.pins],
+        "pins": published_pins(pin_set),
         "expires_at": timestamp(pin_set.expires_at),
     }
 

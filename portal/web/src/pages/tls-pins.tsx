@@ -37,6 +37,7 @@ type Pin = {
   first_seen_at: string | null;
   last_seen_at: string | null;
   source: string;
+  pending?: boolean;
   stale: boolean;
 };
 
@@ -270,7 +271,14 @@ export function TlsPinsPage() {
               <TableBody>
                 {s.pins.map((p) => (
                   <TableRow key={p.spki}>
-                    <TableCell className="min-w-40 max-w-64 break-words">{p.label}</TableCell>
+                    <TableCell className="min-w-40 max-w-64 break-words">
+                      {p.label}
+                      {p.pending && (
+                        <Badge variant="warning" className="ml-2">
+                          not published
+                        </Badge>
+                      )}
+                    </TableCell>
                     <TableCell className="min-w-72 font-mono text-xs break-all">{p.spki}</TableCell>
                     <TableCell>{p.source}</TableCell>
                     <TableCell className="whitespace-nowrap">{day(p.first_seen_at)}</TableCell>
@@ -286,7 +294,10 @@ export function TlsPinsPage() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        disabled={action.isPending || s.pins.length === 1}
+                        disabled={
+                          action.isPending ||
+                          (!p.pending && s.pins.filter((q) => !q.pending).length === 1)
+                        }
                         onClick={() => {
                           if (!confirm(`Remove ${p.label} from ${s.id} and publish?`)) return;
                           action.mutate({
