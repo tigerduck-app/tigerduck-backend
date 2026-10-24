@@ -43,7 +43,10 @@ def validate_target(url: str, allowed_hosts: Iterable[str]) -> str:
     # Before urlsplit, which silently drops tabs and newlines.
     if any(c.isspace() or unicodedata.category(c) == "Cc" for c in url):
         raise InvalidTarget("the URL holds whitespace or a control character")
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise InvalidTarget("the URL cannot be parsed") from None
     if parts.scheme != "https":
         raise InvalidTarget("the URL must use https")
     if "@" in parts.netloc:

@@ -163,6 +163,7 @@ async def test_create_stores_the_link_and_audits_it(admin_client, client) -> Non
         "https://www.ntust.edu.tw/\tx",
         "https://www.ntust.edu.tw/\x7f",
         "https://evil.example/",
+        "https://[broken/",
     ],
 )
 async def test_create_refuses_an_invalid_target(admin_client, client, target) -> None:

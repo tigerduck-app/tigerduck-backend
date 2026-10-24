@@ -91,7 +91,10 @@ def _public_addresses(host: str, resolve: Resolver) -> list[str]:
 
 
 def _next_hop(url: str, location: str, allowed_hosts: Iterable[str]) -> str:
-    target = urljoin(url, location)
+    try:
+        target = urljoin(url, location)
+    except ValueError:
+        target = location
     try:
         return validate_target(target, allowed_hosts)
     except InvalidTarget as exc:

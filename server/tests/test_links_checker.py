@@ -230,6 +230,15 @@ def test_a_redirect_a_target_could_not_have_is_refused_unresolved(
     assert resolver.asked == ["www.ntust.edu.tw"]
 
 
+def test_a_redirect_to_a_malformed_url_fails_the_check() -> None:
+    server = Server({("www.ntust.edu.tw", "/"): _redirect("https://[broken/")})
+
+    with pytest.raises(
+        CheckFailure, match=r"redirect: to 'https://\[broken/': the URL cannot be parsed"
+    ):
+        _fetch("https://www.ntust.edu.tw/", server)
+
+
 def test_five_redirects_are_followed_and_a_sixth_is_not() -> None:
     hops = {
         ("www.ntust.edu.tw", f"/{i}"): _redirect(f"/{i + 1}") for i in range(6)

@@ -39,6 +39,7 @@ def test_an_https_url_on_an_allowed_host_is_kept(url: str) -> None:
         ("https://evil.example\\.ntust.edu.tw/", "plain host name"),
         ("https://%65vil.ntust.edu.tw/", "plain host name"),
         ("https://[::1]/", "plain host name"),
+        ("https://[broken/", "cannot be parsed"),
         ("https://www.ntust.edu.tw:8443/", "port other than 443"),
         ("https://www.ntust.edu.tw:80/", "port other than 443"),
         ("https://www.ntust.edu.tw:99999/", "port"),
