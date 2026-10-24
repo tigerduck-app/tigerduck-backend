@@ -557,7 +557,6 @@ async def test_the_watcher_resigns_a_document_with_seven_days_left(
 @pytest.mark.asyncio(loop_scope="session")
 async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) -> None:
     await _store_set(db_session, ["hung.tls.test"], [UNRELATED_PIN], auto_publish=True)
-    before = REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp")
 
     threads = []
 
@@ -572,9 +571,33 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
     assert time.monotonic() - started < 1
     result = (await _stored_set(factory)).watch_results["hung.tls.test"]
     assert result["status"] == "error" and result["detail"] == "timeout"
-    assert REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp") == before
+    # Never reached: the stale alert counts from the first check.
+    assert _gauge("tigerduck_tls_host_last_success_timestamp", "hung.tls.test") == NOW.timestamp()
     assert threads[0].startswith("tls-probe")
     await asyncio.sleep(1)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_failing_host_keeps_its_last_success_while_others_succeed(
+    pki, db_session, factory
+) -> None:
+    await _store_set(db_session, [HOST, "ok.tls.test"], [pki.root.pin], auto_publish=False)
+    chain = (pki.leaf.cert, pki.intermediate.cert, pki.root.cert)
+    failing = {HOST}
+
+    def flaky(target: str) -> Probe:
+        return Probe("error", detail="timeout") if target in failing else Probe("trusted", chain)
+
+    failing.clear()
+    await run_pin_watch(factory, None, timeout=10, probe_fn=flaky, now=NOW)
+    failing.add(HOST)
+    later = NOW + timedelta(hours=4)
+    await run_pin_watch(factory, None, timeout=10, probe_fn=flaky, now=later)
+
+    assert _gauge("tigerduck_tls_host_last_success_timestamp", HOST) == NOW.timestamp()
+    assert _gauge("tigerduck_tls_host_last_success_timestamp", "ok.tls.test") == later.timestamp()
+    results = (await _stored_set(factory)).watch_results
+    assert results[HOST]["last_success_at"] == "2026-10-25T04:00:00Z"
 
 
 @pytest.mark.asyncio(loop_scope="session")

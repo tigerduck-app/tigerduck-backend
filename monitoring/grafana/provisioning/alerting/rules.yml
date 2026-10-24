@@ -365,7 +365,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: 'time() - (max(tigerduck_tls_watch_last_success_timestamp > 0) or max(process_start_time_seconds{job="backend"}))'
+              expr: 'time() - (max by (set, host) (tigerduck_tls_host_last_success_timestamp) or on() max(process_start_time_seconds{job="backend"}))'
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [10800]}}]}
@@ -373,7 +373,7 @@ groups:
         noDataState: OK
         execErrState: Error
         annotations:
-          summary: The TLS pin watcher has not reached a monitored host for over 3 hours (seconds since in the value).
+          summary: The TLS pin watcher has not reached this host (set and host labels) for over 3 hours, or has not run since the backend started (seconds since in the value).
 
       - uid: td-tls-chain-untrusted
         title: TLS chain fails system trust

@@ -326,6 +326,7 @@ def _apply(
     `served` holds the set's pins in the current document, if there is one."""
     seen_at = timestamp(now)
     described = _describe(result.chain)
+    previous = pin_set.watch_results.get(target) or {}
     record = {
         "checked_at": seen_at,
         "status": result.status,
@@ -333,8 +334,14 @@ def _apply(
         "via_aia": result.via_aia,
         "chain": described,
         "added": [],
+        "last_success_at": (
+            seen_at if result.status != "error" else previous.get("last_success_at") or seen_at
+        ),
     }
     labels = {"set": pin_set.id, "host": target}
+    metrics.TLS_HOST_LAST_SUCCESS.labels(**labels).set(
+        datetime.fromisoformat(record["last_success_at"]).timestamp()
+    )
     if result.status == "untrusted":
         metrics.TLS_CHAIN_TRUSTED.labels(**labels).set(0)
         _set_chain_info(pin_set.id, target, _chain_label(described, f"untrusted ({result.detail}): "))
@@ -433,5 +440,3 @@ async def run_pin_watch(
         if should_publish and signer is not None:
             await publish(session, signer, reason="watcher", now=now)
         await ensure_current_document(session, signer, now=now)
-    if any(result.status != "error" for result in results):
-        metrics.TLS_WATCH_LAST_SUCCESS.set(time.time())

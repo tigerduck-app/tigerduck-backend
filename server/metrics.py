@@ -522,10 +522,11 @@ def observe_llm_request(outcome: str, seconds: float) -> None:
 
 # --- TLS pins (server/tls_pins/) ---
 
-TLS_WATCH_LAST_SUCCESS = Gauge(
-    "tigerduck_tls_watch_last_success_timestamp",
-    "Unix time the pin watcher last finished a run that reached at least one "
-    "host; 0 until the first since the process started.",
+TLS_HOST_LAST_SUCCESS = Gauge(
+    "tigerduck_tls_host_last_success_timestamp",
+    "Unix time the pin watcher last reached the host, or first checked it if "
+    "it never has. Kept in the database, so a restart does not reset it.",
+    ["set", "host"],
 )
 TLS_CHAIN_MATCHES = Gauge(
     "tigerduck_tls_chain_matches",
