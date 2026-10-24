@@ -1,6 +1,6 @@
 """The public pin document, and the operator actions on the admin listener.
 
-The portal calls the actions with the operator in `X-Portal-Actor`; each
+The portal calls the actions with the operator in `X-Admin-Actor`; each
 one writes its own `admin_audit_log` row in the transaction it changes.
 """
 
@@ -65,7 +65,7 @@ admin_router = APIRouter(
 # Two years, leap day included; a mistyped year would make a set that never expires.
 MAX_EXPIRY_AHEAD = timedelta(days=731)
 
-ActorDep = Annotated[str, Header(alias="X-Portal-Actor", min_length=1, max_length=320)]
+ActorDep = Annotated[str, Header(alias="X-Admin-Actor", min_length=1, max_length=320)]
 
 
 class PinIn(BaseModel):

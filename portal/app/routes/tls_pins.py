@@ -83,7 +83,7 @@ async def get_tls_pins(pool: Annotated[Any, Depends(get_pool)]) -> JSONResponse:
 
 
 async def _forward(request: Request, method: str, path: str, body: Any = None) -> JSONResponse:
-    headers = {**_internal_headers(request), "X-Portal-Actor": request.state.actor}
+    headers = {**_internal_headers(request), "X-Admin-Actor": request.state.actor}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.request(

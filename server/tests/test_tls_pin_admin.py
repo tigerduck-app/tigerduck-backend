@@ -22,7 +22,7 @@ from server.tls_pins.models import TlsPinDocument, TlsPinSet
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-ACTOR = {"X-Portal-Actor": "ops@example.com"}
+ACTOR = {"X-Admin-Actor": "ops@example.com"}
 PIN_A = "9VZ7Yd685RTXsE6rL/puuMbnejYaXwaZasGL7c+Uolc="
 PIN_B = "BxOmElsPeD54MBOb5h+TPNJnBlsAk6spRc/wLnko0cc="
 NEW_PIN = "xES1tmzl1x4bXkDyc4XJXL/SSgW1b3DKwJkvD1DDN5w="

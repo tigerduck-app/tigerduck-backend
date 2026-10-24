@@ -57,7 +57,7 @@ async def test_an_action_carries_the_secret_the_operator_and_the_body(backend) -
     sent = backend[0]
     assert str(sent.url) == "http://tigerduck-internal-admin:9001/tls-pins/sets/ntust/pins"
     assert sent.headers["X-Push-Token"] == "s3cret"
-    assert sent.headers["X-Portal-Actor"] == "dev"
+    assert sent.headers["X-Admin-Actor"] == "dev"
     assert json.loads(sent.content) == {"spki": "x", "label": "y"}
 
 
