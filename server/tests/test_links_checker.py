@@ -154,8 +154,17 @@ def test_a_hop_whose_host_resolves_to_a_private_address_is_refused(address: str)
     assert [r.headers["host"] for r in server.requests] == ["www.ntust.edu.tw"]
 
 
-def test_a_nat64_address_is_refused() -> None:
-    dns = {"www.ntust.edu.tw": ["64:ff9b::a00:8"]}
+@pytest.mark.parametrize(
+    "address",
+    [
+        "64:ff9b::a00:8",  # NAT64, to 10.0.0.8
+        "2002:a00:8::1",  # 6to4, to 10.0.0.8
+        "2002:808:808::1",  # 6to4, to 8.8.8.8: the relay could be anywhere
+        "2001:0:4136:e378:8000:63bf:f5ff:fff7",  # Teredo, to 10.0.0.8
+    ],
+)
+def test_an_address_that_tunnels_to_ipv4_is_refused(address: str) -> None:
+    dns = {"www.ntust.edu.tw": [address]}
 
     with pytest.raises(CheckFailure, match="not a public address"):
         _fetch("https://www.ntust.edu.tw/", Server({}), dns)
