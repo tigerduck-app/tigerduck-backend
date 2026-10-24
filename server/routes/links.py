@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.admin_audit import AdminAuditLog
 from server.db import SessionDep
 from server.links import checker
-from server.links.models import Link
+from server.links.models import ALERT_OK, Link
 from server.links.rules import Rule, dump
 from server.links.targets import (
     NAME_PATTERN,
@@ -174,7 +174,11 @@ async def update_link(
             setattr(link, field, value)
         link.updated_at = datetime.now(UTC)
         link.updated_by = actor
-        if changes.keys() & {"target_url", "expectations"}:
+        if "enabled" in changes:
+            # A link turned off or on starts with no alert, so turning it back
+            # on cannot page with the failure it had before.
+            link.alert_state = ALERT_OK
+        if changes.keys() & {"target_url", "expectations"} or changes.get("enabled"):
             # Due at once: the next tick checks what was saved.
             link.last_check_at = None
         session.add(

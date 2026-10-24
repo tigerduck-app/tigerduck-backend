@@ -11,7 +11,7 @@ from sqlalchemy import select
 from server import metrics
 from server.admin_audit import AdminAuditLog
 from server.links import checker
-from server.links.models import ALERT_FAILING, Link
+from server.links.models import ALERT_FAILING, ALERT_OK, Link
 from server.links.rules import Page
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -275,6 +275,42 @@ async def test_a_new_target_or_new_rules_are_checked_at_the_next_tick(
     assert resp.status_code == 200, resp.text
     row = await _row(client, "ntust-calendar")
     assert row.last_check_at == (None if rechecked else checked)
+
+
+async def test_a_link_turned_off_drops_its_alert_and_back_on_is_checked_next(
+    admin_client, client
+) -> None:
+    from datetime import UTC, datetime
+
+    # The metrics are process-wide; a name of its own keeps this test's apart.
+    name, failure = "t-off-and-on", "status: expected 200, found 503"
+    await _add(
+        client,
+        name,
+        last_check_at=datetime.now(UTC),
+        last_check_ok=False,
+        alert_state=ALERT_FAILING,
+        alert_detail=failure,
+    )
+
+    try:
+        await admin_client.patch(f"/admin/links/{name}", headers=ACTOR, json={"enabled": False})
+        row = await _row(client, name)
+        assert (row.alert_state, row.alert_detail) == (ALERT_OK, failure)
+        assert row.last_check_at is not None
+
+        await admin_client.patch(f"/admin/links/{name}", headers=ACTOR, json={"enabled": True})
+        row = await _row(client, name)
+        assert row.last_check_at is None
+        # Until that check, the old failure stays resolved.
+        checker.publish(row)
+        assert REGISTRY.get_sample_value(
+            "tigerduck_link_check_failing", {"name": name, "failure": failure}
+        ) == 0
+    finally:
+        metrics.forget_link(name)
+        metrics.LINK_CHECK_FAILING.remove_by_labels({"name": name})
+        metrics._link_failures.pop(name, None)
 
 
 async def test_edit_refuses_an_invalid_target_and_an_unknown_link(admin_client, client) -> None:
