@@ -32,7 +32,6 @@ from server.tls_pins.document import (
     PinSigner,
     current_document,
     document_sets,
-    ensure_current_document,
     lock_pin_state,
     publish,
     published_pins,
@@ -412,8 +411,8 @@ async def run_pin_watch(
     probe_fn: Callable[[str], Probe] = probe,
     now: datetime | None = None,
 ) -> None:
-    """Check every monitored host, record the results, publish what the
-    sets allow, and keep the document from expiring."""
+    """Check every monitored host, record the results, and publish what the
+    sets allow."""
     async with session_factory() as session:
         rows = await session.execute(
             select(TlsPinSet.id, TlsPinSet.domains, TlsPinSet.monitored_hosts)
@@ -450,4 +449,3 @@ async def run_pin_watch(
         )
         if should_publish and signer is not None:
             await publish(session, signer, reason="watcher", now=now)
-        await ensure_current_document(session, signer, now=now)

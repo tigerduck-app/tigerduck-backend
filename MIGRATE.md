@@ -82,7 +82,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `baseline_serial`: it is the first row under Documents on the portal's new
   TLS pins page, and in `docker compose logs backend | grep tls_pins.published`.
   A document is valid for 30 days and is signed again under a new serial
-  when 7 days are left.
+  when 7 days are left, by an hourly job that runs even with the watcher
+  off.
 
 - **The pin watcher.** Every hour, starting a minute after the backend
   starts, it opens TLS to each monitored host (ports 443, 993 and 465 on the

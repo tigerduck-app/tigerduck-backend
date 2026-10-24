@@ -34,6 +34,7 @@ from prometheus_client import REGISTRY
 from sqlalchemy import select
 
 from server.db import build_session_factory
+from server.scheduler.runtime import build_scheduler
 from server.tls_pins import watcher
 from server.tls_pins.document import PinSigner, document_sets, publish, spki_sha256
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
@@ -538,16 +539,19 @@ async def test_a_matching_chain_marks_its_pins_seen_and_removes_none(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_the_watcher_resigns_a_document_with_seven_days_left(
-    db_session, factory, signer
+async def test_the_document_is_resigned_with_the_watcher_off(
+    db_session, factory, signer, test_settings
 ) -> None:
     await _store_set(db_session, [], [UNRELATED_PIN], auto_publish=True)
     async with factory() as session:
-        first = await publish(session, signer, reason="initial", now=NOW - timedelta(days=22))
+        old = datetime.now(UTC) - timedelta(days=24)
+        first = await publish(session, signer, reason="initial", now=old)
         await session.commit()
+    settings = test_settings.model_copy(update={"tls_pin_watch_interval_seconds": 0})
+    scheduler = build_scheduler(factory, object(), settings, llm=object(), tls_pin_signer=signer)
 
-    await run_pin_watch(factory, signer, timeout=10, now=NOW - timedelta(hours=1))
-    await run_pin_watch(factory, signer, timeout=10, now=NOW + timedelta(days=1))
+    assert scheduler.get_job("tls_pin_watch") is None
+    await scheduler.get_job("tls_pin_resign").func()
 
     documents = await _documents(factory)
     assert [d.reason for d in documents] == ["initial", "resign"]
