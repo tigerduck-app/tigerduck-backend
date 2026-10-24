@@ -412,3 +412,24 @@ groups:
         execErrState: Error
         annotations:
           summary: The last off-site backup or restore drill (kind label) failed; it resolves on the next success. See ~/Library/Logs/tigerduck-backup.log on the host.
+
+      # --- Links (server/links/checker.py) ---------------------------------
+      # The backend exports the stored alert state at startup, so a deploy
+      # neither repeats this alert nor resolves it. The failure label holds
+      # the first failing rule and what was found; it recovers on a pass.
+      - uid: td-link-check-failing
+        title: Link check failing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'max by (name, failure) (tigerduck_link_check_failing)'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A link (name label) fails its check; the failure label gives the rule and what was found. The portal's Links page edits and tests it.
