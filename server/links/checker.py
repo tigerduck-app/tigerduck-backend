@@ -219,9 +219,15 @@ def next_alert_state(current: str, ok: bool) -> tuple[str, str | None]:
 
 
 def publish(link: Link) -> None:
-    """Export `link`'s state. A disabled link, and one never checked that
-    has nothing to alert on, export no state."""
-    failing = link.alert_state == ALERT_FAILING
+    """Export `link`'s state, and its last failure at 1 while it fails and
+    at 0 after, from the row alone, so a restart can clear an alert too. A
+    disabled link, and one never checked that has nothing to alert on,
+    export no state."""
+    failing = link.enabled and link.alert_state == ALERT_FAILING
+    if link.alert_detail is not None or failing:
+        metrics.publish_link_failure(
+            link.name, link.alert_detail or "unknown", failing=failing
+        )
     if not link.enabled or (link.last_check_at is None and not failing):
         metrics.forget_link(link.name)
         return
@@ -229,7 +235,6 @@ def publish(link: Link) -> None:
         link.name,
         ok=not failing,
         checked_at=link.last_check_at.timestamp() if link.last_check_at else None,
-        failure=link.alert_detail,
     )
 
 
@@ -270,8 +275,6 @@ async def check_link(
         link.alert_state, change = next_alert_state(link.alert_state, result.ok)
         if change == "failing":
             link.alert_detail = result.detail
-        elif change == "recovered":
-            link.alert_detail = None
     if change == "failing":
         logger.warning("links.check_failing", name=name, detail=result.detail)
     elif change == "recovered":

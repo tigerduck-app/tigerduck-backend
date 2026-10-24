@@ -536,8 +536,8 @@ LINK_CHECK_LAST = Gauge(
 LINK_CHECK_FAILING = Gauge(
     "tigerduck_link_check_failing",
     "1 while a link fails, 0 once it recovers or is disabled. The failure "
-    "label is the detail of the check that started the failure, kept until "
-    "the link recovers, so the alert's labels survive a restart.",
+    "label is the detail of the check that started the latest failure, "
+    "stored on the link, so the alert's labels survive a restart.",
     ["name", "failure"],
 )
 
@@ -546,26 +546,23 @@ _link_failures: dict[str, str] = {}
 _link_names: set[str] = set()
 
 
-def publish_link(
-    name: str, *, ok: bool, checked_at: float | None, failure: str | None
-) -> None:
+def publish_link(name: str, *, ok: bool, checked_at: float | None) -> None:
     _link_names.add(name)
     LINK_CHECK_OK.labels(name=name).set(1 if ok else 0)
     if checked_at is None:
         LINK_CHECK_LAST.remove(name)
     else:
         LINK_CHECK_LAST.labels(name=name).set(checked_at)
+
+
+def publish_link_failure(name: str, failure: str, *, failing: bool) -> None:
+    """The failing series under `failure`, at 1 or at 0. At 0, not removed:
+    the alert then resolves at once, with the labels it fired with."""
     exported = _link_failures.get(name)
-    if ok:
-        # At 0, not removed: the alert then resolves at once, with its labels.
-        if exported is not None:
-            LINK_CHECK_FAILING.labels(name=name, failure=exported).set(0)
-        return
-    failure = failure or "unknown"
     if exported is not None and exported != failure:
         LINK_CHECK_FAILING.remove(name, exported)
     _link_failures[name] = failure
-    LINK_CHECK_FAILING.labels(name=name, failure=failure).set(1)
+    LINK_CHECK_FAILING.labels(name=name, failure=failure).set(1 if failing else 0)
 
 
 def forget_link(name: str) -> None:
@@ -579,7 +576,7 @@ def forget_link(name: str) -> None:
 
 
 def published_links() -> frozenset[str]:
-    return frozenset(_link_names)
+    return frozenset(_link_names | _link_failures.keys())
 
 
 # --- Exposition ---

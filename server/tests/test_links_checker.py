@@ -494,7 +494,8 @@ async def test_a_link_alerts_once_as_it_fails_and_once_as_it_recovers(
     # The series stays at 0, so the alert resolves with the labels it fired with.
     await checker.check_link(factory, test_settings, link_name)
     row = await _row(factory, link_name)
-    assert (row.alert_state, row.last_check_ok, row.alert_detail) == (ALERT_OK, True, None)
+    assert (row.alert_state, row.last_check_ok) == (ALERT_OK, True)
+    assert row.alert_detail == "status: expected 200, found 503"
     assert _sample("tigerduck_link_check_ok", name=link_name) == 1
     assert _failing_series(link_name) == {"status: expected 200, found 503": 0}
     assert _sample("tigerduck_link_check_last_timestamp", name=link_name) == (
@@ -540,7 +541,24 @@ async def test_a_restart_exports_the_stored_alert_state_before_any_check(
 
 
 @db_test
-async def test_a_disabled_failing_link_drops_its_failure_to_0(
+async def test_a_restart_right_after_a_recovery_exports_the_cleared_alert(
+    factory, link_name, test_settings, monkeypatch
+) -> None:
+    await _add_link(factory, link_name)
+    monkeypatch.setattr(checker, "fetch", Pages(_page(status=503), _page()))
+    await checker.check_link(factory, test_settings, link_name)
+    await checker.check_link(factory, test_settings, link_name)
+    # Restarted before Prometheus scraped the 0.
+    _new_process(link_name)
+
+    await checker.run_link_checks(factory, test_settings)
+
+    assert _sample("tigerduck_link_check_ok", name=link_name) == 1
+    assert _failing_series(link_name) == {"status: expected 200, found 503": 0}
+
+
+@db_test
+async def test_a_disabled_failing_link_drops_its_failure_to_0_after_a_restart(
     factory, link_name, test_settings
 ) -> None:
     await _add_link(
@@ -551,9 +569,7 @@ async def test_a_disabled_failing_link_drops_its_failure_to_0(
         alert_state=ALERT_FAILING,
         alert_detail="status: expected 200, found 503",
     )
-    metrics.publish_link(
-        link_name, ok=False, checked_at=0.0, failure="status: expected 200, found 503"
-    )
+    _new_process(link_name)
 
     await checker.run_link_checks(factory, test_settings)
 
@@ -592,7 +608,7 @@ async def test_the_job_checks_only_enabled_links_that_are_due(
     await _add_link(
         factory, off, enabled=False, last_check_at=now - timedelta(days=1)
     )
-    metrics.publish_link(off, ok=True, checked_at=0.0, failure=None)
+    metrics.publish_link(off, ok=True, checked_at=0.0)
     pages = Pages(_page())
     monkeypatch.setattr(checker, "fetch", pages)
 
