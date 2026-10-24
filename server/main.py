@@ -311,6 +311,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings,
         sync_worker=sync_worker,
         push_worker=push_worker,
+        tls_pin_signer=app.state.tls_pin_signer,
     )
 
     app.state.engine = engine
