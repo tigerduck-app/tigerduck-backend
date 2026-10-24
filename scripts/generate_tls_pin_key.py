@@ -2,7 +2,8 @@
 
 Writes the private key as PKCS #8 PEM, the format of `openssl genpkey
 -algorithm ed25519`, to `<dir>/tls-pins-<key_id>.pem` with mode 0600, and
-refuses to overwrite one. Prints the key_id and the raw 32-byte public key
+refuses to overwrite one. `<dir>` defaults to server/signing, made with
+mode 0700 when missing. Prints the key_id and the raw 32-byte public key
 in base64, which the apps embed; nothing else.
 
     uv run python scripts/generate_tls_pin_key.py td-pins-2026c
@@ -29,7 +30,7 @@ from server.tls_pins.document import KEY_ID_PATTERN, key_file_name
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("key_id", help="lower case letters, digits and hyphens")
-    parser.add_argument("--dir", type=Path, default=_BACKEND_DIR / "server" / "secrets")
+    parser.add_argument("--dir", type=Path, default=_BACKEND_DIR / "server" / "signing")
     args = parser.parse_args(argv)
     if not KEY_ID_PATTERN.fullmatch(args.key_id):
         parser.error("key_id must be lower case letters, digits and hyphens")
@@ -40,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
+    args.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = args.dir / key_file_name(args.key_id)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

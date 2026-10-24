@@ -146,6 +146,7 @@ cd tigerduck-backend
 cp .env.example .env
 
 # 2. Drop the APNs key at server/secrets/AuthKey_<KEY_ID>.p8 (already gitignored)
+#    The TLS pin document's signing key goes in server/signing/tls-pins-<key_id>.pem (backend only)
 
 # 3. Boot the whole stack (postgres, backend, portal, monitoring)
 ./start.sh                       # docker compose up -d --build, then prints a status block
@@ -397,6 +398,7 @@ tigerduck-backend/
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher (anonymous) / user_dispatch (logged-in) / taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt
 │   ├── secrets/                 # APNs .p8 (gitignored)
+│   ├── signing/                 # Ed25519 key that signs the TLS pin document; backend only (gitignored)
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest (unit + integration)
 ├── portal/                      # Operator portal — separate FastAPI app

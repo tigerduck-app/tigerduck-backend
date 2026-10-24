@@ -32,12 +32,14 @@ def test_prompt_roots_are_the_sorted_pins_of_certifis_roots() -> None:
 
 
 def test_the_key_script_writes_a_private_key_only_the_owner_reads(tmp_path) -> None:
-    run = [sys.executable, "scripts/generate_tls_pin_key.py", "td-pins-2026a", "--dir", str(tmp_path)]
+    out_dir = tmp_path / "signing"
+    run = [sys.executable, "scripts/generate_tls_pin_key.py", "td-pins-2026a", "--dir", str(out_dir)]
 
     first = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     again = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
 
-    path = tmp_path / "tls-pins-td-pins-2026a.pem"
+    path = out_dir / "tls-pins-td-pins-2026a.pem"
+    assert os.stat(out_dir).st_mode & 0o777 == 0o700
     assert os.stat(path).st_mode & 0o777 == 0o600
     lines = first.stdout.splitlines()
     assert lines[0] == "key_id: td-pins-2026a" and len(lines) == 2
@@ -91,4 +93,5 @@ def test_the_production_key_file_loads_by_default(tmp_path) -> None:
     signer = load_signer(path)
 
     assert signer is not None and signer.key_id == "td-pins-2026a"
-    assert Settings.model_fields["tls_pin_signing_key_path"].default.name == path.name
+    default = Settings.model_fields["tls_pin_signing_key_path"].default
+    assert (default.parent.name, default.name) == ("signing", path.name)

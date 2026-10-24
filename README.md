@@ -146,6 +146,7 @@ cd tigerduck-backend
 cp .env.example .env
 
 # 2. 把 APNs 私鑰丟到 server/secrets/AuthKey_<KEY_ID>.p8（已 gitignored）
+#    TLS pin 文件的簽章金鑰放 server/signing/tls-pins-<key_id>.pem（只掛進 backend）
 
 # 3. 啟動整個 stack（postgres、backend、portal、監控）
 ./start.sh                       # docker compose up -d --build，再印出狀態摘要
@@ -396,6 +397,7 @@ tigerduck-backend/
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher（匿名）/ user_dispatch（登入使用者）/ taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt
 │   ├── secrets/                 # APNs .p8（gitignored）
+│   ├── signing/                 # TLS pin 文件的 Ed25519 簽章金鑰，只掛進 backend（gitignored）
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest（單元 + 整合）
 ├── portal/                      # 管理介面 — 另一個 FastAPI app

@@ -42,26 +42,39 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `ntust` and `library` sets with the apps' built-in pins, expiries and
   monitored hosts, all with `auto_publish` off.
 
+- **Move the signing key before starting 3.5.0.** The key now lives in its
+  own folder, `server/signing/`, which `docker-compose.yml` mounts read-only
+  into the backend only. The portal mounts `server/secrets` and has the
+  Docker socket, so the key must not stay there. On the host, before
+  `./start.sh`:
+
+  ```bash
+  mkdir -m 700 server/signing
+  mv server/secrets/tls-pins-*.pem server/signing/
+  ls -l server/signing    # the key stays -rw------- (0600)
+  ```
+
 - **The signing key.** The document is signed with the Ed25519 key
-  `server/secrets/tls-pins-td-pins-2026a.pem` (PKCS #8 PEM, mode 0600),
+  `server/signing/tls-pins-td-pins-2026a.pem` (PKCS #8 PEM, mode 0600),
   which is the default of the new `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH`, so
   `.env` needs nothing. The key_id the apps know it by, `td-pins-2026a`, is
   the file name between `tls-pins-` and `.pem`. Without the file the backend
   starts, logs `tls_pins.signing_disabled` and publishes nothing; the apps
   keep their built-in pins. To make a new key, on the host (the container
-  mounts `server/secrets` read-only):
+  mounts `server/signing` read-only):
 
   ```bash
   uv run python scripts/generate_tls_pin_key.py <key_id>
   # or, the same format:
-  openssl genpkey -algorithm ed25519 -out server/secrets/tls-pins-<key_id>.pem
-  chmod 600 server/secrets/tls-pins-<key_id>.pem
+  openssl genpkey -algorithm ed25519 -out server/signing/tls-pins-<key_id>.pem
+  chmod 600 server/signing/tls-pins-<key_id>.pem
   ```
 
-  The script refuses to overwrite a file and prints only the key_id and the
-  raw public key in base64. The standby key `td-pins-2026b` stays offline.
-  To rotate, first ship apps that embed the new public key, then point
-  `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH` at the new file and `./start.sh`.
+  The script writes into `server/signing`, refuses to overwrite a file and
+  prints only the key_id and the raw public key in base64. The standby key
+  `td-pins-2026b` stays offline. To rotate, first ship apps that embed the
+  new public key, then point `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH` at the new
+  file and `./start.sh`.
 
 - **The first document.** With the key in place the backend publishes the
   first document as it starts (reason `initial`). Its serial is the apps'
