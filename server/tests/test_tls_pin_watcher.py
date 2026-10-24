@@ -34,6 +34,7 @@ from prometheus_client import REGISTRY
 from sqlalchemy import select
 
 from server.db import build_session_factory
+from server.tls_pins import watcher
 from server.tls_pins.document import PinSigner, document_sets, publish, spki_sha256
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
 from server.tls_pins.watcher import (
@@ -271,6 +272,34 @@ def test_aia_is_never_fetched_from_the_stacks_own_addresses() -> None:
     assert _is_public_url("http://8.8.8.8/ca.cer")
 
 
+def test_an_aia_server_trickling_bytes_is_cut_off(monkeypatch) -> None:
+    listener = socket.create_server(("127.0.0.1", 0))
+    stop = threading.Event()
+
+    def trickle() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(4096)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 60000\r\n\r\n")
+            while not stop.wait(0.05):
+                conn.sendall(b"x")
+
+    server = threading.Thread(target=trickle, daemon=True)
+    server.start()
+    monkeypatch.setattr(watcher, "_is_public_url", lambda url: True)
+    monkeypatch.setattr(watcher, "AIA_FETCH_DEADLINE_SECONDS", 0.3)
+
+    started = time.monotonic()
+    try:
+        result = watcher.fetch_issuer(f"http://127.0.0.1:{listener.getsockname()[1]}/ca.cer")
+    finally:
+        stop.set()
+        server.join(5)
+        listener.close()
+
+    assert result is None and time.monotonic() - started < 3
+
+
 # --- The watcher -----------------------------------------------------------
 
 
@@ -455,7 +484,10 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
     await _store_set(db_session, ["hung.tls.test"], [UNRELATED_PIN], auto_publish=True)
     before = REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp")
 
+    threads = []
+
     def hang(target: str) -> Probe:
+        threads.append(threading.current_thread().name)
         time.sleep(1)
         return Probe("trusted")
 
@@ -466,6 +498,7 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
     result = (await _stored_set(factory)).watch_results["hung.tls.test"]
     assert result["status"] == "error" and result["detail"] == "timeout"
     assert REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp") == before
+    assert threads[0].startswith("tls-probe")
     await asyncio.sleep(1)
 
 

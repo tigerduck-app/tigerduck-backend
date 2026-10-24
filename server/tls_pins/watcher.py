@@ -13,6 +13,7 @@ import socket
 import ssl
 import time
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -51,9 +52,13 @@ from server.tls_pins.targets import (
 
 logger = structlog.get_logger(__name__)
 
+# Also bounds a whole TLS handshake: CPython keeps one deadline across its reads.
 CONNECT_TIMEOUT_SECONDS = 10.0
+AIA_FETCH_DEADLINE_SECONDS = 20.0
 AIA_MAX_BYTES = 64 * 1024
 AIA_MAX_HOPS = 3
+# A host that stalls holds one of these threads, not the default executor's.
+_probe_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tls-probe")
 # OpenSSL's codes for a chain that stops short of a trusted root.
 _INCOMPLETE_CHAIN_CODES = frozenset({2, 20, 21})
 
@@ -154,6 +159,8 @@ def parse_issuer(body: bytes) -> x509.Certificate | None:
 def fetch_issuer(url: str) -> x509.Certificate | None:
     if not _is_public_url(url):
         return None
+    # httpx times each read; a server trickling bytes needs an overall limit.
+    deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
     try:
         with (
             httpx.Client(timeout=CONNECT_TIMEOUT_SECONDS) as client,
@@ -164,7 +171,7 @@ def fetch_issuer(url: str) -> x509.Certificate | None:
             body = b""
             for chunk in resp.iter_bytes():
                 body += chunk
-                if len(body) > AIA_MAX_BYTES:
+                if len(body) > AIA_MAX_BYTES or time.monotonic() > deadline:
                     return None
     except httpx.HTTPError:
         return None
@@ -226,7 +233,9 @@ def probe(
 
 async def _probe_in_thread(probe_fn: Callable[[str], Probe], target: str, timeout: float) -> Probe:
     try:
-        return await asyncio.wait_for(asyncio.to_thread(probe_fn, target), timeout)
+        # On timeout a queued probe is dropped; a running one ends at its socket timeouts.
+        call = asyncio.get_running_loop().run_in_executor(_probe_pool, probe_fn, target)
+        return await asyncio.wait_for(call, timeout)
     except TimeoutError:
         return Probe("error", detail="timeout")
     except Exception as exc:  # one host's bug must not end the run
