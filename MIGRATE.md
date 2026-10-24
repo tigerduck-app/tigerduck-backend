@@ -37,7 +37,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **The TLS pin document.** `GET /.well-known/tigerduck/tls-pins.json`,
   public and outside `/v3`, serves the signed pin document the apps take
   their TLS pins from, with `Cache-Control: public, max-age=300` and an
-  `ETag`. It answers 404 until the first document is published. Migration
+  `ETag`, answering 304 to a matching `If-None-Match`. It answers 404 until
+  the first document is published. Migration
   `8996a3bf992f` adds `tls_pin_sets` and `tls_pin_documents` and seeds the
   `ntust` and `library` sets with the apps' built-in pins, expiries and
   monitored hosts, all with `auto_publish` off.
@@ -88,9 +89,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   NTUST hosts) with the container's trust store, completing a chain NTUST
   sends short through its AIA address over HTTP. A chain that shares no pin
   with its set gets its intermediates and root added to the set; with
-  `auto_publish` off they are published only when an operator presses
-  Publish now. `TIGERDUCK_TLS_PIN_WATCH_INTERVAL_SECONDS` (3600; 0 turns it
-  off) and `TIGERDUCK_TLS_PIN_WATCH_TIMEOUT_SECONDS` (30, per host) tune it.
+  `auto_publish` off they are marked "not published" and left out of every
+  document, whatever else publishes, until an operator presses Publish now,
+  and the chain mismatch alert keeps firing until then. The portal saves, and
+  the watcher connects to, only host names under their set's domains, on
+  ports 443, 465 or 993, that resolve to public addresses.
+  `TIGERDUCK_TLS_PIN_WATCH_INTERVAL_SECONDS` (3600; 0 turns it off) and
+  `TIGERDUCK_TLS_PIN_WATCH_TIMEOUT_SECONDS` (30, per host) tune it.
   The portal's TLS pins page shows each pin's first and last seen, each
   host's last result and chain, and the document history, and carries the
   pin actions; each one is recorded in `admin_audit_log`.
@@ -99,8 +104,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   go to the Discord channel: the watcher not reaching a host for 3 hours, a
   chain failing system trust, a chain sharing no pin with the served
   document, a published change to a set, the document within 3 days of
-  expiry, and a set within 60 days of expiry. Grafana reads the file only at
-  start: `docker compose restart grafana` after `./start.sh`.
+  expiry, and a set within 60 days of expiry. A route in `policies.yml`
+  repeats the set expiry alert weekly instead of every 4 hours. Grafana reads
+  both files only at start: `docker compose restart grafana` after
+  `./start.sh`.
 
 - **Turning on `auto_publish`.** Leave it off until the watcher has run for
   a while without alerts you did not expect. First check that the
