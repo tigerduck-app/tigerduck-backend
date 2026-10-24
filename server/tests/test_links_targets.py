@@ -14,7 +14,7 @@ ALLOWED = ["ntust.edu.tw"]
     [
         "https://www.academic.ntust.edu.tw/p/404-1048-78935.php",
         "https://ntust.edu.tw",
-        "https://WWW.NTUST.EDU.TW:8443/a?b=c#d",
+        "https://WWW.NTUST.EDU.TW:443/a?b=c#d",
     ],
 )
 def test_an_https_url_on_an_allowed_host_is_kept(url: str) -> None:
@@ -39,6 +39,8 @@ def test_an_https_url_on_an_allowed_host_is_kept(url: str) -> None:
         ("https://evil.example\\.ntust.edu.tw/", "plain host name"),
         ("https://%65vil.ntust.edu.tw/", "plain host name"),
         ("https://[::1]/", "plain host name"),
+        ("https://www.ntust.edu.tw:8443/", "port other than 443"),
+        ("https://www.ntust.edu.tw:80/", "port other than 443"),
         ("https://www.ntust.edu.tw:99999/", "port"),
         ("https://www.ntust.edu.tw:0/", "port"),
     ],

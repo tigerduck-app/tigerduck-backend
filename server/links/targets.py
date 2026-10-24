@@ -57,8 +57,8 @@ def validate_target(url: str, allowed_hosts: Iterable[str]) -> str:
         port = parts.port
     except ValueError:
         port = 0
-    if port == 0:
-        raise InvalidTarget("the URL has an invalid port")
+    if port not in (None, 443):
+        raise InvalidTarget("the URL must not name a port other than 443")
     if not host_allowed(host, allowed_hosts):
         raise InvalidTarget(f"the host {host} is not an allowed host")
     return url

@@ -47,9 +47,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   there is kept.
 - **Allowed hosts.** A target must be `https` on a host in
   `TIGERDUCK_LINKS_ALLOWED_HOSTS` (a JSON list, default `["ntust.edu.tw"]`,
-  each with its subdomains), with no user name, password, whitespace or
-  control character. It is checked when saved, when served and on every
-  redirect the checker follows.
+  each with its subdomains), on the default port, with no user name,
+  password, whitespace or control character. It is checked when saved, when
+  served and on every redirect the checker follows.
 - **The portal's Links page** lists the links and creates, edits, enables,
   disables and tests them. It goes through new routes on the admin listener
   (`/admin/links` on `:9001`), which record `link.create`, `link.update`,
