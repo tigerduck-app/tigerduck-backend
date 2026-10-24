@@ -4,6 +4,8 @@ sets, publishes when it should, and records the operator."""
 from __future__ import annotations
 
 import json
+import socket
+import types
 from datetime import UTC, datetime
 
 import pytest
@@ -12,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import select
 
 from server.admin_audit import AdminAuditLog
+from server.tls_pins import targets
 from server.tls_pins.document import PinSigner, document_sets
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
 
@@ -21,6 +24,26 @@ ACTOR = {"X-Portal-Actor": "ops@example.com"}
 PIN_A = "9VZ7Yd685RTXsE6rL/puuMbnejYaXwaZasGL7c+Uolc="
 PIN_B = "BxOmElsPeD54MBOb5h+TPNJnBlsAk6spRc/wLnko0cc="
 NEW_PIN = "xES1tmzl1x4bXkDyc4XJXL/SSgW1b3DKwJkvD1DDN5w="
+
+
+# Names the stub resolver answers with a non-public address; every other
+# name gets a public one, so no test does a real DNS lookup.
+ADDRESSES = {
+    "intranet.ntust.edu.tw": "10.0.0.7",
+    "nat64.ntust.edu.tw": "64:ff9b::a00:7",
+    "mapped.ntust.edu.tw": "::ffff:127.0.0.1",
+}
+
+
+@pytest.fixture(autouse=True)
+def stub_dns(monkeypatch):
+    def getaddrinfo(host, port, *args, **kwargs):
+        address = ADDRESSES.get(host, "140.118.31.99")
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    stub = types.SimpleNamespace(getaddrinfo=getaddrinfo, SOCK_STREAM=socket.SOCK_STREAM)
+    monkeypatch.setattr(targets, "socket", stub)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -136,6 +159,54 @@ async def test_monitored_hosts_are_saved_without_publishing(admin_client, stored
     assert pin_set.monitored_hosts == ["www.ntust.edu.tw", "mail.ntust.edu.tw:993"]
     assert list(pin_set.watch_results) == ["www.ntust.edu.tw"]
     assert await _latest(stored) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "140.118.31.99",
+        "140.118.31.99:443",
+        "www.ntust.edu.tw:8443",
+        "www.example.com",
+        "ntust.edu.tw.example.com",
+        "intranet.ntust.edu.tw",
+        "nat64.ntust.edu.tw",
+        "mapped.ntust.edu.tw:993",
+    ],
+)
+async def test_a_host_the_watcher_must_not_reach_is_refused(admin_client, stored, host) -> None:
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts",
+        json={"hosts": ["moodle2.ntust.edu.tw", host]},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert (await _set(stored)).monitored_hosts == ["www.ntust.edu.tw"]
+
+
+async def test_a_subdomain_is_refused_when_the_domain_excludes_them(admin_client, stored) -> None:
+    stored.add(
+        TlsPinSet(
+            id="library",
+            domains=[{"name": "api.lib.ntust.edu.tw", "include_subdomains": False}],
+            pins=[{"spki": PIN_A, "label": "CA", "source": "builtin"}],
+            expires_at=datetime(2027, 8, 18, tzinfo=UTC),
+            monitored_hosts=[],
+        )
+    )
+    await stored.commit()
+
+    exact = await admin_client.put(
+        "/tls-pins/sets/library/monitored-hosts",
+        json={"hosts": ["api.lib.ntust.edu.tw"]}, headers=ACTOR,
+    )
+    sub = await admin_client.put(
+        "/tls-pins/sets/library/monitored-hosts",
+        json={"hosts": ["x.api.lib.ntust.edu.tw"]}, headers=ACTOR,
+    )
+
+    assert exact.status_code == 200 and sub.status_code == 422
 
 
 async def test_an_expiry_can_only_move_later(admin_client, stored) -> None:

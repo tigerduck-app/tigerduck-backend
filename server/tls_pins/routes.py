@@ -6,8 +6,8 @@ one writes its own `admin_audit_log` row in the transaction it changes.
 
 from __future__ import annotations
 
+import asyncio
 import base64
-import re
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -20,6 +20,7 @@ from server import metrics
 from server.admin_audit import AdminAuditLog
 from server.db import SessionDep
 from server.security import require_shared_secret
+from server.tls_pins import targets
 from server.tls_pins.document import (
     current_document,
     document_sets,
@@ -27,7 +28,6 @@ from server.tls_pins.document import (
     publish,
 )
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
-from server.tls_pins.watcher import parse_target
 
 DOCUMENT_PATH = "/.well-known/tigerduck/tls-pins.json"
 
@@ -60,8 +60,6 @@ admin_router = APIRouter(
 
 ActorDep = Annotated[str, Header(alias="X-Portal-Actor", min_length=1, max_length=320)]
 
-_HOST_NAME = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
-
 
 class PinIn(BaseModel):
     spki: str
@@ -91,11 +89,9 @@ class HostsIn(BaseModel):
     def _targets(cls, hosts: list[str]) -> list[str]:
         for target in hosts:
             try:
-                host, port = parse_target(target)
-            except ValueError:
-                host, port = "", 0
-            if not _HOST_NAME.fullmatch(host) or not 0 < port < 65536:
-                raise ValueError(f"{target!r} is not host or host:port")
+                targets.check_target(target)
+            except targets.TargetRefused as exc:
+                raise ValueError(f"{target}: {exc}") from None
         return list(dict.fromkeys(hosts))
 
 
@@ -186,11 +182,30 @@ async def remove_pin(
     )
 
 
+async def _resolve_refusal(target: str) -> str | None:
+    try:
+        await asyncio.to_thread(targets.resolve, *targets.parse_target(target))
+    except targets.TargetRefused as exc:
+        return f"{target}: {exc}"
+    return None
+
+
 @admin_router.put("/sets/{set_id}/monitored-hosts")
 async def set_monitored_hosts(
     set_id: str, body: HostsIn, request: Request, session: SessionDep, actor: ActorDep
 ) -> dict:
+    # Resolved before the transaction opens; a lookup can take seconds.
+    refusals = await asyncio.gather(*(_resolve_refusal(t) for t in body.hosts))
     pin_set = await _locked_set(session, set_id)
+    refusals += [
+        f"{t}: not under the set's domains"
+        for t in body.hosts
+        if not targets.under_domains(targets.parse_target(t)[0], pin_set.domains)
+    ]
+    if any(refusals):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, detail="; ".join(filter(None, refusals))
+        )
     pin_set.monitored_hosts = body.hosts
     pin_set.watch_results = {
         host: result for host, result in pin_set.watch_results.items() if host in body.hosts

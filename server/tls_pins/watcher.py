@@ -9,7 +9,6 @@ never removed here; an operator removes them in the portal.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import socket
 import ssl
 import time
@@ -40,6 +39,14 @@ from server.tls_pins.document import (
     timestamp,
 )
 from server.tls_pins.models import TlsPinSet
+from server.tls_pins.targets import (
+    TargetRefused,
+    address_allowed,
+    check_target,
+    parse_target,
+    resolve,
+    under_domains,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -58,12 +65,6 @@ class Probe:
     chain: tuple[x509.Certificate, ...] = ()
     detail: str | None = None
     via_aia: bool = False
-
-
-def parse_target(target: str) -> tuple[str, int]:
-    """"host" or "host:port"; port 443 when left out."""
-    host, sep, port = target.rpartition(":")
-    return (host, int(port)) if sep else (target, 443)
 
 
 def _trust_context(cafile: str | None, extra: Sequence[bytes] = ()) -> ssl.SSLContext:
@@ -88,11 +89,22 @@ def _unverified_context() -> ssl.SSLContext:
     return ctx
 
 
-def _chain(ctx: ssl.SSLContext, host: str, port: int) -> tuple[x509.Certificate, ...]:
-    with (
-        socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS) as raw,
-        ctx.wrap_socket(raw, server_hostname=host) as tls,
-    ):
+def _connect(addresses: list[tuple[str, int]]) -> socket.socket:
+    """A connection to the first of `addresses` that answers. Connecting to
+    the checked addresses, not the name, keeps a second lookup out."""
+    error: OSError = OSError("no address")
+    for address in addresses:
+        try:
+            return socket.create_connection(address, timeout=CONNECT_TIMEOUT_SECONDS)
+        except OSError as exc:
+            error = exc
+    raise error
+
+
+def _chain(
+    ctx: ssl.SSLContext, host: str, addresses: list[tuple[str, int]]
+) -> tuple[x509.Certificate, ...]:
+    with _connect(addresses) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
         # The chain as served when the context does not verify.
         ders = tls.get_verified_chain()
     return tuple(x509.load_der_x509_certificate(der) for der in ders)
@@ -121,7 +133,7 @@ def _is_public_url(url: str) -> bool:
         infos = socket.getaddrinfo(parts.hostname, parts.port or 80)
     except OSError:
         return False
-    return all(ipaddress.ip_address(info[4][0]).is_global for info in infos)
+    return all(address_allowed(info[4][0]) for info in infos)
 
 
 def parse_issuer(body: bytes) -> x509.Certificate | None:
@@ -180,23 +192,30 @@ def probe(
     *,
     cafile: str | None = None,
     fetch: Callable[[str], x509.Certificate | None] = fetch_issuer,
+    resolve: Callable[[str, int], list[tuple[str, int]]] = resolve,
 ) -> Probe:
-    """Check `target` against system trust (`cafile` stands in for it in
-    tests). Blocking; the watcher runs it in a worker thread."""
+    """Check `target` against system trust (`cafile` and `resolve` stand in
+    for it and for DNS in tests). Blocking; the watcher runs it in a worker
+    thread."""
     host, port = parse_target(target)
     try:
+        addresses = resolve(host, port)
+    except TargetRefused as exc:
+        return Probe("error", detail=f"refused: {exc}")
+    try:
         try:
-            return Probe("trusted", _chain(_trust_context(cafile), host, port))
+            return Probe("trusted", _chain(_trust_context(cafile), host, addresses))
         except ssl.SSLCertVerificationError as exc:
             if exc.verify_code not in _INCOMPLETE_CHAIN_CODES:
                 raise
-            extra = _aia_intermediates(_chain(_unverified_context(), host, port), fetch)
+            extra = _aia_intermediates(_chain(_unverified_context(), host, addresses), fetch)
             if not extra:
                 raise
-            return Probe("trusted", _chain(_trust_context(cafile, extra), host, port), via_aia=True)
+            chain = _chain(_trust_context(cafile, extra), host, addresses)
+            return Probe("trusted", chain, via_aia=True)
     except ssl.SSLCertVerificationError as exc:
         try:
-            served = _chain(_unverified_context(), host, port)
+            served = _chain(_unverified_context(), host, addresses)
         except OSError:
             served = ()
         return Probe("untrusted", served, detail=exc.verify_message)
@@ -212,6 +231,19 @@ async def _probe_in_thread(probe_fn: Callable[[str], Probe], target: str, timeou
     except Exception as exc:  # one host's bug must not end the run
         logger.exception("tls_pins.probe_failed", host=target)
         return Probe("error", detail=type(exc).__name__)
+
+
+def _refusal(target: str, domains: list[dict]) -> str | None:
+    """Why the watcher will not connect to `target`, if it will not."""
+    try:
+        host, _ = check_target(target)
+    except TargetRefused as exc:
+        return str(exc)
+    return None if under_domains(host, domains) else "not under the set's domains"
+
+
+async def _refused(reason: str) -> Probe:
+    return Probe("error", detail=f"refused: {reason}")
 
 
 def _describe(chain: tuple[x509.Certificate, ...]) -> list[dict]:
@@ -324,16 +356,20 @@ async def run_pin_watch(
     """Check every monitored host, record the results, publish what the
     sets allow, and keep the document from expiring."""
     async with session_factory() as session:
+        rows = await session.execute(
+            select(TlsPinSet.id, TlsPinSet.domains, TlsPinSet.monitored_hosts)
+        )
         targets = [
-            (set_id, host)
-            for set_id, hosts in await session.execute(
-                select(TlsPinSet.id, TlsPinSet.monitored_hosts)
-            )
+            (set_id, host, _refusal(host, domains))
+            for set_id, domains, hosts in rows
             for host in hosts
         ]
     # The probes reach the school's servers, so no transaction is open yet.
     results = await asyncio.gather(
-        *(_probe_in_thread(probe_fn, host, timeout) for _, host in targets)
+        *(
+            _refused(refusal) if refusal else _probe_in_thread(probe_fn, host, timeout)
+            for _, host, refusal in targets
+        )
     )
     now = now or datetime.now(UTC)
     async with session_scope(session_factory) as session:
@@ -344,7 +380,7 @@ async def run_pin_watch(
         )
         sets = {s.id: s for s in (await session.execute(select(TlsPinSet))).scalars()}
         should_publish = False
-        for (set_id, host), result in zip(targets, results, strict=True):
+        for (set_id, host, _), result in zip(targets, results, strict=True):
             pin_set = sets.get(set_id)
             if pin_set is None:
                 continue

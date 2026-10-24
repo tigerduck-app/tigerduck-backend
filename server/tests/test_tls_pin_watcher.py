@@ -13,7 +13,7 @@ import socket
 import ssl
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,9 +45,13 @@ from server.tls_pins.watcher import (
 )
 
 AIA_URL = "http://aia.invalid/intermediate.cer"
+HOST = "tls.test"
 UNRELATED_PIN = "A" * 43 + "="
 NOW = datetime(2026, 10, 25, 4, 0, tzinfo=UTC)
 PEM = serialization.Encoding.PEM
+
+
+Resolve = Callable[[str, int], list[tuple[str, int]]]
 
 
 @dataclass(frozen=True)
@@ -95,7 +99,7 @@ def _issue(subject: str, issuer: Authority | None, *, ca: bool) -> Authority:
     else:
         builder = (
             builder.add_extension(
-                x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False
+                x509.SubjectAlternativeName([x509.DNSName(HOST)]), critical=False
             )
             .add_extension(
                 x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
@@ -126,7 +130,7 @@ class Pki:
 def _pki(tmp_path: Path, name: str) -> Pki:
     root = _issue(f"{name} Root CA", None, ca=True)
     intermediate = _issue(f"{name} Issuing CA", root, ca=True)
-    leaf = _issue("localhost", intermediate, ca=False)
+    leaf = _issue(HOST, intermediate, ca=False)
     cafile = tmp_path / f"{name}-roots.pem"
     cafile.write_bytes(root.cert.public_bytes(PEM))
     return Pki(root, intermediate, leaf, str(cafile))
@@ -138,8 +142,9 @@ def pki(tmp_path: Path) -> Pki:
 
 
 @contextlib.contextmanager
-def tls_server(tmp_path: Path, leaf: Authority, *chain: Authority) -> Iterator[str]:
-    """Serves `leaf` and `chain` on localhost; yields "localhost:<port>"."""
+def tls_server(tmp_path: Path, leaf: Authority, *chain: Authority) -> Iterator[Resolve]:
+    """Serves `leaf` and `chain` on 127.0.0.1; yields the stand-in for DNS
+    that sends HOST there."""
     certfile, keyfile = tmp_path / "server-chain.pem", tmp_path / "server-key.pem"
     certfile.write_bytes(b"".join(a.cert.public_bytes(PEM) for a in (leaf, *chain)))
     keyfile.write_bytes(
@@ -167,7 +172,8 @@ def tls_server(tmp_path: Path, leaf: Authority, *chain: Authority) -> Iterator[s
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        yield f"localhost:{listener.getsockname()[1]}"
+        port = listener.getsockname()[1]
+        yield lambda host, _port: [("127.0.0.1", port)]
     finally:
         stop.set()
         thread.join()
@@ -186,8 +192,8 @@ def _aia(*answers: Authority):
 
 
 def test_a_full_chain_validates_up_to_a_root_the_server_does_not_send(tmp_path, pki) -> None:
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
-        result = probe(target, cafile=pki.cafile, fetch=_aia())
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
+        result = probe(HOST, cafile=pki.cafile, fetch=_aia(), resolve=resolve)
 
     assert result.status == "trusted" and not result.via_aia
     assert [spki_sha256(c) for c in result.chain] == [
@@ -196,8 +202,8 @@ def test_a_full_chain_validates_up_to_a_root_the_server_does_not_send(tmp_path, 
 
 
 def test_an_incomplete_chain_is_completed_through_aia(tmp_path, pki) -> None:
-    with tls_server(tmp_path, pki.leaf) as target:
-        result = probe(target, cafile=pki.cafile, fetch=_aia(pki.intermediate))
+    with tls_server(tmp_path, pki.leaf) as resolve:
+        result = probe(HOST, cafile=pki.cafile, fetch=_aia(pki.intermediate), resolve=resolve)
 
     assert result.status == "trusted" and result.via_aia
     assert [spki_sha256(c) for c in result.chain] == [
@@ -207,9 +213,9 @@ def test_an_incomplete_chain_is_completed_through_aia(tmp_path, pki) -> None:
 
 def test_an_aia_intermediate_never_becomes_a_trust_anchor(tmp_path, pki) -> None:
     other = _pki(tmp_path, "Other")
-    with tls_server(tmp_path, pki.leaf) as target:
-        unrooted = probe(target, cafile=other.cafile, fetch=_aia(pki.intermediate))
-        without_aia = probe(target, cafile=pki.cafile, fetch=_aia())
+    with tls_server(tmp_path, pki.leaf) as resolve:
+        unrooted = probe(HOST, cafile=other.cafile, fetch=_aia(pki.intermediate), resolve=resolve)
+        without_aia = probe(HOST, cafile=pki.cafile, fetch=_aia(), resolve=resolve)
 
     assert unrooted.status == "untrusted"
     assert [spki_sha256(c) for c in unrooted.chain] == [pki.leaf.pin]
@@ -218,8 +224,8 @@ def test_an_aia_intermediate_never_becomes_a_trust_anchor(tmp_path, pki) -> None
 
 def test_a_chain_from_an_untrusted_root_is_untrusted(tmp_path, pki) -> None:
     other = _pki(tmp_path, "Other")
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
-        result = probe(target, cafile=other.cafile, fetch=_aia(pki.intermediate))
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
+        result = probe(HOST, cafile=other.cafile, fetch=_aia(pki.intermediate), resolve=resolve)
 
     assert result.status == "untrusted"
     assert result.detail
@@ -228,7 +234,22 @@ def test_a_chain_from_an_untrusted_root_is_untrusted(tmp_path, pki) -> None:
 def test_an_unreachable_host_is_an_error() -> None:
     with socket.create_server(("127.0.0.1", 0)) as closed:
         port = closed.getsockname()[1]
-    assert probe(f"127.0.0.1:{port}").status == "error"
+    result = probe(HOST, resolve=lambda host, _port: [("127.0.0.1", port)])
+
+    assert result.status == "error" and "ConnectionRefusedError" in result.detail
+
+
+def test_a_host_resolving_to_a_private_address_is_never_connected(monkeypatch) -> None:
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, 1, 6, "", ("10.0.0.7", 443))]
+    )
+    connected = []
+    monkeypatch.setattr(socket, "create_connection", lambda *a, **k: connected.append(a))
+
+    result = probe(HOST)
+
+    assert result.status == "error" and result.detail.startswith("refused:")
+    assert connected == []
 
 
 def test_an_aia_answer_parses_as_der_pem_or_pkcs7(pki) -> None:
@@ -267,7 +288,7 @@ async def _store_set(db_session, hosts: list[str], pins: list[str], *, auto_publ
     db_session.add(
         TlsPinSet(
             id="ntust",
-            domains=[{"name": "localhost", "include_subdomains": True}],
+            domains=[{"name": HOST, "include_subdomains": True}],
             pins=[
                 {"spki": p, "label": "built in", "first_seen_at": None,
                  "last_seen_at": None, "source": "builtin"}
@@ -301,15 +322,16 @@ def _gauge(name: str, target: str) -> float | None:
 async def test_a_changed_chain_adds_its_intermediate_and_root_but_never_its_leaf(
     tmp_path, pki, db_session, factory, signer
 ) -> None:
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
-        await _store_set(db_session, [target], [UNRELATED_PIN], auto_publish=True)
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
+        await _store_set(db_session, [HOST], [UNRELATED_PIN], auto_publish=True)
         async with factory() as session:
             first = await publish(session, signer, reason="initial", now=NOW)
             await session.commit()
 
         await run_pin_watch(
             factory, signer, timeout=10,
-            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia()), now=NOW,
+            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia(), resolve=resolve),
+            now=NOW,
         )
 
     pin_set = await _stored_set(factory)
@@ -320,11 +342,11 @@ async def test_a_changed_chain_adds_its_intermediate_and_root_but_never_its_leaf
     assert {p["source"] for p in added} == {"watcher"}
     assert [p["label"] for p in added] == ["CN=Test Issuing CA", "CN=Test Root CA"]
     assert pki.leaf.pin not in {p["spki"] for p in pin_set.pins}
-    result = pin_set.watch_results[target]
+    result = pin_set.watch_results[HOST]
     assert result["status"] == "trusted"
     assert result["added"] == [pki.intermediate.pin, pki.root.pin]
     assert [c["subject"] for c in result["chain"]] == [
-        "CN=localhost", "CN=Test Issuing CA", "CN=Test Root CA"
+        "CN=tls.test", "CN=Test Issuing CA", "CN=Test Root CA"
     ]
 
     documents = await _documents(factory)
@@ -334,23 +356,24 @@ async def test_a_changed_chain_adds_its_intermediate_and_root_but_never_its_leaf
         UNRELATED_PIN, pki.intermediate.pin, pki.root.pin
     ]
     # Measured against the document the apps held when the check ran.
-    assert _gauge("tigerduck_tls_chain_matches", target) == 0
-    assert _gauge("tigerduck_tls_chain_trusted", target) == 1
+    assert _gauge("tigerduck_tls_chain_matches", HOST) == 0
+    assert _gauge("tigerduck_tls_chain_trusted", HOST) == 1
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_with_auto_publish_off_the_pins_are_added_but_not_published(
     tmp_path, pki, db_session, factory, signer
 ) -> None:
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
-        await _store_set(db_session, [target], [UNRELATED_PIN], auto_publish=False)
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
+        await _store_set(db_session, [HOST], [UNRELATED_PIN], auto_publish=False)
         async with factory() as session:
             first = await publish(session, signer, reason="initial", now=NOW)
             await session.commit()
 
         await run_pin_watch(
             factory, signer, timeout=10,
-            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia()), now=NOW,
+            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia(), resolve=resolve),
+            now=NOW,
         )
 
     assert len((await _stored_set(factory)).pins) == 3
@@ -362,42 +385,44 @@ async def test_an_untrusted_chain_changes_nothing_and_is_reported(
     tmp_path, pki, db_session, factory, signer
 ) -> None:
     other = _pki(tmp_path, "Other")
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
-        await _store_set(db_session, [target], [UNRELATED_PIN], auto_publish=True)
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
+        await _store_set(db_session, [HOST], [UNRELATED_PIN], auto_publish=True)
         async with factory() as session:
             first = await publish(session, signer, reason="initial", now=NOW)
             await session.commit()
 
         await run_pin_watch(
             factory, signer, timeout=10,
-            probe_fn=functools.partial(probe, cafile=other.cafile, fetch=_aia()), now=NOW,
+            probe_fn=functools.partial(probe, cafile=other.cafile, fetch=_aia(), resolve=resolve),
+            now=NOW,
         )
 
     pin_set = await _stored_set(factory)
     assert [p["spki"] for p in pin_set.pins] == [UNRELATED_PIN]
-    assert pin_set.watch_results[target]["status"] == "untrusted"
+    assert pin_set.watch_results[HOST]["status"] == "untrusted"
     assert [d.serial for d in await _documents(factory)] == [first.serial]
-    assert _gauge("tigerduck_tls_chain_trusted", target) == 0
+    assert _gauge("tigerduck_tls_chain_trusted", HOST) == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_a_matching_chain_marks_its_pins_seen_and_removes_none(
     tmp_path, pki, db_session, factory, signer
 ) -> None:
-    with tls_server(tmp_path, pki.leaf, pki.intermediate) as target:
+    with tls_server(tmp_path, pki.leaf, pki.intermediate) as resolve:
         await _store_set(
-            db_session, [target], [pki.intermediate.pin, UNRELATED_PIN], auto_publish=True
+            db_session, [HOST], [pki.intermediate.pin, UNRELATED_PIN], auto_publish=True
         )
         await run_pin_watch(
             factory, None, timeout=10,
-            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia()), now=NOW,
+            probe_fn=functools.partial(probe, cafile=pki.cafile, fetch=_aia(), resolve=resolve),
+            now=NOW,
         )
 
     pins = (await _stored_set(factory)).pins
     assert [p["spki"] for p in pins] == [pki.intermediate.pin, UNRELATED_PIN]
     assert pins[0]["first_seen_at"] == pins[0]["last_seen_at"] == "2026-10-25T04:00:00Z"
     assert pins[1]["last_seen_at"] is None
-    assert _gauge("tigerduck_tls_chain_matches", target) == 1
+    assert _gauge("tigerduck_tls_chain_matches", HOST) == 1
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -419,7 +444,7 @@ async def test_the_watcher_resigns_a_document_with_seven_days_left(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) -> None:
-    await _store_set(db_session, ["hung.invalid"], [UNRELATED_PIN], auto_publish=True)
+    await _store_set(db_session, ["hung.tls.test"], [UNRELATED_PIN], auto_publish=True)
     before = REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp")
 
     def hang(target: str) -> Probe:
@@ -430,7 +455,41 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
     await run_pin_watch(factory, None, timeout=0.1, probe_fn=hang, now=NOW)
 
     assert time.monotonic() - started < 1
-    result = (await _stored_set(factory)).watch_results["hung.invalid"]
+    result = (await _stored_set(factory)).watch_results["hung.tls.test"]
     assert result["status"] == "error" and result["detail"] == "timeout"
     assert REGISTRY.get_sample_value("tigerduck_tls_watch_last_success_timestamp") == before
     await asyncio.sleep(1)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_refused_host_is_never_probed(db_session, factory) -> None:
+    db_session.add(
+        TlsPinSet(
+            id="exact",
+            domains=[{"name": "exact.test", "include_subdomains": False}],
+            pins=[{"spki": UNRELATED_PIN, "label": "x", "first_seen_at": None,
+                   "last_seen_at": None, "source": "builtin"}],
+            expires_at=datetime(2027, 8, 18, tzinfo=UTC),
+            monitored_hosts=[
+                "203.0.113.5", "exact.test:8443", "other.example", "sub.exact.test", "exact.test",
+            ],
+        )
+    )
+    await db_session.commit()
+    probed: list[str] = []
+
+    def record(target: str) -> Probe:
+        probed.append(target)
+        return Probe("error", detail="stub")
+
+    await run_pin_watch(factory, None, timeout=10, probe_fn=record, now=NOW)
+
+    assert probed == ["exact.test"]
+    async with factory() as session:
+        results = (await session.get(TlsPinSet, "exact")).watch_results
+    assert {t: r["detail"] for t, r in results.items() if t != "exact.test"} == {
+        "203.0.113.5": "refused: an IP address, not a host name",
+        "exact.test:8443": "refused: port must be 443, 465 or 993",
+        "other.example": "refused: not under the set's domains",
+        "sub.exact.test": "refused: not under the set's domains",
+    }
