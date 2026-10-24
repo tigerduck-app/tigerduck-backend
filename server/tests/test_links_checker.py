@@ -511,3 +511,29 @@ async def test_a_check_runs_the_fetch_in_a_thread_with_the_allowed_hosts(
 
     assert seen["thread"] is not threading.main_thread()
     assert seen["allowed"] == test_settings.links_allowed_hosts
+
+
+@pytest.mark.parametrize(("tick", "scheduled"), [(60, True), (0, False)])
+def test_the_scheduler_runs_the_checker_at_startup_unless_turned_off(
+    test_settings, tick: int, scheduled: bool
+) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from server.bulletins.llm.base import BulletinMetadata
+    from server.bulletins.llm.openai_compat import RecordingProvider
+    from server.bulletins.taxonomy import CanonicalOrg
+    from server.scheduler.runtime import build_scheduler
+
+    before = datetime.now(UTC)
+    scheduler = build_scheduler(
+        async_sessionmaker(),
+        None,
+        test_settings.model_copy(update={"link_check_tick_seconds": tick}),
+        llm=RecordingProvider(BulletinMetadata(canonical_org=CanonicalOrg.other)),
+    )
+
+    job = scheduler.get_job("link_check")
+    assert (job is not None) == scheduled
+    if job is not None:
+        assert job.trigger.interval == timedelta(seconds=60)
+        assert before <= job.next_run_time <= datetime.now(UTC)
