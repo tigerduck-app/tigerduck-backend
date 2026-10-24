@@ -42,7 +42,16 @@ async def _forward(request: Request, method: str, path: str = "", json=None) -> 
     return JSONResponse(payload, status_code=resp.status_code)
 
 
-_UNKNOWN = JSONResponse({"detail": "link not found"}, status_code=404)
+def _unknown() -> JSONResponse:
+    return JSONResponse({"detail": "link not found"}, status_code=404)
+
+
+async def _body(request: Request):
+    """The request's JSON, or None for the backend to refuse as invalid."""
+    try:
+        return await request.json()
+    except ValueError:
+        return None
 
 
 @router.get("")
@@ -52,18 +61,18 @@ async def list_links(request: Request) -> JSONResponse:
 
 @router.post("")
 async def create_link(request: Request) -> JSONResponse:
-    return await _forward(request, "POST", json=await request.json())
+    return await _forward(request, "POST", json=await _body(request))
 
 
 @router.patch("/{name}")
 async def update_link(name: str, request: Request) -> JSONResponse:
     if not _NAME.fullmatch(name):
-        return _UNKNOWN
-    return await _forward(request, "PATCH", f"/{name}", json=await request.json())
+        return _unknown()
+    return await _forward(request, "PATCH", f"/{name}", json=await _body(request))
 
 
 @router.post("/{name}/test")
 async def test_link(name: str, request: Request) -> JSONResponse:
     if not _NAME.fullmatch(name):
-        return _UNKNOWN
+        return _unknown()
     return await _forward(request, "POST", f"/{name}/test")
