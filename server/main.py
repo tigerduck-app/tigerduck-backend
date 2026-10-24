@@ -57,6 +57,12 @@ from server.scheduler.runtime import build_scheduler
 from server.syncjobs.executor import SyncWorker, default_worker_id
 from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetcher
 from server.syncjobs.policies import ensure_default_policies
+from server.tls_pins import routes as tls_pins_routes
+from server.tls_pins.document import (
+    ensure_current_document,
+    load_signer,
+    refresh_gauges,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -266,6 +272,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     jobs_session_factory = build_session_factory(jobs_engine)
     async with session_scope(session_factory) as seed_session:
         await ensure_default_policies(seed_session)
+    async with session_scope(session_factory) as pin_session:
+        await ensure_current_document(pin_session, app.state.tls_pin_signer)
+        await refresh_gauges(pin_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
     # Read by the sync worker and by the push pipeline's pre-send check.
@@ -384,6 +393,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
 
+    app.include_router(tls_pins_routes.public_router)
+
     # Public, so a failure carries no detail.
     @app.get("/ready", tags=["meta"])
     async def ready() -> JSONResponse:
@@ -479,6 +490,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
         app.state.credential_cipher = None
+    app.state.tls_pin_signer = load_signer(settings.tls_pin_signing_key_path)
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)
