@@ -230,6 +230,19 @@ def test_a_redirect_a_target_could_not_have_is_refused_unresolved(
     assert resolver.asked == ["www.ntust.edu.tw"]
 
 
+def test_a_target_the_allowed_hosts_no_longer_cover_is_not_fetched() -> None:
+    server = Server({})
+    resolver = Resolver(DNS)
+
+    with pytest.raises(
+        CheckFailure,
+        match="invalid target: the host www.academic.ntust.edu.tw is not an allowed host",
+    ):
+        fetch(CALENDAR, ["library.example"], resolve=resolver, transport=server.transport)
+    assert resolver.asked == []
+    assert server.requests == []
+
+
 def test_a_redirect_to_a_malformed_url_fails_the_check() -> None:
     server = Server({("www.ntust.edu.tw", "/"): _redirect("https://[broken/")})
 

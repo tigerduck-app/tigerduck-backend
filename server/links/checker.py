@@ -151,13 +151,17 @@ def fetch(
     resolve: Resolver = _resolve,
     transport: httpx.BaseTransport | None = None,
 ) -> Page:
-    """GET `url`, following at most MAX_REDIRECTS redirects, each checked as
-    a target is. Blocking: run it in a worker thread.
+    """GET `url`, checked as a target is, following at most MAX_REDIRECTS
+    redirects, each checked too. Blocking: run it in a worker thread.
 
     Each request goes to an address that was checked, with the host name in
     Host and SNI, so a second DNS answer cannot move it elsewhere. An address
     that cannot be reached hands over to the next.
     """
+    try:
+        validate_target(url, allowed_hosts)
+    except InvalidTarget as exc:
+        raise CheckFailure(f"invalid target: {exc}") from None
     deadline = time.monotonic() + CHECK_TIMEOUT_SECONDS
     with httpx.Client(
         transport=transport,
