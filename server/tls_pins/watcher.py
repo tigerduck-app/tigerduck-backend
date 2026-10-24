@@ -309,6 +309,17 @@ def _set_chain_info(set_id: str, target: str, label: str) -> None:
     metrics.TLS_CHAIN_INFO.labels(set=set_id, host=target, chain=label).set(1)
 
 
+def forget_host(set_id: str, target: str) -> None:
+    """Drop a host's series, so a host no longer monitored stops alerting."""
+    for gauge in (
+        metrics.TLS_CHAIN_TRUSTED, metrics.TLS_CHAIN_MATCHES, metrics.TLS_HOST_LAST_SUCCESS
+    ):
+        gauge.remove(set_id, target)
+    label = _chain_labels.pop((set_id, target), None)
+    if label is not None:
+        metrics.TLS_CHAIN_INFO.remove(set_id, target, label)
+
+
 def _chain_label(described: list[dict], prefix: str = "") -> str:
     return prefix + "; ".join(
         f"{c['subject']} until {c['not_after'][:10]} pin {c['spki']}" for c in described

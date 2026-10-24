@@ -28,6 +28,7 @@ from server.tls_pins.document import (
     publish,
 )
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
+from server.tls_pins.watcher import forget_host
 
 DOCUMENT_PATH = "/.well-known/tigerduck/tls-pins.json"
 
@@ -208,6 +209,8 @@ async def set_monitored_hosts(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, detail="; ".join(filter(None, refusals))
         )
+    for host in set(pin_set.monitored_hosts) - set(body.hosts):
+        forget_host(set_id, host)
     pin_set.monitored_hosts = body.hosts
     pin_set.watch_results = {
         host: result for host, result in pin_set.watch_results.items() if host in body.hosts

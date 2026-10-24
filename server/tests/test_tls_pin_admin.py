@@ -11,10 +11,12 @@ from datetime import UTC, datetime
 import pytest
 import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from prometheus_client import REGISTRY
 from sqlalchemy import select
 
+from server import metrics
 from server.admin_audit import AdminAuditLog
-from server.tls_pins import targets
+from server.tls_pins import targets, watcher
 from server.tls_pins.document import PinSigner, document_sets
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
 
@@ -159,6 +161,30 @@ async def test_monitored_hosts_are_saved_without_publishing(admin_client, stored
     assert pin_set.monitored_hosts == ["www.ntust.edu.tw", "mail.ntust.edu.tw:993"]
     assert list(pin_set.watch_results) == ["www.ntust.edu.tw"]
     assert await _latest(stored) is None
+
+
+async def test_removing_a_host_drops_its_alert_series(admin_client, stored) -> None:
+    host = {"set": "ntust", "host": "www.ntust.edu.tw"}
+    names = (
+        "tigerduck_tls_chain_trusted",
+        "tigerduck_tls_chain_matches",
+        "tigerduck_tls_host_last_success_timestamp",
+    )
+    for gauge in (
+        metrics.TLS_CHAIN_TRUSTED, metrics.TLS_CHAIN_MATCHES, metrics.TLS_HOST_LAST_SUCCESS
+    ):
+        gauge.labels(**host).set(0)
+    watcher._set_chain_info("ntust", "www.ntust.edu.tw", "untrusted: CN=x")
+
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts", json={"hosts": ["moodle2.ntust.edu.tw"]},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 200
+    assert [REGISTRY.get_sample_value(name, host) for name in names] == [None, None, None]
+    chain = {**host, "chain": "untrusted: CN=x"}
+    assert REGISTRY.get_sample_value("tigerduck_tls_chain_info", chain) is None
 
 
 @pytest.mark.parametrize(
