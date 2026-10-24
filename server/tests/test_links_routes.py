@@ -319,3 +319,25 @@ async def test_test_now_checks_records_and_audits(admin_client, client, monkeypa
         assert resp.status_code == 404
     finally:
         metrics.forget_link("ntust-calendar")
+
+
+async def test_test_now_writes_its_result_and_audit_row_in_one_transaction(
+    admin_client, client, monkeypatch
+) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    await _add(client, "ntust-calendar", expectations=[{"type": "status", "equals": 200}])
+    monkeypatch.setattr(
+        checker, "fetch", lambda url, hosts: Page(status=503, final_url=url, body="")
+    )
+    # An audit row the database refuses: the check's result must go with it.
+    monkeypatch.setattr(
+        checker, "AdminAuditLog", lambda **kw: AdminAuditLog(**{**kw, "actor": None})
+    )
+
+    with pytest.raises(IntegrityError):
+        await admin_client.post("/admin/links/ntust-calendar/test", headers=ACTOR)
+
+    row = await _row(client, "ntust-calendar")
+    assert (row.last_check_at, row.alert_state) == (None, "ok")
+    assert await _audit(client) == []

@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server import metrics
+from server.admin_audit import AdminAuditLog
 from server.config import Settings
 from server.db import session_scope
 from server.links.models import ALERT_FAILING, ALERT_OK, Link
@@ -233,11 +234,16 @@ def publish(link: Link) -> None:
 
 
 async def check_link(
-    session_factory: async_sessionmaker[AsyncSession], settings: Settings, name: str
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    name: str,
+    *,
+    actor: str | None = None,
 ) -> CheckResult | None:
     """Check `name` now and record the result, unless a check that started
     later recorded its own first. None when the link was removed or edited
-    during the check, which then records nothing."""
+    during the check, which then records nothing. An operator's check
+    (`actor`) writes its `link.test` audit row with the result."""
     async with session_factory() as session:
         link = await session.get(Link, name)
         if link is None:
@@ -250,6 +256,12 @@ async def check_link(
         link = await session.get(Link, name, with_for_update=True)
         if link is None or (link.target_url, link.expectations) != (target_url, expectations):
             return None
+        if actor is not None:
+            session.add(
+                AdminAuditLog(
+                    actor=actor, action="link.test", detail={"name": name, "ok": result.ok}
+                )
+            )
         if link.last_check_at is not None and link.last_check_at > started:
             return result
         link.last_check_at = started

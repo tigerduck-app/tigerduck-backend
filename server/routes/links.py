@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.admin_audit import AdminAuditLog
-from server.db import SessionDep, session_scope
+from server.db import SessionDep
 from server.links import checker
 from server.links.models import Link
 from server.links.rules import Rule, dump
@@ -195,16 +195,12 @@ async def test_link(name: str, actor: Actor, request: Request) -> dict:
     async with factory() as session:
         if await session.get(Link, name) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_NOT_FOUND)
-    result = await checker.check_link(factory, request.app.state.settings, name)
+    result = await checker.check_link(
+        factory, request.app.state.settings, name, actor=actor
+    )
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="the link changed or was removed during the check",
-        )
-    async with session_scope(factory) as session:
-        session.add(
-            AdminAuditLog(
-                actor=actor, action="link.test", detail={"name": name, "ok": result.ok}
-            )
         )
     return {"ok": result.ok, "detail": result.detail}
