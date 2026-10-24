@@ -1,7 +1,7 @@
 // Links: the redirects the API serves at /links/<name>. The backend
 // validates and audits every change; this page only edits and shows them.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Link2, Pencil, Play, Plus } from "lucide-react";
@@ -77,8 +77,10 @@ function CheckBadge({ link }: { link: LinkRow }) {
 
 export function LinksPage() {
   const qc = useQueryClient();
-  // null: closed; "" : a new link; otherwise the name being edited.
-  const [editing, setEditing] = useState<string | null>(null);
+  // null: closed. `name` is "" for a new link; `key` tells editors apart.
+  const [editor, setEditor] = useState<{ key: number; name: string } | null>(null);
+  const editing = editor?.name ?? null;
+  const openedEditors = useRef(0);
   const [draft, setDraft] = useState<Draft>(EMPTY);
 
   const linksQ = useQuery<{ links: LinkRow[] }>({
@@ -90,7 +92,7 @@ export function LinksPage() {
   const refresh = () => qc.invalidateQueries({ queryKey: ["links"] });
 
   const saveMut = useMutation({
-    mutationFn: async () => {
+    mutationFn: async ({ target, draft }: { key: number; target: string; draft: Draft }) => {
       let expectations: unknown;
       try {
         expectations = JSON.parse(draft.expectations || "[]");
@@ -102,16 +104,17 @@ export function LinksPage() {
         check_interval_minutes: Number(draft.check_interval_minutes),
         expectations,
       };
-      return editing
-        ? api<LinkRow>(`/api/links/${editing}`, { method: "PATCH", json: body })
+      return target
+        ? api<LinkRow>(`/api/links/${target}`, { method: "PATCH", json: body })
         : api<LinkRow>("/api/links", {
             method: "POST",
             json: { name: draft.name.trim(), ...body },
           });
     },
-    onSuccess: (link) => {
-      toast.success(`${editing ? "Saved" : "Created"} ${link.name}`);
-      setEditing(null);
+    onSuccess: (link, { key, target }) => {
+      toast.success(`${target ? "Saved" : "Created"} ${link.name}`);
+      // Another editor opened meanwhile stays open.
+      setEditor((current) => (current?.key === key ? null : current));
       refresh();
     },
     onError: (e) => toast.error(errorText(e)),
@@ -151,7 +154,8 @@ export function LinksPage() {
           }
         : EMPTY,
     );
-    setEditing(link ? link.name : "");
+    openedEditors.current += 1;
+    setEditor({ key: openedEditors.current, name: link ? link.name : "" });
   };
 
   const links = linksQ.data?.links;
@@ -272,7 +276,7 @@ export function LinksPage() {
 
       <Dialog
         open={editing !== null}
-        onOpenChange={(open) => !open && setEditing(null)}
+        onOpenChange={(open) => !open && setEditor(null)}
       >
         <DialogContent>
           <DialogHeader>
@@ -328,7 +332,7 @@ export function LinksPage() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setEditing(null)}>
+            <Button variant="ghost" onClick={() => setEditor(null)}>
               Cancel
             </Button>
             <Button
@@ -337,7 +341,9 @@ export function LinksPage() {
                 !draft.target_url.trim() ||
                 (!editing && !draft.name.trim())
               }
-              onClick={() => saveMut.mutate()}
+              onClick={() =>
+                editor && saveMut.mutate({ key: editor.key, target: editor.name, draft })
+              }
             >
               {editing ? "Save" : "Create"}
             </Button>
