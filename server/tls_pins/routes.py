@@ -1,12 +1,33 @@
-"""The public pin document, and the operator actions on the admin listener."""
+"""The public pin document, and the operator actions on the admin listener.
+
+The portal calls the actions with the operator in `X-Portal-Actor`; each
+one writes its own `admin_audit_log` row in the transaction it changes.
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Response, status
-from sqlalchemy import select
+import base64
+import re
+from datetime import UTC, datetime
+from typing import Annotated
 
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from server import metrics
+from server.admin_audit import AdminAuditLog
 from server.db import SessionDep
-from server.tls_pins.models import TlsPinDocument
+from server.security import require_shared_secret
+from server.tls_pins.document import (
+    current_document,
+    document_sets,
+    lock_pin_state,
+    publish,
+)
+from server.tls_pins.models import TlsPinDocument, TlsPinSet
+from server.tls_pins.watcher import parse_target
 
 DOCUMENT_PATH = "/.well-known/tigerduck/tls-pins.json"
 
@@ -30,4 +51,207 @@ async def tls_pin_document(session: SessionDep) -> Response:
         content=bytes(row.envelope),
         media_type="application/json",
         headers={"Cache-Control": "public, max-age=300", "ETag": f'"{row.serial}"'},
+    )
+
+
+admin_router = APIRouter(
+    prefix="/tls-pins", tags=["admin"], dependencies=[Depends(require_shared_secret)]
+)
+
+ActorDep = Annotated[str, Header(alias="X-Portal-Actor", min_length=1, max_length=320)]
+
+_HOST_NAME = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
+
+
+class PinIn(BaseModel):
+    spki: str
+    label: str = Field(min_length=1, max_length=200)
+
+    @field_validator("spki")
+    @classmethod
+    def _sha256_base64(cls, value: str) -> str:
+        try:
+            digest = base64.b64decode(value, validate=True)
+        except ValueError:
+            digest = b""
+        if len(digest) != 32 or base64.b64encode(digest).decode() != value:
+            raise ValueError("must be the padded base64 of a SHA-256 digest")
+        return value
+
+
+class SpkiIn(BaseModel):
+    spki: str
+
+
+class HostsIn(BaseModel):
+    hosts: list[str] = Field(max_length=50)
+
+    @field_validator("hosts")
+    @classmethod
+    def _targets(cls, hosts: list[str]) -> list[str]:
+        for target in hosts:
+            try:
+                host, port = parse_target(target)
+            except ValueError:
+                host, port = "", 0
+            if not _HOST_NAME.fullmatch(host) or not 0 < port < 65536:
+                raise ValueError(f"{target!r} is not host or host:port")
+        return list(dict.fromkeys(hosts))
+
+
+class ExpiryIn(BaseModel):
+    expires_at: AwareDatetime
+
+
+class AutoPublishIn(BaseModel):
+    enabled: bool
+
+
+async def _locked_set(session: AsyncSession, set_id: str) -> TlsPinSet:
+    await lock_pin_state(session)
+    pin_set = await session.get(TlsPinSet, set_id)
+    if pin_set is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="pin_set_not_found")
+    return pin_set
+
+
+async def _finish(
+    session: AsyncSession,
+    request: Request,
+    actor: str,
+    action: str,
+    detail: dict,
+    *,
+    pin_set: TlsPinSet | None = None,
+    publish_now: bool,
+    pin_sets: list[dict] | None = None,
+) -> dict:
+    """Publish when asked and a key is configured, and record the action.
+    Without a key the change is kept and goes out with the next document."""
+    if pin_set is not None:
+        pin_set.updated_at = datetime.now(UTC)
+        pin_set.updated_by = actor
+        metrics.TLS_PIN_SET_EXPIRY.labels(set=pin_set.id).set(pin_set.expires_at.timestamp())
+    signer = request.app.state.tls_pin_signer
+    serial = None
+    if publish_now and signer is not None:
+        document = await publish(
+            session, signer, reason=f"portal.{action}", pin_sets=pin_sets
+        )
+        serial = document.serial
+    session.add(
+        AdminAuditLog(actor=actor, action=f"tls_pins.{action}", detail={**detail, "serial": serial})
+    )
+    return {"ok": True, "serial": serial}
+
+
+@admin_router.post("/sets/{set_id}/pins")
+async def add_pin(
+    set_id: str, body: PinIn, request: Request, session: SessionDep, actor: ActorDep
+) -> dict:
+    pin_set = await _locked_set(session, set_id)
+    if any(pin["spki"] == body.spki for pin in pin_set.pins):
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="pin_exists")
+    pin_set.pins = [
+        *pin_set.pins,
+        {
+            "spki": body.spki,
+            "label": body.label,
+            "first_seen_at": None,
+            "last_seen_at": None,
+            "source": "portal",
+        },
+    ]
+    return await _finish(
+        session, request, actor, "add_pin", {"set": set_id, "spki": body.spki},
+        pin_set=pin_set, publish_now=True,
+    )
+
+
+@admin_router.post("/sets/{set_id}/pins/remove")
+async def remove_pin(
+    set_id: str, body: SpkiIn, request: Request, session: SessionDep, actor: ActorDep
+) -> dict:
+    pin_set = await _locked_set(session, set_id)
+    remaining = [pin for pin in pin_set.pins if pin["spki"] != body.spki]
+    if len(remaining) == len(pin_set.pins):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="pin_not_found")
+    if not remaining:
+        # A set with no pins would fail every chain on its hosts.
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="last_pin")
+    pin_set.pins = remaining
+    return await _finish(
+        session, request, actor, "remove_pin", {"set": set_id, "spki": body.spki},
+        pin_set=pin_set, publish_now=True,
+    )
+
+
+@admin_router.put("/sets/{set_id}/monitored-hosts")
+async def set_monitored_hosts(
+    set_id: str, body: HostsIn, request: Request, session: SessionDep, actor: ActorDep
+) -> dict:
+    pin_set = await _locked_set(session, set_id)
+    pin_set.monitored_hosts = body.hosts
+    pin_set.watch_results = {
+        host: result for host, result in pin_set.watch_results.items() if host in body.hosts
+    }
+    return await _finish(
+        session, request, actor, "set_hosts", {"set": set_id, "hosts": len(body.hosts)},
+        pin_set=pin_set, publish_now=False,
+    )
+
+
+@admin_router.put("/sets/{set_id}/expires-at")
+async def extend_expiry(
+    set_id: str, body: ExpiryIn, request: Request, session: SessionDep, actor: ActorDep
+) -> dict:
+    pin_set = await _locked_set(session, set_id)
+    # The apps take the later of their built-in expiry and the document's.
+    if body.expires_at <= pin_set.expires_at:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="expiry_not_later")
+    pin_set.expires_at = body.expires_at
+    return await _finish(
+        session, request, actor, "extend_expiry",
+        {"set": set_id, "expires_at": body.expires_at.isoformat()},
+        pin_set=pin_set, publish_now=True,
+    )
+
+
+@admin_router.put("/sets/{set_id}/auto-publish")
+async def set_auto_publish(
+    set_id: str, body: AutoPublishIn, request: Request, session: SessionDep, actor: ActorDep
+) -> dict:
+    pin_set = await _locked_set(session, set_id)
+    pin_set.auto_publish = body.enabled
+    return await _finish(
+        session, request, actor, "set_auto_publish", {"set": set_id, "enabled": body.enabled},
+        pin_set=pin_set, publish_now=False,
+    )
+
+
+def _require_signer(request: Request) -> None:
+    if request.app.state.tls_pin_signer is None:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, detail="tls_pin_signing_disabled"
+        )
+
+
+@admin_router.post("/publish")
+async def publish_document(request: Request, session: SessionDep, actor: ActorDep) -> dict:
+    """Sign the stored sets as they are."""
+    _require_signer(request)
+    return await _finish(session, request, actor, "publish", {}, publish_now=True)
+
+
+@admin_router.post("/resign")
+async def resign_document(request: Request, session: SessionDep, actor: ActorDep) -> dict:
+    """Sign the current document's sets again under a new serial."""
+    _require_signer(request)
+    await lock_pin_state(session)
+    document = await current_document(session)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="tls_pin_document_not_found")
+    return await _finish(
+        session, request, actor, "resign", {},
+        publish_now=True, pin_sets=document_sets(document),
     )

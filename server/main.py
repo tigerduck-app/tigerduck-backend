@@ -448,6 +448,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
         return JSONResponse({"ok": True, "done": True, "processed": processed})
 
+    admin.include_router(tls_pins_routes.admin_router)
+
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
     # them before issuing requests. The cipher is None when credential keys
     # are unconfigured — /v3 auth then answers 503 auth_not_configured.
