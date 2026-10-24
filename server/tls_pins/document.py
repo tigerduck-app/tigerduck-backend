@@ -12,6 +12,7 @@ import functools
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,8 +22,9 @@ import structlog
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 from server import metrics
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
@@ -129,6 +131,26 @@ async def current_document(session: AsyncSession) -> TlsPinDocument | None:
     ).scalar_one_or_none()
 
 
+_ON_COMMIT = "tls_pins.on_commit"
+
+
+def on_commit(session: AsyncSession, update: Callable[[], None]) -> None:
+    """Run `update` once the session commits, and drop it on a rollback, so
+    the metrics never report a document or expiry that was not stored."""
+    session.info.setdefault(_ON_COMMIT, []).append(update)
+
+
+@event.listens_for(Session, "after_commit")
+def _run_on_commit(session: Session) -> None:
+    for update in session.info.pop(_ON_COMMIT, []):
+        update()
+
+
+@event.listens_for(Session, "after_rollback")
+def _drop_on_commit(session: Session) -> None:
+    session.info.pop(_ON_COMMIT, None)
+
+
 def _json_bytes(value: dict) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -186,10 +208,14 @@ async def publish(
     await session.flush()
 
     before = {s["id"]: s for s in document_sets(previous)} if previous else {}
-    for entry in pin_sets:
-        if before.get(entry["id"]) != entry:
-            metrics.TLS_PINS_PUBLISHED.labels(set=entry["id"]).inc()
-    metrics.TLS_PIN_DOCUMENT_EXPIRY.set(expires.timestamp())
+    changed = [entry["id"] for entry in pin_sets if before.get(entry["id"]) != entry]
+
+    def count() -> None:
+        for set_id in changed:
+            metrics.TLS_PINS_PUBLISHED.labels(set=set_id).inc()
+        metrics.TLS_PIN_DOCUMENT_EXPIRY.set(expires.timestamp())
+
+    on_commit(session, count)
     logger.info("tls_pins.published", serial=serial, reason=reason, key_id=signer.key_id)
     return document
 

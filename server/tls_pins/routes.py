@@ -25,6 +25,7 @@ from server.tls_pins.document import (
     current_document,
     document_sets,
     lock_pin_state,
+    on_commit,
     publish,
 )
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
@@ -133,7 +134,8 @@ async def _finish(
     if pin_set is not None:
         pin_set.updated_at = datetime.now(UTC)
         pin_set.updated_by = actor
-        metrics.TLS_PIN_SET_EXPIRY.labels(set=pin_set.id).set(pin_set.expires_at.timestamp())
+        gauge, expires = metrics.TLS_PIN_SET_EXPIRY.labels(set=pin_set.id), pin_set.expires_at
+        on_commit(session, lambda: gauge.set(expires.timestamp()))
     signer = request.app.state.tls_pin_signer
     serial = None
     if publish_now and signer is not None:

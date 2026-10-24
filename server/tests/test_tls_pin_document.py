@@ -206,11 +206,24 @@ async def test_a_document_is_resigned_with_its_own_sets_seven_days_before_expiry
 
 async def test_a_changed_set_counts_as_published(db_session, stored_set, signer) -> None:
     await publish(db_session, signer, reason="initial", now=NOW)
+    await db_session.commit()
     before = _published("ntust")
     pin_set = await db_session.get(TlsPinSet, "ntust")
     pin_set.expires_at = datetime(2028, 1, 1, tzinfo=UTC)
     await db_session.flush()
 
     await publish(db_session, signer, reason="portal", now=NOW)
+    await db_session.commit()
 
     assert _published("ntust") == before + 1
+
+
+async def test_a_rolled_back_publish_moves_no_metric(db_session, stored_set, signer) -> None:
+    expiry = "tigerduck_tls_pin_document_expiry_timestamp"
+    before = (_published("ntust"), REGISTRY.get_sample_value(expiry))
+
+    await publish(db_session, signer, reason="initial", now=NOW + timedelta(days=400))
+    await db_session.rollback()
+    await db_session.commit()
+
+    assert (_published("ntust"), REGISTRY.get_sample_value(expiry)) == before
