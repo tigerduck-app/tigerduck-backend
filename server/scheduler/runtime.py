@@ -19,6 +19,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.links.checker import run_link_checks
 from server.metrics import instrument_scheduler
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
@@ -75,6 +76,9 @@ def build_scheduler(
       first a minute after start (not at all with its interval set to 0).
     * `tls_pin_resign` — sign the pin document again when 7 days are left,
       checked hourly whatever the watcher's interval (only with a key).
+    * `link_check` — export each link's alert state and check the links due a
+      check, every minute and once at startup (not at all with its interval
+      set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -285,6 +289,21 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=600,
+        )
+    if settings.link_check_tick_seconds > 0:
+
+        async def link_check() -> None:
+            await run_link_checks(session_factory, settings)
+
+        scheduler.add_job(
+            link_check,
+            trigger=IntervalTrigger(seconds=settings.link_check_tick_seconds),
+            id="link_check",
+            # At startup, so the exported alert state survives a restart.
+            next_run_time=datetime.now(UTC),
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
         )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)

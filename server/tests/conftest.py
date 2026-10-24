@@ -133,6 +133,7 @@ def test_settings() -> Settings:
         session_reauth_scan_interval_seconds=99999,
         tls_pin_watch_interval_seconds=0,
         tls_pin_signing_key_path=None,
+        link_check_tick_seconds=0,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
         auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",

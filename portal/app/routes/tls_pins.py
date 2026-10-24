@@ -82,7 +82,7 @@ async def get_tls_pins(pool: Annotated[Any, Depends(get_pool)]) -> JSONResponse:
     )
 
 
-async def _proxy(request: Request, method: str, path: str, body: Any = None) -> JSONResponse:
+async def _forward(request: Request, method: str, path: str, body: Any = None) -> JSONResponse:
     headers = {**_internal_headers(request), "X-Portal-Actor": request.state.actor}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -108,38 +108,38 @@ def _set_path(set_id: str, rest: str) -> str:
 
 @router.post("/sets/{set_id}/pins")
 async def add_pin(set_id: str, request: Request, body: JsonBody) -> JSONResponse:
-    return await _proxy(request, "POST", _set_path(set_id, "/pins"), body)
+    return await _forward(request, "POST", _set_path(set_id, "/pins"), body)
 
 
 @router.post("/sets/{set_id}/pins/remove")
 async def remove_pin(set_id: str, request: Request, body: JsonBody) -> JSONResponse:
-    return await _proxy(request, "POST", _set_path(set_id, "/pins/remove"), body)
+    return await _forward(request, "POST", _set_path(set_id, "/pins/remove"), body)
 
 
 @router.put("/sets/{set_id}/monitored-hosts")
 async def set_monitored_hosts(
     set_id: str, request: Request, body: JsonBody
 ) -> JSONResponse:
-    return await _proxy(request, "PUT", _set_path(set_id, "/monitored-hosts"), body)
+    return await _forward(request, "PUT", _set_path(set_id, "/monitored-hosts"), body)
 
 
 @router.put("/sets/{set_id}/expires-at")
 async def extend_expiry(set_id: str, request: Request, body: JsonBody) -> JSONResponse:
-    return await _proxy(request, "PUT", _set_path(set_id, "/expires-at"), body)
+    return await _forward(request, "PUT", _set_path(set_id, "/expires-at"), body)
 
 
 @router.put("/sets/{set_id}/auto-publish")
 async def set_auto_publish(
     set_id: str, request: Request, body: JsonBody
 ) -> JSONResponse:
-    return await _proxy(request, "PUT", _set_path(set_id, "/auto-publish"), body)
+    return await _forward(request, "PUT", _set_path(set_id, "/auto-publish"), body)
 
 
 @router.post("/publish")
 async def publish(request: Request, body: JsonBody) -> JSONResponse:
-    return await _proxy(request, "POST", "/publish", body)
+    return await _forward(request, "POST", "/publish", body)
 
 
 @router.post("/resign")
 async def resign(request: Request) -> JSONResponse:
-    return await _proxy(request, "POST", "/resign")
+    return await _forward(request, "POST", "/resign")

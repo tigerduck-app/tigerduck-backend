@@ -44,6 +44,7 @@ from server.routes import auth as auth_routes
 from server.routes import academic_calendar as academic_calendar_routes
 from server.routes import bulletins_feed as bulletins_feed_routes
 from server.routes import holiday_overrides as holiday_overrides_routes
+from server.routes import links as links_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
@@ -396,6 +397,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok", "env": settings.env}
 
     app.include_router(tls_pins_routes.public_router)
+    # Public and unversioned: the apps follow these links whatever API they speak.
+    app.include_router(links_routes.router)
 
     # Public, so a failure carries no detail.
     @app.get("/ready", tags=["meta"])
@@ -496,6 +499,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.credential_cipher = None
     # Loaded by the lifespan; tests set their own.
     app.state.tls_pin_signer = None
+
+    admin.include_router(links_routes.admin_router)
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)

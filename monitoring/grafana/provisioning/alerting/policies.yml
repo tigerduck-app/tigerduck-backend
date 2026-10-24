@@ -14,3 +14,7 @@ policies:
       - receiver: tigerduck-oncall
         object_matchers: [['alertname', '=', 'TLS pin set expiring']]
         repeat_interval: 168h
+      # Once as a link starts failing and once as it recovers, not every 4h.
+      - receiver: tigerduck-oncall
+        object_matchers: [['alertname', '=', 'Link check failing']]
+        repeat_interval: 8760h

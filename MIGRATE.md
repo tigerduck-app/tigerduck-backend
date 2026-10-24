@@ -34,13 +34,55 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ## Upgrading to 3.5.0
 
+- **Links at `/links/<name>` (#108).** `GET
+  https://api.tigerduck.app/links/<name>` answers `307` to the link's
+  target with `Cache-Control: no-store`, without auth and outside `/v3`; an
+  unknown or disabled name, or a target off the allowed hosts, answers
+  `404`. nginx-proxy-manager already forwards the path; nothing changes
+  there.
+- **Migration `35df7613737a`** adds `links` and seeds `ntust-calendar`,
+  which goes to `https://www.academic.ntust.edu.tw/p/404-1048-78935.php`
+  and is checked for status 200, the final host
+  `www.academic.ntust.edu.tw` and at least one `.ics` link. A row already
+  there is kept.
+- **Allowed hosts.** A target must be `https` on a host in
+  `TIGERDUCK_LINKS_ALLOWED_HOSTS` (a JSON list, default `["ntust.edu.tw"]`,
+  each with its subdomains), on the default port, with no user name,
+  password, whitespace or control character. It is checked when saved, when
+  served, before each check and on every redirect the checker follows.
+- **The portal's Links page** lists the links and creates, edits, enables,
+  disables and tests them. It goes through new routes on the admin listener
+  (`/admin/links` on `:9001`), which record `link.create`, `link.update`,
+  `link.enable`, `link.disable` and `link.test` in `admin_audit_log`.
+  Rebuild both with `./start.sh`.
+- **The link checker.** The `link_check` job (every minute,
+  `TIGERDUCK_LINK_CHECK_TICK_SECONDS`, 0 turns it off) fetches each enabled
+  link at its interval (60 minutes unless set) from the backend container,
+  with that container's trust store, and runs its rules. The first check of
+  `ntust-calendar` runs right after the deploy; press Test on the Links
+  page to see it. A certificate error there means the container cannot
+  validate the school's chain, and the alert below fires until it can.
+- **Alerts.** Grafana's new rule `Link check failing` posts to Discord once
+  when a link fails, naming the rule it failed and what was found in the
+  check that started the failure, and again when it passes or is disabled.
+  That detail and the alert state are kept on the row, and the rule reads
+  the last value of the past 15 minutes, so a restart or an outage of the
+  backend shorter than that neither repeats nor clears the alert; a longer
+  one clears it and the next start posts it again. Grafana reads its
+  provisioning only at start, so after `./start.sh` run
+  `docker compose restart grafana`.
+- **The apps switch later.** They keep following
+  `https://r.xinshou.tw/ntust-calender` until their releases move to
+  `/links/ntust-calendar` (tigerduck-app#687, tigerduck-app-android#375);
+  keep `r.xinshou.tw` serving until old versions fade.
+
 - **The TLS pin document.** `GET /.well-known/tigerduck/tls-pins.json`,
   public and outside `/v3`, serves the signed pin document the apps take
   their TLS pins from, with `Cache-Control: public, max-age=300` and an
   `ETag`, answering 304 to a matching `If-None-Match`. It answers 404 until
-  the first document is published. Migration
-  `8996a3bf992f` adds `tls_pin_sets` and `tls_pin_documents` and seeds the
-  `ntust` and `library` sets with the apps' built-in pins, expiries and
+  the first document is published. Migration `8996a3bf992f`, which follows
+  the links migration, adds `tls_pin_sets` and `tls_pin_documents` and seeds
+  the `ntust` and `library` sets with the apps' built-in pins, expiries and
   monitored hosts, all with `auto_publish` off.
 
 - **Move the signing key before starting 3.5.0.** The key now lives in its
@@ -101,7 +143,7 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   host's last result and chain, and the document history, and carries the
   pin actions; each one is recorded in `admin_audit_log`.
 
-- **Alerts.** Six rules in `monitoring/grafana/provisioning/alerting/rules.yml`
+- **TLS pin alerts.** Six rules in `monitoring/grafana/provisioning/alerting/rules.yml`
   go to the Discord channel: the watcher not reaching a host for 3 hours, a
   chain failing system trust, a chain sharing no pin with the served
   document, a published change to a set, the document within 3 days of
@@ -123,10 +165,12 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   and that every host on the portal's TLS pins page shows `trusted`. Then
   tick Auto-publish for each set there.
 
-- **Rolling back.** With 3.5.0 running, run
+- **Rolling back.** Before any app uses the link, run
   `docker compose exec backend alembic downgrade c5e8a2f71d40` first; it
-  drops both tables. The apps keep the last document they verified until it
-  expires, then use their built-in pins.
+  drops `links` and both TLS pin tables. After an app release uses the link,
+  a rollback leaves that release without the calendar. To roll back only the
+  TLS pins, downgrade to `35df7613737a` instead. The apps keep the last pin
+  document they verified until it expires, then use their built-in pins.
 
 ---
 

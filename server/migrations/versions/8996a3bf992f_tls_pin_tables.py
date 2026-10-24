@@ -1,7 +1,7 @@
 """tls_pin_sets and tls_pin_documents, seeded with the apps' built-in sets
 
 Revision ID: 8996a3bf992f
-Revises: c5e8a2f71d40
+Revises: 35df7613737a
 Create Date: 2026-10-25 12:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '8996a3bf992f'
-down_revision: str | Sequence[str] | None = 'c5e8a2f71d40'
+down_revision: str | Sequence[str] | None = '35df7613737a'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -12,7 +12,7 @@ from server.tests.conftest import _alembic
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 REVISION = "8996a3bf992f"
-BEFORE = "c5e8a2f71d40"
+BEFORE = "35df7613737a"
 
 
 async def test_upgrade_seeds_both_sets_with_auto_publish_off(migration_db_url: str) -> None:
