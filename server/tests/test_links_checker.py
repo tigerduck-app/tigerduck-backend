@@ -632,6 +632,38 @@ async def test_a_link_edited_during_its_check_records_nothing(
 
 
 @db_test
+async def test_a_check_that_ends_after_a_newer_one_does_not_replace_its_result(
+    factory, link_name, test_settings, monkeypatch
+) -> None:
+    import asyncio
+
+    await _add_link(factory, link_name)
+    slow_started, release = asyncio.Event(), asyncio.Event()
+    calls: list[int] = []
+
+    async def fake_run_check(target_url, expectations, allowed_hosts):
+        calls.append(len(calls))
+        if len(calls) == 1:
+            slow_started.set()
+            await release.wait()
+            return checker.CheckResult(False, "status: expected 200, found 503")
+        return checker.CheckResult(True, "200 from www.academic.ntust.edu.tw")
+
+    monkeypatch.setattr(checker, "run_check", fake_run_check)
+    slow = asyncio.create_task(checker.check_link(factory, test_settings, link_name))
+    await slow_started.wait()
+
+    newer = await checker.check_link(factory, test_settings, link_name)
+    release.set()
+    older = await slow
+
+    assert (newer.ok, older.ok) == (True, False)
+    row = await _row(factory, link_name)
+    assert (row.last_check_ok, row.alert_state) == (True, ALERT_OK)
+    assert row.last_check_detail == "200 from www.academic.ntust.edu.tw"
+
+
+@db_test
 async def test_a_check_runs_the_fetch_in_a_thread_with_the_allowed_hosts(
     factory, link_name, test_settings, monkeypatch
 ) -> None:

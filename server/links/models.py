@@ -27,6 +27,8 @@ class Link(Base):
     check_interval_minutes: Mapped[int] = mapped_column(
         Integer, server_default=text("60")
     )
+    # When the recorded check started; a check that started earlier and
+    # ended later records nothing over it.
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_ok: Mapped[bool | None] = mapped_column(Boolean)
     last_check_detail: Mapped[str | None] = mapped_column(Text)

@@ -235,20 +235,24 @@ def publish(link: Link) -> None:
 async def check_link(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings, name: str
 ) -> CheckResult | None:
-    """Check `name` now and record the result. None when the link was
-    removed or edited during the check, which then records nothing."""
+    """Check `name` now and record the result, unless a check that started
+    later recorded its own first. None when the link was removed or edited
+    during the check, which then records nothing."""
     async with session_factory() as session:
         link = await session.get(Link, name)
         if link is None:
             return None
         target_url, expectations = link.target_url, list(link.expectations)
+    started = datetime.now(UTC)
     # No transaction is open across the fetch.
     result = await run_check(target_url, expectations, settings.links_allowed_hosts)
     async with session_scope(session_factory) as session:
         link = await session.get(Link, name, with_for_update=True)
         if link is None or (link.target_url, link.expectations) != (target_url, expectations):
             return None
-        link.last_check_at = datetime.now(UTC)
+        if link.last_check_at is not None and link.last_check_at > started:
+            return result
+        link.last_check_at = started
         link.last_check_ok = result.ok
         link.last_check_detail = result.detail
         link.alert_state, change = next_alert_state(link.alert_state, result.ok)
