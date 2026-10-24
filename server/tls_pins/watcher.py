@@ -36,6 +36,7 @@ from server.tls_pins.document import (
     lock_pin_state,
     publish,
     published_pins,
+    set_entry,
     spki_sha256,
     timestamp,
 )
@@ -415,18 +416,20 @@ async def run_pin_watch(
     async with session_scope(session_factory) as session:
         await lock_pin_state(session)
         document = await current_document(session)
-        published = (
-            {s["id"]: set(s["pins"]) for s in document_sets(document)} if document else {}
-        )
+        served = {s["id"]: s for s in document_sets(document)} if document else {}
         sets = {s.id: s for s in (await session.execute(select(TlsPinSet))).scalars()}
-        should_publish = False
         for (set_id, host, _), result in zip(targets, results, strict=True):
             pin_set = sets.get(set_id)
             # An operator may have removed the host while it was probed.
             if pin_set is None or host not in pin_set.monitored_hosts:
                 continue
-            added = _apply(pin_set, host, result, published.get(set_id), now)
-            should_publish |= bool(added) and pin_set.auto_publish
+            entry = served.get(set_id)
+            _apply(pin_set, host, result, set(entry["pins"]) if entry else None, now)
+        # Compared with the served document, not this run's additions, so a
+        # change kept while the key was missing goes out once it is back.
+        should_publish = document is not None and any(
+            s.auto_publish and served.get(s.id) != set_entry(s) for s in sets.values()
+        )
         if should_publish and signer is not None:
             await publish(session, signer, reason="watcher", now=now)
         await ensure_current_document(session, signer, now=now)

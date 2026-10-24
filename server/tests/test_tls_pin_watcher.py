@@ -465,6 +465,34 @@ async def test_with_auto_publish_off_the_pins_are_added_but_not_published(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_pins_kept_while_the_key_was_missing_are_published_once_it_is_back(
+    pki, db_session, factory, signer
+) -> None:
+    await _store_set(db_session, [HOST], [UNRELATED_PIN], auto_publish=True)
+    async with factory() as session:
+        first = await publish(session, signer, reason="initial", now=NOW)
+        await session.commit()
+
+    def changed_chain(target: str) -> Probe:
+        return Probe("trusted", (pki.leaf.cert, pki.intermediate.cert, pki.root.cert))
+
+    await run_pin_watch(factory, None, timeout=10, probe_fn=changed_chain, now=NOW)
+    assert len((await _stored_set(factory)).pins) == 3
+    assert [d.serial for d in await _documents(factory)] == [first.serial]
+
+    later = NOW + timedelta(hours=1)
+    await run_pin_watch(factory, signer, timeout=10, probe_fn=changed_chain, now=later)
+
+    documents = await _documents(factory)
+    assert len(documents) == 2 and documents[-1].reason == "watcher"
+    assert document_sets(documents[-1])[0]["pins"] == [
+        UNRELATED_PIN, pki.intermediate.pin, pki.root.pin
+    ]
+    await run_pin_watch(factory, signer, timeout=10, probe_fn=changed_chain, now=later)
+    assert len(await _documents(factory)) == 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_an_untrusted_chain_changes_nothing_and_is_reported(
     tmp_path, pki, db_session, factory, signer
 ) -> None:
