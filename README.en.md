@@ -350,6 +350,10 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/v3/admin/sync-policies` | List sync policies (admin port only) | shared secret |
 | `PATCH` | `/v3/admin/sync-policies/{job_type}` | Update sync policy (admin port only) | shared secret |
 | `POST` | `/push-tick` | Run a push tick now (admin port only; the portal calls it) | shared secret |
+| `GET` | `/admin/links` | List the redirect links and their last check (admin port only) | shared secret |
+| `POST` | `/admin/links` | Add a redirect link (admin port only) | shared secret |
+| `PATCH` | `/admin/links/{name}` | Edit, enable or disable a redirect link (admin port only) | shared secret |
+| `POST` | `/admin/links/{name}/test` | Check a redirect link now (admin port only) | shared secret |
 
 ### Meta
 
@@ -357,6 +361,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 |---|---|---|---|
 | `GET` | `/health` | Liveness check | none |
 | `GET` | `/version` | Version and API base path | none |
+| `GET` | `/links/{name}` | 307 to the link's target, edited in the portal | none |
 
 ## Development
 

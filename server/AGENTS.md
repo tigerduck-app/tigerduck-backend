@@ -38,6 +38,8 @@ server/
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
+├── links/                     # /links/{name} redirects: model, target checks,
+│                              #   rules and the scheduled link checker
 ├── academic_calendar/         # semester terms + school holidays (models, schemas,
 │                              #   terms.py: the current term and the days a term
 │                              #   runs on, as the apps take them)
@@ -50,6 +52,7 @@ server/
 │   ├── overrides.py           # /v3/sync/{courses,assignments}/{id}/override
 │   ├── holiday_overrides.py   # /v3/sync/holiday-overrides
 │   ├── academic_calendar.py   # /v3/calendar/*
+│   ├── links.py               # /links/{name} (public, unversioned) + admin router
 │   ├── bulletins_feed.py      # /v3/bulletins/*
 │   ├── bulletins_v3.py        # subscriptions + read-state
 │   ├── schedule_v3.py         # /v3/schedule/*
@@ -226,8 +229,8 @@ into the backend container via `docker-compose.yml`.
   batch back and claims again. `POST /push-tick` (X-Push-Token)
   forces one: it waits up to 20s, then answers `done: false` and lets the
   tick finish on its own; a call while that tick runs joins it.
-- The operator endpoints, `POST /push-tick` and `/v3/admin/sync-policies`,
-  live on a separate FastAPI app that the admin listener
+- The operator endpoints, `POST /push-tick`, `/v3/admin/sync-policies` and
+  `/admin/links`, live on a separate FastAPI app that the admin listener
   (`TIGERDUCK_ADMIN_PORT`, 9001) serves inside the API process, bound to
   the backend's alias on the internal `tigerduck-admin` network. The API
   port never serves them. Add an operator endpoint there, not to the API.
@@ -315,7 +318,9 @@ into the backend container via `docker-compose.yml`.
 - Do not add a portal route that changes state, shows one account's or
   device's data, or lists many students or devices without an `audit()`
   call (`portal/app/audit.py`) inside its transaction;
-  `portal/tests/test_audit_coverage.py` fails for one without it. `detail` takes counts and filters, never a student id,
+  `portal/tests/test_audit_coverage.py` fails for one without it. A route
+  that hands the change to the admin listener (the Links page) passes the
+  operator in `X-Admin-Actor` instead, and the backend writes the row. `detail` takes counts and filters, never a student id,
   a typed search, a push body or a token.
 - Do not let the portal drive backend lifecycle (start/stop/restart).
   Its docker socket mount is read-only on purpose; container lifecycle
