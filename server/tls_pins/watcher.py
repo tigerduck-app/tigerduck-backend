@@ -19,7 +19,6 @@ from datetime import UTC, datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
-import httpx
 import structlog
 from cryptography import x509
 from cryptography.hazmat.primitives.serialization import Encoding, pkcs7
@@ -43,7 +42,6 @@ from server.tls_pins.document import (
 from server.tls_pins.models import TlsPinSet
 from server.tls_pins.targets import (
     TargetRefused,
-    address_allowed,
     check_target,
     parse_target,
     resolve,
@@ -129,17 +127,32 @@ def _ca_issuers_url(cert: x509.Certificate) -> str | None:
     return None
 
 
-def _is_public_url(url: str) -> bool:
-    """An http(s) URL whose host resolves to public addresses only, so a
-    certificate cannot point the fetch at the stack's own services."""
+def _aia_request(url: str) -> tuple[list[tuple[str, int]], bytes] | None:
+    """The addresses to fetch an http AIA URL from and the request to send,
+    if its host resolves to public addresses only: a certificate must not
+    point the fetch at the stack's own services."""
+    if not url.isascii() or not url.isprintable() or " " in url:
+        return None
     parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        return False
     try:
-        infos = socket.getaddrinfo(parts.hostname, parts.port or 80)
-    except OSError:
-        return False
-    return all(address_allowed(info[4][0]) for info in infos)
+        if parts.scheme != "http" or not parts.hostname:
+            return None
+        addresses = resolve(parts.hostname, parts.port or 80)
+    except (ValueError, TargetRefused):
+        return None
+    target = parts.path or "/"
+    if parts.query:
+        target += "?" + parts.query
+    host = parts.netloc.rpartition("@")[2]
+    return addresses, f"GET {target} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode()
+
+
+def _recv(sock: socket.socket, deadline: float) -> bytes:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("AIA fetch deadline")
+    sock.settimeout(remaining)
+    return sock.recv(16384)
 
 
 def parse_issuer(body: bytes) -> x509.Certificate | None:
@@ -157,23 +170,25 @@ def parse_issuer(body: bytes) -> x509.Certificate | None:
 
 
 def fetch_issuer(url: str) -> x509.Certificate | None:
-    if not _is_public_url(url):
+    """GET over HTTP/1.0 to the checked addresses, so a second lookup cannot
+    rebind the name, under one deadline for headers and body alike."""
+    request = _aia_request(url)
+    if request is None:
         return None
-    # httpx times each read; a server trickling bytes needs an overall limit.
+    addresses, head = request
     deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
+    response = b""
     try:
-        with (
-            httpx.Client(timeout=CONNECT_TIMEOUT_SECONDS) as client,
-            client.stream("GET", url) as resp,
-        ):
-            if resp.status_code != 200:
-                return None
-            body = b""
-            for chunk in resp.iter_bytes():
-                body += chunk
-                if len(body) > AIA_MAX_BYTES or time.monotonic() > deadline:
+        with _connect(addresses) as sock:
+            sock.sendall(head)
+            while chunk := _recv(sock, deadline):
+                response += chunk
+                if len(response) > AIA_MAX_BYTES:
                     return None
-    except httpx.HTTPError:
+    except OSError:
+        return None
+    head, sep, body = response.partition(b"\r\n\r\n")
+    if not sep or head.split(b"\r\n", 1)[0].split()[1:2] != [b"200"]:
         return None
     return parse_issuer(body)
 

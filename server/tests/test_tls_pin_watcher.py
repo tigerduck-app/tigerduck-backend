@@ -39,7 +39,7 @@ from server.tls_pins.document import PinSigner, document_sets, publish, spki_sha
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
 from server.tls_pins.watcher import (
     Probe,
-    _is_public_url,
+    _aia_request,
     parse_issuer,
     probe,
     run_pin_watch,
@@ -265,39 +265,86 @@ def test_an_aia_answer_parses_as_der_pem_or_pkcs7(pki) -> None:
 
 
 def test_aia_is_never_fetched_from_the_stacks_own_addresses() -> None:
-    assert not _is_public_url("http://127.0.0.1/ca.cer")
-    assert not _is_public_url("http://10.0.0.5/ca.cer")
-    assert not _is_public_url("http://169.254.169.254/latest")
-    assert not _is_public_url("ftp://8.8.8.8/ca.cer")
-    assert _is_public_url("http://8.8.8.8/ca.cer")
+    assert _aia_request("http://127.0.0.1/ca.cer") is None
+    assert _aia_request("http://10.0.0.5/ca.cer") is None
+    assert _aia_request("http://169.254.169.254/latest") is None
+    assert _aia_request("ftp://8.8.8.8/ca.cer") is None
+    assert _aia_request("https://8.8.8.8/ca.cer") is None
+    assert _aia_request("http://8.8.8.8/a b") is None
+    assert _aia_request("http://8.8.8.8:99999/ca.cer") is None
+    assert _aia_request("http://8.8.8.8/ca.cer") == (
+        [("8.8.8.8", 80)],
+        b"GET /ca.cer HTTP/1.0\r\nHost: 8.8.8.8\r\nConnection: close\r\n\r\n",
+    )
 
 
-def test_an_aia_server_trickling_bytes_is_cut_off(monkeypatch) -> None:
+@contextlib.contextmanager
+def _aia_server(monkeypatch, answer: Callable[[socket.socket], None]) -> Iterator[list[bytes]]:
+    """A local AIA server that `aia.test` resolves to, once per fetch."""
     listener = socket.create_server(("127.0.0.1", 0))
-    stop = threading.Event()
+    requests: list[bytes] = []
+    lookups: list[str] = []
 
-    def trickle() -> None:
+    def serve() -> None:
         conn, _ = listener.accept()
         with conn:
-            conn.recv(4096)
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 60000\r\n\r\n")
-            while not stop.wait(0.05):
-                conn.sendall(b"x")
+            requests.append(conn.recv(4096))
+            answer(conn)
 
-    server = threading.Thread(target=trickle, daemon=True)
+    def resolve(host: str, port: int) -> list[tuple[str, int]]:
+        lookups.append(host)
+        return [("127.0.0.1", listener.getsockname()[1])]
+
+    server = threading.Thread(target=serve, daemon=True)
     server.start()
-    monkeypatch.setattr(watcher, "_is_public_url", lambda url: True)
+    monkeypatch.setattr(watcher, "resolve", resolve)
+    try:
+        yield requests
+    finally:
+        server.join(10)
+        listener.close()
+    assert lookups == ["aia.test"]
+
+
+def _trickle(first: bytes) -> Callable[[socket.socket], None]:
+    def answer(conn: socket.socket) -> None:
+        conn.sendall(first)
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            with contextlib.suppress(OSError):
+                conn.sendall(b"x")
+            time.sleep(0.05)
+
+    return answer
+
+
+def test_an_aia_fetch_connects_to_the_address_it_checked(monkeypatch, pki) -> None:
+    der = pki.intermediate.cert.public_bytes(serialization.Encoding.DER)
+
+    def answer(conn: socket.socket) -> None:
+        conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: application/pkix-cert\r\n\r\n" + der)
+
+    with _aia_server(monkeypatch, answer) as requests:
+        issuer = watcher.fetch_issuer("http://aia.test/ca.cer")
+
+    assert issuer == pki.intermediate.cert
+    assert requests[0].startswith(b"GET /ca.cer HTTP/1.0\r\nHost: aia.test\r\n")
+
+
+@pytest.mark.parametrize(
+    "first",
+    [b"HTTP/1.0 200 OK\r\n", b"HTTP/1.0 200 OK\r\nContent-Length: 60000\r\n\r\n"],
+    ids=["headers", "body"],
+)
+def test_an_aia_server_trickling_bytes_is_cut_off(monkeypatch, first) -> None:
     monkeypatch.setattr(watcher, "AIA_FETCH_DEADLINE_SECONDS", 0.3)
 
     started = time.monotonic()
-    try:
-        result = watcher.fetch_issuer(f"http://127.0.0.1:{listener.getsockname()[1]}/ca.cer")
-    finally:
-        stop.set()
-        server.join(5)
-        listener.close()
+    with _aia_server(monkeypatch, _trickle(first)):
+        result = watcher.fetch_issuer("http://aia.test/ca.cer")
+        elapsed = time.monotonic() - started
 
-    assert result is None and time.monotonic() - started < 3
+    assert result is None and elapsed < 3
 
 
 # --- The watcher -----------------------------------------------------------
