@@ -33,6 +33,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 25, 4, 0, tzinfo=UTC)
 PIN = "9VZ7Yd685RTXsE6rL/puuMbnejYaXwaZasGL7c+Uolc="
+DOCUMENT_URL = "/.well-known/tigerduck/tls-pins.json"
 
 
 def _published(set_id: str) -> float:
@@ -74,7 +75,7 @@ async def test_a_published_document_round_trips_through_the_endpoint(
     document = await publish(db_session, signer, reason="initial", now=NOW)
     await db_session.commit()
 
-    resp = await client.get("/.well-known/tigerduck/tls-pins.json")
+    resp = await client.get(DOCUMENT_URL)
 
     assert resp.status_code == 200
     assert resp.content == document.envelope
@@ -98,6 +99,20 @@ async def test_a_published_document_round_trips_through_the_endpoint(
         }
     ]
     assert payload["prompt_roots"] == list(prompt_roots())
+
+
+async def test_an_unchanged_document_answers_304(client, db_session, stored_set, signer) -> None:
+    document = await publish(db_session, signer, reason="initial", now=NOW)
+    await db_session.commit()
+    etag = f'"{document.serial}"'
+
+    same = await client.get(DOCUMENT_URL, headers={"If-None-Match": f'"1", {etag}'})
+    older = await client.get(DOCUMENT_URL, headers={"If-None-Match": f'"{document.serial - 1}"'})
+
+    assert same.status_code == 304 and same.content == b""
+    assert same.headers["etag"] == etag
+    assert same.headers["cache-control"] == "public, max-age=300"
+    assert older.status_code == 200 and older.content == document.envelope
 
 
 async def test_a_tampered_payload_fails_verification(db_session, stored_set, signer) -> None:

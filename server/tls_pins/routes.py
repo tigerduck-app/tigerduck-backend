@@ -35,7 +35,9 @@ public_router = APIRouter(tags=["tls-pins"])
 
 
 @public_router.get(DOCUMENT_PATH)
-async def tls_pin_document(session: SessionDep) -> Response:
+async def tls_pin_document(
+    session: SessionDep, if_none_match: Annotated[str | None, Header()] = None
+) -> Response:
     """The highest serial's envelope, as stored. Unauthenticated: the apps
     fetch it before sign-in, and its signature is what they trust."""
     row = (
@@ -47,11 +49,11 @@ async def tls_pin_document(session: SessionDep) -> Response:
     ).first()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="tls_pin_document_not_found")
-    return Response(
-        content=bytes(row.envelope),
-        media_type="application/json",
-        headers={"Cache-Control": "public, max-age=300", "ETag": f'"{row.serial}"'},
-    )
+    headers = {"Cache-Control": "public, max-age=300", "ETag": f'"{row.serial}"'}
+    tags = {tag.strip().removeprefix("W/") for tag in (if_none_match or "").split(",")}
+    if headers["ETag"] in tags or "*" in tags:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(content=bytes(row.envelope), media_type="application/json", headers=headers)
 
 
 admin_router = APIRouter(
