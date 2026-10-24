@@ -272,6 +272,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     jobs_session_factory = build_session_factory(jobs_engine)
     async with session_scope(session_factory) as seed_session:
         await ensure_default_policies(seed_session)
+    app.state.tls_pin_signer = load_signer(settings.tls_pin_signing_key_path)
     async with session_scope(session_factory) as pin_session:
         await ensure_current_document(pin_session, app.state.tls_pin_signer)
         await refresh_gauges(pin_session)
@@ -493,7 +494,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
         app.state.credential_cipher = None
-    app.state.tls_pin_signer = load_signer(settings.tls_pin_signing_key_path)
+    # Loaded by the lifespan; tests set their own.
+    app.state.tls_pin_signer = None
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)

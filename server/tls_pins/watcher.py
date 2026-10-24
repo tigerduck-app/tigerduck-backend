@@ -286,7 +286,11 @@ def _apply(
                         }
                     )
         pin_set.pins = [
-            {**pin, "first_seen_at": pin["first_seen_at"] or seen_at, "last_seen_at": seen_at}
+            {
+                **pin,
+                "first_seen_at": pin.get("first_seen_at") or seen_at,
+                "last_seen_at": seen_at,
+            }
             if pin["spki"] in seen
             else pin
             for pin in pin_set.pins
