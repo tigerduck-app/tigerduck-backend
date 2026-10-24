@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 import structlog
@@ -123,20 +123,38 @@ def _read_capped(response: httpx.Response, deadline: float) -> bytes:
     return bytes(body[:MAX_BODY_BYTES])
 
 
+class _PinnedTransport(httpx.BaseTransport):
+    """Sends a request to the address in its `address` extension, with the
+    host name in Host and SNI. The request the client sees keeps the host
+    name, so its cookie jar matches cookies as the apps' does."""
+
+    def __init__(self, transport: httpx.BaseTransport) -> None:
+        self._transport = transport
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        extensions = dict(request.extensions)
+        address = extensions.pop("address")
+        return self._transport.handle_request(
+            httpx.Request(
+                request.method,
+                request.url.copy_with(host=address),
+                headers=request.headers,
+                stream=request.stream,
+                extensions={**extensions, "sni_hostname": request.url.host},
+            )
+        )
+
+    def close(self) -> None:
+        self._transport.close()
+
+
 def _request(
     client: httpx.Client, url: str, address: str, deadline: float
 ) -> Page | str:
     """The page at `url`, asked of `address`, or the Location it redirects to."""
     if time.monotonic() > deadline:
         raise Unreachable("fetch: the page took too long to load")
-    parts = urlsplit(url)
-    netloc = f"[{address}]" if ":" in address else address
-    with client.stream(
-        "GET",
-        urlunsplit(("https", netloc, parts.path or "/", parts.query, "")),
-        headers={"Host": parts.netloc},
-        extensions={"sni_hostname": parts.hostname},
-    ) as response:
+    with client.stream("GET", url, extensions={"address": address}) as response:
         if response.has_redirect_location:
             return response.headers["Location"]
         body = _read_capped(response, deadline)
@@ -171,10 +189,15 @@ def fetch(
         raise CheckFailure(f"invalid target: {exc}") from None
     deadline = time.monotonic() + CHECK_TIMEOUT_SECONDS
     with httpx.Client(
-        transport=transport,
+        transport=_PinnedTransport(
+            transport
+            or httpx.HTTPTransport(
+                # Each hop is verified for its own host name, so no connection is reused.
+                limits=httpx.Limits(max_keepalive_connections=0),
+                trust_env=False,
+            )
+        ),
         timeout=REQUEST_TIMEOUT_SECONDS,
-        # Each hop is verified for its own host name, so no connection is reused.
-        limits=httpx.Limits(max_keepalive_connections=0),
         trust_env=False,
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
     ) as client:

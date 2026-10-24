@@ -129,6 +129,32 @@ def test_redirects_are_followed_and_the_last_hop_is_the_final_url() -> None:
     ]
 
 
+def test_a_cookie_set_before_a_redirect_goes_with_the_next_hop_to_its_host() -> None:
+    server = Server(
+        {
+            ("www.ntust.edu.tw", "/login"): httpx.Response(
+                302,
+                headers={
+                    "Location": "/calendar",
+                    "Set-Cookie": "session=abc; Domain=www.ntust.edu.tw; Path=/",
+                },
+            ),
+            ("www.ntust.edu.tw", "/calendar"): _redirect(CALENDAR),
+            ("www.academic.ntust.edu.tw", "/p/404-1048-78935.php"): httpx.Response(200),
+        }
+    )
+
+    _fetch("https://www.ntust.edu.tw/login", server)
+
+    cookies = [r.headers.get("Cookie") for r in server.requests]
+    assert cookies == [None, "session=abc", None]
+    assert [r.url.host for r in server.requests] == [
+        "140.118.31.20",
+        "140.118.31.20",
+        "140.118.31.10",
+    ]
+
+
 @pytest.mark.parametrize(
     "address",
     [
