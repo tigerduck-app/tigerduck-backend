@@ -1,11 +1,12 @@
 """Generate the Ed25519 key pair that signs the TLS pin document.
 
-Writes the private key to `<dir>/<key_id>.pem` with mode 0600 and refuses
-to overwrite one. Prints the key_id and the raw 32-byte public key in
-base64, which the apps embed; nothing else.
+Writes the private key as PKCS #8 PEM, the format of `openssl genpkey
+-algorithm ed25519`, to `<dir>/tls-pins-<key_id>.pem` with mode 0600, and
+refuses to overwrite one. Prints the key_id and the raw 32-byte public key
+in base64, which the apps embed; nothing else.
 
-    uv run python scripts/generate_tls_pin_key.py td-pins-2026a
-    uv run python scripts/generate_tls_pin_key.py td-pins-2026b --dir /Volumes/offline
+    uv run python scripts/generate_tls_pin_key.py td-pins-2026c
+    uv run python scripts/generate_tls_pin_key.py td-pins-2026d --dir /Volumes/offline
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BACKEND_DIR))
 
-from server.tls_pins.document import KEY_ID_PATTERN
+from server.tls_pins.document import KEY_ID_PATTERN, key_file_name
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     )
-    path = args.dir / f"{args.key_id}.pem"
+    path = args.dir / key_file_name(args.key_id)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:

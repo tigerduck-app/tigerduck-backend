@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from server.config import Settings
 from server.tls_pins.document import load_signer, prompt_roots, spki_sha256
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +37,7 @@ def test_the_key_script_writes_a_private_key_only_the_owner_reads(tmp_path) -> N
     first = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     again = subprocess.run(run, cwd=REPO_ROOT, capture_output=True, text=True, check=False)
 
-    path = tmp_path / "td-pins-2026a.pem"
+    path = tmp_path / "tls-pins-td-pins-2026a.pem"
     assert os.stat(path).st_mode & 0o777 == 0o600
     lines = first.stdout.splitlines()
     assert lines[0] == "key_id: td-pins-2026a" and len(lines) == 2
@@ -49,7 +52,7 @@ def test_the_key_script_writes_a_private_key_only_the_owner_reads(tmp_path) -> N
 
 
 def test_a_missing_or_unusable_key_disables_signing(tmp_path) -> None:
-    not_ed25519 = tmp_path / "td-pins-ec.pem"
+    not_ed25519 = tmp_path / "tls-pins-ec.pem"
     not_ed25519.write_bytes(
         ec.generate_private_key(ec.SECP256R1()).private_bytes(
             serialization.Encoding.PEM,
@@ -57,10 +60,35 @@ def test_a_missing_or_unusable_key_disables_signing(tmp_path) -> None:
             serialization.NoEncryption(),
         )
     )
-    garbage = tmp_path / "td-pins-x.pem"
+    garbage = tmp_path / "tls-pins-x.pem"
     garbage.write_bytes(b"not a key")
+    misnamed = tmp_path / "td-pins-2026a.pem"
+    misnamed.write_bytes(_openssl_key(tmp_path))
 
     assert load_signer(None) is None
-    assert load_signer(tmp_path / "td-pins-missing.pem") is None
+    assert load_signer(tmp_path / "tls-pins-missing.pem") is None
+    assert load_signer(misnamed) is None
     assert load_signer(garbage) is None
     assert load_signer(not_ed25519) is None
+
+
+def _openssl_key(tmp_path: Path) -> bytes:
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl is not installed")
+    out = tmp_path / "openssl.pem"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(out)],
+        check=True, capture_output=True,
+    )
+    return out.read_bytes()
+
+
+def test_the_production_key_file_loads_by_default(tmp_path) -> None:
+    """The production key came from `openssl genpkey -algorithm ed25519`."""
+    path = tmp_path / "tls-pins-td-pins-2026a.pem"
+    path.write_bytes(_openssl_key(tmp_path))
+
+    signer = load_signer(path)
+
+    assert signer is not None and signer.key_id == "td-pins-2026a"
+    assert Settings.model_fields["tls_pin_signing_key_path"].default.name == path.name

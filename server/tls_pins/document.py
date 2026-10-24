@@ -36,6 +36,11 @@ RESIGN_BEFORE = timedelta(days=7)
 # "TD_PINS"
 PIN_STATE_LOCK_KEY = 0x54445F50494E53
 KEY_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+KEY_FILE_PREFIX = "tls-pins-"
+
+
+def key_file_name(key_id: str) -> str:
+    return f"{KEY_FILE_PREFIX}{key_id}.pem"
 
 
 @dataclass(frozen=True)
@@ -45,14 +50,14 @@ class PinSigner:
 
 
 def load_signer(path: Path | None) -> PinSigner | None:
-    """The signing key at `path`, whose file name without `.pem` is its
-    key_id, or None. Without a key the backend runs and publishes nothing."""
-    if path is None:
-        logger.warning("tls_pins.signing_disabled", reason="no_key_configured")
+    """The PKCS #8 PEM key at `path`, named `tls-pins-<key_id>.pem`, or None.
+    Without a key the backend runs and publishes nothing."""
+    if path is None or not path.is_file():
+        logger.warning("tls_pins.signing_disabled", reason="no_key_file", path=str(path))
         return None
-    key_id = path.name.removesuffix(".pem")
-    if not KEY_ID_PATTERN.fullmatch(key_id):
-        logger.error("tls_pins.signing_disabled", reason="bad_key_id", path=str(path))
+    key_id = path.name.removeprefix(KEY_FILE_PREFIX).removesuffix(".pem")
+    if path.name != key_file_name(key_id) or not KEY_ID_PATTERN.fullmatch(key_id):
+        logger.error("tls_pins.signing_disabled", reason="bad_key_file_name", path=str(path))
         return None
     try:
         key = serialization.load_pem_private_key(path.read_bytes(), password=None)
