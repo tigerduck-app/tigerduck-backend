@@ -146,6 +146,7 @@ cd tigerduck-backend
 cp .env.example .env
 
 # 2. 把 APNs 私鑰丟到 server/secrets/AuthKey_<KEY_ID>.p8（已 gitignored）
+#    TLS pin 文件的簽章金鑰放 server/signing/tls-pins-<key_id>.pem（只掛進 backend）
 
 # 3. 啟動整個 stack（postgres、backend、portal、監控）
 ./start.sh                       # docker compose up -d --build，再印出狀態摘要
@@ -354,6 +355,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `POST` | `/admin/links` | 新增轉址連結（只在 admin port） | shared secret |
 | `PATCH` | `/admin/links/{name}` | 修改、啟用或停用轉址連結（只在 admin port） | shared secret |
 | `POST` | `/admin/links/{name}/test` | 立刻檢查轉址連結（只在 admin port） | shared secret |
+| `POST`/`PUT` | `/tls-pins/*` | TLS pin 的增刪、監看主機、到期日、auto_publish、立即發布或重簽（只在 admin port，portal 呼叫） | shared secret |
 
 ### 基礎
 
@@ -362,6 +364,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/health` | liveness | 無 |
 | `GET` | `/version` | 版本與 API base path | 無 |
 | `GET` | `/links/{name}` | 307 轉到連結的目標，目標在 portal 編輯 | 無 |
+| `GET` | `/.well-known/tigerduck/tls-pins.json` | App 的 TLS pin 簽章文件（Ed25519） | 無 |
 
 ## 開發
 
@@ -399,6 +402,7 @@ tigerduck-backend/
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher（匿名）/ user_dispatch（登入使用者）/ taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt
 │   ├── secrets/                 # APNs .p8（gitignored）
+│   ├── signing/                 # TLS pin 文件的 Ed25519 簽章金鑰，只掛進 backend（gitignored）
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest（單元 + 整合）
 ├── portal/                      # 管理介面 — 另一個 FastAPI app

@@ -1,0 +1,396 @@
+"""The portal's pin actions on the admin listener: each one changes the
+sets, publishes when it should, and records the operator."""
+
+from __future__ import annotations
+
+import json
+import socket
+import types
+from datetime import UTC, datetime, timedelta
+
+import pytest
+import pytest_asyncio
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from prometheus_client import REGISTRY
+from sqlalchemy import select
+
+from server import metrics
+from server.admin_audit import AdminAuditLog
+from server.tls_pins import targets, watcher
+from server.tls_pins.document import PinSigner, document_sets
+from server.tls_pins.models import TlsPinDocument, TlsPinSet
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+ACTOR = {"X-Admin-Actor": "ops@example.com"}
+PIN_A = "9VZ7Yd685RTXsE6rL/puuMbnejYaXwaZasGL7c+Uolc="
+PIN_B = "BxOmElsPeD54MBOb5h+TPNJnBlsAk6spRc/wLnko0cc="
+NEW_PIN = "xES1tmzl1x4bXkDyc4XJXL/SSgW1b3DKwJkvD1DDN5w="
+
+
+# Names the stub resolver answers with a non-public address; every other
+# name gets a public one, so no test does a real DNS lookup.
+ADDRESSES = {
+    "intranet.ntust.edu.tw": "10.0.0.7",
+    "nat64.ntust.edu.tw": "64:ff9b::a00:7",
+    "mapped.ntust.edu.tw": "::ffff:127.0.0.1",
+}
+
+
+@pytest.fixture(autouse=True)
+def stub_dns(monkeypatch):
+    def getaddrinfo(host, port, *args, **kwargs):
+        address = ADDRESSES.get(host, "140.118.31.99")
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    stub = types.SimpleNamespace(getaddrinfo=getaddrinfo, SOCK_STREAM=socket.SOCK_STREAM)
+    monkeypatch.setattr(targets, "socket", stub)
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def stored(db_session, client):
+    db_session.add(
+        TlsPinSet(
+            id="ntust",
+            domains=[{"name": "ntust.edu.tw", "include_subdomains": True}],
+            pins=[
+                {"spki": p, "label": "CA", "first_seen_at": None, "last_seen_at": None,
+                 "source": "builtin"}
+                for p in (PIN_A, PIN_B)
+            ],
+            expires_at=datetime(2027, 8, 18, tzinfo=UTC),
+            monitored_hosts=["www.ntust.edu.tw"],
+            watch_results={"www.ntust.edu.tw": {"status": "trusted"}, "old.ntust.edu.tw": {}},
+        )
+    )
+    await db_session.commit()
+    client.app.state.tls_pin_signer = PinSigner("td-pins-test", Ed25519PrivateKey.generate())
+    return db_session
+
+
+async def _set(db_session) -> TlsPinSet:
+    db_session.expire_all()
+    return await db_session.get(TlsPinSet, "ntust")
+
+
+async def _latest(db_session) -> TlsPinDocument | None:
+    return (
+        await db_session.execute(
+            select(TlsPinDocument).order_by(TlsPinDocument.serial.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _audit(db_session) -> list[tuple[str, str, dict]]:
+    rows = await db_session.execute(
+        select(AdminAuditLog.actor, AdminAuditLog.action, AdminAuditLog.detail).order_by(
+            AdminAuditLog.id
+        )
+    )
+    return [tuple(r) for r in rows]
+
+
+async def test_adding_a_pin_publishes_it_and_records_the_operator(admin_client, stored) -> None:
+    resp = await admin_client.post(
+        "/tls-pins/sets/ntust/pins", json={"spki": NEW_PIN, "label": "TWCA Global Root CA"},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 200
+    serial = resp.json()["serial"]
+    pins = (await _set(stored)).pins
+    assert [p["spki"] for p in pins] == [PIN_A, PIN_B, NEW_PIN]
+    assert pins[-1]["source"] == "portal"
+    latest = await _latest(stored)
+    assert latest.serial == serial and latest.reason == "portal.add_pin"
+    assert document_sets(latest)[0]["pins"] == [PIN_A, PIN_B, NEW_PIN]
+    assert await _audit(stored) == [
+        ("ops@example.com", "tls_pins.add_pin", {"set": "ntust", "spki": NEW_PIN, "serial": serial})
+    ]
+
+
+async def test_a_pin_must_be_a_new_sha256_in_padded_base64(admin_client, stored) -> None:
+    for spki, code in ((PIN_A, 409), ("not-base64", 422), (NEW_PIN.rstrip("="), 422)):
+        resp = await admin_client.post(
+            "/tls-pins/sets/ntust/pins", json={"spki": spki, "label": "x"}, headers=ACTOR
+        )
+        assert resp.status_code == code, spki
+    assert await _latest(stored) is None
+
+
+async def test_an_action_needs_an_operator(admin_client, stored) -> None:
+    resp = await admin_client.post("/tls-pins/publish")
+
+    assert resp.status_code == 422
+    assert await _latest(stored) is None
+
+
+async def test_removing_a_pin_publishes_but_the_last_one_stays(admin_client, stored) -> None:
+    removed = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_A}, headers=ACTOR
+    )
+    last = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_B}, headers=ACTOR
+    )
+    unknown = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": NEW_PIN}, headers=ACTOR
+    )
+
+    assert removed.status_code == 200 and removed.json()["serial"] is not None
+    assert last.status_code == 409 and unknown.status_code == 404
+    assert [p["spki"] for p in (await _set(stored)).pins] == [PIN_B]
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_B]
+
+
+async def test_monitored_hosts_are_saved_without_publishing(admin_client, stored) -> None:
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts",
+        json={"hosts": ["www.ntust.edu.tw", "mail.ntust.edu.tw:993", "www.ntust.edu.tw"]},
+        headers=ACTOR,
+    )
+    bad = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts",
+        json={"hosts": ["https://www.ntust.edu.tw/"]},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 200 and resp.json()["serial"] is None
+    assert bad.status_code == 422
+    pin_set = await _set(stored)
+    assert pin_set.monitored_hosts == ["www.ntust.edu.tw", "mail.ntust.edu.tw:993"]
+    assert list(pin_set.watch_results) == ["www.ntust.edu.tw"]
+    assert await _latest(stored) is None
+
+
+async def test_removing_a_host_drops_its_alert_series(admin_client, stored) -> None:
+    host = {"set": "ntust", "host": "www.ntust.edu.tw"}
+    names = (
+        "tigerduck_tls_chain_trusted",
+        "tigerduck_tls_chain_matches",
+        "tigerduck_tls_host_last_success_timestamp",
+    )
+    for gauge in (
+        metrics.TLS_CHAIN_TRUSTED, metrics.TLS_CHAIN_MATCHES, metrics.TLS_HOST_LAST_SUCCESS
+    ):
+        gauge.labels(**host).set(0)
+    watcher._set_chain_info("ntust", "www.ntust.edu.tw", "untrusted: CN=x")
+
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts", json={"hosts": ["moodle2.ntust.edu.tw"]},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 200
+    assert [REGISTRY.get_sample_value(name, host) for name in names] == [None, None, None]
+    chain = {**host, "chain": "untrusted: CN=x"}
+    assert REGISTRY.get_sample_value("tigerduck_tls_chain_info", chain) is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "140.118.31.99",
+        "140.118.31.99:443",
+        "www.ntust.edu.tw:8443",
+        "www.example.com",
+        "ntust.edu.tw.example.com",
+        "intranet.ntust.edu.tw",
+        "nat64.ntust.edu.tw",
+        "mapped.ntust.edu.tw:993",
+    ],
+)
+async def test_a_host_the_watcher_must_not_reach_is_refused(admin_client, stored, host) -> None:
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/monitored-hosts",
+        json={"hosts": ["moodle2.ntust.edu.tw", host]},
+        headers=ACTOR,
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert (await _set(stored)).monitored_hosts == ["www.ntust.edu.tw"]
+
+
+async def test_a_subdomain_is_refused_when_the_domain_excludes_them(admin_client, stored) -> None:
+    stored.add(
+        TlsPinSet(
+            id="library",
+            domains=[{"name": "api.lib.ntust.edu.tw", "include_subdomains": False}],
+            pins=[{"spki": PIN_A, "label": "CA", "source": "builtin"}],
+            expires_at=datetime(2027, 8, 18, tzinfo=UTC),
+            monitored_hosts=[],
+        )
+    )
+    await stored.commit()
+
+    exact = await admin_client.put(
+        "/tls-pins/sets/library/monitored-hosts",
+        json={"hosts": ["api.lib.ntust.edu.tw"]}, headers=ACTOR,
+    )
+    sub = await admin_client.put(
+        "/tls-pins/sets/library/monitored-hosts",
+        json={"hosts": ["x.api.lib.ntust.edu.tw"]}, headers=ACTOR,
+    )
+
+    assert exact.status_code == 200 and sub.status_code == 422
+
+
+async def test_an_expiry_can_only_move_later(admin_client, stored) -> None:
+    earlier = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at", json={"expires_at": "2027-01-01T00:00:00Z"},
+        headers=ACTOR,
+    )
+    later = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at", json={"expires_at": "2028-08-18T00:00:00Z"},
+        headers=ACTOR,
+    )
+
+    assert earlier.status_code == 409 and later.status_code == 200
+    assert document_sets(await _latest(stored))[0]["expires_at"] == "2028-08-18T00:00:00Z"
+
+
+async def test_an_expiry_more_than_two_years_ahead_is_refused(admin_client, stored) -> None:
+    far = (datetime.now(UTC) + timedelta(days=732)).isoformat()
+
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at", json={"expires_at": far}, headers=ACTOR
+    )
+
+    assert resp.status_code == 409 and resp.json()["detail"] == "expiry_too_far"
+    assert (await _set(stored)).expires_at == datetime(2027, 8, 18, tzinfo=UTC)
+
+
+async def test_auto_publish_is_toggled_and_recorded(admin_client, stored) -> None:
+    resp = await admin_client.put(
+        "/tls-pins/sets/ntust/auto-publish", json={"enabled": True}, headers=ACTOR
+    )
+
+    assert resp.status_code == 200
+    assert (await _set(stored)).auto_publish is True
+    assert (await _audit(stored))[-1][1:] == (
+        "tls_pins.set_auto_publish", {"set": "ntust", "enabled": True, "serial": None}
+    )
+
+
+async def _add_pending_pin(db_session) -> None:
+    pin_set = await _set(db_session)
+    pin_set.pins = [
+        *pin_set.pins,
+        {"spki": NEW_PIN, "label": "CN=New CA", "source": "watcher", "pending": True},
+    ]
+    await db_session.commit()
+
+
+async def test_a_pending_pin_stays_out_of_documents_until_publish_now(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+
+    other = "Ugw0DiiUBBgk/lTl4qpL+9Ss3NJzM2S6vEJ/D1XlvXQ="
+    added = await admin_client.post(
+        "/tls-pins/sets/ntust/pins", json={"spki": other, "label": "x"}, headers=ACTOR
+    )
+    extended = await admin_client.put(
+        "/tls-pins/sets/ntust/expires-at",
+        json={"expires_at": "2027-12-01T00:00:00Z"},
+        headers=ACTOR,
+    )
+    assert added.status_code == 200 and extended.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, other]
+
+    published = await admin_client.post(
+        "/tls-pins/publish", json={"approve": {"ntust": [NEW_PIN]}}, headers=ACTOR
+    )
+
+    assert published.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, NEW_PIN, other]
+    assert not any(p.get("pending") for p in (await _set(stored)).pins)
+    assert (await _audit(stored))[-1] == (
+        "ops@example.com",
+        "tls_pins.publish",
+        {"approved": {"ntust": [NEW_PIN]}, "serial": published.json()["serial"]},
+    )
+
+
+async def test_publish_now_leaves_a_pin_found_after_the_page_loaded_pending(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+    later = "Ugw0DiiUBBgk/lTl4qpL+9Ss3NJzM2S6vEJ/D1XlvXQ="
+    pin_set = await _set(stored)
+    pin_set.pins = [*pin_set.pins, {"spki": later, "label": "CN=Later", "pending": True}]
+    await stored.commit()
+
+    resp = await admin_client.post(
+        "/tls-pins/publish", json={"approve": {"ntust": [NEW_PIN]}}, headers=ACTOR
+    )
+    bare = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+
+    assert resp.status_code == 200 and bare.status_code == 200
+    assert document_sets(await _latest(stored))[0]["pins"] == [PIN_A, PIN_B, NEW_PIN]
+    assert [p.get("pending", False) for p in (await _set(stored)).pins] == [
+        False, False, False, True
+    ]
+
+
+async def test_the_last_published_pin_stays_even_with_a_pending_one(
+    admin_client, stored
+) -> None:
+    await _add_pending_pin(stored)
+
+    removed = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_A}, headers=ACTOR
+    )
+    last = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": PIN_B}, headers=ACTOR
+    )
+    rejected = await admin_client.post(
+        "/tls-pins/sets/ntust/pins/remove", json={"spki": NEW_PIN}, headers=ACTOR
+    )
+
+    assert removed.status_code == 200 and last.status_code == 409
+    assert rejected.status_code == 200
+    assert [p["spki"] for p in (await _set(stored)).pins] == [PIN_B]
+
+
+async def test_publish_and_resign_now(admin_client, stored) -> None:
+    published = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+    await admin_client.post(
+        "/tls-pins/sets/ntust/pins", json={"spki": NEW_PIN, "label": "x"}, headers=ACTOR
+    )
+    stored.add(
+        TlsPinSet(
+            id="library", domains=[], pins=[], expires_at=datetime(2027, 5, 4, tzinfo=UTC)
+        )
+    )
+    await stored.commit()
+    resigned = await admin_client.post("/tls-pins/resign", headers=ACTOR)
+
+    assert published.status_code == 200 and resigned.status_code == 200
+    latest = await _latest(stored)
+    assert latest.serial == resigned.json()["serial"] > published.json()["serial"]
+    # The re-sign keeps the served sets, not the stored ones.
+    assert [s["id"] for s in document_sets(latest)] == ["ntust"]
+    assert json.loads(latest.payload)["pin_sets"][0]["pins"] == [PIN_A, PIN_B, NEW_PIN]
+
+
+async def test_without_a_key_edits_are_kept_and_publishing_is_refused(
+    admin_client, stored
+) -> None:
+    admin_client.app.state.tls_pin_signer = None
+
+    edit = await admin_client.post(
+        "/tls-pins/sets/ntust/pins", json={"spki": NEW_PIN, "label": "x"}, headers=ACTOR
+    )
+    publish = await admin_client.post("/tls-pins/publish", headers=ACTOR)
+
+    assert edit.status_code == 200 and edit.json()["serial"] is None
+    assert publish.status_code == 503
+    assert len((await _set(stored)).pins) == 3
+    assert await _latest(stored) is None
+
+
+async def test_the_actions_are_not_served_on_the_api_port(client, stored) -> None:
+    resp = await client.post("/tls-pins/publish", headers=ACTOR)
+
+    assert resp.status_code == 404

@@ -270,6 +270,19 @@ class Settings(BaseSettings):
         }
     )
 
+    # --- TLS pin document (server/tls_pins/) ---
+    # Ed25519 private key that signs the document, as PKCS #8 PEM named
+    # `tls-pins-<key_id>.pem` (scripts/generate_tls_pin_key.py writes one),
+    # in server/signing, which only the backend mounts. Without the file the
+    # backend publishes nothing.
+    tls_pin_signing_key_path: Path | None = (
+        SERVER_DIR / "signing" / "tls-pins-td-pins-2026a.pem"
+    )
+    # How often the pin watcher checks every monitored host; 0 turns it off.
+    tls_pin_watch_interval_seconds: int = 3600
+    # Cap on one host's check, each TLS connection and AIA fetch included.
+    tls_pin_watch_timeout_seconds: float = 30.0
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"

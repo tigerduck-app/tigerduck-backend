@@ -6,6 +6,7 @@ import {
   GraduationCap,
   HardDrive,
   Link2,
+  LockKeyhole,
   LogOut,
   Menu,
   Megaphone,
@@ -40,6 +41,7 @@ const NAV: NavItem[] = [
   { to: "/inspect", label: "Data Inspection", icon: Search },
   { to: "/semester-dates", label: "Semester dates", icon: CalendarDays },
   { to: "/links", label: "Links", icon: Link2 },
+  { to: "/tls-pins", label: "TLS pins", icon: LockKeyhole },
 ];
 
 const NAV_BOTTOM: NavItem[] = [

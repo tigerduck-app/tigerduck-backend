@@ -3,6 +3,7 @@ __pycache__/
 # Server runtime / secrets
 .env
 server/secrets/
+server/signing/
 *.p8
 .venv/
 .pytest_cache/

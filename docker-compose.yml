@@ -81,6 +81,9 @@ services:
     # operation (drop the new .p8, restart container) instead of a rebuild.
     volumes:
       - ./server/secrets:/app/server/secrets:ro
+      # The TLS pin document's signing key. Its own folder, so the portal,
+      # which mounts server/secrets, never sees it.
+      - ./server/signing:/app/server/signing:ro
     # host-gateway resolves `host.docker.internal` to the Docker host. Needed
     # on Linux for parity with Mac (on macOS Docker Desktop sets this for free,
     # explicit entry is harmless).

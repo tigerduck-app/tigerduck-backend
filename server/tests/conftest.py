@@ -131,6 +131,8 @@ def test_settings() -> Settings:
         course_reminder_scan_interval_seconds=99999,
         bulletin_user_dispatch_interval_seconds=99999,
         session_reauth_scan_interval_seconds=99999,
+        tls_pin_watch_interval_seconds=0,
+        tls_pin_signing_key_path=None,
         link_check_tick_seconds=0,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",

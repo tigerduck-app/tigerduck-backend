@@ -520,6 +520,47 @@ def observe_llm_request(outcome: str, seconds: float) -> None:
     LLM_REQUEST_DURATION.labels(outcome=outcome).observe(seconds)
 
 
+# --- TLS pins (server/tls_pins/) ---
+
+TLS_HOST_LAST_SUCCESS = Gauge(
+    "tigerduck_tls_host_last_success_timestamp",
+    "Unix time the pin watcher last reached the host, or first checked it if "
+    "it never has. Kept in the database, so a restart does not reset it.",
+    ["set", "host"],
+)
+TLS_CHAIN_MATCHES = Gauge(
+    "tigerduck_tls_chain_matches",
+    "1 when the host's validated chain shares a pin with its set in the "
+    "current document (the stored set before any document), else 0.",
+    ["set", "host"],
+)
+TLS_CHAIN_TRUSTED = Gauge(
+    "tigerduck_tls_chain_trusted",
+    "1 when the host's chain passed system trust at the last check, else 0.",
+    ["set", "host"],
+)
+# The chain's subjects, validity and pins as a label, so an alert joined on
+# it carries them to Discord. One series per host: a new chain replaces it.
+TLS_CHAIN_INFO = Gauge(
+    "tigerduck_tls_chain_info",
+    "Always 1; the chain label describes the host's chain at the last check.",
+    ["set", "host", "chain"],
+)
+TLS_PIN_DOCUMENT_EXPIRY = Gauge(
+    "tigerduck_tls_pin_document_expiry_timestamp",
+    "Unix time the served pin document expires; 0 before the first one.",
+)
+TLS_PIN_SET_EXPIRY = Gauge(
+    "tigerduck_tls_pin_set_expiry_timestamp",
+    "Unix time each stored pin set expires.",
+    ["set"],
+)
+TLS_PINS_PUBLISHED = Counter(
+    "tigerduck_tls_pins_published_total",
+    "Documents published that changed the set; a re-sign changes none.",
+    ["set"],
+)
+
 # --- Links (server/links/checker.py) ---
 
 LINK_CHECK_OK = Gauge(

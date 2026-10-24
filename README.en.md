@@ -146,6 +146,7 @@ cd tigerduck-backend
 cp .env.example .env
 
 # 2. Drop the APNs key at server/secrets/AuthKey_<KEY_ID>.p8 (already gitignored)
+#    The TLS pin document's signing key goes in server/signing/tls-pins-<key_id>.pem (backend only)
 
 # 3. Boot the whole stack (postgres, backend, portal, monitoring)
 ./start.sh                       # docker compose up -d --build, then prints a status block
@@ -354,6 +355,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `POST` | `/admin/links` | Add a redirect link (admin port only) | shared secret |
 | `PATCH` | `/admin/links/{name}` | Edit, enable or disable a redirect link (admin port only) | shared secret |
 | `POST` | `/admin/links/{name}/test` | Check a redirect link now (admin port only) | shared secret |
+| `POST`/`PUT` | `/tls-pins/*` | Add or remove a TLS pin, edit monitored hosts, extend an expiry, toggle auto_publish, publish or re-sign now (admin port only; the portal calls them) | shared secret |
 
 ### Meta
 
@@ -362,6 +364,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/health` | Liveness check | none |
 | `GET` | `/version` | Version and API base path | none |
 | `GET` | `/links/{name}` | 307 to the link's target, edited in the portal | none |
+| `GET` | `/.well-known/tigerduck/tls-pins.json` | The apps' signed TLS pin document (Ed25519) | none |
 
 ## Development
 
@@ -400,6 +403,7 @@ tigerduck-backend/
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher (anonymous) / user_dispatch (logged-in) / taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt
 │   ├── secrets/                 # APNs .p8 (gitignored)
+│   ├── signing/                 # Ed25519 key that signs the TLS pin document; backend only (gitignored)
 │   ├── migrations/              # Alembic
 │   └── tests/                   # pytest (unit + integration)
 ├── portal/                      # Operator portal — separate FastAPI app

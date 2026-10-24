@@ -32,6 +32,8 @@ server/
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
 ├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
+├── tls_pins/                  # the apps' signed TLS pin document: models, document
+│                              #   (the only code that signs), watcher, routes
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
@@ -94,6 +96,8 @@ server/
 │   └── runtime.py             # APScheduler bootstrap (in FastAPI lifespan)
 ├── migrations/                # Alembic, async template
 ├── secrets/                   # .p8 / fcm_service_account.json (gitignored)
+├── signing/                   # the TLS pin document's Ed25519 key (gitignored);
+│                              #   mounted into the backend only, never the portal
 └── tests/                     # pytest-asyncio integration + unit tests
 ```
 
@@ -298,7 +302,10 @@ into the backend container via `docker-compose.yml`.
 - Do not send APNs pushes from inside request handlers. Scheduling
   goes through a `push_jobs` row and is delivered by the push pipeline
   (`server/push/pipeline.py`) on its APScheduler tick.
-- Do not commit `.env`, `server/secrets/*.p8`, or anything under
+- Do not mount `server/signing` into the portal or any other service: it
+  holds the TLS pin document's signing key, and the portal, which has the
+  Docker socket, already mounts `server/secrets`.
+- Do not commit `.env`, `server/secrets/*.p8`, `server/signing/`, or anything under
   `server/migrations/versions/` without reviewing first (migrations are
   fine to commit; the warning is to avoid accidentally committing test
   SQL dumps).

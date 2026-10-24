@@ -6,6 +6,8 @@
 .env.*
 !.env.example
 server/secrets/
+# The pin document signing key; mounted into the backend only.
+server/signing/
 *.p8
 
 # Python artefacts

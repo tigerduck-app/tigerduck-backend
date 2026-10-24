@@ -19,6 +19,13 @@ BACKEND_AUDITED_WRITES = {
     ("links.py", "create_link"),
     ("links.py", "test_link"),
     ("links.py", "update_link"),
+    *(
+        ("tls_pins.py", name)
+        for name in (
+            "add_pin", "remove_pin", "set_monitored_hosts", "extend_expiry",
+            "set_auto_publish", "publish", "resign",
+        )
+    ),
 }
 # GETs that return one student's data (user.view) or many students' ids or
 # devices (user.list).
@@ -50,6 +57,7 @@ OTHER_READS = {
     ("status.py", "health"),
     ("status.py", "ready"),
     ("status.py", "status_payload"),
+    ("tls_pins.py", "get_tls_pins"),
 }
 
 

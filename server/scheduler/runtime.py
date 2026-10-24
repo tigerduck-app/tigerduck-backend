@@ -7,7 +7,7 @@ longer than the interval — better to skip than double-send.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -30,6 +30,9 @@ from server.push.reminders import scan_assignment_reminders
 from server.push.session_reauth import scan_sessionless_devices
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
+from server.db import session_scope
+from server.tls_pins.document import PinSigner, ensure_current_document
+from server.tls_pins.watcher import run_pin_watch
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
@@ -51,6 +54,7 @@ def build_scheduler(
     llm: LLMProvider | None = None,
     sync_worker: SyncWorker | None = None,
     push_worker: PushPipelineWorker | None = None,
+    tls_pin_signer: PinSigner | None = None,
 ) -> AsyncIOScheduler:
     """Wire APScheduler with the TigerDuck jobs:
 
@@ -68,6 +72,10 @@ def build_scheduler(
     * `session_reauth_scan` — ask devices left without a session to sign in
       again every 10 min (only with a `push_worker`, which delivers it, and
       not at all with its interval set to 0).
+    * `tls_pin_watch` — check every monitored host's TLS chain hourly,
+      first a minute after start (not at all with its interval set to 0).
+    * `tls_pin_resign` — sign the pin document again when 7 days are left,
+      checked hourly whatever the watcher's interval (only with a key).
     * `link_check` — export each link's alert state and check the links due a
       check, every minute and once at startup (not at all with its interval
       set to 0).
@@ -249,6 +257,39 @@ def build_scheduler(
                 coalesce=True,
                 misfire_grace_time=60,
             )
+    if settings.tls_pin_watch_interval_seconds > 0:
+
+        async def tls_pin_watch() -> None:
+            await run_pin_watch(
+                session_factory,
+                tls_pin_signer,
+                timeout=settings.tls_pin_watch_timeout_seconds,
+            )
+
+        scheduler.add_job(
+            tls_pin_watch,
+            trigger=IntervalTrigger(seconds=settings.tls_pin_watch_interval_seconds),
+            id="tls_pin_watch",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
+            # A deploy would otherwise leave the chain gauges empty for an hour.
+            next_run_time=datetime.now(UTC) + timedelta(minutes=1),
+        )
+    if tls_pin_signer is not None:
+
+        async def tls_pin_resign() -> None:
+            async with session_scope(session_factory) as session:
+                await ensure_current_document(session, tls_pin_signer)
+
+        scheduler.add_job(
+            tls_pin_resign,
+            trigger=IntervalTrigger(hours=1),
+            id="tls_pin_resign",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
+        )
     if settings.link_check_tick_seconds > 0:
 
         async def link_check() -> None:
