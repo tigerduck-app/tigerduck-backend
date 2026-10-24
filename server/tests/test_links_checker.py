@@ -728,6 +728,42 @@ async def test_a_link_edited_during_its_check_records_nothing(
 
 
 @db_test
+async def test_a_check_that_started_before_the_link_was_turned_on_records_nothing(
+    factory, link_name, test_settings, monkeypatch
+) -> None:
+    await _add_link(
+        factory,
+        link_name,
+        enabled=False,
+        last_check_at=datetime.now(UTC) - timedelta(minutes=5),
+        alert_state=ALERT_FAILING,
+        alert_detail="status: expected 200, found 503",
+    )
+
+    async def turned_on_meanwhile(target_url, expectations, allowed_hosts):
+        # What turning it on in the portal writes.
+        async with factory() as session:
+            await session.execute(
+                update(Link)
+                .where(Link.name == link_name)
+                .values(
+                    enabled=True,
+                    alert_state=ALERT_OK,
+                    last_check_at=None,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            await session.commit()
+        return checker.CheckResult(False, "status: expected 200, found 503")
+
+    monkeypatch.setattr(checker, "run_check", turned_on_meanwhile)
+
+    assert await checker.check_link(factory, test_settings, link_name) is None
+    row = await _row(factory, link_name)
+    assert (row.last_check_at, row.alert_state) == (None, ALERT_OK)
+
+
+@db_test
 async def test_a_check_that_ends_after_a_newer_one_does_not_replace_its_result(
     factory, link_name, test_settings, monkeypatch
 ) -> None:

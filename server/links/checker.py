@@ -282,20 +282,26 @@ async def check_link(
     actor: str | None = None,
 ) -> CheckResult | None:
     """Check `name` now and record the result, unless a check that started
-    later recorded its own first. None when the link was removed or edited
-    during the check, which then records nothing. An operator's check
+    later recorded its own first. None when the link was removed, edited,
+    turned off or on during the check, which then records nothing. An operator's check
     (`actor`) writes its `link.test` audit row with the result."""
     async with session_factory() as session:
         link = await session.get(Link, name)
         if link is None:
             return None
         target_url, expectations = link.target_url, list(link.expectations)
+        # Every operator change sets it, turning the link off or on included.
+        updated_at = link.updated_at
     started = datetime.now(UTC)
     # No transaction is open across the fetch.
     result = await run_check(target_url, expectations, settings.links_allowed_hosts)
     async with session_scope(session_factory) as session:
         link = await session.get(Link, name, with_for_update=True)
-        if link is None or (link.target_url, link.expectations) != (target_url, expectations):
+        if link is None or (link.target_url, link.expectations, link.updated_at) != (
+            target_url,
+            expectations,
+            updated_at,
+        ):
             return None
         if actor is not None:
             session.add(
