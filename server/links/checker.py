@@ -67,11 +67,16 @@ def _resolve(host: str, port: int) -> list[str]:
     ]
 
 
-def _public_address(host: str, port: int, resolve: Resolver) -> str:
-    """An address of `host` to connect to, when every address it has is a
-    public one; a private, loopback or link-local one refuses the hop."""
+# ipaddress counts it global, but a NAT64 gateway maps it onto any IPv4
+# address, private ones included.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _public_addresses(host: str, resolve: Resolver) -> list[str]:
+    """The addresses of `host` to try, when every address it has is a public
+    one; a private, loopback or link-local one refuses the hop."""
     try:
-        addresses = list(resolve(host, port))
+        addresses = list(dict.fromkeys(resolve(host, 443)))
     except OSError:
         addresses = []
     if not addresses:
@@ -80,9 +85,9 @@ def _public_address(host: str, port: int, resolve: Resolver) -> str:
         address = ipaddress.ip_address(raw)
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
             address = address.ipv4_mapped
-        if not address.is_global or address.is_multicast:
+        if not address.is_global or address.is_multicast or address in _NAT64:
             raise CheckFailure(f"fetch: {host} resolves to {raw}, not a public address")
-    return addresses[0]
+    return addresses
 
 
 def _next_hop(url: str, location: str, allowed_hosts: Iterable[str]) -> str:
@@ -94,14 +99,46 @@ def _next_hop(url: str, location: str, allowed_hosts: Iterable[str]) -> str:
 
 
 def _read_capped(response: httpx.Response, deadline: float) -> bytes:
+    # Raw bytes: a compressed body could inflate far past the cap in one chunk.
+    encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+    if encoding not in ("", "identity"):
+        raise CheckFailure(f"fetch: the page is sent with Content-Encoding {encoding}")
     body = bytearray()
-    for chunk in response.iter_bytes():
+    for chunk in response.iter_raw():
         body += chunk
         if len(body) >= MAX_BODY_BYTES:
             break
         if time.monotonic() > deadline:
             raise CheckFailure("fetch: the page took too long to load")
     return bytes(body[:MAX_BODY_BYTES])
+
+
+def _request(
+    client: httpx.Client, url: str, address: str, deadline: float
+) -> Page | str:
+    """The page at `url`, asked of `address`, or the Location it redirects to."""
+    if time.monotonic() > deadline:
+        raise CheckFailure("fetch: the page took too long to load")
+    parts = urlsplit(url)
+    netloc = f"[{address}]" if ":" in address else address
+    with client.stream(
+        "GET",
+        urlunsplit(("https", netloc, parts.path or "/", parts.query, "")),
+        headers={"Host": parts.netloc},
+        extensions={"sni_hostname": parts.hostname},
+    ) as response:
+        if response.has_redirect_location:
+            return response.headers["Location"]
+        body = _read_capped(response, deadline)
+        return Page(
+            status=response.status_code,
+            final_url=url,
+            body=body.decode(response.encoding or "utf-8", errors="replace"),
+        )
+
+
+def _describe(exc: httpx.HTTPError) -> str:
+    return f"fetch: {type(exc).__name__}: {exc}"[:300]
 
 
 def fetch(
@@ -114,8 +151,9 @@ def fetch(
     """GET `url`, following at most MAX_REDIRECTS redirects, each checked as
     a target is. Blocking: run it in a worker thread.
 
-    Each request goes to the address that was checked, with the host name
-    in Host and SNI, so a second DNS answer cannot move it elsewhere.
+    Each request goes to an address that was checked, with the host name in
+    Host and SNI, so a second DNS answer cannot move it elsewhere. An address
+    that cannot be reached hands over to the next.
     """
     deadline = time.monotonic() + CHECK_TIMEOUT_SECONDS
     with httpx.Client(
@@ -127,29 +165,20 @@ def fetch(
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
     ) as client:
         for _ in range(MAX_REDIRECTS + 1):
-            parts = urlsplit(url)
-            host = parts.hostname or ""
-            port = parts.port or 443
-            address = _public_address(host, port, resolve)
-            netloc = f"[{address}]" if ":" in address else address
-            try:
-                with client.stream(
-                    "GET",
-                    urlunsplit(("https", f"{netloc}:{port}", parts.path or "/", parts.query, "")),
-                    headers={"Host": parts.netloc},
-                    extensions={"sni_hostname": host},
-                ) as response:
-                    if response.has_redirect_location:
-                        url = _next_hop(url, response.headers["Location"], allowed_hosts)
-                        continue
-                    body = _read_capped(response, deadline)
-                    return Page(
-                        status=response.status_code,
-                        final_url=url,
-                        body=body.decode(response.encoding or "utf-8", errors="replace"),
-                    )
-            except httpx.HTTPError as exc:
-                raise CheckFailure(f"fetch: {type(exc).__name__}: {exc}"[:300]) from exc
+            unreachable: httpx.HTTPError | None = None
+            for address in _public_addresses(urlsplit(url).hostname or "", resolve):
+                try:
+                    answer = _request(client, url, address, deadline)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                    unreachable = exc
+                except httpx.HTTPError as exc:
+                    raise CheckFailure(_describe(exc)) from exc
+            else:
+                raise CheckFailure(_describe(unreachable)) from unreachable
+            if isinstance(answer, Page):
+                return answer
+            url = _next_hop(url, answer, allowed_hosts)
         raise CheckFailure(f"redirect: more than {MAX_REDIRECTS} redirects")
 
 

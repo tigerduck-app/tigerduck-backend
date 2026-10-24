@@ -55,6 +55,16 @@ class Resolver:
         return self.table[host]
 
 
+def _streamed(response: httpx.Response) -> httpx.Response:
+    """`response` with its body unread, as one off the network arrives; the
+    checker reads raw bytes, which a response built with content has spent."""
+    return httpx.Response(
+        response.status_code,
+        headers=response.headers,
+        stream=httpx.ByteStream(response.content),
+    )
+
+
 class Server:
     """Answers by (Host header, path); records every request it got."""
 
@@ -65,7 +75,7 @@ class Server:
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
-        return self.pages[(request.headers["host"], request.url.path)]
+        return _streamed(self.pages[(request.headers["host"], request.url.path)])
 
 
 def _redirect(location: str, status: int = 302) -> httpx.Response:
@@ -136,6 +146,60 @@ def test_a_hop_whose_host_resolves_to_a_private_address_is_refused(address: str)
 
     # Refused before anything was sent to it.
     assert [r.headers["host"] for r in server.requests] == ["www.ntust.edu.tw"]
+
+
+def test_a_nat64_address_is_refused() -> None:
+    dns = {"www.ntust.edu.tw": ["64:ff9b::a00:8"]}
+
+    with pytest.raises(CheckFailure, match="not a public address"):
+        _fetch("https://www.ntust.edu.tw/", Server({}), dns)
+
+
+def _unreachable_first(*reachable: str):
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.host)
+        if request.url.host not in reachable:
+            raise httpx.ConnectError("connection refused", request=request)
+        return _streamed(httpx.Response(200, text="ok"))
+
+    return httpx.MockTransport(handle), seen
+
+
+def test_an_unreachable_address_hands_over_to_the_next() -> None:
+    transport, seen = _unreachable_first("2001:288:6008::20")
+
+    page = fetch(
+        "https://www.ntust.edu.tw/", ALLOWED, resolve=Resolver(DNS), transport=transport
+    )
+
+    assert page.body == "ok"
+    assert seen == ["140.118.31.20", "2001:288:6008::20"]
+
+
+def test_a_host_none_of_whose_addresses_answers_fails_the_check() -> None:
+    transport, seen = _unreachable_first()
+
+    with pytest.raises(CheckFailure, match="fetch: ConnectError"):
+        fetch(
+            "https://www.ntust.edu.tw/", ALLOWED, resolve=Resolver(DNS), transport=transport
+        )
+    assert seen == ["140.118.31.20", "2001:288:6008::20"]
+
+
+def test_a_compressed_page_is_refused_unread() -> None:
+    server = Server(
+        {
+            ("www.ntust.edu.tw", "/"): httpx.Response(
+                200, headers={"Content-Encoding": "gzip"}, content=b"\x1f\x8b"
+            )
+        }
+    )
+
+    with pytest.raises(CheckFailure, match="Content-Encoding gzip"):
+        _fetch("https://www.ntust.edu.tw/", server)
+    assert server.requests[0].headers["Accept-Encoding"] == "identity"
 
 
 def test_one_private_address_among_public_ones_refuses_the_first_hop_too() -> None:
