@@ -84,6 +84,8 @@ export function LinksPage() {
   const linksQ = useQuery<{ links: LinkRow[] }>({
     queryKey: ["links"],
     queryFn: () => api<{ links: LinkRow[] }>("/api/links"),
+    // Scheduled checks change the rows while the page is open.
+    refetchInterval: 15_000,
   });
   const refresh = () => qc.invalidateQueries({ queryKey: ["links"] });
 
