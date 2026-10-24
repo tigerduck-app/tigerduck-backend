@@ -5,6 +5,7 @@ import {
   CalendarDays,
   GraduationCap,
   HardDrive,
+  Link2,
   LogOut,
   Menu,
   Megaphone,
@@ -38,6 +39,7 @@ const NAV: NavItem[] = [
   { to: "/moodle", label: "Moodle", icon: GraduationCap },
   { to: "/inspect", label: "Data Inspection", icon: Search },
   { to: "/semester-dates", label: "Semester dates", icon: CalendarDays },
+  { to: "/links", label: "Links", icon: Link2 },
 ];
 
 const NAV_BOTTOM: NavItem[] = [
