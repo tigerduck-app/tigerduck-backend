@@ -260,3 +260,22 @@ export type CustomPushRecentItem = {
   sent_at: string | null;
   is_queueing: boolean;
 };
+
+export type LinkRow = {
+  name: string;
+  target_url: string;
+  enabled: boolean;
+  expectations: Record<string, unknown>[];
+  check_interval_minutes: number;
+  last_check_at: string | null;
+  last_check_ok: boolean | null;
+  last_check_detail: string | null;
+  alert_state: "ok" | "failing";
+  updated_at: string;
+  updated_by: string;
+};
+
+export type LinkTestResult = {
+  ok: boolean;
+  detail: string;
+};

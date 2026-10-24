@@ -350,6 +350,10 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v3/admin/sync-policies` | 列出同步策略（只在 admin port） | shared secret |
 | `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略（只在 admin port） | shared secret |
 | `POST` | `/push-tick` | 立刻跑一次推播 tick（只在 admin port，portal 呼叫） | shared secret |
+| `GET` | `/admin/links` | 列出轉址連結與上次檢查結果（只在 admin port） | shared secret |
+| `POST` | `/admin/links` | 新增轉址連結（只在 admin port） | shared secret |
+| `PATCH` | `/admin/links/{name}` | 修改、啟用或停用轉址連結（只在 admin port） | shared secret |
+| `POST` | `/admin/links/{name}/test` | 立刻檢查轉址連結（只在 admin port） | shared secret |
 
 ### 基礎
 
@@ -357,6 +361,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 |---|---|---|---|
 | `GET` | `/health` | liveness | 無 |
 | `GET` | `/version` | 版本與 API base path | 無 |
+| `GET` | `/links/{name}` | 307 轉到連結的目標，目標在 portal 編輯 | 無 |
 
 ## 開發
 

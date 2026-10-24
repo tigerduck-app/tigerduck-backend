@@ -32,6 +32,56 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.5.0
+
+- **Links at `/links/<name>` (#108).** `GET
+  https://api.tigerduck.app/links/<name>` answers `307` to the link's
+  target with `Cache-Control: no-store`, without auth and outside `/v3`; an
+  unknown or disabled name, or a target off the allowed hosts, answers
+  `404`. nginx-proxy-manager already forwards the path; nothing changes
+  there.
+- **Migration `35df7613737a`** adds `links` and seeds `ntust-calendar`,
+  which goes to `https://www.academic.ntust.edu.tw/p/404-1048-78935.php`
+  and is checked for status 200, the final host
+  `www.academic.ntust.edu.tw` and at least one `.ics` link. A row already
+  there is kept.
+- **Allowed hosts.** A target must be `https` on a host in
+  `TIGERDUCK_LINKS_ALLOWED_HOSTS` (a JSON list, default `["ntust.edu.tw"]`,
+  each with its subdomains), on the default port, with no user name,
+  password, whitespace or control character. It is checked when saved, when
+  served, before each check and on every redirect the checker follows.
+- **The portal's Links page** lists the links and creates, edits, enables,
+  disables and tests them. It goes through new routes on the admin listener
+  (`/admin/links` on `:9001`), which record `link.create`, `link.update`,
+  `link.enable`, `link.disable` and `link.test` in `admin_audit_log`.
+  Rebuild both with `./start.sh`.
+- **The link checker.** The `link_check` job (every minute,
+  `TIGERDUCK_LINK_CHECK_TICK_SECONDS`, 0 turns it off) fetches each enabled
+  link at its interval (60 minutes unless set) from the backend container,
+  with that container's trust store, and runs its rules. The first check of
+  `ntust-calendar` runs right after the deploy; press Test on the Links
+  page to see it. A certificate error there means the container cannot
+  validate the school's chain, and the alert below fires until it can.
+- **Alerts.** Grafana's new rule `Link check failing` posts to Discord once
+  when a link fails, naming the rule it failed and what was found in the
+  check that started the failure, and again when it passes or is disabled.
+  That detail and the alert state are kept on the row, and the rule reads
+  the last value of the past 15 minutes, so a restart or an outage of the
+  backend shorter than that neither repeats nor clears the alert; a longer
+  one clears it and the next start posts it again. Grafana reads its
+  provisioning only at start, so after `./start.sh` run
+  `docker compose restart grafana`.
+- **The apps switch later.** They keep following
+  `https://r.xinshou.tw/ntust-calender` until their releases move to
+  `/links/ntust-calendar` (tigerduck-app#687, tigerduck-app-android#375);
+  keep `r.xinshou.tw` serving until old versions fade.
+- **Rolling back.** Before any app uses the link, run
+  `docker compose exec backend alembic downgrade c5e8a2f71d40` first; it
+  drops the table. After an app release uses it, a rollback leaves that
+  release without the calendar.
+
+---
+
 ## Upgrading to 3.4.1
 
 - **Assignment reminders count from the student's own due date.** An
