@@ -299,6 +299,13 @@ class Settings(BaseSettings):
     # against each NTUST subdomain the pipeline reaches.
     bulletin_ca_bundle: Path | None = None
 
+    # --- Links (`/links/{name}`, server/links/) ---
+    # Hosts a link may redirect to, each with its subdomains; checked when a
+    # target is saved, when it is served and on every hop the checker follows.
+    links_allowed_hosts: list[str] = Field(default_factory=lambda: ["ntust.edu.tw"])
+    # How often the checker looks for links due a check; 0 turns it off.
+    link_check_tick_seconds: int = 60
+
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "sk-local"
