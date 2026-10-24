@@ -550,6 +550,18 @@ async def test_a_hung_probe_is_cut_off_and_is_no_success(db_session, factory) ->
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_a_host_waiting_for_a_thread_still_gets_its_whole_timeout() -> None:
+    def slow(target: str) -> Probe:
+        time.sleep(0.4)
+        return Probe("trusted")
+
+    hosts = [f"h{i}.tls.test" for i in range(watcher.PROBE_THREADS + 2)]
+    results = await asyncio.gather(*(watcher._probe_in_thread(slow, h, 0.6) for h in hosts))
+
+    assert [r.status for r in results] == ["trusted"] * len(hosts)
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_a_refused_host_is_never_probed(db_session, factory) -> None:
     db_session.add(
         TlsPinSet(

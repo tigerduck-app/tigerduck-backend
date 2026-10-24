@@ -56,7 +56,11 @@ AIA_FETCH_DEADLINE_SECONDS = 20.0
 AIA_MAX_BYTES = 64 * 1024
 AIA_MAX_HOPS = 3
 # A host that stalls holds one of these threads, not the default executor's.
-_probe_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="tls-probe")
+PROBE_THREADS = 8
+_probe_pool = ThreadPoolExecutor(max_workers=PROBE_THREADS, thread_name_prefix="tls-probe")
+# Held until a probe's thread is done, so a host's timeout starts when a thread
+# takes it, not while it waits behind slow hosts.
+_probe_slots = asyncio.Semaphore(PROBE_THREADS)
 # OpenSSL's codes for a chain that stops short of a trusted root.
 _INCOMPLETE_CHAIN_CODES = frozenset({2, 20, 21})
 
@@ -246,11 +250,19 @@ def probe(
         return Probe("error", detail=f"{type(exc).__name__}: {exc}")
 
 
+def _free_slot(call: asyncio.Future) -> None:
+    _probe_slots.release()
+    if not call.cancelled():
+        call.exception()  # a probe that fails after its timeout was already reported
+
+
 async def _probe_in_thread(probe_fn: Callable[[str], Probe], target: str, timeout: float) -> Probe:
+    await _probe_slots.acquire()
+    call = asyncio.get_running_loop().run_in_executor(_probe_pool, probe_fn, target)
+    call.add_done_callback(_free_slot)
     try:
-        # On timeout a queued probe is dropped; a running one ends at its socket timeouts.
-        call = asyncio.get_running_loop().run_in_executor(_probe_pool, probe_fn, target)
-        return await asyncio.wait_for(call, timeout)
+        # A timed-out probe keeps its slot until its socket timeouts end it.
+        return await asyncio.wait_for(asyncio.shield(call), timeout)
     except TimeoutError:
         return Probe("error", detail="timeout")
     except Exception as exc:  # one host's bug must not end the run
