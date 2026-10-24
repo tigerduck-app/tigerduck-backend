@@ -141,7 +141,7 @@ def _request(
         )
 
 
-def _describe(exc: httpx.HTTPError) -> str:
+def _describe(exc: Exception) -> str:
     return f"fetch: {type(exc).__name__}: {exc}"[:300]
 
 
@@ -198,11 +198,16 @@ async def run_check(
             asyncio.to_thread(fetch, target_url, list(allowed_hosts)),
             timeout=CHECK_TIMEOUT_SECONDS + 5,
         )
+        failure = first_failure(page, expectations)
     except TimeoutError:
         return CheckResult(False, "fetch: no answer in time")
     except CheckFailure as exc:
         return CheckResult(False, str(exc))
-    failure = first_failure(page, expectations)
+    except Exception as exc:
+        # One the fetch did not foresee, httpx.InvalidURL for one: it fails
+        # this link's check rather than the links behind it.
+        logger.exception("links.check_error", url=target_url)
+        return CheckResult(False, _describe(exc))
     if failure is not None:
         return CheckResult(False, failure)
     return CheckResult(True, f"{page.status} from {urlsplit(page.final_url).hostname}")
@@ -290,7 +295,12 @@ async def run_link_checks(
     the enabled links that are due. Runs at startup too, so the alert state
     is back before Grafana next evaluates."""
     async with session_factory() as session:
-        links = (await session.execute(select(Link))).scalars().all()
+        # The longest unchecked first.
+        links = (
+            await session.execute(
+                select(Link).order_by(Link.last_check_at.asc().nulls_first(), Link.name)
+            )
+        ).scalars().all()
     for link in links:
         publish(link)
     for name in metrics.published_links() - {link.name for link in links}:

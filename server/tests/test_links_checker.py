@@ -625,6 +625,38 @@ async def test_the_job_checks_only_enabled_links_that_are_due(
 
 
 @db_test
+async def test_a_check_that_raises_fails_its_link_and_the_tick_goes_on(
+    factory, link_name, test_settings, monkeypatch
+) -> None:
+    older, never = f"{link_name}-older", f"{link_name}-never"
+    await _add_link(factory, older, last_check_at=datetime.now(UTC) - timedelta(days=1))
+    # Added last, checked first: a link never checked goes ahead of the others.
+    await _add_link(factory, never)
+    urls: list[str] = []
+
+    def raises_once(url, allowed_hosts):
+        urls.append(url)
+        if len(urls) == 1:
+            raise httpx.InvalidURL("Invalid non-printable ASCII character in URL")
+        return _page()
+
+    monkeypatch.setattr(checker, "fetch", raises_once)
+
+    try:
+        assert await checker.run_link_checks(factory, test_settings) == 2
+        row = await _row(factory, never)
+        assert (row.last_check_ok, row.alert_state) == (False, ALERT_FAILING)
+        assert row.last_check_detail == (
+            "fetch: InvalidURL: Invalid non-printable ASCII character in URL"
+        )
+        assert row.last_check_at is not None
+        assert (await _row(factory, older)).last_check_ok is True
+    finally:
+        _new_process(older)
+        _new_process(never)
+
+
+@db_test
 async def test_a_link_edited_during_its_check_records_nothing(
     factory, link_name, test_settings, monkeypatch
 ) -> None:
