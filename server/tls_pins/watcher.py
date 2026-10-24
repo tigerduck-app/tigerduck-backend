@@ -1,8 +1,8 @@
 """The pin watcher: checks the chain every monitored host serves.
 
 A validated chain that shares no pin with its set gets its intermediates
-and root added, never its leaf, as pending pins that only Publish now
-releases. A chain that fails system trust is reported and changes nothing. Pins are
+and root added, never its leaf, and published when the set allows it. A
+chain that fails system trust is reported and changes nothing. Pins are
 never removed here; an operator removes them in the portal.
 """
 
@@ -371,10 +371,8 @@ def _apply(
                             "first_seen_at": seen_at,
                             "last_seen_at": seen_at,
                             "source": "watcher",
-                            # Pending even with auto publish on: the chain's root is
-                            # not pinned, and a network attacker can serve any chain
-                            # that system trust accepts.
-                            "pending": True,
+                            # Left out of every document until Publish now.
+                            "pending": not pin_set.auto_publish,
                         }
                     )
         pin_set.pins = [

@@ -89,12 +89,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   starts, it opens TLS to each monitored host (ports 443, 993 and 465 on the
   NTUST hosts) with the container's trust store, completing a chain NTUST
   sends short through its AIA address over HTTP. A chain that shares no pin
-  with its set gets its intermediates and root added to the set, marked "not
-  published": they stay out of every document, whatever else publishes, until
-  an operator presses Publish now, `auto_publish` on or off, because the
-  chain's root is one the set does not pin and a network attacker can serve
-  any chain the trust store accepts. The chain mismatch alert keeps firing
-  until then. The portal saves, and
+  with its set gets its intermediates and root added to the set; with
+  `auto_publish` off they are marked "not published" and left out of every
+  document, whatever else publishes, until an operator presses Publish now,
+  and the chain mismatch alert keeps firing until then. The portal saves, and
   the watcher connects to, only host names under their set's domains, on
   ports 443, 465 or 993, that resolve to public addresses.
   `TIGERDUCK_TLS_PIN_WATCH_INTERVAL_SECONDS` (3600; 0 turns it off) and
@@ -112,11 +110,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   both files only at start: `docker compose restart grafana` after
   `./start.sh`.
 
-- **Turning on `auto_publish`.** With it on, the watcher publishes a set
-  whenever the stored set differs from the served document, such as after
-  portal edits saved while the signing key was missing; it never publishes
-  the pins it found itself. Leave it off until the watcher has run for a
-  while without alerts you did not expect. First check that the
+- **Turning on `auto_publish`.** Leave it off until the watcher has run for
+  a while without alerts you did not expect. First check that the
   container's trust store validates every monitored host's chain, TWCA
   CYBER Root CA included:
 
