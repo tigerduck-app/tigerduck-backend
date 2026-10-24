@@ -16,9 +16,11 @@ _NAME = re.compile(NAME_PATTERN)
 
 # Letters, digits and hyphens only. The apps' URL parsers read a backslash as
 # a slash, so `https://evil.example\.ntust.edu.tw` would take them to
-# evil.example although urlsplit reports a host under ntust.edu.tw.
-_LABEL = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+# evil.example although urlsplit reports a host under ntust.edu.tw. Labels
+# stay within DNS's 63 bytes, past which getaddrinfo raises UnicodeError.
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _HOSTNAME = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
+_MAX_HOSTNAME = 253
 
 
 class InvalidTarget(ValueError):
@@ -54,7 +56,7 @@ def validate_target(url: str, allowed_hosts: Iterable[str]) -> str:
     host = parts.hostname
     if not host:
         raise InvalidTarget("the URL has no host")
-    if not _HOSTNAME.fullmatch(host):
+    if len(host) > _MAX_HOSTNAME or not _HOSTNAME.fullmatch(host):
         raise InvalidTarget(f"the host {host!r} is not a plain host name")
     try:
         port = parts.port
