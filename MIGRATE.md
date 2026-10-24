@@ -63,10 +63,14 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   page to see it. A certificate error there means the container cannot
   validate the school's chain, and the alert below fires until it can.
 - **Alerts.** Grafana's new rule `Link check failing` posts to Discord once
-  when a link fails, naming the failing rule and what was found, and again
-  when it passes. The state is kept on the row, so a restart neither
-  repeats nor clears it. Grafana reads its provisioning only at start, so
-  after `./start.sh` run `docker compose restart grafana`.
+  when a link fails, naming the rule it failed and what was found in the
+  check that started the failure, and again when it passes or is disabled.
+  That detail and the alert state are kept on the row, and the rule reads
+  the last value of the past 15 minutes, so a restart or an outage of the
+  backend shorter than that neither repeats nor clears the alert; a longer
+  one clears it and the next start posts it again. Grafana reads its
+  provisioning only at start, so after `./start.sh` run
+  `docker compose restart grafana`.
 - **The apps switch later.** They keep following
   `https://r.xinshou.tw/ntust-calender` until their releases move to
   `/links/ntust-calendar` (tigerduck-app#687, tigerduck-app-android#375);

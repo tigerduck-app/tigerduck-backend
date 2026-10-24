@@ -535,43 +535,47 @@ LINK_CHECK_LAST = Gauge(
 )
 LINK_CHECK_FAILING = Gauge(
     "tigerduck_link_check_failing",
-    "1 while a link fails; the failure label is the rule it first failed "
-    "and what was found, kept until it recovers so the alert fires once.",
+    "1 while a link fails, 0 once it recovers or is disabled. The failure "
+    "label is the detail of the check that started the failure, kept until "
+    "the link recovers, so the alert's labels survive a restart.",
     ["name", "failure"],
 )
 
-# The failure label each failing link is exported with.
+# The failure label each link's failing series carries, at 1 or at 0.
 _link_failures: dict[str, str] = {}
 _link_names: set[str] = set()
 
 
 def publish_link(
-    name: str, *, ok: bool, checked_at: float, failure: str | None
+    name: str, *, ok: bool, checked_at: float | None, failure: str | None
 ) -> None:
     _link_names.add(name)
     LINK_CHECK_OK.labels(name=name).set(1 if ok else 0)
-    LINK_CHECK_LAST.labels(name=name).set(checked_at)
+    if checked_at is None:
+        LINK_CHECK_LAST.remove(name)
+    else:
+        LINK_CHECK_LAST.labels(name=name).set(checked_at)
     exported = _link_failures.get(name)
     if ok:
+        # At 0, not removed: the alert then resolves at once, with its labels.
         if exported is not None:
-            LINK_CHECK_FAILING.remove(name, exported)
-            del _link_failures[name]
-    elif exported is None:
-        exported = failure or "unknown"
-        _link_failures[name] = exported
-        LINK_CHECK_FAILING.labels(name=name, failure=exported).set(1)
+            LINK_CHECK_FAILING.labels(name=name, failure=exported).set(0)
+        return
+    failure = failure or "unknown"
+    if exported is not None and exported != failure:
+        LINK_CHECK_FAILING.remove(name, exported)
+    _link_failures[name] = failure
+    LINK_CHECK_FAILING.labels(name=name, failure=failure).set(1)
 
 
 def forget_link(name: str) -> None:
-    """Drop a disabled or deleted link's series."""
-    if name not in _link_names:
-        return
+    """A disabled or deleted link: its failure goes to 0, the rest go."""
     _link_names.discard(name)
     LINK_CHECK_OK.remove(name)
     LINK_CHECK_LAST.remove(name)
-    exported = _link_failures.pop(name, None)
+    exported = _link_failures.get(name)
     if exported is not None:
-        LINK_CHECK_FAILING.remove(name, exported)
+        LINK_CHECK_FAILING.labels(name=name, failure=exported).set(0)
 
 
 def published_links() -> frozenset[str]:

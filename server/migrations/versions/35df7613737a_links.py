@@ -34,6 +34,7 @@ def upgrade() -> None:
             last_check_ok          boolean,
             last_check_detail      text,
             alert_state            text NOT NULL DEFAULT 'ok',
+            alert_detail           text,
             updated_at             timestamptz NOT NULL DEFAULT now(),
             updated_by             text NOT NULL
         )

@@ -339,7 +339,14 @@ def link_name(request):
     # The metrics are process-wide; a name per test keeps their series apart.
     name = "t-" + request.node.name.removeprefix("test_")[:50].replace("_", "-")
     yield name
+    _new_process(name)
+
+
+def _new_process(name: str) -> None:
+    """What a restart leaves of `name`'s series: nothing."""
     metrics.forget_link(name)
+    metrics.LINK_CHECK_FAILING.remove_by_labels({"name": name})
+    metrics._link_failures.pop(name, None)
 
 
 async def _add_link(factory, name: str, **fields) -> None:
@@ -386,7 +393,7 @@ async def test_a_link_alerts_once_as_it_fails_and_once_as_it_recovers(
     await checker.check_link(factory, test_settings, link_name)
     row = await _row(factory, link_name)
     assert (row.alert_state, row.last_check_ok) == (ALERT_FAILING, False)
-    assert row.last_check_detail == "status: expected 200, found 503"
+    assert row.last_check_detail == row.alert_detail == "status: expected 200, found 503"
     assert _sample("tigerduck_link_check_ok", name=link_name) == 0
     assert _failing_series(link_name) == {"status: expected 200, found 503": 1}
 
@@ -395,13 +402,15 @@ async def test_a_link_alerts_once_as_it_fails_and_once_as_it_recovers(
     row = await _row(factory, link_name)
     assert row.alert_state == ALERT_FAILING
     assert row.last_check_detail == "fetch: ConnectError: refused"
+    assert row.alert_detail == "status: expected 200, found 503"
     assert _failing_series(link_name) == {"status: expected 200, found 503": 1}
 
+    # The series stays at 0, so the alert resolves with the labels it fired with.
     await checker.check_link(factory, test_settings, link_name)
     row = await _row(factory, link_name)
-    assert (row.alert_state, row.last_check_ok) == (ALERT_OK, True)
+    assert (row.alert_state, row.last_check_ok, row.alert_detail) == (ALERT_OK, True, None)
     assert _sample("tigerduck_link_check_ok", name=link_name) == 1
-    assert _failing_series(link_name) == {}
+    assert _failing_series(link_name) == {"status: expected 200, found 503": 0}
     assert _sample("tigerduck_link_check_last_timestamp", name=link_name) == (
         row.last_check_at.timestamp()
     )
@@ -417,11 +426,12 @@ async def test_a_restart_exports_the_stored_alert_state_before_any_check(
         link_name,
         last_check_at=checked,
         last_check_ok=False,
-        last_check_detail="status: expected 200, found 503",
+        # The failure has changed since it started; the alert keeps the first.
+        last_check_detail="fetch: ConnectError: refused",
         alert_state=ALERT_FAILING,
+        alert_detail="status: expected 200, found 503",
     )
-    # A new process: nothing exported yet.
-    metrics.forget_link(link_name)
+    _new_process(link_name)
     pages = Pages(_page(status=502), _page())
     monkeypatch.setattr(checker, "fetch", pages)
 
@@ -433,12 +443,56 @@ async def test_a_restart_exports_the_stored_alert_state_before_any_check(
 
     # A failing check after the restart is no new failure.
     await checker.check_link(factory, test_settings, link_name)
-    assert (await _row(factory, link_name)).alert_state == ALERT_FAILING
+    row = await _row(factory, link_name)
+    assert row.alert_state == ALERT_FAILING
+    assert row.last_check_detail == "status: expected 200, found 502"
     assert _failing_series(link_name) == {"status: expected 200, found 503": 1}
 
     await checker.check_link(factory, test_settings, link_name)
     assert (await _row(factory, link_name)).alert_state == ALERT_OK
-    assert _failing_series(link_name) == {}
+    assert _failing_series(link_name) == {"status: expected 200, found 503": 0}
+
+
+@db_test
+async def test_a_disabled_failing_link_drops_its_failure_to_0(
+    factory, link_name, test_settings
+) -> None:
+    await _add_link(
+        factory,
+        link_name,
+        enabled=False,
+        last_check_at=datetime.now(UTC),
+        alert_state=ALERT_FAILING,
+        alert_detail="status: expected 200, found 503",
+    )
+    metrics.publish_link(
+        link_name, ok=False, checked_at=0.0, failure="status: expected 200, found 503"
+    )
+
+    await checker.run_link_checks(factory, test_settings)
+
+    assert _sample("tigerduck_link_check_ok", name=link_name) is None
+    assert _failing_series(link_name) == {"status: expected 200, found 503": 0}
+
+
+@db_test
+async def test_a_failing_link_edited_to_be_checked_again_keeps_alerting(
+    factory, link_name, test_settings
+) -> None:
+    await _add_link(
+        factory,
+        link_name,
+        last_check_at=None,
+        alert_state=ALERT_FAILING,
+        alert_detail="status: expected 200, found 503",
+    )
+    _new_process(link_name)
+
+    checker.publish(await _row(factory, link_name))
+
+    assert _sample("tigerduck_link_check_ok", name=link_name) == 0
+    assert _sample("tigerduck_link_check_last_timestamp", name=link_name) is None
+    assert _failing_series(link_name) == {"status: expected 200, found 503": 1}
 
 
 @db_test

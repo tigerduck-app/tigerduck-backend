@@ -33,6 +33,9 @@ class Link(Base):
     # ALERT_OK or ALERT_FAILING: what the alert last said, so a restart
     # neither repeats a failure alert nor misses a recovery.
     alert_state: Mapped[str] = mapped_column(Text, server_default=text("'ok'"))
+    # The detail of the check that started the failure. The alert is labelled
+    # with it until the link recovers, so its label set survives a restart.
+    alert_detail: Mapped[str | None] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
