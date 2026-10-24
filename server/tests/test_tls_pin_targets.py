@@ -63,6 +63,7 @@ def test_a_host_must_sit_under_its_sets_domains() -> None:
         "10.0.0.7", "127.0.0.1", "169.254.169.254", "100.64.0.1", "192.168.1.1",
         "::1", "fe80::1%en0", "fd00::1", "::ffff:127.0.0.1", "::ffff:10.0.0.7",
         "64:ff9b::a00:7", "64:ff9b::808:808",
+        "2002:a00:7::1", "2002:808:808::1", "2001:0:a00:7::1", "2001:0:808:808::1",
     ],
 )
 def test_non_global_and_nat64_addresses_are_refused(address) -> None:

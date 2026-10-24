@@ -10,7 +10,7 @@ import socket
 
 ALLOWED_PORTS = frozenset({443, 465, 993})
 _HOST_NAME = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+")
-# NAT64 reaches IPv4 addresses, private ones included, yet counts as global.
+# NAT64, 6to4 and Teredo reach IPv4 addresses, private ones included.
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 
@@ -53,7 +53,7 @@ def under_domains(host: str, domains: list[dict]) -> bool:
 def address_allowed(address: str) -> bool:
     ip = ipaddress.ip_address(address.split("%", 1)[0])
     if isinstance(ip, ipaddress.IPv6Address):
-        if ip in _NAT64:
+        if ip in _NAT64 or ip.sixtofour is not None or ip.teredo is not None:
             return False
         ip = ip.ipv4_mapped or ip
     return ip.is_global
