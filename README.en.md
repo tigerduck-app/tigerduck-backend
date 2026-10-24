@@ -350,6 +350,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/v3/admin/sync-policies` | List sync policies (admin port only) | shared secret |
 | `PATCH` | `/v3/admin/sync-policies/{job_type}` | Update sync policy (admin port only) | shared secret |
 | `POST` | `/push-tick` | Run a push tick now (admin port only; the portal calls it) | shared secret |
+| `POST`/`PUT` | `/tls-pins/*` | Add or remove a TLS pin, edit monitored hosts, extend an expiry, toggle auto_publish, publish or re-sign now (admin port only; the portal calls them) | shared secret |
 
 ### Meta
 
@@ -357,6 +358,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 |---|---|---|---|
 | `GET` | `/health` | Liveness check | none |
 | `GET` | `/version` | Version and API base path | none |
+| `GET` | `/.well-known/tigerduck/tls-pins.json` | The apps' signed TLS pin document (Ed25519) | none |
 
 ## Development
 

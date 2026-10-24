@@ -32,6 +32,8 @@ server/
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
 ├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
+├── tls_pins/                  # the apps' signed TLS pin document: models, document
+│                              #   (the only code that signs), watcher, routes
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)

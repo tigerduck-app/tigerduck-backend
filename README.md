@@ -350,6 +350,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v3/admin/sync-policies` | 列出同步策略（只在 admin port） | shared secret |
 | `PATCH` | `/v3/admin/sync-policies/{job_type}` | 更新同步策略（只在 admin port） | shared secret |
 | `POST` | `/push-tick` | 立刻跑一次推播 tick（只在 admin port，portal 呼叫） | shared secret |
+| `POST`/`PUT` | `/tls-pins/*` | TLS pin 的增刪、監看主機、到期日、auto_publish、立即發布或重簽（只在 admin port，portal 呼叫） | shared secret |
 
 ### 基礎
 
@@ -357,6 +358,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 |---|---|---|---|
 | `GET` | `/health` | liveness | 無 |
 | `GET` | `/version` | 版本與 API base path | 無 |
+| `GET` | `/.well-known/tigerduck/tls-pins.json` | App 的 TLS pin 簽章文件（Ed25519） | 無 |
 
 ## 開發
 

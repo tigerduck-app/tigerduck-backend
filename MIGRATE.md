@@ -32,6 +32,83 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.5.0
+
+- **The TLS pin document.** `GET /.well-known/tigerduck/tls-pins.json`,
+  public and outside `/v3`, serves the signed pin document the apps take
+  their TLS pins from, with `Cache-Control: public, max-age=300` and an
+  `ETag`. It answers 404 until the first document is published. Migration
+  `8996a3bf992f` adds `tls_pin_sets` and `tls_pin_documents` and seeds the
+  `ntust` and `library` sets with the apps' built-in pins, expiries and
+  monitored hosts, all with `auto_publish` off.
+
+- **The signing key.** The document is signed with the Ed25519 key
+  `server/secrets/tls-pins-td-pins-2026a.pem` (PKCS #8 PEM, mode 0600),
+  which is the default of the new `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH`, so
+  `.env` needs nothing. The key_id the apps know it by, `td-pins-2026a`, is
+  the file name between `tls-pins-` and `.pem`. Without the file the backend
+  starts, logs `tls_pins.signing_disabled` and publishes nothing; the apps
+  keep their built-in pins. To make a new key, on the host (the container
+  mounts `server/secrets` read-only):
+
+  ```bash
+  uv run python scripts/generate_tls_pin_key.py <key_id>
+  # or, the same format:
+  openssl genpkey -algorithm ed25519 -out server/secrets/tls-pins-<key_id>.pem
+  chmod 600 server/secrets/tls-pins-<key_id>.pem
+  ```
+
+  The script refuses to overwrite a file and prints only the key_id and the
+  raw public key in base64. The standby key `td-pins-2026b` stays offline.
+  To rotate, first ship apps that embed the new public key, then point
+  `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH` at the new file and `./start.sh`.
+
+- **The first document.** With the key in place the backend publishes the
+  first document as it starts (reason `initial`). Its serial is the apps'
+  `baseline_serial`: it is the first row under Documents on the portal's new
+  TLS pins page, and in `docker compose logs backend | grep tls_pins.published`.
+  A document is valid for 30 days and is signed again under a new serial
+  when 7 days are left.
+
+- **The pin watcher.** Every hour, starting a minute after the backend
+  starts, it opens TLS to each monitored host (ports 443, 993 and 465 on the
+  NTUST hosts) with the container's trust store, completing a chain NTUST
+  sends short through its AIA address over HTTP. A chain that shares no pin
+  with its set gets its intermediates and root added to the set; with
+  `auto_publish` off they are published only when an operator presses
+  Publish now. `TIGERDUCK_TLS_PIN_WATCH_INTERVAL_SECONDS` (3600; 0 turns it
+  off) and `TIGERDUCK_TLS_PIN_WATCH_TIMEOUT_SECONDS` (30, per host) tune it.
+  The portal's TLS pins page shows each pin's first and last seen, each
+  host's last result and chain, and the document history, and carries the
+  pin actions; each one is recorded in `admin_audit_log`.
+
+- **Alerts.** Six rules in `monitoring/grafana/provisioning/alerting/rules.yml`
+  go to the Discord channel: the watcher not reaching a host for 3 hours, a
+  chain failing system trust, a chain sharing no pin with the served
+  document, a published change to a set, the document within 3 days of
+  expiry, and a set within 60 days of expiry. Grafana reads the file only at
+  start: `docker compose restart grafana` after `./start.sh`.
+
+- **Turning on `auto_publish`.** Leave it off until the watcher has run for
+  a while without alerts you did not expect. First check that the
+  container's trust store validates every monitored host's chain, TWCA
+  CYBER Root CA included:
+
+  ```bash
+  docker compose exec backend sh -c 'ls /etc/ssl/certs | grep -i twca'
+  docker compose exec backend python -c "from server.tls_pins.watcher import probe; r = probe('www.ntust.edu.tw'); print(r.status, r.detail, [c.subject.rfc4514_string() for c in r.chain])"
+  ```
+
+  and that every host on the portal's TLS pins page shows `trusted`. Then
+  tick Auto-publish for each set there.
+
+- **Rolling back.** With 3.5.0 running, run
+  `docker compose exec backend alembic downgrade c5e8a2f71d40` first; it
+  drops both tables. The apps keep the last document they verified until it
+  expires, then use their built-in pins.
+
+---
+
 ## Upgrading to 3.4.1
 
 - **Assignment reminders count from the student's own due date.** An
