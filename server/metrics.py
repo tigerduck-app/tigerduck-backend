@@ -520,6 +520,64 @@ def observe_llm_request(outcome: str, seconds: float) -> None:
     LLM_REQUEST_DURATION.labels(outcome=outcome).observe(seconds)
 
 
+# --- Links (server/links/checker.py) ---
+
+LINK_CHECK_OK = Gauge(
+    "tigerduck_link_check_ok",
+    "1 while an enabled link passes its check, 0 while it fails. Set from "
+    "the links table at startup, so a restart keeps the alert state.",
+    ["name"],
+)
+LINK_CHECK_LAST = Gauge(
+    "tigerduck_link_check_last_timestamp",
+    "Unix time each enabled link was last checked.",
+    ["name"],
+)
+LINK_CHECK_FAILING = Gauge(
+    "tigerduck_link_check_failing",
+    "1 while a link fails; the failure label is the rule it first failed "
+    "and what was found, kept until it recovers so the alert fires once.",
+    ["name", "failure"],
+)
+
+# The failure label each failing link is exported with.
+_link_failures: dict[str, str] = {}
+_link_names: set[str] = set()
+
+
+def publish_link(
+    name: str, *, ok: bool, checked_at: float, failure: str | None
+) -> None:
+    _link_names.add(name)
+    LINK_CHECK_OK.labels(name=name).set(1 if ok else 0)
+    LINK_CHECK_LAST.labels(name=name).set(checked_at)
+    exported = _link_failures.get(name)
+    if ok:
+        if exported is not None:
+            LINK_CHECK_FAILING.remove(name, exported)
+            del _link_failures[name]
+    elif exported is None:
+        exported = failure or "unknown"
+        _link_failures[name] = exported
+        LINK_CHECK_FAILING.labels(name=name, failure=exported).set(1)
+
+
+def forget_link(name: str) -> None:
+    """Drop a disabled or deleted link's series."""
+    if name not in _link_names:
+        return
+    _link_names.discard(name)
+    LINK_CHECK_OK.remove(name)
+    LINK_CHECK_LAST.remove(name)
+    exported = _link_failures.pop(name, None)
+    if exported is not None:
+        LINK_CHECK_FAILING.remove(name, exported)
+
+
+def published_links() -> frozenset[str]:
+    return frozenset(_link_names)
+
+
 # --- Exposition ---
 
 

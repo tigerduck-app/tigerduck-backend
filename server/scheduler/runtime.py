@@ -7,6 +7,8 @@ longer than the interval — better to skip than double-send.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,6 +19,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.links.checker import run_link_checks
 from server.metrics import instrument_scheduler
 from server.push.custom_push_dispatcher import dispatch_pending_custom_pushes
 from server.push.router import PushRouter
@@ -65,6 +68,9 @@ def build_scheduler(
     * `session_reauth_scan` — ask devices left without a session to sign in
       again every 10 min (only with a `push_worker`, which delivers it, and
       not at all with its interval set to 0).
+    * `link_check` — export each link's alert state and check the links due a
+      check, every minute and once at startup (not at all with its interval
+      set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -243,6 +249,21 @@ def build_scheduler(
                 coalesce=True,
                 misfire_grace_time=60,
             )
+    if settings.link_check_tick_seconds > 0:
+
+        async def link_check() -> None:
+            await run_link_checks(session_factory, settings)
+
+        scheduler.add_job(
+            link_check,
+            trigger=IntervalTrigger(seconds=settings.link_check_tick_seconds),
+            id="link_check",
+            # At startup, so the exported alert state survives a restart.
+            next_run_time=datetime.now(UTC),
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)
     return scheduler
