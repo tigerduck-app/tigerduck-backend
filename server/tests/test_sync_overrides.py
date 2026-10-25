@@ -113,7 +113,7 @@ async def test_override_marks_an_assignment_whose_rows_are_all_soft_deleted(
     retried it on every full sync; the server-synced row takes it now."""
     login = await do_login(client)
     gone = datetime.now(UTC)
-    await seed_assignment(
+    placeholder_id = await seed_assignment(
         client, login["user"]["id"], moodle_course_id=0, deleted_at=gone
     )
     synced_id = await seed_assignment(
@@ -139,7 +139,7 @@ async def test_override_marks_an_assignment_whose_rows_are_all_soft_deleted(
         json={"local_status": "none"},
     )
     assert response.status_code == 200, response.text
-    assert await assignment_marks(client) == [(synced_id, "none")]
+    assert await assignment_marks(client) == [(placeholder_id, "none"), (synced_id, "none")]
 
 
 async def test_clearing_a_mark_clears_every_row_of_the_assignment(client) -> None:
@@ -920,3 +920,54 @@ async def test_two_devices_writing_at_once_keep_the_later_stamp(client) -> None:
             f"#{round_no:02X}FF00",
             later,
         ), round_no
+
+
+async def put_row_mark(client, login: dict, row_id: int, status: str, at: datetime) -> None:
+    """A mark sent to one row of the assignment, as the academics PUT does."""
+    response = await client.put(
+        f"/v3/assignments/{row_id}/override",
+        headers=bearer(login),
+        json={"local_status": status, "local_status_updated_at": at.isoformat()},
+    )
+    assert response.status_code == 200, response.text
+
+
+async def test_a_clear_stamps_every_row_of_the_assignment(client) -> None:
+    """Rows without an override get a stamped `none` too, so a mark made
+    before the clear and sent to another row afterwards loses."""
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    placeholder_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=0)
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    await mark(client, login, "none", t + timedelta(minutes=10))
+    await put_row_mark(client, login, placeholder_id, "ignored", t + timedelta(minutes=5))
+
+    assert {status for _, status in await assignment_marks(client)} == {"none"}
+
+
+async def test_a_refused_clear_logs_the_mark_that_stays(client) -> None:
+    """A clear stamped between an older mark on another row and a newer one
+    on the row the apps see clears only the older; the change log says the
+    newer mark stays."""
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    placeholder_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=0)
+    t = datetime.now(UTC) - timedelta(hours=1)
+    await put_row_mark(client, login, placeholder_id, "ignored", t)
+    await mark(client, login, "locally_completed", t + timedelta(minutes=20))
+
+    cleared = await mark(client, login, "none", t + timedelta(minutes=10))
+
+    assert (cleared["applied"], cleared["local_status"]) == (False, "locally_completed")
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        last = (
+            await session.execute(
+                select(UserChangeLog)
+                .where(UserChangeLog.entity_type == "assignment_override")
+                .order_by(UserChangeLog.revision.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+    assert (last.operation, last.payload) == ("upsert", {"local_status": "locally_completed"})

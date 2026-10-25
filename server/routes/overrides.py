@@ -106,37 +106,39 @@ async def patch_assignment_override(
 
     # A clear goes to every row of the assignment: `/sync/full` keys a mark
     # left on a soft-deleted row once no row is live, which would bring it
-    # back. It is kept as a stamped `none`, so a mark made before the clear
-    # and sent after it loses. A mark goes to the row the apps see.
+    # back. It is kept as a stamped `none` on each, so a mark made before
+    # the clear and sent after it to any row loses. A mark goes to the row
+    # the apps see.
+    row_ids = [assignment.id]
     if clearing:
-        of_assignment = select(UserAssignment.id).where(
-            UserAssignment.user_id == auth.user_id,
-            UserAssignment.moodle_assignment_id == moodle_assignment_id,
-        )
-    else:
-        of_assignment = select(UserAssignment.id).where(
-            UserAssignment.id == assignment.id
-        )
+        row_ids = (
+            await session.execute(
+                select(UserAssignment.id).where(
+                    UserAssignment.user_id == auth.user_id,
+                    UserAssignment.moodle_assignment_id == moodle_assignment_id,
+                )
+            )
+        ).scalars().all()
     overrides = {
         o.user_assignment_id: o
         for o in (
             await session.execute(
                 select(UserAssignmentOverride).where(
                     UserAssignmentOverride.user_id == auth.user_id,
-                    UserAssignmentOverride.user_assignment_id.in_(of_assignment),
+                    UserAssignmentOverride.user_assignment_id.in_(row_ids),
                 )
             )
         ).scalars()
     }
-    target = overrides.get(assignment.id)
-    if target is None:
-        target = UserAssignmentOverride(
-            user_id=auth.user_id,
-            user_assignment_id=assignment.id,
-            local_status=AssignmentLocalStatus.none.value,
-        )
-        session.add(target)
-        overrides[assignment.id] = target
+    for row_id in row_ids:
+        if row_id not in overrides:
+            overrides[row_id] = UserAssignmentOverride(
+                user_id=auth.user_id,
+                user_assignment_id=row_id,
+                local_status=AssignmentLocalStatus.none.value,
+            )
+            session.add(overrides[row_id])
+    target = overrides[assignment.id]
 
     changed = False
     for override in overrides.values():
@@ -154,14 +156,16 @@ async def patch_assignment_override(
     await session.flush()
     applied = target.local_status == payload.local_status
 
+    # From the row the apps see: a clear it refused may still have cleared
+    # an older mark on another row of the assignment.
     if changed:
         await append_change(
             session,
             user_id=auth.user_id,
             entity_type=ChangeEntityType.assignment_override.value,
             entity_id=str(assignment.id),
-            operation="delete" if clearing else "upsert",
-            payload={"local_status": payload.local_status},
+            operation="delete" if target.local_status == AssignmentLocalStatus.none else "upsert",
+            payload={"local_status": target.local_status},
             device_id=auth.device_id,
             locked_state=state,
         )
