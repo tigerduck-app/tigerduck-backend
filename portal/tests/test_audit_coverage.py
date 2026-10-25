@@ -13,6 +13,20 @@ ROUTES = Path(__file__).resolve().parents[1] / "app" / "routes"
 WRITE_METHODS = {"post", "put", "patch", "delete"}
 # POSTs that only read.
 READ_ONLY_WRITES = {("custom_push.py", "preview")}
+# Writes the backend's admin listener records in admin_audit_log itself, in
+# the change's transaction, with the operator `_forward` names in X-Admin-Actor.
+BACKEND_AUDITED_WRITES = {
+    ("links.py", "create_link"),
+    ("links.py", "test_link"),
+    ("links.py", "update_link"),
+    *(
+        ("tls_pins.py", name)
+        for name in (
+            "add_pin", "remove_pin", "set_monitored_hosts", "extend_expiry",
+            "set_auto_publish", "publish", "resign",
+        )
+    ),
+}
 # GETs that return one student's data (user.view) or many students' ids or
 # devices (user.list).
 PERSONAL_READS = {
@@ -35,6 +49,7 @@ OTHER_READS = {
     ("custom_push.py", "recent"),
     ("device_lists.py", "get_list"),
     ("device_lists.py", "list_lists"),
+    ("links.py", "list_links"),
     ("logs.py", "data"),
     ("logs.py", "tabs"),
     ("moodle/status.py", "moodle_status"),
@@ -42,6 +57,7 @@ OTHER_READS = {
     ("status.py", "health"),
     ("status.py", "ready"),
     ("status.py", "status_payload"),
+    ("tls_pins.py", "get_tls_pins"),
 }
 
 
@@ -66,11 +82,18 @@ def test_every_write_route_calls_audit() -> None:
     missing = [
         (module, name)
         for module, name, _, body in writes
-        if (module, name) not in READ_ONLY_WRITES and "await audit(" not in body
+        if (module, name) not in READ_ONLY_WRITES | BACKEND_AUDITED_WRITES
+        and "await audit(" not in body
+    ]
+    unforwarded = [
+        (module, name)
+        for module, name, _, body in writes
+        if (module, name) in BACKEND_AUDITED_WRITES and "await _forward(" not in body
     ]
 
     assert len(writes) > 20
     assert not missing, f"write routes without an audit() call: {missing}"
+    assert not unforwarded, f"backend-audited routes that skip _forward: {unforwarded}"
 
 
 def test_every_read_route_is_classified_and_personal_reads_call_audit() -> None:

@@ -9,3 +9,12 @@ policies:
     group_wait: 30s
     group_interval: 5m
     repeat_interval: 4h
+    routes:
+      # A set stays under 60 days for weeks; weekly is reminder enough.
+      - receiver: tigerduck-oncall
+        object_matchers: [['alertname', '=', 'TLS pin set expiring']]
+        repeat_interval: 168h
+      # Once as a link starts failing and once as it recovers, not every 4h.
+      - receiver: tigerduck-oncall
+        object_matchers: [['alertname', '=', 'Link check failing']]
+        repeat_interval: 8760h

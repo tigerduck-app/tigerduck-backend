@@ -270,6 +270,19 @@ class Settings(BaseSettings):
         }
     )
 
+    # --- TLS pin document (server/tls_pins/) ---
+    # Ed25519 private key that signs the document, as PKCS #8 PEM named
+    # `tls-pins-<key_id>.pem` (scripts/generate_tls_pin_key.py writes one),
+    # in server/signing, which only the backend mounts. Without the file the
+    # backend publishes nothing.
+    tls_pin_signing_key_path: Path | None = (
+        SERVER_DIR / "signing" / "tls-pins-td-pins-2026a.pem"
+    )
+    # How often the pin watcher checks every monitored host; 0 turns it off.
+    tls_pin_watch_interval_seconds: int = 3600
+    # Cap on one host's check, each TLS connection and AIA fetch included.
+    tls_pin_watch_timeout_seconds: float = 30.0
+
     # --- Bulletins ---
     bulletin_list_url: str = (
         "https://bulletin.ntust.edu.tw/p/403-1045-1391-1.php"
@@ -298,6 +311,13 @@ class Settings(BaseSettings):
     # chain validation. Obtain the bundle via `openssl s_client -showcerts`
     # against each NTUST subdomain the pipeline reaches.
     bulletin_ca_bundle: Path | None = None
+
+    # --- Links (`/links/{name}`, server/links/) ---
+    # Hosts a link may redirect to, each with its subdomains; checked when a
+    # target is saved, when it is served and on every hop the checker follows.
+    links_allowed_hosts: list[str] = Field(default_factory=lambda: ["ntust.edu.tw"])
+    # How often the checker looks for links due a check; 0 turns it off.
+    link_check_tick_seconds: int = 60
 
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"

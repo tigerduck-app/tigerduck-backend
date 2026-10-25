@@ -520,6 +520,106 @@ def observe_llm_request(outcome: str, seconds: float) -> None:
     LLM_REQUEST_DURATION.labels(outcome=outcome).observe(seconds)
 
 
+# --- TLS pins (server/tls_pins/) ---
+
+TLS_HOST_LAST_SUCCESS = Gauge(
+    "tigerduck_tls_host_last_success_timestamp",
+    "Unix time the pin watcher last reached the host, or first checked it if "
+    "it never has. Kept in the database, so a restart does not reset it.",
+    ["set", "host"],
+)
+TLS_CHAIN_MATCHES = Gauge(
+    "tigerduck_tls_chain_matches",
+    "1 when the host's validated chain shares a pin with its set in the "
+    "current document (the stored set before any document), else 0.",
+    ["set", "host"],
+)
+TLS_CHAIN_TRUSTED = Gauge(
+    "tigerduck_tls_chain_trusted",
+    "1 when the host's chain passed system trust at the last check, else 0.",
+    ["set", "host"],
+)
+# The chain's subjects, validity and pins as a label, so an alert joined on
+# it carries them to Discord. One series per host: a new chain replaces it.
+TLS_CHAIN_INFO = Gauge(
+    "tigerduck_tls_chain_info",
+    "Always 1; the chain label describes the host's chain at the last check.",
+    ["set", "host", "chain"],
+)
+TLS_PIN_DOCUMENT_EXPIRY = Gauge(
+    "tigerduck_tls_pin_document_expiry_timestamp",
+    "Unix time the served pin document expires; 0 before the first one.",
+)
+TLS_PIN_SET_EXPIRY = Gauge(
+    "tigerduck_tls_pin_set_expiry_timestamp",
+    "Unix time each stored pin set expires.",
+    ["set"],
+)
+TLS_PINS_PUBLISHED = Counter(
+    "tigerduck_tls_pins_published_total",
+    "Documents published that changed the set; a re-sign changes none.",
+    ["set"],
+)
+
+# --- Links (server/links/checker.py) ---
+
+LINK_CHECK_OK = Gauge(
+    "tigerduck_link_check_ok",
+    "1 while an enabled link passes its check, 0 while it fails. Set from "
+    "the links table at startup, so a restart keeps the alert state.",
+    ["name"],
+)
+LINK_CHECK_LAST = Gauge(
+    "tigerduck_link_check_last_timestamp",
+    "Unix time each enabled link was last checked.",
+    ["name"],
+)
+LINK_CHECK_FAILING = Gauge(
+    "tigerduck_link_check_failing",
+    "1 while a link fails, 0 once it recovers or is disabled. The failure "
+    "label is the detail of the check that started the latest failure, "
+    "stored on the link, so the alert's labels survive a restart.",
+    ["name", "failure"],
+)
+
+# The failure label each link's failing series carries, at 1 or at 0.
+_link_failures: dict[str, str] = {}
+_link_names: set[str] = set()
+
+
+def publish_link(name: str, *, ok: bool, checked_at: float | None) -> None:
+    _link_names.add(name)
+    LINK_CHECK_OK.labels(name=name).set(1 if ok else 0)
+    if checked_at is None:
+        LINK_CHECK_LAST.remove(name)
+    else:
+        LINK_CHECK_LAST.labels(name=name).set(checked_at)
+
+
+def publish_link_failure(name: str, failure: str, *, failing: bool) -> None:
+    """The failing series under `failure`, at 1 or at 0. At 0, not removed:
+    the alert then resolves at once, with the labels it fired with."""
+    exported = _link_failures.get(name)
+    if exported is not None and exported != failure:
+        LINK_CHECK_FAILING.remove(name, exported)
+    _link_failures[name] = failure
+    LINK_CHECK_FAILING.labels(name=name, failure=failure).set(1 if failing else 0)
+
+
+def forget_link(name: str) -> None:
+    """A disabled or deleted link: its failure goes to 0, the rest go."""
+    _link_names.discard(name)
+    LINK_CHECK_OK.remove(name)
+    LINK_CHECK_LAST.remove(name)
+    exported = _link_failures.get(name)
+    if exported is not None:
+        LINK_CHECK_FAILING.labels(name=name, failure=exported).set(0)
+
+
+def published_links() -> frozenset[str]:
+    return frozenset(_link_names | _link_failures.keys())
+
+
 # --- Exposition ---
 
 

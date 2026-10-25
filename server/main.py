@@ -44,6 +44,7 @@ from server.routes import auth as auth_routes
 from server.routes import academic_calendar as academic_calendar_routes
 from server.routes import bulletins_feed as bulletins_feed_routes
 from server.routes import holiday_overrides as holiday_overrides_routes
+from server.routes import links as links_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
 from server.routes import live_activities_v3 as live_activities_v3_routes
 from server.routes import schedule_v3 as schedule_v3_routes
@@ -57,6 +58,13 @@ from server.scheduler.runtime import build_scheduler
 from server.syncjobs.executor import SyncWorker, default_worker_id
 from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetcher
 from server.syncjobs.policies import ensure_default_policies
+from server.tls_pins import routes as tls_pins_routes
+from server.tls_pins.document import (
+    ensure_current_document,
+    load_signer,
+    refresh_gauges,
+)
+from server.tls_pins.watcher import restore_host_gauges
 
 logger = structlog.get_logger(__name__)
 
@@ -266,6 +274,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     jobs_session_factory = build_session_factory(jobs_engine)
     async with session_scope(session_factory) as seed_session:
         await ensure_default_policies(seed_session)
+    app.state.tls_pin_signer = load_signer(settings.tls_pin_signing_key_path)
+    async with session_scope(session_factory) as pin_session:
+        await ensure_current_document(pin_session, app.state.tls_pin_signer)
+        await refresh_gauges(pin_session)
+        await restore_host_gauges(pin_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
     # Read by the sync worker and by the push pipeline's pre-send check.
@@ -302,6 +315,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings,
         sync_worker=sync_worker,
         push_worker=push_worker,
+        tls_pin_signer=app.state.tls_pin_signer,
     )
 
     app.state.engine = engine
@@ -384,6 +398,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "env": settings.env}
 
+    app.include_router(tls_pins_routes.public_router)
+    # Public and unversioned: the apps follow these links whatever API they speak.
+    app.include_router(links_routes.router)
+
     # Public, so a failure carries no detail.
     @app.get("/ready", tags=["meta"])
     async def ready() -> JSONResponse:
@@ -436,6 +454,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
         return JSONResponse({"ok": True, "done": True, "processed": processed})
 
+    admin.include_router(tls_pins_routes.admin_router)
+
     # /v3 collaborators live on app.state (not lifespan) so tests can swap
     # them before issuing requests. The cipher is None when credential keys
     # are unconfigured — /v3 auth then answers 503 auth_not_configured.
@@ -479,6 +499,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.credential_cipher = CredentialCipher.from_settings(settings)
     except CredentialCipherError:
         app.state.credential_cipher = None
+    # Loaded by the lifespan; tests set their own.
+    app.state.tls_pin_signer = None
+
+    admin.include_router(links_routes.admin_router)
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)

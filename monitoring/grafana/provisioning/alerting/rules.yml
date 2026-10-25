@@ -351,6 +351,130 @@ groups:
           __panelId__: '9'
           summary: Over 20 refresh-token reuse detections in 24 hours.
 
+      # --- TLS pins (server/tls_pins/) ------------------------------------
+      # The chain label, joined from tigerduck_tls_chain_info, lists each
+      # certificate's subject, expiry and pin; the pins the watcher added are
+      # the ones after the leaf.
+      - uid: td-tls-watch-stale
+        title: TLS pin watcher not running
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'time() - (max by (set, host) (tigerduck_tls_host_last_success_timestamp) or on() max(process_start_time_seconds{job="backend"}))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [10800]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: The TLS pin watcher has not reached this host (set and host labels) for over 3 hours, or has not run since the backend started (seconds since in the value).
+
+      - uid: td-tls-chain-untrusted
+        title: TLS chain fails system trust
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (set, host, chain) ((1 - tigerduck_tls_chain_trusted) * on(set, host) group_left(chain) tigerduck_tls_chain_info)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A monitored host (set and host labels) served a chain that fails system trust (chain label). Nothing was added or published for it.
+
+      - uid: td-tls-chain-mismatch
+        title: TLS chain shares no pin
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max by (set, host, chain) ((1 - tigerduck_tls_chain_matches) * on(set, host) group_left(chain) tigerduck_tls_chain_info)'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A monitored host's validated chain (chain label) shares no pin with the served document. The watcher added its intermediates and root to the set, and published them if the set's auto_publish is on; otherwise publish from the portal's TLS pins page.
+
+      - uid: td-tls-pins-published
+        title: TLS pins published
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'sum by (set) (increase(tigerduck_tls_pins_published_total[10m]))'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A new pin document changed this set (set label). The portal's TLS pins page has the document history.
+
+      - uid: td-tls-document-expiring
+        title: TLS pin document expiring
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'max(tigerduck_tls_pin_document_expiry_timestamp > 0) - time()'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [259200]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: The served pin document expires within 3 days (seconds left in the value), so re-signing has stopped. Check the backend's signing key.
+
+      - uid: td-tls-set-expiring
+        title: TLS pin set expiring
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: 'min by (set) (tigerduck_tls_pin_set_expiry_timestamp) - time()'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: lt, params: [5184000]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A pin set (set label) expires within 60 days (seconds left in the value). Extend it on the portal's TLS pins page.
+
       # --- Backups (deploy/backup/tigerduck-backup.sh) ---------------------
       # 0 until the first success; no data means sql-exporter cannot read it.
       - uid: td-backup-stale
@@ -412,3 +536,25 @@ groups:
         execErrState: Error
         annotations:
           summary: The last off-site backup or restore drill (kind label) failed; it resolves on the next success. See ~/Library/Logs/tigerduck-backup.log on the host.
+
+      # --- Links (server/links/checker.py) ---------------------------------
+      # The failure label holds the check that started the failure, stored on
+      # the row and exported again at startup; the series drops to 0 when the
+      # link passes. Reading the last value of 15 minutes bridges a restart,
+      # so one shorter than that neither resolves nor repeats the alert.
+      - uid: td-link-check-failing
+        title: Link check failing
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model: {refId: A, instant: true, expr: 'max by (name, failure) (last_over_time(tigerduck_link_check_failing[15m]))'}
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: A link (name label) fails its check; the failure label gives the rule and what was found. The portal's Links page edits and tests it.
