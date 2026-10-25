@@ -414,19 +414,19 @@ DAY = timedelta(days=1)
     ("phones", "claimed"),
     [
         ([{"seen_ago": timedelta(0)}], True),
-        ([{"seen_ago": 59 * DAY}], True),
-        ([{"seen_ago": 61 * DAY}], False),
+        ([{"seen_ago": 89 * DAY}], True),
+        ([{"seen_ago": 91 * DAY}], False),
         ([{}], False),
-        ([{"seen_ago": 90 * DAY, "push_ago": 13 * DAY}], True),
-        ([{"seen_ago": 90 * DAY, "push_ago": 15 * DAY}], False),
-        ([{"seen_ago": 90 * DAY, "push_ago": DAY, "status": "invalidated"}], False),
-        ([{"seen_ago": 90 * DAY, "push_ago": DAY, "token_kind": "push_to_start"}], False),
-        ([{"seen_ago": 90 * DAY}, {"seen_ago": DAY}], True),
+        ([{"seen_ago": 120 * DAY, "push_ago": 13 * DAY}], True),
+        ([{"seen_ago": 120 * DAY, "push_ago": 15 * DAY}], False),
+        ([{"seen_ago": 120 * DAY, "push_ago": DAY, "status": "invalidated"}], False),
+        ([{"seen_ago": 120 * DAY, "push_ago": DAY, "token_kind": "push_to_start"}], False),
+        ([{"seen_ago": 120 * DAY}, {"seen_ago": DAY}], True),
     ],
     ids=[
         "signed-in-just-now-no-push",
-        "seen-59-days-ago",
-        "seen-61-days-ago",
+        "seen-89-days-ago",
+        "seen-91-days-ago",
         "never-seen",
         "push-13-days-ago",
         "push-15-days-ago",
@@ -438,7 +438,7 @@ DAY = timedelta(days=1)
 async def test_a_job_runs_only_for_a_device_seen_or_reached_lately(
     db_session, prepared_engine, test_settings, phones, claimed
 ):
-    """60 days since a device was seen (`sync_job_device_active_days`), or 14
+    """90 days since a device was seen (`sync_job_device_active_days`), or 14
     since a push reached it (`sync_job_device_push_days`)."""
     user, _, _ = await _setup_user_job(db_session, syncing_device=False)
     db_session.add_all(
@@ -460,7 +460,7 @@ async def test_a_returning_device_gets_its_overdue_job_at_the_next_tick(
         syncing_device=False,
         job_kwargs={"run_after": datetime.now(UTC) - 3 * DAY},
     )
-    phone = _phone(user, seen_ago=61 * DAY)
+    phone = _phone(user, seen_ago=91 * DAY)
     db_session.add(phone)
     await db_session.commit()
     fetcher = StubFetcher(results=[])
