@@ -43,6 +43,7 @@ from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
 from server.routes import academic_calendar as academic_calendar_routes
 from server.routes import bulletins_feed as bulletins_feed_routes
+from server.routes import course_catalog as course_catalog_routes
 from server.routes import holiday_overrides as holiday_overrides_routes
 from server.routes import links as links_routes
 from server.routes import bulletins_v3 as bulletins_v3_routes
@@ -525,6 +526,7 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(academics_routes.assignments_router, prefix=prefix)
     app.include_router(settings_docs_routes.router, prefix=prefix)
     app.include_router(academic_calendar_routes.router, prefix=prefix)
+    app.include_router(course_catalog_routes.router, prefix=prefix)
     app.include_router(bulletins_feed_routes.router, prefix=prefix)
     app.include_router(holiday_overrides_routes.router, prefix=f"{prefix}/sync")
     app.include_router(bulletins_v3_routes.subscriptions_router, prefix=prefix)
