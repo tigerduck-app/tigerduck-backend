@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
+from server.auth.models import UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.syncjobs.executor import SyncWorker, _claim_due_jobs
 from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -81,6 +83,35 @@ async def test_run_now_queues_high_priority(client):
     assert job.priority == 1
     assert job.run_after <= datetime.now(UTC)
     assert "manual_requested_at" in job.cursor
+
+
+async def test_run_now_reaches_the_next_claim_from_a_device_not_seen_lately(client):
+    """A refresh keeps a session live without moving `last_seen_at`, so the
+    device asking can be past `sync_job_device_active_days`; its request
+    must not wait for good."""
+    headers = await _login(client)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        await session.execute(
+            update(UserDevice).values(last_seen_at=datetime.now(UTC) - timedelta(days=91))
+        )
+        await session.commit()
+
+    response = await client.post(
+        "/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers
+    )
+
+    assert response.json()["queued"] is True
+    worker = SyncWorker(
+        session_factory=factory,
+        settings=client.app.state.settings,
+        cipher=None,
+        fetcher=None,
+        course_fetcher=None,
+        worker_id="test-worker",
+    )
+    claimed = [job_id for job_id, _ in await _claim_due_jobs(worker)]
+    assert (await _get_job(client)).id in claimed
 
 
 async def test_run_now_cooldown_429(client):
