@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -11,6 +11,7 @@ from sqlalchemy import select
 from server.auth.models import PushJob
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.sync.merge import to_clock
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -137,7 +138,7 @@ async def test_override_marks_an_assignment_whose_rows_are_all_soft_deleted(
         json={"local_status": "none"},
     )
     assert response.status_code == 200, response.text
-    assert await assignment_marks(client) == []
+    assert await assignment_marks(client) == [(synced_id, "none")]
 
 
 async def test_clearing_a_mark_clears_every_row_of_the_assignment(client) -> None:
@@ -173,13 +174,16 @@ async def test_clearing_a_mark_clears_every_row_of_the_assignment(client) -> Non
         json={"local_status": "none"},
     )
     assert response.status_code == 200, response.text
-    assert await assignment_marks(client) == []
+    assert await assignment_marks(client) == [
+        (placeholder_id, "none"),
+        (synced_id, "none"),
+    ]
 
 
 async def test_clearing_a_mark_keeps_the_notes_of_the_assignment(client) -> None:
     """An override can also hold a note, which the initial upload sets. A
-    clear takes the mark off such a row and deletes only rows with nothing
-    else saved."""
+    clear takes the mark off every row and keeps the rows, so the clear's
+    stamp outranks a mark made before it."""
     login = await do_login(client)
     user_id = uuid.UUID(login["user"]["id"])
     placeholder_id = await seed_assignment(
@@ -223,6 +227,7 @@ async def test_clearing_a_mark_keeps_the_notes_of_the_assignment(client) -> None
     assert await assignment_marks(client) == [
         (placeholder_id, "none"),
         (synced_id, "none"),
+        (other_id, "none"),
     ]
     async with factory() as session:
         kept = {
@@ -633,3 +638,254 @@ async def test_clearing_a_course_name_reaches_the_other_devices(client) -> None:
         {"zh": "", "en": ""}
     ]
     assert await course_override_changes(client) == [{"fields": ["custom_name"]}] * 4
+
+
+# --- TigerSync stamps (`hlc`) -------------------------------------------------
+
+PROTOCOL = {"X-TigerSync-Protocol": "2"}
+
+
+def stamped(login: dict) -> dict:
+    return {**bearer(login), **PROTOCOL}
+
+
+def clock(ts: datetime) -> int:
+    return to_clock(ts)
+
+
+async def revision(client, login: dict) -> int:
+    response = await client.get("/v3/sync/revision", headers=bearer(login))
+    return response.json()["revision"]
+
+
+async def mark(client, login: dict, status: str, at: datetime) -> dict:
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=stamped(login),
+        json={"local_status": status, "hlc": clock(at)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_a_mark_sent_late_loses_to_a_later_one(client) -> None:
+    login = await do_login(client)
+    synced_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    assert (await mark(client, login, "locally_completed", t + timedelta(minutes=30)))[
+        "applied"
+    ] is True
+    before = (await revision(client, login), await sync_triggers(client))
+
+    late = await mark(client, login, "ignored", t)
+    assert late == {
+        "id": late["id"],
+        "updated_at": late["updated_at"],
+        "local_status": "locally_completed",
+        "local_status_hlc": clock(t + timedelta(minutes=30)),
+        "applied": False,
+    }
+    assert await assignment_marks(client) == [(synced_id, "locally_completed")]
+    assert (await revision(client, login), await sync_triggers(client)) == before
+
+
+async def test_a_clear_outranks_a_mark_made_before_it(client) -> None:
+    login = await do_login(client)
+    synced_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    await mark(client, login, "ignored", t)
+    cleared = await mark(client, login, "none", t + timedelta(minutes=10))
+    assert cleared["deleted"] is True
+    assert (cleared["local_status"], cleared["applied"]) == ("none", True)
+
+    late = await mark(client, login, "ignored", t + timedelta(minutes=5))
+    assert (late["local_status"], late["applied"]) == ("none", False)
+    assert await assignment_marks(client) == [(synced_id, "none")]
+    full = (await client.get("/v3/sync/full", headers=bearer(login))).json()
+    assert [
+        (o["local_status"], o["local_status_hlc"]) for o in full["assignment_overrides"]
+    ] == [("none", clock(t + timedelta(minutes=10)))]
+
+
+async def test_clearing_an_unmarked_assignment_records_the_clear_quietly(client) -> None:
+    """A device can clear a mark the server never got; the clear's stamp is
+    kept for that mark, and nothing changed for the other devices."""
+    login = await do_login(client)
+    synced_id = await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    t = datetime.now(UTC) - timedelta(hours=1)
+    before = await revision(client, login)
+
+    await mark(client, login, "none", t + timedelta(minutes=10))
+    assert await revision(client, login) == before
+    assert await sync_triggers(client) == 0
+
+    assert (await mark(client, login, "ignored", t))["applied"] is False
+    assert await assignment_marks(client) == [(synced_id, "none")]
+
+
+async def test_the_same_mark_twice_moves_only_its_stamp(client) -> None:
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    await mark(client, login, "ignored", t)
+    before = await revision(client, login)
+    again = await mark(client, login, "ignored", t + timedelta(minutes=5))
+    assert (again["applied"], again["local_status_hlc"]) == (
+        True,
+        clock(t + timedelta(minutes=5)),
+    )
+    assert await revision(client, login) == before
+    # The moved stamp still outranks an edit made between the two.
+    between = await mark(client, login, "locally_completed", t + timedelta(minutes=3))
+    assert (between["local_status"], between["applied"]) == ("ignored", False)
+
+
+async def test_an_app_that_stamps_its_edits_must_stamp_each(client) -> None:
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+
+    unstamped_mark = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=stamped(login),
+        json={"local_status": "ignored"},
+    )
+    unstamped_colour = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=stamped(login),
+        json={"color_hex": "#FF8800"},
+    )
+    assert (unstamped_mark.status_code, unstamped_colour.status_code) == (422, 422)
+    assert unstamped_mark.json() == {"detail": "hlc_required"}
+    assert await assignment_marks(client) == []
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).first() is None
+
+    # The numeric Moodle id is routing data, not an edit.
+    alone = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=stamped(login),
+        json={"moodle_course_id": 4242},
+    )
+    assert alone.status_code == 200, alone.text
+
+
+async def test_an_edit_without_a_stamp_is_stamped_when_it_arrives(client) -> None:
+    """A released app sends no stamp: its edit counts from its arrival, so it
+    beats an edit stamped earlier, as every edit did before stamps."""
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+    await mark(client, login, "locally_completed", datetime.now(UTC) - timedelta(minutes=1))
+
+    sent_at = datetime.now(UTC)
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "ignored"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["applied"] is True
+    assert response.json()["local_status_hlc"] >= clock(sent_at)
+
+
+async def test_a_stamp_from_the_future_is_clamped(client) -> None:
+    login = await do_login(client)
+    await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
+
+    sent_at = datetime.now(UTC)
+    answer = await mark(client, login, "ignored", sent_at + timedelta(days=1))
+    assert (
+        clock(sent_at)
+        <= answer["local_status_hlc"]
+        <= clock(datetime.now(UTC) + timedelta(seconds=5))
+    )
+
+
+async def course_patch(client, login: dict, body: dict, at: datetime) -> dict:
+    response = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=stamped(login),
+        json={**body, "hlc": clock(at)},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_course_fields_and_locales_resolve_on_their_own(client) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    await course_patch(client, login, {"color_hex": "#FF0000"}, t + timedelta(minutes=10))
+    await course_patch(
+        client, login, {"custom_name": "作業系統", "locale": "zh"}, t + timedelta(minutes=10)
+    )
+    # A device that had not synced edits the name in English, and the colour,
+    # both earlier: the name stays, the colour loses.
+    answer = await course_patch(
+        client,
+        login,
+        {"color_hex": "#0000FF", "custom_name": "OS", "locale": "en"},
+        t,
+    )
+    assert answer["color_hex"] == "#FF0000"
+    assert answer["custom_names"] == {"zh": "作業系統", "en": "OS"}
+    assert answer["applied"] == ["custom_name"]
+    assert answer["color_hex_hlc"] == clock(t + timedelta(minutes=10))
+    assert answer["custom_names_hlc"] == {
+        "zh": clock(t + timedelta(minutes=10)),
+        "en": clock(t),
+    }
+    assert answer["ignore_assignments_hlc"] is None
+
+    full = (await client.get("/v3/sync/full", headers=bearer(login))).json()
+    (row,) = full["course_overrides"]
+    assert (row["color_hex_hlc"], row["custom_names_hlc"]) == (
+        answer["color_hex_hlc"],
+        answer["custom_names_hlc"],
+    )
+    assert await course_override_changes(client) == [
+        {"fields": ["color_hex"]},
+        {"fields": ["custom_name"]},
+        {"fields": ["custom_name"]},
+    ]
+
+
+async def test_the_same_colour_again_is_no_change(client) -> None:
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    await course_patch(client, login, {"color_hex": "#FF0000"}, t)
+    triggers = await sync_triggers(client)
+    again = await course_patch(client, login, {"color_hex": "#FF0000"}, t + timedelta(minutes=5))
+    assert (again["applied"], again["color_hex_hlc"]) == (
+        ["color_hex"],
+        clock(t + timedelta(minutes=5)),
+    )
+    later = await course_patch(client, login, {"color_hex": "#0000FF"}, t + timedelta(minutes=3))
+    assert (later["color_hex"], later["applied"]) == ("#FF0000", [])
+    assert await course_override_changes(client) == [{"fields": ["color_hex"]}]
+    assert await sync_triggers(client) == triggers
