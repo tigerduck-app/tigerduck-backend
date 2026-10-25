@@ -309,17 +309,39 @@ into the backend container via `docker-compose.yml`.
   another, and logs a change and queues a `sync_trigger` only when a
   value changed. A cleared assignment mark stays as a stamped `none` on
   every row of the assignment, so an older mark sent late loses to it.
-- `/sync/full` tags each course tombstone with `deleted_by_reset` and
-  `deleted_by_this_device`; a client ignores a tombstone that is both,
-  the same rule `upload_courses` applies when it releases them. A course
-  an upload's `force_keys` brings to the server is stored as
-  `user_added`, unless the key brings back a course deleted while it was
-  not; one already there keeps its `source`. A single delete of a
-  `user_added` course leaves a tombstone marked `user_added`, which its
-  author's snapshot leaves out and its author's next upload forcing no
-  key releases. That helps only a removal that hides nothing on the
-  device, today the iPhone's tap-again in Add course: the apps' other
-  removals keep a local hide, so their rosters leave the course out.
+- Course membership is stamped per key (`sync/membership.py`): an add in
+  `user_courses.added_at`, a hide or removal in its tombstone's
+  `deleted_at` (kind `hide`, `remove`, or `reset` for the per-course
+  reset tombstones), a term reset in `user_semester_resets`, a full reset
+  in `users.courses_reset_at`. A delete or an upload's add wins only when
+  later than the key's add, tombstone and covering resets. A reset wins
+  only when later than the one it replaces; a released app's reset is
+  recorded too, never moving a stored one back. Turning course sync off
+  everywhere drops tombstones and term resets together.
+- With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
+  writes the tombstone even for a course the server lacks; an upload's
+  `adds` replace `force_keys`, and its roster skips a hidden key, lifts a
+  reset tombstone and shows a removed key beside its removal tombstone,
+  which keeps refusing older edits. A reset clears only the term's
+  choices stamped at or before it: a row with a later add or override
+  value stays with its older choices emptied, and each row that goes
+  leaves a reset tombstone after a term reset. The course override PATCH
+  refuses edits stamped before the term's reset. `/sync/full` returns
+  every tombstone with `hlc` and `kind`.
+- Without the header, released apps get today's rules. `/sync/full`
+  sends the last 30 days of tombstones, each tagged `deleted_by_reset`
+  and `deleted_by_this_device`; a client ignores a tombstone that is
+  both, the same rule `upload_courses` applies when it releases them. It
+  leaves out a removal tombstone beside a roster row, which those apps
+  would read as a hide. A course an upload's `force_keys` brings to the
+  server is stored as `user_added`, unless the key brings back a course
+  deleted while it was not; one already there keeps its `source`. A
+  single delete of a `user_added` course leaves a tombstone marked
+  `user_added`, which its author's snapshot leaves out and its author's
+  next upload forcing no key releases. That helps only a removal that
+  hides nothing on the device, today the iPhone's tap-again in Add
+  course: the apps' other removals keep a local hide, so their rosters
+  leave the course out. A semester reset needs a device id.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
