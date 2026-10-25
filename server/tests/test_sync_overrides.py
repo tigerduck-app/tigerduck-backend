@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -889,3 +890,33 @@ async def test_the_same_colour_again_is_no_change(client) -> None:
     assert (later["color_hex"], later["applied"]) == ("#FF0000", [])
     assert await course_override_changes(client) == [{"fields": ["color_hex"]}]
     assert await sync_triggers(client) == triggers
+
+
+async def test_two_devices_writing_at_once_keep_the_later_stamp(client) -> None:
+    """Both requests read the stored stamp before either writes unless the
+    sync lock orders them, and then the one committing last wins."""
+    login = await do_login(client)
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
+    )
+    t = datetime.now(UTC) - timedelta(hours=1)
+    await course_patch(client, login, {"color_hex": "#000000"}, t)
+
+    for round_no in range(20):
+        earlier = t + timedelta(minutes=1 + round_no)
+        later = earlier + timedelta(seconds=1)
+        writes = [
+            course_patch(client, login, {"color_hex": f"#{round_no:02X}FF00"}, later),
+            course_patch(client, login, {"color_hex": f"#{round_no:02X}00FF"}, earlier),
+        ]
+        await asyncio.gather(*(writes if round_no % 2 else reversed(writes)))
+
+        stored = await course_override(client)
+        assert (stored.color_hex, stored.color_hex_updated_at) == (
+            f"#{round_no:02X}FF00",
+            later,
+        ), round_no
