@@ -319,6 +319,13 @@ class Settings(BaseSettings):
     # How often the checker looks for links due a check; 0 turns it off.
     link_check_tick_seconds: int = 60
 
+    # --- Course catalog (`/v3/course-catalog`, server/course_catalog/) ---
+    # Taipei time ("HH:MM") the daily refresh from NTUST's course query
+    # starts, a quiet hour for the school; empty turns it off.
+    course_catalog_refresh_time: str = Field(
+        default="05:30", pattern=r"^(([01][0-9]|2[0-3]):[0-5][0-9])?$"
+    )
+
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "sk-local"
