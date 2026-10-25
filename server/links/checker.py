@@ -10,14 +10,18 @@ flips on the first failed check and on the first passing one after it;
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
+import math
 import socket
+import ssl
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urljoin, urlsplit
 
+import certifi
 import httpx
 import structlog
 from sqlalchemy import select
@@ -30,6 +34,13 @@ from server.db import session_scope
 from server.links.models import ALERT_FAILING, ALERT_OK, Link
 from server.links.rules import Page, first_failure
 from server.links.targets import InvalidTarget, validate_target
+from server.tls_chain import (
+    INCOMPLETE_CHAIN_CODES,
+    IssuerFetch,
+    fetch_issuer,
+    missing_intermediates,
+    trust_context,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -123,26 +134,96 @@ def _read_capped(response: httpx.Response, deadline: float) -> bytes:
     return bytes(body[:MAX_BODY_BYTES])
 
 
+def _verify_code(exc: BaseException | None) -> int | None:
+    """The X.509 verify code of the failed certificate check behind `exc`."""
+    while exc is not None and not isinstance(exc, ssl.SSLCertVerificationError):
+        # httpcore drops the cause, so the ssl error is only the context.
+        exc = exc.__cause__ or exc.__context__
+    return exc.verify_code if exc is not None else None
+
+
 class _PinnedTransport(httpx.BaseTransport):
     """Sends a request to the address in its `address` extension, with the
     host name in Host and SNI. The request the client sees keeps the host
-    name, so its cookie jar matches cookies as the apps' does."""
+    name, so its cookie jar matches cookies as the apps' does.
 
-    def __init__(self, transport: httpx.BaseTransport) -> None:
-        self._transport = transport
+    Without a `transport` it makes its own over `cafile`'s roots, and a chain
+    that stops short of one is completed through AIA, as browsers and Apple's
+    platforms do: the intermediates join the store, never as anchors, and the
+    request is sent once more. They stay for the check's later hops.
+    """
+
+    def __init__(
+        self,
+        transport: httpx.BaseTransport | None = None,
+        *,
+        cafile: str = certifi.where(),
+        fetch: IssuerFetch | None = None,
+        deadline: float = math.inf,
+    ) -> None:
+        # httpx's own context has the same roots but takes partial chains,
+        # which would make an AIA intermediate an anchor.
+        self._context = trust_context(cafile) if transport is None else None
+        self._transport = transport or httpx.HTTPTransport(
+            verify=self._context,
+            # Each hop is verified for its own host name, so no connection is reused.
+            limits=httpx.Limits(max_keepalive_connections=0),
+            trust_env=False,
+        )
+        self._fetch = fetch or functools.partial(fetch_issuer, deadline=deadline)
+        self._deadline = deadline
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         extensions = dict(request.extensions)
         address = extensions.pop("address")
-        return self._transport.handle_request(
-            httpx.Request(
+
+        def pinned(timeout: dict[str, float | None]) -> httpx.Request:
+            return httpx.Request(
                 request.method,
                 request.url.copy_with(host=address),
                 headers=request.headers,
                 stream=request.stream,
-                extensions={**extensions, "sni_hostname": request.url.host},
+                extensions={**extensions, "timeout": timeout, "sni_hostname": request.url.host},
             )
-        )
+
+        def send() -> httpx.Response:
+            timeout = extensions.get("timeout", {})
+            if math.isfinite(self._deadline):
+                left = self._deadline - time.monotonic()
+                if left <= 0:
+                    raise httpx.ConnectTimeout("the check ran out of time", request=request)
+                # httpx times each phase on its own; with half each, the connect and the
+                # wait for the response headers fit in what is left of the check.
+                timeout = {k: left / 2 if v is None else min(v, left / 2) for k, v in timeout.items()}
+            return self._transport.handle_request(pinned(timeout))
+
+        try:
+            return send()
+        except httpx.ConnectError as exc:
+            if not self._add_aia_intermediates(exc, request.url, address):
+                raise
+        return send()
+
+    def _add_aia_intermediates(
+        self, error: httpx.ConnectError, url: httpx.URL, address: str
+    ) -> bool:
+        """Whether `error` is a chain that stops short of a root and AIA
+        supplied intermediates for it, now in the store."""
+        if (
+            self._context is None
+            or _verify_code(error) not in INCOMPLETE_CHAIN_CODES
+            or time.monotonic() > self._deadline
+        ):
+            return False
+        try:
+            extra = missing_intermediates(
+                url.host, [(address, url.port or 443)], self._fetch, self._deadline
+            )
+        except (OSError, ValueError):
+            return False
+        for der in extra:
+            self._context.load_verify_locations(cadata=der)
+        return bool(extra)
 
     def close(self) -> None:
         self._transport.close()
@@ -189,14 +270,7 @@ def fetch(
         raise CheckFailure(f"invalid target: {exc}") from None
     deadline = time.monotonic() + CHECK_TIMEOUT_SECONDS
     with httpx.Client(
-        transport=_PinnedTransport(
-            transport
-            or httpx.HTTPTransport(
-                # Each hop is verified for its own host name, so no connection is reused.
-                limits=httpx.Limits(max_keepalive_connections=0),
-                trust_env=False,
-            )
-        ),
+        transport=_PinnedTransport(transport, deadline=deadline),
         timeout=REQUEST_TIMEOUT_SECONDS,
         trust_env=False,
         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},

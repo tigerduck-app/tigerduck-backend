@@ -32,6 +32,19 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.5.1
+
+- **Link checks complete a chain that leaves out its intermediate
+  (#156).** A host such as `www.academic.ntust.edu.tw` sends only its leaf
+  certificate, so 3.5.0 failed `ntust-calendar` on every check. The checker
+  now fetches the missing intermediates from the leaf's AIA CA Issuers URL,
+  as the TLS pin watcher already did, and verifies the chain against the
+  certifi roots; a fetched intermediate never becomes a trust anchor. The
+  AIA fetch connects only to public addresses and ends with the check's
+  deadline.
+- No migration and no app update. The next check of `ntust-calendar`
+  after the restart passes and sends the recovery alert.
+
 ## Upgrading to 3.5.0
 
 - **Links at `/links/<name>` (#108).** `GET
