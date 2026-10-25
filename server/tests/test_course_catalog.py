@@ -268,28 +268,50 @@ async def test_a_sweep_keeps_at_most_three_requests_in_flight(db_session) -> Non
     assert peak == LANES == 3
 
 
-async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_backoff) -> None:
+async def test_a_failed_zh_request_keeps_that_terms_last_snapshot(db_session, no_backoff) -> None:
     factory = await _factory(db_session)
     await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
     before = await _snapshots(factory)
     # New counts, so a term that is stored gets the second fetch's time.
-    school = School(fail={("1151", "en", "0"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
+    school = School(fail={("1151", "zh", "0"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
 
     with pytest.raises(CatalogFetchError, match="1151"):
         await refresh_course_catalog(factory, transport=_over_a_network(school), now=SECOND)
 
     after = await _snapshots(factory)
-    # 1151's zh fetch succeeded, but is not stored without its en.
     for language in ("zh", "en"):
         assert after["1151", language].fetched_at == FIRST
         assert after["1151", language].body == before["1151", language].body
         assert after["1152", language].fetched_at == SECOND
-    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "en", "0")]
+    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "zh", "0")]
     assert len(failing) == ATTEMPTS
-    # The failed sweep stops there rather than sweeping on, and the en text stays.
-    en_sent = [b for b in school.bodies() if (b["Semester"], b["Language"]) == ("1151", "en")]
-    assert len(en_sent) < 20
+    # The failed sweep stops there rather than sweeping on, and en is not swept.
+    sent = [b for b in school.bodies() if b["Semester"] == "1151"]
+    assert len(sent) < 20 and {b["Language"] for b in sent} == {"zh"}
     assert (await _english(factory))["1151"].fetched_at == FIRST
+
+
+async def test_a_failed_en_sweep_still_stores_zh_and_stays_due(db_session, no_backoff) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    school = School(fail={("1151", "en", "0"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
+
+    with pytest.raises(CatalogFetchError, match="en text of 1151"):
+        await refresh_course_catalog(factory, transport=_over_a_network(school), now=SECOND)
+
+    after = await _snapshots(factory)
+    assert after["1151", "zh"].fetched_at == SECOND
+    # en is built from the stored text, as between en sweeps.
+    en = {r["CourseNo"]: r for r in _document(after["1151", "en"])["courses"]}
+    assert after["1151", "en"].fetched_at == SECOND
+    assert {r["ChooseStudent"] for r in en.values()} == {1}
+    assert en["3T1001701"]["CourseName"] == "Calculus"
+    assert (await _english(factory))["1151"].fetched_at == FIRST
+
+    retry = School(edit=lambda row: row | {"ChooseStudent": 1})
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(retry), now=SECOND + timedelta(hours=2))
+    assert any(b["Semester"] == "1151" and b["Language"] == "en" for b in retry.bodies())
+    assert (await _english(factory))["1151"].fetched_at == SECOND + timedelta(hours=2)
 
 
 async def test_an_unchanged_catalog_keeps_its_snapshot_and_etag(db_session) -> None:

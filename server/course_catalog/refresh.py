@@ -17,7 +17,8 @@ changes language. So en is swept only by the first run after `EN_SWEEP_HOUR`
 in Taipei each day, or by one with no en text stored, and every run builds
 the en snapshot from its zh rows and the last en sweep's text, matched by
 CourseNo and Node. A row the last en sweep did not have keeps its zh text
-until the next one.
+until the next one. An en sweep that fails does not hold up zh: the run
+builds en from the stored text, and en stays due for the next run.
 
 Each course row keeps the fields the app's `CourseSearchResult` decodes
 (`_FIELDS`) and adds three flags the device filters on, derived here:
@@ -283,23 +284,22 @@ def _in_english(rows: list[dict[str, Any]], texts: dict[str, list]) -> list[dict
     return [row | dict(zip(_TRANSLATED, texts.get(_key(row), ()))) for row in rows]
 
 
-async def _fetch_semester(
-    client: httpx.AsyncClient, semester: str, sweep_english: bool
-) -> tuple[list[dict[str, Any]], dict[str, list] | None]:
-    """Every course of `semester` in zh, flagged, and the en text when
-    `sweep_english`."""
+async def _english_texts(client: httpx.AsyncClient, semester: str) -> dict[str, list]:
+    """The en text of every course of `semester`, by CourseNo and Node."""
+    en = await _sweep(client, semester, "en")
+    if not en:
+        raise CatalogFetchError(f"courses {semester} en: no course, though zh has some")
+    return {_key(r): [r[field] for field in _TRANSLATED] for r in en}
+
+
+async def _fetch_semester(client: httpx.AsyncClient, semester: str) -> list[dict[str, Any]]:
+    """Every course of `semester` in zh, flagged."""
     zh = await _sweep(client, semester, "zh")
     if not zh:
         raise NoCourses(f"courses {semester}: no course at all")
     intensive = {
         r["CourseNo"] for r in await _courses(client, semester, "zh", only_intensive=True)
     }
-    texts = None
-    if sweep_english:
-        en = await _sweep(client, semester, "en")
-        if not en:
-            raise CatalogFetchError(f"courses {semester} en: no course, though zh has some")
-        texts = {_key(r): [r[field] for field in _TRANSLATED] for r in en}
     english_taught = {r["CourseNo"] for r in zh if ENGLISH_TAUGHT_MARK in (r["Contents"] or "")}
     rows = sorted(
         (
@@ -313,7 +313,7 @@ async def _fetch_semester(
         # The school's order may vary between fetches; the ETag should not.
         key=lambda r: (r["CourseNo"], r["Node"] or ""),
     )
-    return rows, texts
+    return rows
 
 
 async def _stored_zh(session: AsyncSession, semester: str) -> tuple[int, bool] | None:
@@ -408,15 +408,17 @@ async def refresh_course_catalog(
     """Fetch and store the current term and the terms listed after it. A
     later term with no course yet is skipped; the current one is a failure.
 
-    Returns the semesters fetched in full, changed or not. A semester that
-    failed keeps its last snapshot, and the refresh raises `CatalogFetchError`
-    naming it once the others are stored, so the job reports the error.
+    Returns the semesters stored, changed or not. A semester that failed keeps
+    its last snapshot, and one whose en sweep failed is stored with the en text
+    it had; the refresh raises `CatalogFetchError` naming them once the others
+    are stored, so the job reports the error.
     """
     now = now or datetime.now(UTC)
     async with session_scope(session_factory) as session:
         current = await current_term_code(session, now)
     done: list[str] = []
     failed: list[str] = []
+    english_failed: list[str] = []
     async with httpx.AsyncClient(
         transport=transport, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}
     ) as client:
@@ -426,9 +428,8 @@ async def refresh_course_catalog(
             async with session_scope(session_factory) as session:
                 stored = await session.get(CourseCatalogEnglish, semester)
                 stored_zh = await _stored_zh(session, semester)
-            sweep_english = english_due(stored.fetched_at if stored else None, now)
             try:
-                rows, swept = await _fetch_semester(client, semester, sweep_english)
+                rows = await _fetch_semester(client, semester)
             except NoCourses:
                 if current is not None and semester > current:
                     logger.info("course_catalog.semester_skipped", semester=semester, reason="no courses yet")
@@ -445,7 +446,15 @@ async def refresh_course_catalog(
                 logger.warning("course_catalog.semester_failed", semester=semester, error=short)
                 failed.append(semester)
                 continue
-            texts = swept if swept is not None else stored.texts
+            swept = None
+            if english_due(stored.fetched_at if stored else None, now):
+                try:
+                    swept = await _english_texts(client, semester)
+                except CatalogFetchError as exc:
+                    # zh is stored all the same, and en stays due for the next run.
+                    logger.warning("course_catalog.english_failed", semester=semester, error=str(exc))
+                    english_failed.append(semester)
+            texts = swept if swept is not None else (stored.texts if stored else {})
             documents = {
                 "zh": snapshot(semester, "zh", rows, lists["zh"], now),
                 "en": snapshot(semester, "en", _in_english(rows, texts), lists["en"], now),
@@ -464,6 +473,9 @@ async def refresh_course_catalog(
                 changed=changed,
                 bytes={k: len(v[0]) for k, v in documents.items()},
             )
-    if failed:
-        raise CatalogFetchError(f"kept the last snapshot of {', '.join(failed)}")
+    problems = [f"kept the last snapshot of {', '.join(failed)}"] if failed else []
+    if english_failed:
+        problems.append(f"kept the stored en text of {', '.join(english_failed)}")
+    if problems:
+        raise CatalogFetchError("; ".join(problems))
     return done
