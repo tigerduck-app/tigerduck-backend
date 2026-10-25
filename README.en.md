@@ -339,7 +339,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `GET` | `/v3/course-catalog/{semester}?language=zh\|en` | A term's whole course list, departments and dimensions, refreshed from NTUST daily (gzip, ETag) | JWT |
+| `GET` | `/v3/course-catalog/{semester}?language=zh\|en` | A term's whole course list, departments and dimensions, refreshed from NTUST every 2 hours (gzip, ETag) | JWT |
 
 ### Schedule / Live Activity
 

@@ -1,6 +1,6 @@
 """/v3/course-catalog: a semester's whole course list, for on-device search.
 
-The daily refresh (`server/course_catalog/refresh.py`) stores each semester
+The refresh (`server/course_catalog/refresh.py`) stores each semester
 and language gzip-compressed with its ETag, and leaves a snapshot whose
 content has not changed as it is. A device that already holds the snapshot
 costs a 304, and a new one is the stored bytes, sent as they are.

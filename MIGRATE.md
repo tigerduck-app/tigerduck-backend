@@ -46,25 +46,32 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   snapshot as it is, `fetched_at` included, and a device that holds it gets
   a 304 on later days too.
 - **Migration `5d2a9c7e4f1b`** adds `course_catalog_snapshots`, one row per
-  term and language holding the gzip-compressed JSON served.
-- **The refresh.** The `course_catalog_refresh` job runs once a day at
-  `TIGERDUCK_COURSE_CATALOG_REFRESH_TIME` (default `05:30`, Taipei time;
-  empty turns it off). It fetches the current term from the academic
-  calendar and every later term `querycourse.ntust.edu.tw` lists, three at
-  most, one request at a time: 37 course-number prefix queries in zh and
-  in en, one `OnlyIntensive` query, and the option lists, about 5 minutes
-  of the school's time per term. A request is retried twice with backoff;
-  a term with any failed request keeps its last snapshot, and the job
-  reports an error. A term listed after the current one with no course yet
-  is skipped with a log line and is not an error. The first snapshot comes with the first run after the
-  deploy; until then the app keeps querying the school itself.
+  term and language holding the gzip-compressed JSON served, and
+  `course_catalog_en_texts`, one row per term holding the en course names,
+  teachers and notes of the day's en sweep.
+- **The refresh.** The `course_catalog_refresh` job runs every
+  `TIGERDUCK_COURSE_CATALOG_REFRESH_INTERVAL_MINUTES` (default 120; 0 turns
+  it off), the first time a minute after the backend starts. It fetches the
+  current term from the academic calendar and every later term
+  `querycourse.ntust.edu.tw` lists, three at most. Each run sweeps zh as 281
+  course-number prefix queries, three in flight at most, and sends one
+  `OnlyIntensive` query and the option lists. en is swept too only on the
+  first run after 05:00 Taipei time each day, or when a term has no en text
+  stored; the runs between build the en snapshot from their zh rows and the
+  stored en text, and a new course shows its zh text until the next en sweep.
+  A zh run takes about a minute and some 200 s of the school's time per term,
+  a run with en twice that. A request is retried twice with backoff; a term
+  with any failed request keeps its last snapshot, and the job reports an
+  error. A term listed after the current one with no course yet is skipped
+  with a log line and is not an error. Until the first run has stored a term,
+  the app keeps querying the school itself.
 - **Alert.** Grafana's new rule `Course catalog not refreshed` posts when
-  the job has not completed for over two days (50 hours) while it is
-  scheduled. Grafana reads its provisioning only at start, so after
+  the job has not completed for over 6.5 hours, three missed runs, while it
+  is scheduled. Grafana reads its provisioning only at start, so after
   `./start.sh` run `docker compose restart grafana`.
 - No change to `.env` is needed.
-- **Rollback.** `alembic downgrade 8996a3bf992f` drops the table; the
-  previous release neither reads nor writes it.
+- **Rollback.** `alembic downgrade 8996a3bf992f` drops both tables; the
+  previous release neither reads nor writes them.
 
 ## Upgrading to 3.5.1
 

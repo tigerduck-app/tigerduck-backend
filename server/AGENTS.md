@@ -44,8 +44,8 @@ server/
 ├── syncjobs/                  # server-side academic sync executor
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
-├── course_catalog/            # NTUST's course list per term and language: model
-│                              #   and the daily refresh from its course query
+├── course_catalog/            # NTUST's course list per term and language: models
+│                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms + school holidays (models, schemas,
 │                              #   terms.py: the current term and the days a term
 │                              #   runs on, as the apps take them)

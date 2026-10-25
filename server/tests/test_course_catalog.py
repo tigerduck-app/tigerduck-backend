@@ -1,4 +1,4 @@
-"""The course catalog: the daily refresh against a stand-in for NTUST's course
+"""The course catalog: the refresh against a stand-in for NTUST's course
 query, built from its recorded answers (fixtures/querycourse.json), and the
 /v3/course-catalog endpoint that serves what it stored. Nothing here reaches
 the network."""
