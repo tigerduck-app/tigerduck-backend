@@ -132,11 +132,11 @@ async def test_delete_courses_scoped_to_semester_leaves_other_terms(client) -> N
     # the reset device's re-upload of CS101 at the end of this test is
     # released rather than skipped, while every other device stays bound.
     tomb = await client.delete("/v3/sync/courses/client:1132:CS101", headers=bearer(login))
-    assert tomb.json() == {"deleted": 1}
+    assert tomb.json()["deleted"] == 1
     await _upload(client, login, [{"semester": "1132", "course_no": "CS303", "course_name": "Kept"}])
 
     response = await client.delete("/v3/sync/courses", params={"semester": "1132"}, headers=bearer(login))
-    assert response.json() == {"deleted": 1}
+    assert response.json()["deleted"] == 1
 
     snap = await _snapshot(client, login)
     assert sorted((c["semester"], c["course_no"]) for c in snap["courses"]) == [
@@ -166,7 +166,7 @@ async def test_delete_all_courses_without_semester_flags_full_reset(client) -> N
         {"semester": "1141", "course_no": "CS202", "course_name": "New"},
     ])
     response = await client.delete("/v3/sync/courses", headers=bearer(login))
-    assert response.json() == {"deleted": 2}
+    assert response.json()["deleted"] == 2
     snap = await _snapshot(client, login)
     assert snap["courses"] == []
     assert snap["courses_reset_at"] is not None

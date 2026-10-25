@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.auth.dependencies import CurrentAuthDep
 from server.auth.models import PushJob
 from server.db import SessionDep
-from server.sync import serializers
+from server.sync import membership, serializers
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import (
     ClockProtocolDep,
@@ -240,24 +240,34 @@ async def patch_course_override(
     changed_fields: list[str] = []
     sent: dict[str, bool] = {}
 
-    if payload.color_hex is not None:
-        if apply_field(existing, "color_hex", payload.color_hex, **edit):
-            changed_fields.append("color_hex")
-        sent["color_hex"] = existing.color_hex == payload.color_hex
+    # A reset of the course's term cleared every choice stamped before it.
+    reset_at = (await membership.Resets.load(session, auth.user_id)).covering(course.semester)
+    if reset_at is not None and stamp <= reset_at:
+        given = {
+            "color_hex": payload.color_hex is not None,
+            "custom_name": names,
+            "ignore_assignments": payload.ignore_assignments is not None,
+        }
+        sent = {name: False for name, was_sent in given.items() if was_sent}
+    else:
+        if payload.color_hex is not None:
+            if apply_field(existing, "color_hex", payload.color_hex, **edit):
+                changed_fields.append("color_hex")
+            sent["color_hex"] = existing.color_hex == payload.color_hex
 
-    if names:
-        # A cleared locale stays as "": the apps apply only the locales a
-        # snapshot lists, so one left out would keep the old name elsewhere.
-        if apply_course_name(existing, payload.locale, payload.custom_name, **edit):
-            changed_fields.append("custom_name")
-        sent["custom_name"] = (existing.custom_names or {}).get(
-            payload.locale
-        ) == payload.custom_name
+        if names:
+            # A cleared locale stays as "": the apps apply only the locales a
+            # snapshot lists, so one left out would keep the old name elsewhere.
+            if apply_course_name(existing, payload.locale, payload.custom_name, **edit):
+                changed_fields.append("custom_name")
+            sent["custom_name"] = (existing.custom_names or {}).get(
+                payload.locale
+            ) == payload.custom_name
 
-    if payload.ignore_assignments is not None:
-        if apply_field(existing, "ignore_assignments", payload.ignore_assignments, **edit):
-            changed_fields.append("ignore_assignments")
-        sent["ignore_assignments"] = existing.ignore_assignments == payload.ignore_assignments
+        if payload.ignore_assignments is not None:
+            if apply_field(existing, "ignore_assignments", payload.ignore_assignments, **edit):
+                changed_fields.append("ignore_assignments")
+            sent["ignore_assignments"] = existing.ignore_assignments == payload.ignore_assignments
 
     if payload.moodle_course_id is not None:
         existing.moodle_course_id = payload.moodle_course_id
