@@ -404,6 +404,19 @@ async def test_a_current_term_without_courses_fails(db_session) -> None:
     assert set(await _snapshots(factory)) == {("1152", "zh"), ("1152", "en")}
 
 
+async def test_a_later_term_that_loses_its_courses_fails(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    before = await _snapshots(factory)
+    school = School(unpublished={"1152"})
+
+    with pytest.raises(CatalogFetchError, match="1152"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=LATER)
+
+    after = await _snapshots(factory)
+    assert (after["1152", "zh"].body, after["1152", "zh"].fetched_at) == (before["1152", "zh"].body, FIRST)
+
+
 def _runs(outcome: str) -> float:
     return REGISTRY.get_sample_value(
         "tigerduck_scheduler_job_runs_total",
@@ -502,6 +515,34 @@ async def test_a_semester_list_without_a_term_fails_the_run(db_session, listed) 
     with pytest.raises(CatalogFetchError, match="semestersinfo"):
         await refresh_course_catalog(factory, transport=httpx.MockTransport(handler), now=FIRST)
     assert not school.bodies()
+
+
+@pytest.mark.parametrize(
+    ("path", "college", "answer"),
+    [
+        ("Colleges/", None, []),
+        ("dimensions", None, [d for d in FIXTURE["dimensions"] if d["DimNo"] == "0"]),
+        ("departments", "2", []),
+    ],
+)
+async def test_an_empty_option_list_keeps_every_snapshot(db_session, path, college, answer) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    before = await _snapshots(factory)
+    school = School()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked = request.url.path.removeprefix("/querycourse/api/")
+        if asked == path and request.url.params.get("collegeNo") == college:
+            return httpx.Response(200, json=answer)
+        return school(request)
+
+    with pytest.raises(CatalogFetchError, match="option lists"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(handler), now=LATER)
+    assert not school.bodies()
+    after = await _snapshots(factory)
+    for key, snapshot in before.items():
+        assert (after[key].body, after[key].fetched_at) == (snapshot.body, FIRST)
 
 
 async def test_an_unreadable_row_fails_the_term(db_session) -> None:

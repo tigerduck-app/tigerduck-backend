@@ -223,6 +223,9 @@ async def _option_lists(client: httpx.AsyncClient) -> dict[str, dict[str, list]]
             c["CollegeNo"]: await _call(client, f"departments?collegeNo={c['CollegeNo']}")
             for c in colleges
         }
+        # Every college has departments; an empty list is a hiccup, not news.
+        if not colleges or not all(departments.values()) or all(d["DimNo"] == "0" for d in dimensions):
+            raise CatalogFetchError("option lists: an empty answer")
         return {
             language: {
                 "colleges": [
@@ -420,7 +423,8 @@ async def refresh_course_catalog(
     now: datetime | None = None,
 ) -> list[str]:
     """Fetch and store the current term and the terms listed after it. A
-    later term with no course yet is skipped; the current one is a failure.
+    later term with no course and no snapshot yet is skipped; any other term
+    with no course is a failure.
 
     Returns the semesters stored, changed or not. A semester that failed keeps
     its last snapshot, and one whose en sweep failed is stored with the en text
@@ -445,7 +449,7 @@ async def refresh_course_catalog(
             try:
                 rows = await _fetch_semester(client, semester)
             except NoCourses:
-                if current is not None and semester > current:
+                if current is not None and semester > current and stored_zh is None:
                     logger.info("course_catalog.semester_skipped", semester=semester, reason="no courses yet")
                     continue
                 logger.warning("course_catalog.semester_failed", semester=semester, error="no courses")
