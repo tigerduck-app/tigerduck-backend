@@ -319,12 +319,15 @@ into the backend container via `docker-compose.yml`.
   recorded too, never moving a stored one back. Turning course sync off
   everywhere drops tombstones and term resets together.
 - With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
-  writes the tombstone even for a course the server lacks; an upload's
-  `adds` replace `force_keys`, and its roster skips a hidden key, lifts a
-  reset tombstone and shows a removed key beside its removal tombstone,
-  which keeps refusing older edits. A reset clears only the term's
-  choices stamped at or before it: a row with a later add or override
-  value stays with its older choices emptied, and each row that goes
+  writes the tombstone even for a course the server lacks; a removal of a
+  school row (`source` other than `user_added`) keeps the row and only
+  clears its add. An upload's `adds` replace `force_keys`; the rest of
+  its `courses` is the school's roster, which marks a listed course as a
+  school row, skips a hidden key, lifts a reset tombstone and shows a
+  removed key beside its removal tombstone, which keeps refusing older
+  edits. A reset clears only the term's choices stamped at or before it:
+  a row with a later add stays, and so does a school row with a later
+  override value, with its older choices emptied; each row that goes
   leaves a reset tombstone after a term reset. The course override PATCH
   refuses edits stamped before the term's reset. `/sync/full` returns
   every tombstone with `hlc` and `kind`.
