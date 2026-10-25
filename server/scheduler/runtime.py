@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -67,7 +68,8 @@ def build_scheduler(
     * `sync_changelog_retention` — purge aged changelog entries daily.
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `admin_audit_retention` — prune portal audit rows after 365 days, daily.
-    * `device_retirement` — deregister the devices that are gone, daily.
+    * `device_retirement` — deregister the devices that are gone, daily at
+      04:00 Taipei.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
@@ -189,7 +191,9 @@ def build_scheduler(
     )
     scheduler.add_job(
         device_retirement,
-        trigger=IntervalTrigger(hours=24),
+        # A wall-clock time, so a deploy cannot keep putting the run off a day;
+        # before the host's 04:30 backup (deploy/launchd/ai.tigerduck.backup.plist).
+        trigger=CronTrigger(hour=4, timezone="Asia/Taipei"),
         id="device_retirement",
         max_instances=1,
         coalesce=True,

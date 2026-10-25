@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select, update
@@ -12,6 +13,7 @@ from server.auth.models import AuthSession, DevicePushToken, User, UserDevice
 from server.auth.retirement import SYSTEM_ACTOR, retire_dead_devices
 from server.db import build_session_factory
 from server.models import DeviceRegistration
+from server.scheduler.runtime import build_scheduler
 from server.tests.test_auth_login import LOGIN_BODY, allow_moodle
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -215,3 +217,17 @@ async def test_signing_in_brings_a_deregistered_device_back(client) -> None:
         device = (await session.execute(select(UserDevice))).scalar_one()
         assert device.deleted_at is None
     assert await retire_dead_devices(factory) == 0
+
+
+async def test_the_job_runs_at_four_in_the_morning_at_school(test_settings) -> None:
+    """At a wall-clock time: an interval would start over at every deploy."""
+    scheduler = build_scheduler(object(), object(), test_settings, llm=object())
+    scheduler.start(paused=True)
+    try:
+        started = datetime.now(UTC)
+        run_at = scheduler.get_job("device_retirement").next_run_time
+    finally:
+        scheduler.shutdown(wait=False)
+    local = run_at.astimezone(ZoneInfo("Asia/Taipei"))
+    assert (local.hour, local.minute, local.second) == (4, 0, 0)
+    assert timedelta(0) < run_at - started <= DAY

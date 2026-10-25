@@ -274,10 +274,11 @@ into the backend container via `docker-compose.yml`.
   replaces the notification already on screen, so only one would show.
 - A device with no live session that for 7 days was not seen
   (`last_seen_at`), did not announce itself and took no standard push is
-  deregistered by the daily `device_retirement` job (`auth/retirement.py`)
-  the way the portal's deregister does it: soft-deleted, its active push
-  tokens invalidated, one `device.deregister` audit row with actor `system`
-  and the token ids. Signing in on it brings it back.
+  deregistered by the `device_retirement` job, daily at 04:00 Taipei
+  (`auth/retirement.py`), the way the portal's deregister does it:
+  soft-deleted, its active push tokens invalidated, one `device.deregister`
+  audit row with actor `system` and the token ids. Signing in on it brings
+  it back.
 - A user's sync jobs are claimed only while a device with TigerSync on was
   seen within `sync_job_device_active_days` (90, the refresh token's
   lifetime, so a device that can still sign in counts) or took a standard
