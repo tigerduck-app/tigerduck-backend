@@ -176,19 +176,29 @@ class _PinnedTransport(httpx.BaseTransport):
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         extensions = dict(request.extensions)
         address = extensions.pop("address")
-        pinned = httpx.Request(
-            request.method,
-            request.url.copy_with(host=address),
-            headers=request.headers,
-            stream=request.stream,
-            extensions={**extensions, "sni_hostname": request.url.host},
-        )
+
+        def pinned(timeout: dict[str, float | None]) -> httpx.Request:
+            return httpx.Request(
+                request.method,
+                request.url.copy_with(host=address),
+                headers=request.headers,
+                stream=request.stream,
+                extensions={**extensions, "timeout": timeout, "sni_hostname": request.url.host},
+            )
+
+        timeout = extensions.get("timeout", {})
         try:
-            return self._transport.handle_request(pinned)
+            return self._transport.handle_request(pinned(timeout))
         except httpx.ConnectError as exc:
             if not self._add_aia_intermediates(exc, request.url, address):
                 raise
-        return self._transport.handle_request(pinned)
+        if math.isfinite(self._deadline):
+            # The second try gets only what is left of the check.
+            left = self._deadline - time.monotonic()
+            if left <= 0:
+                raise httpx.ConnectTimeout("out of time after the AIA fetch", request=request)
+            timeout = {k: left if v is None else min(v, left) for k, v in timeout.items()}
+        return self._transport.handle_request(pinned(timeout))
 
     def _add_aia_intermediates(
         self, error: httpx.ConnectError, url: httpx.URL, address: str
