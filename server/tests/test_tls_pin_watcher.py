@@ -33,16 +33,16 @@ from cryptography.x509.oid import (
 from prometheus_client import REGISTRY
 from sqlalchemy import select
 
+from server import tls_chain
 from server.db import build_session_factory
 from server.scheduler.runtime import build_scheduler
+from server.tls_chain import _aia_request, parse_issuer
 from server.tls_pins import watcher
 from server.tls_pins.document import PinSigner, document_sets, publish, spki_sha256
 from server.tls_pins.models import TlsPinDocument, TlsPinSet
 from server.tls_pins.watcher import (
     Probe,
-    _aia_request,
     forget_host,
-    parse_issuer,
     probe,
     restore_host_gauges,
     run_pin_watch,
@@ -300,7 +300,7 @@ def _aia_server(monkeypatch, answer: Callable[[socket.socket], None]) -> Iterato
 
     server = threading.Thread(target=serve, daemon=True)
     server.start()
-    monkeypatch.setattr(watcher, "resolve", resolve)
+    monkeypatch.setattr(tls_chain, "resolve", resolve)
     try:
         yield requests
     finally:
@@ -328,7 +328,7 @@ def test_an_aia_fetch_connects_to_the_address_it_checked(monkeypatch, pki) -> No
         conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: application/pkix-cert\r\n\r\n" + der)
 
     with _aia_server(monkeypatch, answer) as requests:
-        issuer = watcher.fetch_issuer("http://aia.test/ca.cer")
+        issuer = tls_chain.fetch_issuer("http://aia.test/ca.cer")
 
     assert issuer == pki.intermediate.cert
     assert requests[0].startswith(b"GET /ca.cer HTTP/1.0\r\nHost: aia.test\r\n")
@@ -340,11 +340,11 @@ def test_an_aia_fetch_connects_to_the_address_it_checked(monkeypatch, pki) -> No
     ids=["headers", "body"],
 )
 def test_an_aia_server_trickling_bytes_is_cut_off(monkeypatch, first) -> None:
-    monkeypatch.setattr(watcher, "AIA_FETCH_DEADLINE_SECONDS", 0.3)
+    monkeypatch.setattr(tls_chain, "AIA_FETCH_DEADLINE_SECONDS", 0.3)
 
     started = time.monotonic()
     with _aia_server(monkeypatch, _trickle(first)):
-        result = watcher.fetch_issuer("http://aia.test/ca.cer")
+        result = tls_chain.fetch_issuer("http://aia.test/ca.cer")
         elapsed = time.monotonic() - started
 
     assert result is None and elapsed < 3
