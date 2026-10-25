@@ -581,6 +581,10 @@ async def _cleanup_orphaned_sync_data(
     any_reminders = any(d.sync_assignment_reminders for d in active_devices)
     # (entity_type, entity_id, payload) for the per-row delete entries
     deleted_entries: list[tuple[str, str, dict | None]] = []
+    # Before any row it deletes, as every writer of the user's sync data
+    # takes it, so two writers never wait on each other's rows.
+    if not (any_courses and any_assignments):
+        state = await lock_sync_state(session, user_id)
 
     if not any_courses:
         await session.execute(
@@ -624,7 +628,6 @@ async def _cleanup_orphaned_sync_data(
         )
 
     if deleted_entries:
-        state = await lock_sync_state(session, user_id)
         for entity_type, entity_id, payload in deleted_entries:
             await append_change(
                 session,

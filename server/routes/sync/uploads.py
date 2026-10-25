@@ -91,6 +91,8 @@ async def upload_courses(
     background_tasks: BackgroundTasks,
 ):
     now = datetime.now(UTC)
+    # Before any row: the override writes take it first too.
+    state = await lock_sync_state(session, auth.user_id)
 
     existing_keys = set(
         (await session.execute(
@@ -228,7 +230,6 @@ async def upload_courses(
         uploaded_keys=sorted(uploaded_keys),
     )
     if new_keys:
-        state = await lock_sync_state(session, auth.user_id)
         new_rows = (await session.execute(
             select(UserCourse.id, UserCourse.course_key)
             .where(
@@ -280,9 +281,6 @@ async def upload_courses(
     courses_by_key: dict[str, UserCourse] = {}
     overrides_by_course_id: dict[int, UserCourseOverride] = {}
     if override_items:
-        # Under the lock the override PATCHes compare under, so a colour set
-        # meanwhile is seen and kept.
-        await lock_sync_state(session, auth.user_id)
         courses_by_key = {
             c.course_key: c
             for c in (

@@ -50,6 +50,8 @@ async def delete_all_courses(
             status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
         )
     now = datetime.now(UTC)
+    # Before any row: the override writes take it first too.
+    state = await lock_sync_state(session, auth.user_id)
 
     course_scope = [UserCourse.user_id == auth.user_id]
     tombstone_scope = [UserCourseTombstone.user_id == auth.user_id]
@@ -147,7 +149,6 @@ async def delete_all_courses(
     if not rows:
         return {"deleted": 0}
 
-    state = await lock_sync_state(session, auth.user_id)
     for row in rows:
         await append_change(
             session,
@@ -206,6 +207,8 @@ async def delete_course(
     background_tasks: BackgroundTasks,
 ):
     now = datetime.now(UTC)
+    # Before any row: the override writes take it first too.
+    state = await lock_sync_state(session, auth.user_id)
     del_stmt = (
         delete(UserCourse)
         .where(
@@ -241,7 +244,6 @@ async def delete_course(
         )
     )
 
-    state = await lock_sync_state(session, auth.user_id)
     await append_change(
         session,
         user_id=auth.user_id,

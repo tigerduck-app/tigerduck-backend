@@ -233,6 +233,7 @@ async def put_skipped_date(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    state = await lock_sync_state(session, auth.user_id)
     await _get_owned_course(session, auth.user_id, course_id)
     row = (
         await session.execute(
@@ -265,6 +266,7 @@ async def put_skipped_date(
         entity_id=str(row.id),
         operation="upsert",
         device_id=auth.device_id,
+        locked_state=state,
     )
     return serializers.skipped_date_to_dict(row)
 
@@ -279,6 +281,7 @@ async def delete_skipped_date(
     auth: CurrentAuthDep,
     session: SessionDep,
 ) -> None:
+    state = await lock_sync_state(session, auth.user_id)
     await _get_owned_course(session, auth.user_id, course_id)
     row = (
         await session.execute(
@@ -301,6 +304,7 @@ async def delete_skipped_date(
         entity_id=str(row.id),
         operation="delete",
         device_id=auth.device_id,
+        locked_state=state,
     )
 
 
