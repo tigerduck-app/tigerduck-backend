@@ -489,6 +489,21 @@ async def test_a_first_snapshot_is_stored_whatever_its_size(db_session) -> None:
     assert len(zh["courses"]) == len(FIXTURE["courses"]["zh"]) - 3
 
 
+@pytest.mark.parametrize("listed", [[], [{"Semester": "95 1"}]])
+async def test_a_semester_list_without_a_term_fails_the_run(db_session, listed) -> None:
+    factory = await _factory(db_session)
+    school = School()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/semestersinfo"):
+            return httpx.Response(200, json=listed)
+        return school(request)
+
+    with pytest.raises(CatalogFetchError, match="semestersinfo"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(handler), now=FIRST)
+    assert not school.bodies()
+
+
 async def test_an_unreadable_row_fails_the_term(db_session) -> None:
     factory = await _factory(db_session)
 

@@ -204,6 +204,9 @@ async def _target_semesters(client: httpx.AsyncClient, current: str | None) -> l
         listed = sorted({s["Semester"] for s in answer if is_term_code(s["Semester"])}, reverse=True)
     except (KeyError, TypeError):
         raise CatalogFetchError("semestersinfo: an unreadable answer") from None
+    if not listed:
+        # The school always lists past terms; none means its answer went wrong.
+        raise CatalogFetchError("semestersinfo: no term listed")
     # Term codes sort in time order as strings: 1151 < 1152 < 115H < 1161.
     chosen = [code for code in listed if current and code >= current] or listed[:1]
     return chosen[:MAX_SEMESTERS]
