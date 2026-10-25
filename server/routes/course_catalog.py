@@ -1,8 +1,9 @@
 """/v3/course-catalog: a semester's whole course list, for on-device search.
 
 The daily refresh (`server/course_catalog/refresh.py`) stores each semester
-and language gzip-compressed with its ETag, so a device that already holds
-the snapshot costs a 304 and a new one is the stored bytes, sent as they are.
+and language gzip-compressed with its ETag, and leaves a snapshot whose
+content has not changed as it is. A device that already holds the snapshot
+costs a 304, and a new one is the stored bytes, sent as they are.
 """
 
 from __future__ import annotations
@@ -30,8 +31,8 @@ async def get_course_catalog(
     accept_encoding: Annotated[str, Header()] = "",
 ) -> Response:
     """The semester's last complete snapshot in `language`: its courses,
-    colleges with departments, dimensions and `fetched_at`. 404 until the
-    refresh has stored one."""
+    colleges with departments, dimensions and `fetched_at`, when that content
+    was first fetched. 404 until the refresh has stored one."""
     row = await session.get(CourseCatalogSnapshot, (semester, language))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="course_catalog_not_found")

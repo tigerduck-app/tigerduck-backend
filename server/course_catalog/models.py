@@ -15,7 +15,8 @@ from server.db import Base
 
 class CourseCatalogSnapshot(Base):
     """The last complete fetch of a semester in one language. A refresh
-    replaces it only when every request it made succeeded."""
+    replaces it only when every request it made succeeded and the content
+    changed."""
 
     __tablename__ = "course_catalog_snapshots"
 
@@ -24,5 +25,7 @@ class CourseCatalogSnapshot(Base):
     language: Mapped[str] = mapped_column(Text, primary_key=True)
     # The gzip-compressed JSON served; never serialised again.
     body: Mapped[bytes] = mapped_column(LargeBinary)
+    # Hashes the content without `fetched_at`.
     etag: Mapped[str] = mapped_column(Text)
+    # When this content was first fetched.
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

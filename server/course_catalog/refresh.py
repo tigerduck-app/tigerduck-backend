@@ -236,38 +236,50 @@ async def _fetch_semester(
     }
 
 
-def snapshot_json(
+def _json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def snapshot(
     semester: str,
     language: str,
     courses: list[dict[str, Any]],
     lists: dict[str, list],
     fetched_at: datetime,
-) -> bytes:
-    """The document `GET /v3/course-catalog/{semester}` serves."""
-    document = {
-        "semester": semester,
-        "language": language,
-        "fetched_at": fetched_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "courses": courses,
-        **lists,
-    }
-    return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+) -> tuple[bytes, str]:
+    """The document `GET /v3/course-catalog/{semester}` serves, and its ETag.
+    The ETag hashes everything but `fetched_at`, so the same catalog fetched
+    again keeps it."""
+    content = {"semester": semester, "language": language, "courses": courses, **lists}
+    stamp = fetched_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    etag = f'W/"{hashlib.sha256(_json(content)).hexdigest()[:32]}"'
+    return _json({"fetched_at": stamp, **content}), etag
 
 
 async def _store(
-    session: AsyncSession, semester: str, documents: dict[str, bytes], fetched_at: datetime
-) -> None:
-    for language, document in documents.items():
-        values = {
-            "body": gzip.compress(document, mtime=0),
-            "etag": f'W/"{hashlib.sha256(document).hexdigest()[:32]}"',
-            "fetched_at": fetched_at,
-        }
-        await session.execute(
-            insert(CourseCatalogSnapshot)
-            .values(semester=semester, language=language, **values)
-            .on_conflict_do_update(index_elements=["semester", "language"], set_=values)
+    session: AsyncSession,
+    semester: str,
+    documents: dict[str, tuple[bytes, str]],
+    fetched_at: datetime,
+) -> list[str]:
+    """Write each language whose content changed, and return those. An
+    unchanged one keeps its row, `fetched_at` included."""
+    changed = []
+    for language, (document, etag) in documents.items():
+        values = {"body": gzip.compress(document, mtime=0), "etag": etag, "fetched_at": fetched_at}
+        statement = insert(CourseCatalogSnapshot).values(
+            semester=semester, language=language, **values
         )
+        written = await session.scalar(
+            statement.on_conflict_do_update(
+                index_elements=["semester", "language"],
+                set_=values,
+                where=CourseCatalogSnapshot.etag != statement.excluded.etag,
+            ).returning(CourseCatalogSnapshot.language)
+        )
+        if written is not None:
+            changed.append(language)
+    return changed
 
 
 async def refresh_course_catalog(
@@ -278,9 +290,9 @@ async def refresh_course_catalog(
 ) -> list[str]:
     """Fetch and store the current term and the terms listed after it.
 
-    Returns the semesters stored. A semester that failed keeps its last
-    snapshot, and the refresh raises `CatalogFetchError` naming it once the
-    others are stored, so the job reports the error.
+    Returns the semesters fetched in full, changed or not. A semester that
+    failed keeps its last snapshot, and the refresh raises `CatalogFetchError`
+    naming it once the others are stored, so the job reports the error.
     """
     now = now or datetime.now(UTC)
     async with session_scope(session_factory) as session:
@@ -300,18 +312,19 @@ async def refresh_course_catalog(
                 failed.append(semester)
                 continue
             documents = {
-                language: snapshot_json(semester, language, rows, lists[language], now)
+                language: snapshot(semester, language, rows, lists[language], now)
                 for language, rows in courses.items()
             }
             # Both languages or neither: the device searches the two together.
             async with session_scope(session_factory) as session:
-                await _store(session, semester, documents, now)
+                changed = await _store(session, semester, documents, now)
             stored.append(semester)
             logger.info(
                 "course_catalog.stored",
                 semester=semester,
                 courses=len(courses["zh"]),
-                bytes={k: len(v) for k, v in documents.items()},
+                changed=changed,
+                bytes={k: len(v[0]) for k, v in documents.items()},
             )
     if failed:
         raise CatalogFetchError(f"kept the last snapshot of {', '.join(failed)}")

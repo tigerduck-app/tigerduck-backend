@@ -41,8 +41,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   compressed (plain to a client that does not accept gzip) with a weak
   `ETag` and `Cache-Control: private, no-cache`, answers 304 to a matching
   `If-None-Match`, and answers 404 `course_catalog_not_found` until a
-  refresh has stored the term. The body's `fetched_at` says when the
-  snapshot was fetched.
+  refresh has stored the term. The ETag hashes the content without the
+  body's `fetched_at`, so a refresh that finds the same catalog keeps the
+  snapshot as it is, `fetched_at` included, and a device that holds it gets
+  a 304 on later days too.
 - **Migration `5d2a9c7e4f1b`** adds `course_catalog_snapshots`, one row per
   term and language holding the gzip-compressed JSON served.
 - **The refresh.** The `course_catalog_refresh` job runs once a day at

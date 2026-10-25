@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -33,6 +34,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "querycourse.json").read_text())
 FIRST = datetime(2026, 10, 27, 21, 30, tzinfo=UTC)
 SECOND = datetime(2026, 10, 28, 21, 30, tzinfo=UTC)
+THIRD = datetime(2026, 10, 29, 21, 30, tzinfo=UTC)
 # The app's CourseSearchResult, and the flags the refresh adds.
 ROW_KEYS = {
     "Semester", "CourseNo", "CourseName", "CourseTeacher", "Dimension", "CreditPoint",
@@ -45,11 +47,17 @@ _OPTION_PATHS = {"semestersinfo": "semestersinfo", "dimensions": "dimensions", "
 
 class School:
     """querycourse.ntust.edu.tw as recorded. Keeps every request; `fail` maps
-    (semester, language, CourseNo) to the status to answer that query with."""
+    (semester, language, CourseNo) to the status to answer that query with,
+    and `edit` changes each course row it answers."""
 
-    def __init__(self, fail: dict[tuple[str, str, str], int] | None = None) -> None:
+    def __init__(
+        self,
+        fail: dict[tuple[str, str, str], int] | None = None,
+        edit: Callable[[dict], dict] = lambda row: row,
+    ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail = fail or {}
+        self.edit = edit
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -66,7 +74,7 @@ class School:
             r for r in FIXTURE["courses"][body["Language"]]
             if r["CourseNo"].upper().startswith(body["CourseNo"].upper())
         ]
-        return httpx.Response(200, json=[r | {"Semester": body["Semester"]} for r in rows])
+        return httpx.Response(200, json=[self.edit(r | {"Semester": body["Semester"]}) for r in rows])
 
     def bodies(self) -> list[dict]:
         return [json.loads(r.content) for r in self.requests if r.method == "POST"]
@@ -160,7 +168,8 @@ async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_ba
     factory = await _factory(db_session)
     await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
     before = await _snapshots(factory)
-    school = School(fail={("1151", "en", "M"): 500})
+    # New counts, so a term that is stored gets the second fetch's time.
+    school = School(fail={("1151", "en", "M"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
 
     with pytest.raises(CatalogFetchError, match="1151"):
         await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=SECOND)
@@ -175,6 +184,29 @@ async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_ba
     assert len(failing) == ATTEMPTS
     # The failed term stops there rather than sweeping on.
     assert not any(b["Semester"] == "1151" and b.get("OnlyIntensive") for b in school.bodies())
+
+
+async def test_an_unchanged_catalog_keeps_its_snapshot_and_etag(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    before = await _snapshots(factory)
+
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=SECOND)
+
+    after = await _snapshots(factory)
+    for key, snapshot in before.items():
+        assert after[key].etag == snapshot.etag
+        assert after[key].body == snapshot.body
+        assert after[key].fetched_at == FIRST
+
+    enrolment_moved = School(edit=lambda row: row | {"ChooseStudent": 1})
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(enrolment_moved), now=THIRD)
+
+    changed = await _snapshots(factory)
+    for key, snapshot in before.items():
+        assert changed[key].etag != snapshot.etag
+        assert changed[key].fetched_at == THIRD
+        assert _document(changed[key])["fetched_at"] == "2026-10-29T21:30:00Z"
 
 
 async def test_an_unreadable_row_fails_the_term(db_session) -> None:
