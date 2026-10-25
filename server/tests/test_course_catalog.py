@@ -435,12 +435,19 @@ async def test_an_unreadable_row_fails_the_term(db_session) -> None:
     assert await _snapshots(factory) == {}
 
 
-async def test_the_job_runs_every_two_hours_first_a_minute_after_start(test_settings) -> None:
+async def test_the_job_runs_every_two_hours_from_start(test_settings) -> None:
+    """No run at start: a deploy overlap or a crash loop must not start extra
+    sweeps against the school."""
     settings = test_settings.model_copy(update={"course_catalog_refresh_interval_minutes": 120})
-    started = datetime.now(UTC)
-    job = build_scheduler(object(), object(), settings, llm=object()).get_job("course_catalog_refresh")
-    assert job.trigger.interval == timedelta(hours=2)
-    assert timedelta(0) < job.next_run_time - started <= timedelta(minutes=1, seconds=5)
+    scheduler = build_scheduler(object(), object(), settings, llm=object())
+    scheduler.start(paused=True)
+    try:
+        started = datetime.now(UTC)
+        job = scheduler.get_job("course_catalog_refresh")
+        assert job.trigger.interval == timedelta(hours=2)
+        assert job.next_run_time - started > timedelta(hours=1, minutes=59)
+    finally:
+        scheduler.shutdown(wait=False)
     off = build_scheduler(object(), object(), test_settings, llm=object())
     assert off.get_job("course_catalog_refresh") is None
 

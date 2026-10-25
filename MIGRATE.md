@@ -51,7 +51,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   teachers and notes of the day's en sweep.
 - **The refresh.** The `course_catalog_refresh` job runs every
   `TIGERDUCK_COURSE_CATALOG_REFRESH_INTERVAL_MINUTES` (default 120; 0 turns
-  it off), the first time a minute after the backend starts. It fetches the
+  it off), the first time one interval after the backend starts, so a
+  restart puts the next run up to an interval out. It fetches the
   current term from the academic calendar and every later term
   `querycourse.ntust.edu.tw` lists, three at most. Each run sweeps zh as 281
   course-number prefix queries, three in flight at most, and sends one

@@ -81,8 +81,8 @@ def build_scheduler(
       check, every minute and once at startup (not at all with its interval
       set to 0).
     * `course_catalog_refresh` — fetch the course catalog from NTUST every
-      `course_catalog_refresh_interval_minutes`, first a minute after start
-      (not at all with it set to 0).
+      `course_catalog_refresh_interval_minutes`, first one interval after
+      start (not at all with it set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -321,8 +321,6 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=600,
-            # A restart would otherwise put the next refresh a whole interval off.
-            next_run_time=datetime.now(UTC) + timedelta(minutes=1),
         )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)

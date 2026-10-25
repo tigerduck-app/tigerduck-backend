@@ -320,9 +320,9 @@ class Settings(BaseSettings):
     link_check_tick_seconds: int = 60
 
     # --- Course catalog (`/v3/course-catalog`, server/course_catalog/) ---
-    # How often the catalog is refreshed from NTUST's course query, first a
-    # minute after start; 0 turns it off. en is swept on the day's first run
-    # after 05:00 Taipei time.
+    # How often the catalog is refreshed from NTUST's course query, first one
+    # interval after start; 0 turns it off. en is swept on the day's first
+    # run after 05:00 Taipei time.
     course_catalog_refresh_interval_minutes: int = Field(default=120, ge=0)
 
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
