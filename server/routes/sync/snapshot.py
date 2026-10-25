@@ -126,6 +126,9 @@ async def _read_full_snapshot(session, user_id, device_id):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
 
+    # Before the first query, which fixes what the snapshot sees: a write
+    # whose clock header is earlier than this is in it.
+    server_hlc = to_clock(datetime.now(UTC))
     state = await session.get(UserSyncState, user_id)
     user = await session.get(User, user_id)
     courses = await rows(
@@ -194,7 +197,7 @@ async def _read_full_snapshot(session, user_id, device_id):
     _iso = serializers._iso
     return {
         "current_revision": state.current_revision if state else 0,
-        "server_hlc": to_clock(datetime.now(UTC)),
+        "server_hlc": server_hlc,
         "courses_reset_at": _iso(user.courses_reset_at) if user else None,
         # A reset tombstone does not bind the device that wrote it (see
         # `upload_courses`), and the client applies the same rule: between
