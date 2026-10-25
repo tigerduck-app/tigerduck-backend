@@ -41,8 +41,10 @@ from server.tls_pins.models import TlsPinDocument, TlsPinSet
 from server.tls_pins.watcher import (
     Probe,
     _aia_request,
+    forget_host,
     parse_issuer,
     probe,
+    restore_host_gauges,
     run_pin_watch,
 )
 
@@ -602,6 +604,43 @@ async def test_a_failing_host_keeps_its_last_success_while_others_succeed(
     assert _gauge("tigerduck_tls_host_last_success_timestamp", "ok.tls.test") == later.timestamp()
     results = (await _stored_set(factory)).watch_results
     assert results[HOST]["last_success_at"] == "2026-10-25T04:00:00Z"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_restart_keeps_an_open_chain_alert_through_a_timeout(
+    pki, db_session, factory
+) -> None:
+    mismatched = "mm.tls.test"
+    await _store_set(db_session, [HOST, mismatched], [UNRELATED_PIN], auto_publish=False)
+    chain = (pki.leaf.cert, pki.intermediate.cert, pki.root.cert)
+    answers = {
+        HOST: Probe("untrusted", chain[:1], detail="self-signed"),
+        mismatched: Probe("trusted", chain),
+    }
+
+    def probe_fn(target: str) -> Probe:
+        return answers[target]
+
+    await run_pin_watch(factory, None, timeout=10, probe_fn=probe_fn, now=NOW)
+    answers = dict.fromkeys(answers, Probe("error", detail="timeout"))
+    await run_pin_watch(factory, None, timeout=10, probe_fn=probe_fn, now=NOW + timedelta(hours=1))
+    # A restart starts with no series.
+    forget_host("ntust", HOST)
+    forget_host("ntust", mismatched)
+
+    async with factory() as session:
+        await restore_host_gauges(session)
+    await run_pin_watch(factory, None, timeout=10, probe_fn=probe_fn, now=NOW + timedelta(hours=2))
+
+    assert _gauge("tigerduck_tls_chain_trusted", HOST) == 0
+    assert _gauge("tigerduck_tls_chain_trusted", mismatched) == 1
+    assert _gauge("tigerduck_tls_chain_matches", mismatched) == 0
+    info = REGISTRY.get_sample_value(
+        "tigerduck_tls_chain_info",
+        {"set": "ntust", "host": HOST, "chain": watcher._chain_labels[("ntust", HOST)]},
+    )
+    assert info == 1 and watcher._chain_labels[("ntust", HOST)].startswith("untrusted")
+    assert _gauge("tigerduck_tls_host_last_success_timestamp", HOST) == NOW.timestamp()
 
 
 @pytest.mark.asyncio(loop_scope="session")
