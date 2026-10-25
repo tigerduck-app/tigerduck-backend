@@ -85,6 +85,11 @@ class UserCourse(Base):
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The stamp of the user's add, None for a course only the roster brought
+    # (`server/sync/membership.py`).
+    added_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     __table_args__ = (
         UniqueConstraint("user_id", "semester", "course_key"),
         CheckConstraint(
@@ -218,6 +223,18 @@ class UserCourseOverride(Base):
     )
 
     __table_args__ = (UniqueConstraint("user_id", "user_course_id"),)
+class UserSemesterReset(Base):
+    """The latest reset of one term's courses, by its stamp. The course
+    choices of the term stamped at or before it are cleared and refused
+    (`server/sync/membership.py`); a full reset is `users.courses_reset_at`."""
+
+    __tablename__ = "user_semester_resets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    semester: Mapped[str] = mapped_column(String(16), primary_key=True)
+    reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 class UserCourseSkippedDate(Base):
     __tablename__ = "user_course_skipped_dates"
 
