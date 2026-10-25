@@ -335,6 +335,12 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `GET` | `/v3/sync/holiday-overrides` | The user's holiday exceptions ("Still have class?") | JWT |
 | `PUT` | `/v3/sync/holiday-overrides/{holiday_id}` | Set whether one holiday still gets class notifications | JWT |
 
+### Course catalog
+
+| Method | Path | Purpose | Auth |
+|---|---|---|---|
+| `GET` | `/v3/course-catalog/{semester}?language=zh\|en` | A term's whole course list, departments and dimensions, refreshed from NTUST every 2 hours (gzip, ETag) | JWT |
+
 ### Schedule / Live Activity
 
 | Method | Path | Purpose | Auth |

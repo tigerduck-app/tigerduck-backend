@@ -32,6 +32,59 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.6.0
+
+- **The course catalog (tigerduck-app#547).** `GET
+  /v3/course-catalog/{semester}?language=zh|en` (JWT) serves a term's whole
+  course list with its colleges, departments and general-education
+  dimensions, for the app's on-device course search. It is sent gzip
+  compressed (plain to a client that does not accept gzip) with a weak
+  `ETag` and `Cache-Control: private, no-cache`, answers 304 to a matching
+  `If-None-Match`, and answers 404 `course_catalog_not_found` until a
+  refresh has stored the term. The ETag hashes the content without the
+  body's `fetched_at`, so a refresh that finds the same catalog keeps the
+  snapshot as it is, `fetched_at` included, and a device that holds it gets
+  a 304 on later days too.
+- **Migration `5d2a9c7e4f1b`** adds `course_catalog_snapshots`, one row per
+  term and language holding the gzip-compressed JSON served, and
+  `course_catalog_en_texts`, one row per term holding the en course names,
+  teachers and notes of the day's en sweep.
+- **The refresh.** The `course_catalog_refresh` job runs every
+  `TIGERDUCK_COURSE_CATALOG_REFRESH_INTERVAL_MINUTES` (default 120; 0 turns
+  it off), the first time one interval after the backend starts, so a
+  restart puts the next run up to an interval out. It fetches the current
+  term from the academic calendar and every later term
+  `querycourse.ntust.edu.tw` lists, three at most. Each run sweeps zh as 281
+  course-number prefix queries, three in flight at most, and sends one
+  `OnlyIntensive` query and the option lists. A zh run takes about a minute
+  and some 200 s of the school's time per term, a run with en twice that.
+  Until the first run has stored a term, the app keeps querying the school
+  itself.
+- **The en text.** en is swept too only on the first run after 05:00 Taipei
+  time each day, or when a term has no en text stored. The runs between
+  build the en snapshot from their zh rows and the stored en text: a new
+  course shows its zh text until the next en sweep, and a course already
+  there, with the same course number and periods, keeps its stored en
+  name, teacher and notes until then, even when zh has changed them.
+- **Failures.** A request is retried twice with backoff; a term with any
+  failed zh request keeps its last snapshot, and the job reports an error.
+  So does a term whose zh courses drop by more than 10% from its stored
+  snapshot or lose every intensive course, since the school can answer a
+  query with nothing in a hiccup; a term's first snapshot has nothing to
+  compare with and is stored. An en sweep that fails, or that has under 90%
+  of the run's zh course numbers, still lets zh be stored, with en built
+  from the stored text; en stays due, so the next run sweeps it again, and
+  the job reports an error. A term listed after the
+  current one with no course yet is skipped with a log line and is not an
+  error.
+- **Alert.** Grafana's new rule `Course catalog not refreshed` posts when
+  the job has not completed for over 6.5 hours, three missed runs, while it
+  is scheduled. Grafana reads its provisioning only at start, so after
+  `./start.sh` run `docker compose restart grafana`.
+- No change to `.env` is needed.
+- **Rollback.** `alembic downgrade 8996a3bf992f` drops both tables; the
+  previous release neither reads nor writes them.
+
 ## Upgrading to 3.5.1
 
 - **Link checks complete a chain that leaves out its intermediate

@@ -335,6 +335,12 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `GET` | `/v3/sync/holiday-overrides` | 使用者的假日例外（「還要上課？」） | JWT |
 | `PUT` | `/v3/sync/holiday-overrides/{holiday_id}` | 設定某個假日是否照常送課程通知 | JWT |
 
+### 課程目錄
+
+| Method | Path | 用途 | 認證 |
+|---|---|---|---|
+| `GET` | `/v3/course-catalog/{semester}?language=zh\|en` | 一個學期的完整課程、系所與通識向度，每兩小時從 NTUST 更新（gzip、ETag） | JWT |
+
 ### 排程 / Live Activity
 
 | Method | Path | 用途 | 認證 |
