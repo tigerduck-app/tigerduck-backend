@@ -334,3 +334,28 @@ def test_a_chain_read_or_aia_fetch_past_its_deadline_makes_no_connection(monkeyp
     with pytest.raises(TimeoutError):
         tls_chain.peer_chain(tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], past)
     assert connects == []
+
+
+@pytest.mark.parametrize("left", [0.2, 0.6])
+def test_the_chain_read_handshake_ends_by_the_deadline_after_a_slow_connect(
+    monkeypatch, left
+) -> None:
+    ours, server = socket.socketpair()
+    deadline = time.monotonic() + left
+
+    def slow_connect(addresses, deadline):
+        time.sleep(0.3)
+        ours.settimeout(5)
+        return ours
+
+    monkeypatch.setattr(tls_chain, "_connect", slow_connect)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        tls_chain.peer_chain(tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], deadline)
+
+    assert time.monotonic() - started < 1
+    server.settimeout(1)
+    hello = server.recv(4096)
+    # Past the deadline, no handshake starts; before it, one starts and is cut off.
+    assert (hello == b"") == (left < 0.3)
+    server.close()
