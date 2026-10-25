@@ -52,6 +52,7 @@ def course_to_dict(c: UserCourse) -> dict:
         "fetched_at": _iso(c.fetched_at),
         "updated_at": _iso(c.updated_at),
         "version": c.version,
+        "added_hlc": hlc(c.added_at),
     }
 
 
