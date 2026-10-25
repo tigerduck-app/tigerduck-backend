@@ -14,6 +14,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.admin_audit import prune_admin_audit_log
+from server.auth.retirement import retire_dead_devices
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
@@ -66,6 +67,7 @@ def build_scheduler(
     * `sync_changelog_retention` — purge aged changelog entries daily.
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `admin_audit_retention` — prune portal audit rows after 365 days, daily.
+    * `device_retirement` — deregister the devices that are gone, daily.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
@@ -113,6 +115,9 @@ def build_scheduler(
 
     async def admin_audit_retention() -> None:
         await prune_admin_audit_log(session_factory, settings)
+
+    async def device_retirement() -> None:
+        await retire_dead_devices(session_factory)
 
     scheduler.add_job(
         bulletin_scrape,
@@ -178,6 +183,14 @@ def build_scheduler(
         admin_audit_retention,
         trigger=IntervalTrigger(hours=24),
         id="admin_audit_retention",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        device_retirement,
+        trigger=IntervalTrigger(hours=24),
+        id="device_retirement",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

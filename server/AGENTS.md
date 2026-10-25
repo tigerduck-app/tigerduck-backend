@@ -39,7 +39,8 @@ server/
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
-├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
+├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
+│                              #   retirement.py deregisters gone devices daily
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
 ├── links/                     # /links/{name} redirects: model, target checks,
@@ -271,6 +272,12 @@ into the backend container via `docker-compose.yml`.
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
   replaces the notification already on screen, so only one would show.
+- A device with no live session that for 7 days was not seen
+  (`last_seen_at`), did not announce itself and took no standard push is
+  deregistered by the daily `device_retirement` job (`auth/retirement.py`)
+  the way the portal's deregister does it: soft-deleted, its active push
+  tokens invalidated, one `device.deregister` audit row with actor `system`
+  and the token ids. Signing in on it brings it back.
 - A user's sync jobs are claimed only while a device with TigerSync on was
   seen within `sync_job_device_active_days` (60) or took a standard push
   within `sync_job_device_push_days` (14). Until then they stay pending, and
