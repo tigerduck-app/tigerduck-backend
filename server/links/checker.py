@@ -202,7 +202,9 @@ class _PinnedTransport(httpx.BaseTransport):
         ):
             return False
         try:
-            extra = missing_intermediates(url.host, [(address, url.port or 443)], self._fetch)
+            extra = missing_intermediates(
+                url.host, [(address, url.port or 443)], self._fetch, self._deadline
+            )
         except (OSError, ValueError):
             return False
         for der in extra:

@@ -52,22 +52,31 @@ def unverified_context() -> ssl.SSLContext:
     return ctx
 
 
-def _connect(addresses: list[tuple[str, int]]) -> socket.socket:
-    """A connection to the first of `addresses` that answers. Connecting to
-    the checked addresses, not the name, keeps a second lookup out."""
+def _connect(addresses: list[tuple[str, int]], deadline: float = math.inf) -> socket.socket:
+    """A connection to the first of `addresses` that answers before `deadline`.
+    Connecting to the checked addresses, not the name, keeps a second lookup
+    out. The socket's timeout, which also bounds a handshake, ends by then."""
     error: OSError = OSError("no address")
     for address in addresses:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("deadline passed before connecting")
         try:
-            return socket.create_connection(address, timeout=CONNECT_TIMEOUT_SECONDS)
+            return socket.create_connection(
+                address, timeout=min(CONNECT_TIMEOUT_SECONDS, remaining)
+            )
         except OSError as exc:
             error = exc
     raise error
 
 
 def peer_chain(
-    ctx: ssl.SSLContext, host: str, addresses: list[tuple[str, int]]
+    ctx: ssl.SSLContext,
+    host: str,
+    addresses: list[tuple[str, int]],
+    deadline: float = math.inf,
 ) -> tuple[x509.Certificate, ...]:
-    with _connect(addresses) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
+    with _connect(addresses, deadline) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
         # The chain as served when the context does not verify.
         ders = tls.get_verified_chain()
     return tuple(x509.load_der_x509_certificate(der) for der in ders)
@@ -139,7 +148,7 @@ def fetch_issuer(url: str, deadline: float = math.inf) -> x509.Certificate | Non
     deadline = min(deadline, time.monotonic() + AIA_FETCH_DEADLINE_SECONDS)
     response = b""
     try:
-        with _connect(addresses) as sock:
+        with _connect(addresses, deadline) as sock:
             sock.sendall(head)
             while chunk := _recv(sock, deadline):
                 response += chunk
@@ -169,8 +178,12 @@ def _aia_intermediates(served: tuple[x509.Certificate, ...], fetch: IssuerFetch)
 
 
 def missing_intermediates(
-    host: str, addresses: list[tuple[str, int]], fetch: IssuerFetch = fetch_issuer
+    host: str,
+    addresses: list[tuple[str, int]],
+    fetch: IssuerFetch = fetch_issuer,
+    deadline: float = math.inf,
 ) -> list[bytes]:
     """DER of the intermediates `host` leaves out of its chain, fetched
-    through AIA; empty when AIA supplies none."""
-    return _aia_intermediates(peer_chain(unverified_context(), host, addresses), fetch)
+    through AIA; empty when AIA supplies none. The chain read ends by
+    `deadline`; `fetch` holds to its own."""
+    return _aia_intermediates(peer_chain(unverified_context(), host, addresses, deadline), fetch)

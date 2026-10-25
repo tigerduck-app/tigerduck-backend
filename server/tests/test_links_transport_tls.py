@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from server import tls_chain
 from server.links.checker import _PinnedTransport
 from server.tests.test_tls_pin_watcher import AIA_URL, Authority, Pki, _pki
 from server.tests.test_tls_pin_watcher import HOST as PKI_HOST
@@ -257,3 +258,20 @@ def test_no_aia_fetch_starts_once_the_check_is_out_of_time(
         _get(transport, PKI_HOST, port)
 
     assert aia.asked == []
+
+
+def test_a_chain_read_or_aia_fetch_past_its_deadline_makes_no_connection(monkeypatch) -> None:
+    connects: list[tuple] = []
+
+    def refuse(*args, **kwargs):
+        connects.append(args)
+        raise OSError("no connection in this test")
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(tls_chain, "resolve", lambda host, port: [("203.0.113.1", port)])
+    past = time.monotonic() - 1
+
+    assert tls_chain.fetch_issuer(AIA_URL, deadline=past) is None
+    with pytest.raises(TimeoutError):
+        tls_chain.peer_chain(tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], past)
+    assert connects == []
