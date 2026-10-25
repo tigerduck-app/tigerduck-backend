@@ -1,11 +1,12 @@
 """Completing a chain a server sends without its intermediates, as browsers
-and the apps' platforms do: fetch them through the leaf's AIA CA Issuers URL
+and Apple's platforms do: fetch them through the leaf's AIA CA Issuers URL
 and add them to the store, never as trust anchors. The pin watcher and the
 link checker both use it.
 """
 
 from __future__ import annotations
 
+import math
 import socket
 import ssl
 import time
@@ -127,14 +128,15 @@ def parse_issuer(body: bytes) -> x509.Certificate | None:
     return certs[0] if certs else None
 
 
-def fetch_issuer(url: str) -> x509.Certificate | None:
+def fetch_issuer(url: str, deadline: float = math.inf) -> x509.Certificate | None:
     """GET over HTTP/1.0 to the checked addresses, so a second lookup cannot
-    rebind the name, under one deadline for headers and body alike."""
+    rebind the name, under one deadline for headers and body alike: the
+    caller's `deadline` or AIA_FETCH_DEADLINE_SECONDS, whichever is sooner."""
     request = _aia_request(url)
     if request is None:
         return None
     addresses, head = request
-    deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
+    deadline = min(deadline, time.monotonic() + AIA_FETCH_DEADLINE_SECONDS)
     response = b""
     try:
         with _connect(addresses) as sock:
