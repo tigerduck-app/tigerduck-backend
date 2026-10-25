@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 from prometheus_client import REGISTRY
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
@@ -363,6 +363,26 @@ async def test_serves_the_snapshot_gzipped_and_answers_304_to_its_etag(client) -
     zh = await client.get("/v3/course-catalog/1151", headers={**headers, "If-None-Match": etag})
     assert zh.status_code == 200
     assert zh.json()["language"] == "zh"
+
+
+async def test_a_304_does_not_read_the_body(client) -> None:
+    headers = await _seeded(client)
+    etag = (await client.get("/v3/course-catalog/1151", headers=headers)).headers["etag"]
+    statements: list[str] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany) -> None:
+        statements.append(statement)
+
+    engine = client.app.state.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        again = await client.get("/v3/course-catalog/1151", headers={**headers, "If-None-Match": etag})
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    assert again.status_code == 304
+    catalog = [s for s in statements if "course_catalog_snapshots" in s]
+    assert catalog and not any("course_catalog_snapshots.body" in s for s in catalog)
 
 
 async def test_a_client_that_takes_no_gzip_gets_plain_json(client) -> None:
