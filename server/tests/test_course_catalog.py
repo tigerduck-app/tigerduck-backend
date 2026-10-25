@@ -240,6 +240,27 @@ async def test_a_run_between_en_sweeps_builds_en_from_zh(db_session) -> None:
     assert en["EC1011301"]["CourseName"].startswith("Computer Programming")
 
 
+async def test_a_matched_en_row_keeps_its_stored_text_until_the_next_en_sweep(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+
+    def renamed(row: dict) -> dict:
+        if row["CourseNo"] != "3T1001701":
+            return row
+        return row | {"CourseName": "Renamed", "CourseTeacher": "Someone Else"}
+
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School(edit=renamed)), now=LATER)
+    snapshots = await _snapshots(factory)
+    zh = {r["CourseNo"]: r for r in _document(snapshots["1151", "zh"])["courses"]}
+    en = {r["CourseNo"]: r for r in _document(snapshots["1151", "en"])["courses"]}
+    assert zh["3T1001701"]["CourseName"] == "Renamed"
+    assert (en["3T1001701"]["CourseName"], en["3T1001701"]["CourseTeacher"]) == ("Calculus", "Teacher 3T")
+
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School(edit=renamed)), now=SECOND)
+    en = {r["CourseNo"]: r for r in _document((await _snapshots(factory))["1151", "en"])["courses"]}
+    assert (en["3T1001701"]["CourseName"], en["3T1001701"]["CourseTeacher"]) == ("Renamed", "Someone Else")
+
+
 async def test_the_prefixes_cover_every_course_number_once() -> None:
     """Course numbers are upper-case letters and digits, and no prefix is
     longer than three characters."""

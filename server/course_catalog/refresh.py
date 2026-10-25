@@ -17,7 +17,8 @@ changes language. So en is swept only by the first run after `EN_SWEEP_HOUR`
 in Taipei each day, or by one with no en text stored, and every run builds
 the en snapshot from its zh rows and the last en sweep's text, matched by
 CourseNo and Node. A row the last en sweep did not have keeps its zh text
-until the next one. An en sweep that fails does not hold up zh: the run
+until the next one, and a row it had keeps that sweep's en name, teacher and
+notes until the next one, even when zh has changed them since. An en sweep that fails does not hold up zh: the run
 builds en from the stored text, and en stays due for the next run.
 
 Each course row keeps the fields the app's `CourseSearchResult` decodes

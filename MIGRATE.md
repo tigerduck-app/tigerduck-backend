@@ -60,6 +60,9 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   first run after 05:00 Taipei time each day, or when a term has no en text
   stored; the runs between build the en snapshot from their zh rows and the
   stored en text, and a new course shows its zh text until the next en sweep.
+  A course already there, with the same course number and periods, keeps its
+  stored en name, teacher and notes until the next en sweep, even when zh
+  has changed them.
   An en sweep that fails still lets zh be stored, with en built from the
   stored text; en stays due, so the next run sweeps it again, and the job
   reports an error.
