@@ -334,3 +334,43 @@ def test_a_chain_read_or_aia_fetch_past_its_deadline_makes_no_connection(monkeyp
     with pytest.raises(TimeoutError):
         tls_chain.peer_chain(tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], past)
     assert connects == []
+
+
+def _connected_pair(monkeypatch, timeout: float) -> socket.socket:
+    """Makes `_connect` hand over one end of a socket pair with `timeout`, as
+    after a connect that used up part of it; returns the other end."""
+    ours, server = socket.socketpair()
+    ours.settimeout(timeout)
+    monkeypatch.setattr(tls_chain, "_connect", lambda addresses, deadline: ours)
+    return server
+
+
+def test_no_chain_read_handshake_starts_once_the_connect_used_up_the_deadline(
+    monkeypatch,
+) -> None:
+    server = _connected_pair(monkeypatch, 5)
+
+    with pytest.raises(TimeoutError):
+        tls_chain.peer_chain(
+            tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], time.monotonic() - 1
+        )
+
+    server.settimeout(1)
+    assert server.recv(4096) == b""
+    server.close()
+
+
+def test_the_chain_read_handshake_gets_only_the_time_left(monkeypatch) -> None:
+    server = _connected_pair(monkeypatch, 60)
+    timeouts: list[float | None] = []
+
+    class Recording:
+        def wrap_socket(self, raw: socket.socket, server_hostname: str) -> ssl.SSLSocket:
+            timeouts.append(raw.gettimeout())
+            raise ssl.SSLError("no handshake in this test")
+
+    with pytest.raises(ssl.SSLError):
+        tls_chain.peer_chain(Recording(), PKI_HOST, [("203.0.113.1", 443)], time.monotonic() + 30)
+
+    assert len(timeouts) == 1 and 0 < timeouts[0] <= 30
+    server.close()

@@ -70,15 +70,27 @@ def _connect(addresses: list[tuple[str, int]], deadline: float = math.inf) -> so
     raise error
 
 
+def _bound(sock: socket.socket, deadline: float) -> None:
+    """Lowers `sock`'s timeout to what is left before `deadline`, since the
+    connect may have used some of the time its timeout was set from."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("deadline passed")
+    if remaining < (sock.gettimeout() or math.inf):
+        sock.settimeout(remaining)
+
+
 def peer_chain(
     ctx: ssl.SSLContext,
     host: str,
     addresses: list[tuple[str, int]],
     deadline: float = math.inf,
 ) -> tuple[x509.Certificate, ...]:
-    with _connect(addresses, deadline) as raw, ctx.wrap_socket(raw, server_hostname=host) as tls:
-        # The chain as served when the context does not verify.
-        ders = tls.get_verified_chain()
+    with _connect(addresses, deadline) as raw:
+        _bound(raw, deadline)
+        with ctx.wrap_socket(raw, server_hostname=host) as tls:
+            # The chain as served when the context does not verify.
+            ders = tls.get_verified_chain()
     return tuple(x509.load_der_x509_certificate(der) for der in ders)
 
 
@@ -149,6 +161,7 @@ def fetch_issuer(url: str, deadline: float = math.inf) -> x509.Certificate | Non
     response = b""
     try:
         with _connect(addresses, deadline) as sock:
+            _bound(sock, deadline)
             sock.sendall(head)
             while chunk := _recv(sock, deadline):
                 response += chunk
