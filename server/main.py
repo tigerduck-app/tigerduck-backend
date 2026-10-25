@@ -64,6 +64,7 @@ from server.tls_pins.document import (
     load_signer,
     refresh_gauges,
 )
+from server.tls_pins.watcher import restore_host_gauges
 
 logger = structlog.get_logger(__name__)
 
@@ -277,6 +278,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     async with session_scope(session_factory) as pin_session:
         await ensure_current_document(pin_session, app.state.tls_pin_signer)
         await refresh_gauges(pin_session)
+        await restore_host_gauges(pin_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
     # Read by the sync worker and by the push pipeline's pre-send check.

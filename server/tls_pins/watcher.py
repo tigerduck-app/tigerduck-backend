@@ -349,12 +349,14 @@ def _apply(
         ),
     }
     labels = {"set": pin_set.id, "host": target}
-    metrics.TLS_HOST_LAST_SUCCESS.labels(**labels).set(
-        datetime.fromisoformat(record["last_success_at"]).timestamp()
-    )
+    # An error keeps the last chain's values, as the series do.
+    gauges = previous.get("gauges")
     if result.status == "untrusted":
-        metrics.TLS_CHAIN_TRUSTED.labels(**labels).set(0)
-        _set_chain_info(pin_set.id, target, _chain_label(described, f"untrusted ({result.detail}): "))
+        gauges = {
+            "trusted": 0,
+            "matches": (gauges or {}).get("matches"),
+            "chain": _chain_label(described, f"untrusted ({result.detail}): "),
+        }
         logger.warning("tls_pins.chain_untrusted", **labels, detail=result.detail)
     elif result.status == "trusted":
         known = {pin["spki"] for pin in pin_set.pins}
@@ -387,9 +389,11 @@ def _apply(
         ] + added
         record["added"] = [pin["spki"] for pin in added]
         effective = served if served is not None else set(published_pins(pin_set))
-        metrics.TLS_CHAIN_MATCHES.labels(**labels).set(1 if effective & seen else 0)
-        metrics.TLS_CHAIN_TRUSTED.labels(**labels).set(1)
-        _set_chain_info(pin_set.id, target, _chain_label(described))
+        gauges = {
+            "trusted": 1,
+            "matches": 1 if effective & seen else 0,
+            "chain": _chain_label(described),
+        }
         if added:
             pin_set.updated_at = now
             pin_set.updated_by = "watcher"
@@ -399,8 +403,34 @@ def _apply(
                 added=record["added"],
                 chain=[(c["subject"], c["not_after"]) for c in described],
             )
+    record["gauges"] = gauges
+    _export(pin_set.id, target, record)
     pin_set.watch_results = {**pin_set.watch_results, target: record}
     return record["added"]
+
+
+def _export(set_id: str, target: str, record: dict) -> None:
+    """A host's series from its watch result, after each check and again at
+    startup, so a restart does not resolve an alert no check cleared."""
+    labels = {"set": set_id, "host": target}
+    if record.get("last_success_at"):
+        metrics.TLS_HOST_LAST_SUCCESS.labels(**labels).set(
+            datetime.fromisoformat(record["last_success_at"]).timestamp()
+        )
+    gauges = record.get("gauges")
+    if gauges is None:
+        return
+    metrics.TLS_CHAIN_TRUSTED.labels(**labels).set(gauges["trusted"])
+    if gauges["matches"] is not None:
+        metrics.TLS_CHAIN_MATCHES.labels(**labels).set(gauges["matches"])
+    _set_chain_info(set_id, target, gauges["chain"])
+
+
+async def restore_host_gauges(session: AsyncSession) -> None:
+    """Every monitored host's series as its last saved check left them."""
+    for pin_set in (await session.execute(select(TlsPinSet))).scalars():
+        for target in pin_set.monitored_hosts:
+            _export(pin_set.id, target, pin_set.watch_results.get(target) or {})
 
 
 async def run_pin_watch(
