@@ -310,6 +310,30 @@ groups:
           __panelId__: '6'
           summary: No bulletin scrape has parsed a row for over an hour; NTUST may have changed the page.
 
+      # Daily, so one failure is below the scheduler error rule's threshold.
+      # Only while the job is scheduled (TIGERDUCK_COURSE_CATALOG_REFRESH_TIME).
+      - uid: td-course-catalog-stale
+        title: Course catalog not refreshed
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: '(time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="course_catalog_refresh"}) or max(process_start_time_seconds{job="backend"}))) and on() max(tigerduck_scheduler_job_runs_total{job_id="course_catalog_refresh"})'
+          - refId: C
+            datasourceUid: __expr__
+            model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [180000]}}]}
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          __dashboardUid__: tigerduck-backend
+          __panelId__: '18'
+          summary: The course catalog refresh has not completed for over two days; the apps search an older catalog.
+
       - uid: td-relogin-surge
         title: Many accounts need to sign in again
         condition: C
