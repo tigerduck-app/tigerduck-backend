@@ -2,7 +2,7 @@
 // watcher last saw on each host, and every document published. Changes go
 // through the backend, which holds the signing key and audits each one.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, RefreshCw, Send, Trash2 } from "lucide-react";
@@ -84,10 +84,12 @@ type TlsPinsResponse = { sets: PinSet[]; documents: PinDocument[] };
 
 type ActionResult = { ok: boolean; serial: number | null };
 
-type Draft =
+type DraftFields =
   | { kind: "pin"; set: string; spki: string; label: string }
   | { kind: "hosts"; set: string; hosts: string }
   | { kind: "expiry"; set: string; date: string };
+// `key` tells dialogs apart, so a late answer closes only the one that sent it.
+type Draft = DraftFields & { key: number };
 
 function day(iso: string | null): string {
   return iso ? iso.slice(0, 10) : "—";
@@ -112,6 +114,11 @@ const shownPending = (data?: TlsPinsResponse) =>
 export function TlsPinsPage() {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Draft | null>(null);
+  const openedDialogs = useRef(0);
+  const openDraft = (fields: DraftFields) => {
+    openedDialogs.current += 1;
+    setDraft({ ...fields, key: openedDialogs.current });
+  };
 
   const pinsQ = useQuery<TlsPinsResponse>({
     queryKey: ["tls-pins"],
@@ -124,13 +131,15 @@ export function TlsPinsPage() {
       method: "POST" | "PUT";
       json?: unknown;
       publishes: boolean;
+      dialog?: number;
     }) =>
       api<ActionResult>(`/api/tls-pins${a.path}`, {
         method: a.method,
         json: a.json,
       }).then((r) => ({ ...r, publishes: a.publishes })),
-    onSuccess: (r) => {
-      setDraft(null);
+    onSuccess: (r, a) => {
+      // Another dialog opened meanwhile stays open.
+      setDraft((current) => (current?.key === a.dialog ? null : current));
       if (!r.publishes) toast.success("Saved");
       else if (r.serial !== null) toast.success(`Published serial ${r.serial}`);
       else toast.warning("Saved, not published: no signing key");
@@ -151,6 +160,7 @@ export function TlsPinsPage() {
         method: "POST",
         json: { spki: draft.spki.trim(), label: draft.label.trim() },
         publishes: true,
+        dialog: draft.key,
       });
     } else if (draft.kind === "hosts") {
       action.mutate({
@@ -163,6 +173,7 @@ export function TlsPinsPage() {
             .filter(Boolean),
         },
         publishes: false,
+        dialog: draft.key,
       });
     } else {
       action.mutate({
@@ -170,6 +181,7 @@ export function TlsPinsPage() {
         method: "PUT",
         json: { expires_at: `${draft.date}T00:00:00Z` },
         publishes: true,
+        dialog: draft.key,
       });
     }
   };
@@ -247,7 +259,7 @@ export function TlsPinsPage() {
                 size="sm"
                 variant="outline"
                 onClick={() =>
-                  setDraft({ kind: "expiry", set: s.id, date: day(s.expires_at) })
+                  openDraft({ kind: "expiry", set: s.id, date: day(s.expires_at) })
                 }
               >
                 Extend expiry
@@ -256,7 +268,7 @@ export function TlsPinsPage() {
                 size="sm"
                 variant="outline"
                 onClick={() =>
-                  setDraft({
+                  openDraft({
                     kind: "hosts",
                     set: s.id,
                     hosts: s.monitored_hosts.join("\n"),
@@ -267,7 +279,7 @@ export function TlsPinsPage() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => setDraft({ kind: "pin", set: s.id, spki: "", label: "" })}
+                onClick={() => openDraft({ kind: "pin", set: s.id, spki: "", label: "" })}
               >
                 <Plus className="mr-1 h-4 w-4" /> Add pin
               </Button>
