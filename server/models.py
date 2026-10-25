@@ -46,6 +46,7 @@ import server.auth.models  # noqa: F401, E402
 import server.sync.models  # noqa: F401, E402
 import server.syncjobs.models  # noqa: F401, E402
 import server.links.models  # noqa: F401, E402
+import server.course_catalog.models  # noqa: F401, E402
 
 
 class DevicePlatform(StrEnum):
