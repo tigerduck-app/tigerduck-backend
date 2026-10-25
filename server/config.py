@@ -174,6 +174,10 @@ class Settings(BaseSettings):
     sync_job_backoff_cap_seconds: int = 3600
     # Pull-to-refresh per-user-per-job-type cooldown.
     sync_job_manual_cooldown_seconds: int = 60
+    # A user's jobs wait unless a device with TigerSync on was seen within
+    # the first or took a standard push within the second.
+    sync_job_device_active_days: int = 60
+    sync_job_device_push_days: int = 14
     # Moodle webservice fetch timeout (sync worker, not login verify).
     moodle_fetch_timeout_seconds: float = 20.0
 

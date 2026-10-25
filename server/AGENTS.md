@@ -271,6 +271,10 @@ into the backend container via `docker-compose.yml`.
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
   replaces the notification already on screen, so only one would show.
+- A user's sync jobs are claimed only while a device with TigerSync on was
+  seen within `sync_job_device_active_days` (60) or took a standard push
+  within `sync_job_device_push_days` (14). Until then they stay pending, and
+  the first tick after a device comes back runs one already due.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for

@@ -116,7 +116,10 @@ async def _setup_user_job(
         # nor the reauth push, so no test sees a push it did not set up.
         session.add(
             UserDevice(
-                user_id=user.id, client_device_id=f"mac-{student_id}", platform="macos"
+                user_id=user.id,
+                client_device_id=f"mac-{student_id}",
+                platform="macos",
+                last_seen_at=datetime.now(UTC),
             )
         )
     account = ExternalAccount(
@@ -335,7 +338,13 @@ async def test_no_fetch_while_no_device_syncs_and_resume_when_one_does(
     user, _, job = await _setup_user_job(db_session, syncing_device=False)
     if device is not None:
         db_session.add(
-            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios", **device)
+            UserDevice(
+                user_id=user.id,
+                client_device_id="iphone-1",
+                platform="ios",
+                last_seen_at=datetime.now(UTC),
+                **device,
+            )
         )
         await db_session.commit()
     fetcher = StubFetcher(results=[])
@@ -348,12 +357,120 @@ async def test_no_fetch_while_no_device_syncs_and_resume_when_one_does(
 
     if device is None:
         db_session.add(
-            UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
+            UserDevice(
+                user_id=user.id,
+                client_device_id="iphone-1",
+                platform="ios",
+                last_seen_at=datetime.now(UTC),
+            )
         )
     else:
         await db_session.execute(
             update(UserDevice).values(deleted_at=None, cloud_sync_enabled=True)
         )
+    await db_session.commit()
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+
+
+def _phone(
+    user,
+    label="iphone-1",
+    *,
+    seen_ago=None,
+    push_ago=None,
+    token_kind="standard",
+    status="active",
+):
+    """A phone of `user` with TigerSync on, last seen `seen_ago` before now
+    (None for never), and a token the provider last accepted `push_ago`
+    before now (None for no token)."""
+    now = datetime.now(UTC)
+    device = UserDevice(
+        user_id=user.id,
+        client_device_id=label,
+        platform="ios",
+        last_seen_at=None if seen_ago is None else now - seen_ago,
+    )
+    if push_ago is not None:
+        device.push_tokens.append(
+            DevicePushToken(
+                provider="apns",
+                token_kind=token_kind,
+                token_hash=f"hash-{label}",
+                token_value=f"tok-{label}",
+                status=status,
+                last_success_at=now - push_ago,
+            )
+        )
+    return device
+
+
+DAY = timedelta(days=1)
+
+
+@pytest.mark.parametrize(
+    ("phones", "claimed"),
+    [
+        ([{"seen_ago": timedelta(0)}], True),
+        ([{"seen_ago": 59 * DAY}], True),
+        ([{"seen_ago": 61 * DAY}], False),
+        ([{}], False),
+        ([{"seen_ago": 90 * DAY, "push_ago": 13 * DAY}], True),
+        ([{"seen_ago": 90 * DAY, "push_ago": 15 * DAY}], False),
+        ([{"seen_ago": 90 * DAY, "push_ago": DAY, "status": "invalidated"}], False),
+        ([{"seen_ago": 90 * DAY, "push_ago": DAY, "token_kind": "push_to_start"}], False),
+        ([{"seen_ago": 90 * DAY}, {"seen_ago": DAY}], True),
+    ],
+    ids=[
+        "signed-in-just-now-no-push",
+        "seen-59-days-ago",
+        "seen-61-days-ago",
+        "never-seen",
+        "push-13-days-ago",
+        "push-15-days-ago",
+        "push-lately-to-a-dropped-token",
+        "push-lately-to-a-live-activity-token",
+        "one-fresh-one-dead",
+    ],
+)
+async def test_a_job_runs_only_for_a_device_seen_or_reached_lately(
+    db_session, prepared_engine, test_settings, phones, claimed
+):
+    """60 days since a device was seen (`sync_job_device_active_days`), or 14
+    since a push reached it (`sync_job_device_push_days`)."""
+    user, _, _ = await _setup_user_job(db_session, syncing_device=False)
+    db_session.add_all(
+        _phone(user, f"iphone-{index}", **phone) for index, phone in enumerate(phones)
+    )
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+
+    ran = await run_sync_tick(_worker(prepared_engine, test_settings, fetcher=fetcher))
+
+    assert (ran, fetcher.calls) == ((1, ["tok-1"]) if claimed else (0, []))
+
+
+async def test_a_returning_device_gets_its_overdue_job_at_the_next_tick(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(
+        db_session,
+        syncing_device=False,
+        job_kwargs={"run_after": datetime.now(UTC) - 3 * DAY},
+    )
+    phone = _phone(user, seen_ago=61 * DAY)
+    db_session.add(phone)
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    assert await run_sync_tick(worker) == 0
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+
+    # What a sign-in or the app's register on launch does.
+    phone.last_seen_at = datetime.now(UTC)
     await db_session.commit()
 
     assert await run_sync_tick(worker) == 1
