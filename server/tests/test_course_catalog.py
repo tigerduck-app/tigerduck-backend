@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Collection
 from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -24,13 +25,14 @@ from sqlalchemy import event, select
 from server.academic_calendar.models import SemesterTerm
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.course_catalog import refresh
-from server.course_catalog.models import CourseCatalogSnapshot
+from server.course_catalog.models import CourseCatalogEnglish, CourseCatalogSnapshot
 from server.course_catalog.refresh import (
     ATTEMPTS,
     LANES,
     PREFIXES,
     CatalogFetchError,
     course_query,
+    english_due,
     refresh_course_catalog,
 )
 from server.db import build_session_factory
@@ -43,6 +45,8 @@ FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "querycourse.json").r
 FIRST = datetime(2026, 10, 27, 21, 30, tzinfo=UTC)
 SECOND = datetime(2026, 10, 28, 21, 30, tzinfo=UTC)
 THIRD = datetime(2026, 10, 29, 21, 30, tzinfo=UTC)
+# FIRST is 05:30 in Taipei; two hours on is the same school day.
+LATER = datetime(2026, 10, 27, 23, 30, tzinfo=UTC)
 # The app's CourseSearchResult, and the flags the refresh adds.
 ROW_KEYS = {
     "Semester", "CourseNo", "CourseName", "CourseTeacher", "Dimension", "CreditPoint",
@@ -93,6 +97,16 @@ class School:
         return [json.loads(r.content) for r in self.requests if r.method == "POST"]
 
 
+def _over_a_network(school: School) -> httpx.MockTransport:
+    """`school` answering after a pause, so that the lanes take turns."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.001)
+        return school(request)
+
+    return httpx.MockTransport(handler)
+
+
 @pytest.fixture
 def no_backoff(monkeypatch) -> None:
     monkeypatch.setattr(refresh, "RETRY_BASE_SECONDS", 0.0)
@@ -109,6 +123,11 @@ async def _snapshots(factory) -> dict[tuple[str, str], CourseCatalogSnapshot]:
     async with factory() as session:
         rows = (await session.execute(select(CourseCatalogSnapshot))).scalars()
         return {(r.semester, r.language): r for r in rows}
+
+
+async def _english(factory) -> dict[str, CourseCatalogEnglish]:
+    async with factory() as session:
+        return {r.semester: r for r in (await session.execute(select(CourseCatalogEnglish))).scalars()}
 
 
 def _document(snapshot: CourseCatalogSnapshot) -> dict:
@@ -177,6 +196,46 @@ async def test_no_request_sends_the_empty_filter(db_session) -> None:
         course_query("1151", "zh")
 
 
+async def test_en_is_swept_once_a_day_after_five_in_taipei() -> None:
+    def taipei(day: int, hour: int, minute: int = 0) -> datetime:
+        return datetime(2026, 10, day, hour, minute, tzinfo=ZoneInfo("Asia/Taipei"))
+
+    assert english_due(None, taipei(28, 4))
+    assert not english_due(taipei(28, 4), taipei(28, 4, 30))
+    assert english_due(taipei(28, 4), taipei(28, 5, 10))
+    assert not english_due(taipei(28, 5, 10), taipei(28, 23))
+    assert not english_due(taipei(28, 23), taipei(29, 4, 59))
+    assert english_due(taipei(28, 23), taipei(29, 5))
+
+
+async def test_a_run_between_en_sweeps_builds_en_from_zh(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+
+    def moved(row: dict) -> dict:
+        # New counts everywhere, and one course at a new time the en text lacks.
+        row = row | {"ChooseStudent": 7}
+        return row | {"Node": "M1"} if row["CourseNo"] == "EC1011301" else row
+
+    later = School(edit=moved)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(later), now=LATER)
+
+    assert {b["Language"] for b in later.bodies()} == {"zh"}
+    en = {r["CourseNo"]: r for r in _document((await _snapshots(factory))["1151", "en"])["courses"]}
+    assert {r["ChooseStudent"] for r in en.values()} == {7}
+    assert en["3T1001701"]["CourseName"] == "Calculus"
+    assert en["EC1011301"]["CourseName"] == "計算機程式與應用"
+    assert en["EC1011301"]["IsEnglishTaught"]
+    assert (await _english(factory))["1151"].fetched_at == FIRST
+
+    next_day = School(edit=moved)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(next_day), now=SECOND)
+
+    assert {b["Language"] for b in next_day.bodies()} == {"zh", "en"}
+    en = {r["CourseNo"]: r for r in _document((await _snapshots(factory))["1151", "en"])["courses"]}
+    assert en["EC1011301"]["CourseName"].startswith("Computer Programming")
+
+
 async def test_the_prefixes_cover_every_course_number_once() -> None:
     """Course numbers are upper-case letters and digits, and no prefix is
     longer than three characters."""
@@ -210,10 +269,10 @@ async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_ba
     await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
     before = await _snapshots(factory)
     # New counts, so a term that is stored gets the second fetch's time.
-    school = School(fail={("1151", "en", "ME"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
+    school = School(fail={("1151", "en", "0"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
 
     with pytest.raises(CatalogFetchError, match="1151"):
-        await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=SECOND)
+        await refresh_course_catalog(factory, transport=_over_a_network(school), now=SECOND)
 
     after = await _snapshots(factory)
     # 1151's zh fetch succeeded, but is not stored without its en.
@@ -221,10 +280,12 @@ async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_ba
         assert after["1151", language].fetched_at == FIRST
         assert after["1151", language].body == before["1151", language].body
         assert after["1152", language].fetched_at == SECOND
-    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "en", "ME")]
+    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "en", "0")]
     assert len(failing) == ATTEMPTS
-    # The failed term stops there rather than sweeping on.
-    assert not any(b["Semester"] == "1151" and b.get("OnlyIntensive") for b in school.bodies())
+    # The failed sweep stops there rather than sweeping on, and the en text stays.
+    en_sent = [b for b in school.bodies() if (b["Semester"], b["Language"]) == ("1151", "en")]
+    assert len(en_sent) < 20
+    assert (await _english(factory))["1151"].fetched_at == FIRST
 
 
 async def test_an_unchanged_catalog_keeps_its_snapshot_and_etag(db_session) -> None:

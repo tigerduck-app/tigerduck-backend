@@ -1,4 +1,4 @@
-"""course_catalog_snapshots: the school's course catalog per semester and language
+"""course_catalog_snapshots and course_catalog_en_texts: the school's course catalog
 
 Revision ID: 5d2a9c7e4f1b
 Revises: 8996a3bf992f
@@ -17,9 +17,9 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """The daily refresh (`server/course_catalog/refresh.py`) fills it and
-    `GET /v3/course-catalog/{semester}` serves it. A second run changes
-    nothing.
+    """The refresh (`server/course_catalog/refresh.py`) fills both;
+    `GET /v3/course-catalog/{semester}` serves the snapshots, and the en text
+    of the day's en sweep builds the en ones. A second run changes nothing.
     """
     op.execute(
         """
@@ -33,9 +33,19 @@ def upgrade() -> None:
         )
         """
     )
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS course_catalog_en_texts (
+            semester   text PRIMARY KEY,
+            texts      jsonb NOT NULL,
+            fetched_at timestamptz NOT NULL
+        )
+        """
+    )
 
 
 def downgrade() -> None:
-    """The previous release neither reads nor writes it; the next refresh
-    after an upgrade fills it again."""
+    """The previous release neither reads nor writes them; the next refresh
+    after an upgrade fills them again."""
+    op.execute("DROP TABLE IF EXISTS course_catalog_en_texts")
     op.execute("DROP TABLE IF EXISTS course_catalog_snapshots")
