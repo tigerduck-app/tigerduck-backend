@@ -134,7 +134,7 @@ def test_settings() -> Settings:
         tls_pin_watch_interval_seconds=0,
         tls_pin_signing_key_path=None,
         link_check_tick_seconds=0,
-        course_catalog_refresh_time="",
+        course_catalog_refresh_interval_minutes=0,
         api_shared_secret="",
         auth_jwt_secret="test-jwt-secret-0123456789abcdef0123456789abcdef",
         auth_refresh_hmac_key="test-hmac-key-0123456789abcdef0123456789abcdef",

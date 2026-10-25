@@ -10,7 +10,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -81,9 +80,9 @@ def build_scheduler(
     * `link_check` — export each link's alert state and check the links due a
       check, every minute and once at startup (not at all with its interval
       set to 0).
-    * `course_catalog_refresh` — fetch the course catalog from NTUST once a
-      day at `course_catalog_refresh_time`, Taipei time (not at all with it
-      empty).
+    * `course_catalog_refresh` — fetch the course catalog from NTUST every
+      `course_catalog_refresh_interval_minutes`, first a minute after start
+      (not at all with it set to 0).
 
     Passing `llm=None` (the default) builds the real OpenAI-compatible
     provider; tests inject `RecordingProvider` to stay offline.
@@ -310,19 +309,20 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=60,
         )
-    if settings.course_catalog_refresh_time:
-        hour, minute = settings.course_catalog_refresh_time.split(":")
+    if settings.course_catalog_refresh_interval_minutes > 0:
 
         async def course_catalog_refresh() -> None:
             await refresh_course_catalog(session_factory)
 
         scheduler.add_job(
             course_catalog_refresh,
-            trigger=CronTrigger(hour=int(hour), minute=int(minute), timezone="Asia/Taipei"),
+            trigger=IntervalTrigger(minutes=settings.course_catalog_refresh_interval_minutes),
             id="course_catalog_refresh",
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=3600,
+            misfire_grace_time=600,
+            # A restart would otherwise put the next refresh a whole interval off.
+            next_run_time=datetime.now(UTC) + timedelta(minutes=1),
         )
     # After every add_job, so each job's series start at zero.
     instrument_scheduler(scheduler)

@@ -320,11 +320,10 @@ class Settings(BaseSettings):
     link_check_tick_seconds: int = 60
 
     # --- Course catalog (`/v3/course-catalog`, server/course_catalog/) ---
-    # Taipei time ("HH:MM") the daily refresh from NTUST's course query
-    # starts, a quiet hour for the school; empty turns it off.
-    course_catalog_refresh_time: str = Field(
-        default="05:30", pattern=r"^(([01][0-9]|2[0-3]):[0-5][0-9])?$"
-    )
+    # How often the catalog is refreshed from NTUST's course query, first a
+    # minute after start; 0 turns it off. en is swept on the day's first run
+    # after 05:00 Taipei time.
+    course_catalog_refresh_interval_minutes: int = Field(default=120, ge=0)
 
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"

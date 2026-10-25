@@ -13,7 +13,7 @@ import itertools
 import string
 import time
 from collections.abc import Callable, Collection
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -350,7 +350,7 @@ async def test_a_run_that_skips_a_term_counts_as_a_success(
         "refresh_course_catalog",
         functools.partial(refresh_course_catalog, transport=httpx.MockTransport(school), now=FIRST),
     )
-    settings = test_settings.model_copy(update={"course_catalog_refresh_time": "05:30"})
+    settings = test_settings.model_copy(update={"course_catalog_refresh_interval_minutes": 120})
     scheduler = build_scheduler(factory, object(), settings, llm=object())
     for job in scheduler.get_jobs():
         if job.id != "course_catalog_refresh":
@@ -387,11 +387,12 @@ async def test_an_unreadable_row_fails_the_term(db_session) -> None:
     assert await _snapshots(factory) == {}
 
 
-async def test_the_job_runs_daily_at_the_set_taipei_time(test_settings) -> None:
-    settings = test_settings.model_copy(update={"course_catalog_refresh_time": "05:30"})
+async def test_the_job_runs_every_two_hours_first_a_minute_after_start(test_settings) -> None:
+    settings = test_settings.model_copy(update={"course_catalog_refresh_interval_minutes": 120})
+    started = datetime.now(UTC)
     job = build_scheduler(object(), object(), settings, llm=object()).get_job("course_catalog_refresh")
-    fields = {f.name: str(f) for f in job.trigger.fields}
-    assert (fields["hour"], fields["minute"], str(job.trigger.timezone)) == ("5", "30", "Asia/Taipei")
+    assert job.trigger.interval == timedelta(hours=2)
+    assert timedelta(0) < job.next_run_time - started <= timedelta(minutes=1, seconds=5)
     off = build_scheduler(object(), object(), test_settings, llm=object())
     assert off.get_job("course_catalog_refresh") is None
 
