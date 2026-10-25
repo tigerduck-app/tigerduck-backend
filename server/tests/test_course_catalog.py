@@ -60,19 +60,22 @@ _OPTION_PATHS = {"semestersinfo": "semestersinfo", "dimensions": "dimensions", "
 class School:
     """querycourse.ntust.edu.tw as recorded. Keeps every request; `fail` maps
     (semester, language, CourseNo) to the status to answer that query with,
-    `edit` changes each course row it answers, and an `unpublished` term is
-    listed with no course yet."""
+    `edit` changes each course row it answers, an `unpublished` term is
+    listed with no course yet, and a `short` CourseNo ("intensive" for the
+    OnlyIntensive query) is answered with no row, as in a hiccup."""
 
     def __init__(
         self,
         fail: dict[tuple[str, str, str], int] | None = None,
         edit: Callable[[dict], dict] = lambda row: row,
         unpublished: Collection[str] = (),
+        short: Collection[str] = (),
     ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail = fail or {}
         self.edit = edit
         self.unpublished = unpublished
+        self.short = short
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -85,7 +88,8 @@ class School:
         status = self.fail.get((body["Semester"], body["Language"], body["CourseNo"]))
         if status:
             return httpx.Response(status, json={"Message": "error"})
-        if body["Semester"] in self.unpublished:
+        query = "intensive" if body.get("OnlyIntensive") else body["CourseNo"]
+        if body["Semester"] in self.unpublished or query in self.short:
             return httpx.Response(200, json=[])
         rows = FIXTURE["intensive"] if body.get("OnlyIntensive") else [
             r for r in FIXTURE["courses"][body["Language"]]
@@ -371,6 +375,50 @@ async def test_a_run_that_skips_a_term_counts_as_a_success(
         "tigerduck_scheduler_job_last_success_timestamp_seconds",
         {"job_id": "course_catalog_refresh"},
     ) >= started
+
+
+@pytest.mark.parametrize(
+    "short",
+    [
+        # EC holds 3 of the term's 11 courses, a 27% drop.
+        {"EC"},
+        # Every intensive course would lose its flag.
+        {"intensive"},
+    ],
+)
+async def test_a_short_answer_keeps_the_stored_snapshot(db_session, short) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    before = await _snapshots(factory)
+    hiccup = School(short=short, edit=lambda row: row | {"ChooseStudent": 1})
+
+    with pytest.raises(CatalogFetchError, match="1152, 1151"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(hiccup), now=LATER)
+
+    after = await _snapshots(factory)
+    for key, snapshot in before.items():
+        assert (after[key].body, after[key].fetched_at) == (snapshot.body, FIRST)
+
+
+async def test_a_drop_of_ten_percent_or_less_is_stored(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+
+    # TU holds 1 of the 11 courses: 9%, a course the school may have cancelled.
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School(short={"TU"})), now=LATER)
+
+    zh = _document((await _snapshots(factory))["1151", "zh"])
+    assert len(zh["courses"]) == len(FIXTURE["courses"]["zh"]) - 1
+
+
+async def test_a_first_snapshot_is_stored_whatever_its_size(db_session) -> None:
+    factory = await _factory(db_session)
+    school = School(short={"EC", "intensive"})
+
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=FIRST)
+
+    zh = _document((await _snapshots(factory))["1151", "zh"])
+    assert len(zh["courses"]) == len(FIXTURE["courses"]["zh"]) - 3
 
 
 async def test_an_unreadable_row_fails_the_term(db_session) -> None:

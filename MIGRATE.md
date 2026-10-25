@@ -62,7 +62,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   A zh run takes about a minute and some 200 s of the school's time per term,
   a run with en twice that. A request is retried twice with backoff; a term
   with any failed request keeps its last snapshot, and the job reports an
-  error. A term listed after the current one with no course yet is skipped
+  error. So does a term whose zh courses drop by more than 10% from its
+  stored snapshot or lose every intensive course, since the school can
+  answer a query with nothing in a hiccup; a term's first snapshot has
+  nothing to compare with and is stored. A term listed after the current one with no course yet is skipped
   with a log line and is not an error. Until the first run has stored a term,
   the app keeps querying the school itself.
 - **Alert.** Grafana's new rule `Course catalog not refreshed` posts when

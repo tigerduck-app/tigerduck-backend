@@ -8,6 +8,9 @@ lanes that each send one request at a time. The school's time grows with the
 rows it returns, so a prefix with many rows is queried one character longer
 and no request holds up a lane for long. A semester is stored only when every
 request it needed succeeded; otherwise its last complete snapshot stays.
+The school can also answer a prefix or the intensive query with no row in a
+hiccup, so a term whose zh courses drop by more than `MAX_DROP` from its
+stored snapshot, or lose every intensive course, keeps that snapshot too.
 
 The school answers zh and en with the same rows, in which only `_TRANSLATED`
 changes language. So en is swept only by the first run after `EN_SWEEP_HOUR`
@@ -44,6 +47,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -83,6 +87,8 @@ MAX_SEMESTERS = 3
 # The slowest prefix before the split took 37 s; the school gives up at 120 s.
 REQUEST_TIMEOUT = httpx.Timeout(100.0, connect=10.0)
 ATTEMPTS = 3
+# The largest drop in a term's course count taken for real between two runs.
+MAX_DROP = 0.1
 RETRY_BASE_SECONDS = 10.0
 ALLIANCE_PREFIX = "3"
 ENGLISH_TAUGHT_MARK = "英語授課"
@@ -310,6 +316,32 @@ async def _fetch_semester(
     return rows, texts
 
 
+async def _stored_zh(session: AsyncSession, semester: str) -> tuple[int, bool] | None:
+    """The stored zh snapshot's course count and whether it has an intensive
+    course, or None before the term's first snapshot."""
+    body = await session.scalar(
+        select(CourseCatalogSnapshot.body).where(
+            CourseCatalogSnapshot.semester == semester, CourseCatalogSnapshot.language == "zh"
+        )
+    )
+    if body is None:
+        return None
+    courses = json.loads(gzip.decompress(body))["courses"]
+    return len(courses), any(course["IsIntensive"] for course in courses)
+
+
+def _cut_short(rows: list[dict[str, Any]], stored: tuple[int, bool] | None) -> str | None:
+    """What makes `rows` look cut short against the stored snapshot, if anything."""
+    if stored is None:
+        return None
+    count, had_intensive = stored
+    if len(rows) < count * (1 - MAX_DROP):
+        return f"{len(rows)} courses after {count}"
+    if had_intensive and not any(row["IsIntensive"] for row in rows):
+        return "no intensive course after some"
+    return None
+
+
 def _json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -393,6 +425,7 @@ async def refresh_course_catalog(
         for semester in semesters:
             async with session_scope(session_factory) as session:
                 stored = await session.get(CourseCatalogEnglish, semester)
+                stored_zh = await _stored_zh(session, semester)
             sweep_english = english_due(stored.fetched_at if stored else None, now)
             try:
                 rows, swept = await _fetch_semester(client, semester, sweep_english)
@@ -405,6 +438,11 @@ async def refresh_course_catalog(
                 continue
             except CatalogFetchError as exc:
                 logger.warning("course_catalog.semester_failed", semester=semester, error=str(exc))
+                failed.append(semester)
+                continue
+            short = _cut_short(rows, stored_zh)
+            if short:
+                logger.warning("course_catalog.semester_failed", semester=semester, error=short)
                 failed.append(semester)
                 continue
             texts = swept if swept is not None else stored.texts
