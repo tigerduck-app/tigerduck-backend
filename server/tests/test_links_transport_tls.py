@@ -245,19 +245,78 @@ def test_an_aia_intermediate_never_becomes_a_trust_anchor(
     assert aia.asked == [AIA_URL] and seen["host"] == []
 
 
-def test_no_aia_fetch_starts_once_the_check_is_out_of_time(
-    incomplete_chain_server, pki
-) -> None:
-    port, _ = incomplete_chain_server
+def test_nothing_is_sent_once_the_check_is_out_of_time(incomplete_chain_server, pki) -> None:
+    port, seen = incomplete_chain_server
     aia = _Aia(pki.intermediate)
 
     with (
         _PinnedTransport(cafile=pki.cafile, fetch=aia, deadline=time.monotonic() - 1) as transport,
-        pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"),
+        pytest.raises(httpx.ConnectTimeout),
     ):
         _get(transport, PKI_HOST, port)
 
-    assert aia.asked == []
+    assert aia.asked == [] and seen == {"sni": [], "host": []}
+
+
+
+class _SlowAia(_Aia):
+    """Answers once the check's deadline has passed."""
+
+    def __init__(self, answer: Authority, deadline: float) -> None:
+        super().__init__(answer)
+        self.deadline = deadline
+
+    def __call__(self, url: str) -> x509.Certificate | None:
+        time.sleep(max(0.0, self.deadline - time.monotonic()) + 0.05)
+        return super().__call__(url)
+
+
+def test_no_second_try_starts_once_the_aia_fetch_used_up_the_check(
+    incomplete_chain_server, pki
+) -> None:
+    port, seen = incomplete_chain_server
+    deadline = time.monotonic() + 2
+    aia = _SlowAia(pki.intermediate, deadline)
+
+    with (
+        _PinnedTransport(cafile=pki.cafile, fetch=aia, deadline=deadline) as transport,
+        pytest.raises(httpx.ConnectTimeout),
+    ):
+        _get(transport, PKI_HOST, port)
+
+    # The handshake that failed and the one that read the chain, no third.
+    assert aia.asked == [AIA_URL] and seen == {"sni": [PKI_HOST] * 2, "host": []}
+
+
+class _TimedAia(_Aia):
+    """Answers after a second."""
+
+    def __call__(self, url: str) -> x509.Certificate | None:
+        time.sleep(1)
+        return super().__call__(url)
+
+
+def test_each_try_waits_no_longer_than_the_check_has_left(incomplete_chain_server, pki) -> None:
+    port, _ = incomplete_chain_server
+    deadline = time.monotonic() + 4
+    timeouts: list[dict] = []
+
+    with _PinnedTransport(
+        cafile=pki.cafile, fetch=_TimedAia(pki.intermediate), deadline=deadline
+    ) as transport:
+        inner = transport._transport
+
+        class Spy(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                timeouts.append(request.extensions["timeout"])
+                return inner.handle_request(request)
+
+        transport._transport = Spy()
+        assert _get(transport, PKI_HOST, port).status_code == 200
+
+    # Half of what was left: under 4 seconds before the AIA fetch, under 3 after it.
+    assert all(v <= 2 for v in timeouts[0].values())
+    assert all(v <= 1.5 for v in timeouts[1].values())
 
 
 def test_a_chain_read_or_aia_fetch_past_its_deadline_makes_no_connection(monkeypatch) -> None:
