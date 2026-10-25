@@ -50,7 +50,7 @@ async def get_course_catalog(
         )
     ).one()
     headers = _headers(row.etag)
-    if "gzip" in accept_encoding.lower():
+    if accepts_gzip(accept_encoding):
         return Response(
             row.body, media_type="application/json", headers={**headers, "Content-Encoding": "gzip"}
         )
@@ -59,3 +59,21 @@ async def get_course_catalog(
 
 def _headers(etag: str) -> dict[str, str]:
     return {"ETag": etag, "Cache-Control": "private, no-cache", "Vary": "Accept-Encoding"}
+
+
+def accepts_gzip(accept_encoding: str) -> bool:
+    """Whether the Accept-Encoding header takes gzip at a q above 0, by name
+    or through `*` when gzip is not named (RFC 9110 section 12.5.3)."""
+    star = False
+    for item in accept_encoding.split(","):
+        coding, *params = (part.strip().lower() for part in item.split(";"))
+        weights = [p.removeprefix("q=").strip() for p in params if p.startswith("q=")]
+        try:
+            accepted = not weights or float(weights[0]) > 0
+        except ValueError:
+            accepted = False
+        if coding == "gzip":
+            return accepted
+        if coding == "*":
+            star = accepted
+    return star

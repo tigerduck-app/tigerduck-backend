@@ -393,3 +393,26 @@ async def test_a_client_that_takes_no_gzip_gets_plain_json(client) -> None:
     assert response.status_code == 200
     assert "content-encoding" not in response.headers
     assert response.json()["semester"] == "1151"
+
+
+@pytest.mark.parametrize(
+    ("accept_encoding", "gzipped"),
+    [
+        ("gzip, deflate, br", True),
+        ("br;q=1.0, GZIP;q=0.5", True),
+        ("*", True),
+        ("gzip;q=0", False),
+        ("gzip; q=0.000, br", False),
+        ("x-gzip", False),
+        ("gzip;q=0, *", False),
+        ("identity", False),
+    ],
+)
+async def test_gzip_goes_only_to_a_client_that_accepts_it(client, accept_encoding, gzipped) -> None:
+    headers = await _seeded(client)
+    response = await client.get(
+        "/v3/course-catalog/1151", headers={**headers, "Accept-Encoding": accept_encoding}
+    )
+    assert response.status_code == 200
+    assert (response.headers.get("content-encoding") == "gzip") is gzipped
+    assert response.json()["semester"] == "1151"
