@@ -336,26 +336,41 @@ def test_a_chain_read_or_aia_fetch_past_its_deadline_makes_no_connection(monkeyp
     assert connects == []
 
 
-@pytest.mark.parametrize("left", [0.2, 0.6])
-def test_the_chain_read_handshake_ends_by_the_deadline_after_a_slow_connect(
-    monkeypatch, left
-) -> None:
+def _connected_pair(monkeypatch, timeout: float) -> socket.socket:
+    """Makes `_connect` hand over one end of a socket pair with `timeout`, as
+    after a connect that used up part of it; returns the other end."""
     ours, server = socket.socketpair()
-    deadline = time.monotonic() + left
+    ours.settimeout(timeout)
+    monkeypatch.setattr(tls_chain, "_connect", lambda addresses, deadline: ours)
+    return server
 
-    def slow_connect(addresses, deadline):
-        time.sleep(0.3)
-        ours.settimeout(5)
-        return ours
 
-    monkeypatch.setattr(tls_chain, "_connect", slow_connect)
-    started = time.monotonic()
+def test_no_chain_read_handshake_starts_once_the_connect_used_up_the_deadline(
+    monkeypatch,
+) -> None:
+    server = _connected_pair(monkeypatch, 5)
+
     with pytest.raises(TimeoutError):
-        tls_chain.peer_chain(tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], deadline)
+        tls_chain.peer_chain(
+            tls_chain.unverified_context(), PKI_HOST, [("203.0.113.1", 443)], time.monotonic() - 1
+        )
 
-    assert time.monotonic() - started < 1
     server.settimeout(1)
-    hello = server.recv(4096)
-    # Past the deadline, no handshake starts; before it, one starts and is cut off.
-    assert (hello == b"") == (left < 0.3)
+    assert server.recv(4096) == b""
+    server.close()
+
+
+def test_the_chain_read_handshake_gets_only_the_time_left(monkeypatch) -> None:
+    server = _connected_pair(monkeypatch, 60)
+    timeouts: list[float | None] = []
+
+    class Recording:
+        def wrap_socket(self, raw: socket.socket, server_hostname: str) -> ssl.SSLSocket:
+            timeouts.append(raw.gettimeout())
+            raise ssl.SSLError("no handshake in this test")
+
+    with pytest.raises(ssl.SSLError):
+        tls_chain.peer_chain(Recording(), PKI_HOST, [("203.0.113.1", 443)], time.monotonic() + 30)
+
+    assert len(timeouts) == 1 and 0 < timeouts[0] <= 30
     server.close()
