@@ -122,7 +122,11 @@ async def upload_courses(
         )
         added_by_hand = set(added_at)
         back_by_hand: set[str] = set()
+        # Under protocol 2 `courses` outside `adds` is the school's roster,
+        # so a hand-added course it lists becomes a school row.
+        listed_by_school = payload_keys - {a.course_key for a in payload.adds}
     else:
+        listed_by_school: set[str] = set()
         # Clear tombstones for explicitly re-added courses (user action). A
         # course these keys bring to the server counts as added by hand, unless
         # it comes back from the deletion of one that did not. One the server
@@ -237,6 +241,8 @@ async def upload_courses(
                     "source": (
                         CourseSource.user_added.value
                         if course_key in back_by_hand
+                        else CourseSource.ntust_portal.value
+                        if course_key in listed_by_school
                         else UserCourse.__table__.c.source
                     ),
                     "added_at": added_at.get(course_key, UserCourse.__table__.c.added_at),

@@ -202,6 +202,29 @@ async def test_a_removed_course_the_roster_lists_shows_and_keeps_its_stamp(clien
     assert [c["course_no"] for c in legacy["courses"]] == ["CS1"]
 
 
+
+@pytest.mark.parametrize("roster_first", [False, True], ids=["removal first", "roster first"])
+async def test_a_removed_hand_add_the_roster_lists_shows_in_either_order(
+    client, t, roster_first
+) -> None:
+    """The phone removes its hand-added course at 10:00 while offline; the
+    Mac uploads a roster that lists it. Whichever lands first, the course
+    shows from the roster and the removal keeps its stamp."""
+    phone = await login(client)
+    mac = await login(client, "mac-1")
+    await upload(client, phone, adds={"CS1": at(t, 0)})
+    if roster_first:
+        await upload(client, mac, roster=["CS1"])
+    removed = await delete(client, phone, "CS1", at(t, 10), kind="remove")
+    assert (removed["applied"], removed["deleted"]) == (True, 0 if roster_first else 1)
+    if not roster_first:
+        await upload(client, mac, roster=["CS1"])
+
+    (row,) = (await snapshot(client, mac))["courses"]
+    assert (row["course_no"], row["source"], row["added_hlc"]) == ("CS1", "ntust_portal", None)
+    assert await tombstones(client, mac) == {"CS1": ("remove", to_clock(at(t, 10)))}
+    assert (await delete(client, phone, "CS1", at(t, 5)))["applied"] is False
+
 async def test_a_protocol_2_delete_needs_a_stamp(client) -> None:
     phone = await login(client)
     response = await client.delete(f"/v3/sync/courses/{key('CS1')}", headers=phone)
@@ -265,6 +288,24 @@ async def test_a_reset_arriving_last_keeps_the_choices_made_after_it(client, t) 
     }
     assert full["term_resets"] == {SEMESTER: to_clock(at(t, 5))}
 
+
+
+async def test_a_reset_clears_an_older_hand_add_despite_a_newer_colour(client, t) -> None:
+    """Added by hand at 08:00 and reset at 09:00 on an offline device, while
+    a colour stamped 10:00 arrived first: the course and its colour go. A
+    school course with the same colour stays."""
+    phone = await login(client)
+    await upload(client, phone, roster=["CS2"], adds={"CS1": at(t, 0)})
+    await colour(client, phone, "CS1", "#FF0000", at(t, 120))
+    await colour(client, phone, "CS2", "#FF0000", at(t, 120))
+
+    assert (await reset(client, phone, at(t, 60)))["deleted"] == 1
+
+    full = await snapshot(client, phone)
+    assert [c["course_no"] for c in full["courses"]] == ["CS2"]
+    assert [(o["course_no"], o["color_hex"]) for o in full["course_overrides"]] == [
+        ("CS2", "#FF0000")
+    ]
 
 async def test_an_older_reset_changes_nothing(client, t) -> None:
     phone = await login(client)

@@ -245,8 +245,9 @@ async def _record_reset(session, user_id, semester: str | None, stamp: datetime)
 async def _reset_by_stamp(session, auth, semester, stamp, now, request, background_tasks):
     """A reset wins when later than the one it would replace, and clears the
     term's choices stamped at or before it (`sync/membership.py`). A row
-    with a later add or override value stays; the others go, each leaving
-    a reset tombstone after a term reset so released apps still obey it."""
+    with a later add stays, and so does a school row with a later override
+    value; the others go, each leaving a reset tombstone after a term reset
+    so released apps still obey it."""
     state = await lock_sync_state(session, auth.user_id)
     resets = await membership.Resets.load(session, auth.user_id)
     stored = resets.covering(semester) if semester else resets.full
@@ -276,10 +277,15 @@ async def _reset_by_stamp(session, auth, semester, stamp, now, request, backgrou
             )
         ).scalars()
     }
+    # A later colour or name keeps a school row, never a hand-add the reset
+    # clears.
     gone = [
         r for r in rows
         if not (r.added_at is not None and r.added_at > stamp)
-        and not membership.override_outlasts(overrides.get(r.id), stamp)
+        and (
+            r.source == CourseSource.user_added
+            or not membership.override_outlasts(overrides.get(r.id), stamp)
+        )
     ]
     gone_ids = {r.id for r in gone}
     cleared = [
@@ -396,14 +402,23 @@ async def delete_course(
     if kind is None:
         by_hand = row is not None and row.source == CourseSource.user_added
         kind = membership.REMOVE if by_hand else membership.HIDE
+    # A removal takes back a hand-add; the school's row stays and only loses
+    # the add, so the course shows from the roster in either arrival order.
+    kept_row = None
+    if kind == membership.REMOVE and row is not None and row.source != CourseSource.user_added:
+        kept_row = row
     restamp_only = (
-        row is None and tombstone is not None and membership.tombstone_kind(tombstone) == kind
+        (row is None or (kept_row is not None and kept_row.added_at is None))
+        and tombstone is not None
+        and membership.tombstone_kind(tombstone) == kind
     )
     course_no = (
         row.course_no if row else tombstone.course_no if tombstone
         else course_key.rpartition(":")[2]
     )
-    if row is not None:
+    if kept_row is not None:
+        kept_row.added_at = None
+    elif row is not None:
         await session.execute(delete(UserCourse).where(UserCourse.id == row.id))
     marker = {
         "deleted_at": stamp,
@@ -422,7 +437,8 @@ async def delete_course(
         )
         .on_conflict_do_update(index_elements=["user_id", "course_key"], set_=marker)
     )
-    answer = {"deleted": 1 if row else 0, "applied": True, "hlc": to_clock(stamp)}
+    deleted = row is not None and kept_row is None
+    answer = {"deleted": 1 if deleted else 0, "applied": True, "hlc": to_clock(stamp)}
     if restamp_only:
         return answer
 
@@ -431,7 +447,7 @@ async def delete_course(
         user_id=auth.user_id,
         entity_type=ChangeEntityType.course.value,
         entity_id=str(row.id) if row else course_key,
-        operation="delete",
+        operation="delete" if deleted else "upsert",
         payload={"course_key": course_key},
         device_id=auth.device_id,
         locked_state=state,
