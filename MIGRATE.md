@@ -71,9 +71,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   So does a term whose zh courses drop by more than 10% from its stored
   snapshot or lose every intensive course, since the school can answer a
   query with nothing in a hiccup; a term's first snapshot has nothing to
-  compare with and is stored. An en sweep that fails still lets zh be
-  stored, with en built from the stored text; en stays due, so the next run
-  sweeps it again, and the job reports an error. A term listed after the
+  compare with and is stored. An en sweep that fails, or that has under 90%
+  of the run's zh course numbers, still lets zh be stored, with en built
+  from the stored text; en stays due, so the next run sweeps it again, and
+  the job reports an error. A term listed after the
   current one with no course yet is skipped with a log line and is not an
   error.
 - **Alert.** Grafana's new rule `Course catalog not refreshed` posts when

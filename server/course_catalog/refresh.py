@@ -18,8 +18,10 @@ in Taipei each day, or by one with no en text stored, and every run builds
 the en snapshot from its zh rows and the last en sweep's text, matched by
 CourseNo and Node. A row the last en sweep did not have keeps its zh text
 until the next one, and a row it had keeps that sweep's en name, teacher and
-notes until the next one, even when zh has changed them since. An en sweep that fails does not hold up zh: the run
-builds en from the stored text, and en stays due for the next run.
+notes until the next one, even when zh has changed them since. An en sweep
+that fails, or comes back with under `MIN_EN_COVERAGE` of the zh course
+numbers, does not hold up zh: the run builds en from the stored text, and en
+stays due for the next run.
 
 Each course row keeps the fields the app's `CourseSearchResult` decodes
 (`_FIELDS`) and adds three flags the device filters on, derived here:
@@ -91,6 +93,8 @@ REQUEST_TIMEOUT = httpx.Timeout(100.0, connect=10.0)
 ATTEMPTS = 3
 # The largest drop in a term's course count taken for real between two runs.
 MAX_DROP = 0.1
+# The least share of a run's zh course numbers an en sweep must have.
+MIN_EN_COVERAGE = 0.9
 RETRY_BASE_SECONDS = 10.0
 ALLIANCE_PREFIX = "3"
 ENGLISH_TAUGHT_MARK = "英語授課"
@@ -285,11 +289,17 @@ def _in_english(rows: list[dict[str, Any]], texts: dict[str, list]) -> list[dict
     return [row | dict(zip(_TRANSLATED, texts.get(_key(row), ()))) for row in rows]
 
 
-async def _english_texts(client: httpx.AsyncClient, semester: str) -> dict[str, list]:
-    """The en text of every course of `semester`, by CourseNo and Node."""
+async def _english_texts(
+    client: httpx.AsyncClient, semester: str, zh: list[dict[str, Any]]
+) -> dict[str, list]:
+    """The en text of every course of `semester`, by CourseNo and Node. A
+    sweep with under `MIN_EN_COVERAGE` of the zh course numbers is taken for
+    one cut short, as by a prefix the school answered with nothing."""
     en = await _sweep(client, semester, "en")
-    if not en:
-        raise CatalogFetchError(f"courses {semester} en: no course, though zh has some")
+    zh_numbers = {r["CourseNo"] for r in zh}
+    covered = len(zh_numbers & {r["CourseNo"] for r in en})
+    if covered < len(zh_numbers) * MIN_EN_COVERAGE:
+        raise CatalogFetchError(f"courses {semester} en: {covered} of {len(zh_numbers)} courses")
     return {_key(r): [r[field] for field in _TRANSLATED] for r in en}
 
 
@@ -450,7 +460,7 @@ async def refresh_course_catalog(
             swept = None
             if english_due(stored.fetched_at if stored else None, now):
                 try:
-                    swept = await _english_texts(client, semester)
+                    swept = await _english_texts(client, semester, rows)
                 except CatalogFetchError as exc:
                     # zh is stored all the same, and en stays due for the next run.
                     logger.warning("course_catalog.english_failed", semester=semester, error=str(exc))

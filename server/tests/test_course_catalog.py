@@ -240,6 +240,31 @@ async def test_a_run_between_en_sweeps_builds_en_from_zh(db_session) -> None:
     assert en["EC1011301"]["CourseName"].startswith("Computer Programming")
 
 
+async def test_a_short_en_sweep_keeps_the_stored_text_and_stays_due(db_session) -> None:
+    factory = await _factory(db_session)
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
+    school = School(edit=lambda row: row | {"ChooseStudent": 1})
+
+    def en_hiccup(request: httpx.Request) -> httpx.Response:
+        # EC answers en with nothing: 7 of the 10 course numbers are left.
+        if request.method == "POST" and json.loads(request.content)["Language"] == "en" and (
+            json.loads(request.content)["CourseNo"] == "EC"
+        ):
+            return httpx.Response(200, json=[])
+        return school(request)
+
+    with pytest.raises(CatalogFetchError, match="en text of 1152, 1151"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(en_hiccup), now=SECOND)
+
+    after = await _snapshots(factory)
+    assert after["1151", "zh"].fetched_at == SECOND
+    en = {r["CourseNo"]: r for r in _document(after["1151", "en"])["courses"]}
+    assert en["EC1011301"]["CourseName"] == "Computer Programming and Applications"
+    stored = (await _english(factory))["1151"]
+    assert stored.fetched_at == FIRST
+    assert english_due(stored.fetched_at, SECOND)
+
+
 async def test_a_matched_en_row_keeps_its_stored_text_until_the_next_en_sweep(db_session) -> None:
     factory = await _factory(db_session)
     await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
