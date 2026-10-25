@@ -7,12 +7,16 @@ from __future__ import annotations
 
 import gzip
 import json
-from collections.abc import Callable
+import asyncio
+import functools
+import time
+from collections.abc import Callable, Collection
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import select
 
 from server.academic_calendar.models import SemesterTerm
@@ -27,6 +31,7 @@ from server.course_catalog.refresh import (
     refresh_course_catalog,
 )
 from server.db import build_session_factory
+from server.scheduler import runtime
 from server.scheduler.runtime import build_scheduler
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -48,16 +53,19 @@ _OPTION_PATHS = {"semestersinfo": "semestersinfo", "dimensions": "dimensions", "
 class School:
     """querycourse.ntust.edu.tw as recorded. Keeps every request; `fail` maps
     (semester, language, CourseNo) to the status to answer that query with,
-    and `edit` changes each course row it answers."""
+    `edit` changes each course row it answers, and an `unpublished` term is
+    listed with no course yet."""
 
     def __init__(
         self,
         fail: dict[tuple[str, str, str], int] | None = None,
         edit: Callable[[dict], dict] = lambda row: row,
+        unpublished: Collection[str] = (),
     ) -> None:
         self.requests: list[httpx.Request] = []
         self.fail = fail or {}
         self.edit = edit
+        self.unpublished = unpublished
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -70,6 +78,8 @@ class School:
         status = self.fail.get((body["Semester"], body["Language"], body["CourseNo"]))
         if status:
             return httpx.Response(status, json={"Message": "error"})
+        if body["Semester"] in self.unpublished:
+            return httpx.Response(200, json=[])
         rows = FIXTURE["intensive"] if body.get("OnlyIntensive") else [
             r for r in FIXTURE["courses"][body["Language"]]
             if r["CourseNo"].upper().startswith(body["CourseNo"].upper())
@@ -207,6 +217,68 @@ async def test_an_unchanged_catalog_keeps_its_snapshot_and_etag(db_session) -> N
         assert changed[key].etag != snapshot.etag
         assert changed[key].fetched_at == THIRD
         assert _document(changed[key])["fetched_at"] == "2026-10-29T21:30:00Z"
+
+
+async def test_a_later_term_without_courses_yet_is_skipped(db_session) -> None:
+    factory = await _factory(db_session)
+    school = School(unpublished={"1152"})
+
+    stored = await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=FIRST)
+
+    assert stored == ["1151"]
+    assert set(await _snapshots(factory)) == {("1151", "zh"), ("1151", "en")}
+    # An empty zh sweep ends the term before its en sweep.
+    assert not any(b["Semester"] == "1152" and b["Language"] == "en" for b in school.bodies())
+
+
+async def test_a_current_term_without_courses_fails(db_session) -> None:
+    factory = await _factory(db_session)
+    school = School(unpublished={"1151"})
+
+    with pytest.raises(CatalogFetchError, match="1151"):
+        await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=FIRST)
+    assert set(await _snapshots(factory)) == {("1152", "zh"), ("1152", "en")}
+
+
+def _runs(outcome: str) -> float:
+    return REGISTRY.get_sample_value(
+        "tigerduck_scheduler_job_runs_total",
+        {"job_id": "course_catalog_refresh", "outcome": outcome},
+    )
+
+
+async def test_a_run_that_skips_a_term_counts_as_a_success(
+    db_session, test_settings, monkeypatch
+) -> None:
+    """The stale-catalog alert reads the job's last success."""
+    factory = await _factory(db_session)
+    school = School(unpublished={"1152"})
+    monkeypatch.setattr(
+        runtime,
+        "refresh_course_catalog",
+        functools.partial(refresh_course_catalog, transport=httpx.MockTransport(school), now=FIRST),
+    )
+    settings = test_settings.model_copy(update={"course_catalog_refresh_time": "05:30"})
+    scheduler = build_scheduler(factory, object(), settings, llm=object())
+    for job in scheduler.get_jobs():
+        if job.id != "course_catalog_refresh":
+            job.remove()
+    success, error, started = _runs("success"), _runs("error"), time.time()
+
+    scheduler.start()
+    try:
+        scheduler.get_job("course_catalog_refresh").modify(next_run_time=datetime.now(UTC))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (_runs("success"), _runs("error")) == (success, error):
+            await asyncio.sleep(0.01)
+    finally:
+        scheduler.shutdown(wait=False)
+
+    assert (_runs("success"), _runs("error")) == (success + 1, error)
+    assert REGISTRY.get_sample_value(
+        "tigerduck_scheduler_job_last_success_timestamp_seconds",
+        {"job_id": "course_catalog_refresh"},
+    ) >= started
 
 
 async def test_an_unreadable_row_fails_the_term(db_session) -> None:

@@ -55,7 +55,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   in en, one `OnlyIntensive` query, and the option lists, about 5 minutes
   of the school's time per term. A request is retried twice with backoff;
   a term with any failed request keeps its last snapshot, and the job
-  reports an error. The first snapshot comes with the first run after the
+  reports an error. A term listed after the current one with no course yet
+  is skipped with a log line and is not an error. The first snapshot comes with the first run after the
   deploy; until then the app keeps querying the school itself.
 - **Alert.** Grafana's new rule `Course catalog not refreshed` posts when
   the job has not completed for over two days (50 hours) while it is

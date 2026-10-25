@@ -89,6 +89,11 @@ class CatalogFetchError(Exception):
     cannot use."""
 
 
+class NoCourses(CatalogFetchError):
+    """A term with no course in it, as the school lists a term before it
+    publishes the term's courses."""
+
+
 def course_query(
     semester: str, language: str, *, course_no: str = "", only_intensive: bool = False
 ) -> dict[str, Any]:
@@ -211,8 +216,10 @@ async def _fetch_semester(
         rows[language] = []
         for prefix in PREFIXES:
             rows[language] += await _courses(client, semester, language, course_no=prefix)
+        if not rows[language] and language == LANGUAGES[0]:
+            raise NoCourses(f"courses {semester}: no course at all")
         if not rows[language]:
-            raise CatalogFetchError(f"courses {semester} {language}: no course at all")
+            raise CatalogFetchError(f"courses {semester} {language}: no course, though zh has some")
     intensive = {
         r["CourseNo"] for r in await _courses(client, semester, "zh", only_intensive=True)
     }
@@ -288,7 +295,8 @@ async def refresh_course_catalog(
     transport: httpx.AsyncBaseTransport | None = None,
     now: datetime | None = None,
 ) -> list[str]:
-    """Fetch and store the current term and the terms listed after it.
+    """Fetch and store the current term and the terms listed after it. A
+    later term with no course yet is skipped; the current one is a failure.
 
     Returns the semesters fetched in full, changed or not. A semester that
     failed keeps its last snapshot, and the refresh raises `CatalogFetchError`
@@ -307,6 +315,13 @@ async def refresh_course_catalog(
         for semester in semesters:
             try:
                 courses = await _fetch_semester(client, semester)
+            except NoCourses:
+                if current is not None and semester > current:
+                    logger.info("course_catalog.semester_skipped", semester=semester, reason="no courses yet")
+                    continue
+                logger.warning("course_catalog.semester_failed", semester=semester, error="no courses")
+                failed.append(semester)
+                continue
             except CatalogFetchError as exc:
                 logger.warning("course_catalog.semester_failed", semester=semester, error=str(exc))
                 failed.append(semester)
