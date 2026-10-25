@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from server.admin_audit import AdminAuditLog
+from server.auth import service
 from server.auth.models import AuthSession, DevicePushToken, User, UserDevice
 from server.auth.retirement import SYSTEM_ACTOR, retire_dead_devices
 from server.db import build_session_factory
@@ -217,6 +219,68 @@ async def test_signing_in_brings_a_deregistered_device_back(client) -> None:
         device = (await session.execute(select(UserDevice))).scalar_one()
         assert device.deleted_at is None
     assert await retire_dead_devices(factory) == 0
+
+
+async def _done_or_waiting_on_a_lock(task: asyncio.Task, factory) -> None:
+    async with asyncio.timeout(10), factory() as session:
+        while not task.done():
+            waiting = await session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+            # pg_stat_activity holds still for the length of a transaction.
+            await session.rollback()
+            if waiting:
+                return
+            await asyncio.sleep(0.01)
+
+
+async def test_a_sign_in_racing_the_job_keeps_its_device(client, monkeypatch) -> None:
+    """The job runs once the sign-in has read its device. Not waiting for the
+    account lock the sign-in holds, it deregistered the device, and the
+    sign-in, which had read the row as not deleted, wrote only the columns it
+    changed: the device stayed deleted, its push token dropped."""
+    allow_moodle(client)
+    assert (await client.post("/v3/auth/login", json=LOGIN_BODY)).status_code == 200
+    factory = build_session_factory(client.app.state.engine)
+    now = datetime.now(UTC)
+    async with factory() as session:
+        device = (await session.execute(select(UserDevice))).scalar_one()
+        session.add(
+            DevicePushToken(
+                device_id=device.id,
+                provider="apns",
+                token_kind="standard",
+                token_hash="hash-iphone",
+                token_value="tok-iphone",
+            )
+        )
+        await session.execute(update(UserDevice).values(last_seen_at=now - 8 * DAY))
+        await session.execute(
+            update(AuthSession).values(
+                issued_at=now - 100 * DAY, expires_at=now - 10 * DAY
+            )
+        )
+        await session.commit()
+    upsert_device = service._upsert_device
+    retiring: list[asyncio.Task] = []
+
+    async def racing_upsert_device(session, *, user, info, now):
+        await session.execute(select(UserDevice).where(UserDevice.user_id == user.id))
+        retiring.append(asyncio.create_task(retire_dead_devices(factory)))
+        await _done_or_waiting_on_a_lock(retiring[0], factory)
+        return await upsert_device(session, user=user, info=info, now=now)
+
+    monkeypatch.setattr(service, "_upsert_device", racing_upsert_device)
+    assert (await client.post("/v3/auth/login", json=LOGIN_BODY)).status_code == 200
+
+    assert await retiring[0] == 0
+    async with factory() as session:
+        device = (await session.execute(select(UserDevice))).scalar_one()
+        statuses = (await session.execute(select(DevicePushToken.status))).scalars()
+        assert (device.deleted_at, list(statuses)) == (None, ["active"])
 
 
 async def test_the_job_runs_at_four_in_the_morning_at_school(test_settings) -> None:

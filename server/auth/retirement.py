@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import exists, or_, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.admin_audit import AdminAuditLog
@@ -24,6 +24,7 @@ from server.auth.models import (
     PushTokenStatus,
     UserDevice,
 )
+from server.auth.service import lock_accounts
 from server.db import in_array, lift_timeouts, session_scope
 from server.models import DeviceRegistration
 
@@ -44,9 +45,10 @@ async def retire_dead_devices(
 
     An app without a session still launches and takes reminders, so its
     announce (`POST /v3/devices/anonymous`) and an accepted push count as
-    signs of life. One statement picks and marks the devices: a sign-in
-    racing it moves `last_seen_at`, which the update reads again on the row
-    it waited for. Returns how many it deregistered.
+    signs of life. The devices' accounts are locked first, as a sign-in
+    locks them (`lock_accounts`), and the devices are picked again under the
+    lock, so a sign-in either finds its device deregistered or keeps it.
+    Returns how many it deregistered.
     """
     now = now or datetime.now(UTC)
     since = now - _SILENT_FOR
@@ -65,18 +67,25 @@ async def retire_dead_devices(
         DevicePushToken.status == PushTokenStatus.active.value,
         DevicePushToken.last_success_at > since,
     )
+    dead = (
+        UserDevice.deleted_at.is_(None),
+        or_(UserDevice.last_seen_at.is_(None), UserDevice.last_seen_at < since),
+        ~live_session,
+        ~announced,
+        ~reached,
+    )
     async with session_scope(session_factory) as session:
         await lift_timeouts(session)
+        users = (
+            await session.execute(select(UserDevice.user_id).where(*dead).distinct())
+        ).scalars().all()
+        if not users:
+            return 0
+        await lock_accounts(session, *users)
         retired = (
             await session.execute(
                 update(UserDevice)
-                .where(
-                    UserDevice.deleted_at.is_(None),
-                    or_(UserDevice.last_seen_at.is_(None), UserDevice.last_seen_at < since),
-                    ~live_session,
-                    ~announced,
-                    ~reached,
-                )
+                .where(in_array(UserDevice.user_id, users), *dead)
                 # Not a change the device made: the portal lists devices by
                 # updated_at, and its own deregister leaves it alone.
                 .values(deleted_at=now, updated_at=UserDevice.updated_at)
