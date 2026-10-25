@@ -3,12 +3,11 @@
 
 The school has no whole-semester call, and it answers an empty filter with
 HTTP 500 after 120 s, so `course_query` refuses to build one. A semester is
-fetched as one CourseNo prefix query per first character, in zh and in en,
-one request at a time. 3 is split into 3N and 3T, the alliance courses,
-since as one query it would take over a minute; a course number starting
-with any other 3x would be missed. A semester is stored only
-when every request it needed succeeded; otherwise its last complete
-snapshot stays.
+swept as one CourseNo prefix query per `PREFIXES` entry, spread over `LANES`
+lanes that each send one request at a time. The school's time grows with the
+rows it returns, so a prefix with many rows is queried one character longer
+and no request holds up a lane for long. A semester is stored only when every
+request it needed succeeded; otherwise its last complete snapshot stays.
 
 Each course row keeps the fields the app's `CourseSearchResult` decodes
 (`_FIELDS`) and adds three flags the device filters on, derived here:
@@ -49,11 +48,28 @@ logger = structlog.get_logger(__name__)
 BASE_URL = "https://querycourse.ntust.edu.tw/querycourse/api"
 USER_AGENT = "TigerDuckCatalogBot/0.1"
 LANGUAGES = ("zh", "en")
-PREFIXES = (*string.ascii_uppercase, "0", "1", "2", "3N", "3T", *"456789")
+# Course numbers are upper-case letters and digits; digits first, so that the
+# alliance courses, the largest share, start early in every lane.
+_ALNUM = string.digits + string.ascii_uppercase
+# The prefixes with 250 rows or more in 1151 (3: 2253, 3T: 1235, 3N: 1018,
+# C: 387, E: 349, M: 261, T: 251), each queried one character longer.
+_SPLIT = frozenset({"3", "3N", "3T", "C", "E", "M", "T"})
+
+
+def _prefixes(prefix: str) -> list[str]:
+    if prefix not in _SPLIT:
+        return [prefix]
+    return [longer for c in _ALNUM for longer in _prefixes(prefix + c)]
+
+
+PREFIXES = tuple(prefix for c in _ALNUM for prefix in _prefixes(c))
+# Requests in flight at once, never more: the school's site has its own peaks.
+# Three at once each took only 15 to 20% longer than alone.
+LANES = 3
 # The current term and the ones listed after it: a summer term and the next
 # term at most. A calendar left behind would otherwise widen the sweep.
 MAX_SEMESTERS = 3
-# The slowest prefix took 37 s; the school itself gives up at 120 s.
+# The slowest prefix before the split took 37 s; the school gives up at 120 s.
 REQUEST_TIMEOUT = httpx.Timeout(100.0, connect=10.0)
 ATTEMPTS = 3
 RETRY_BASE_SECONDS = 10.0
@@ -207,15 +223,34 @@ async def _option_lists(client: httpx.AsyncClient) -> dict[str, dict[str, list]]
         raise CatalogFetchError("option lists: an unreadable answer") from None
 
 
+async def _sweep(
+    client: httpx.AsyncClient, semester: str, language: str
+) -> list[dict[str, Any]]:
+    """Every course of `semester` in `language`. The first failure cancels
+    the other lanes."""
+    pending = iter(PREFIXES)
+    rows: list[dict[str, Any]] = []
+
+    async def lane() -> None:
+        for prefix in pending:
+            rows.extend(await _courses(client, semester, language, course_no=prefix))
+
+    try:
+        async with asyncio.TaskGroup() as group:
+            for _ in range(LANES):
+                group.create_task(lane())
+    except ExceptionGroup as failures:
+        raise failures.exceptions[0] from None
+    return rows
+
+
 async def _fetch_semester(
     client: httpx.AsyncClient, semester: str
 ) -> dict[str, list[dict[str, Any]]]:
     """Every course of `semester` in each language, flagged."""
     rows: dict[str, list[dict[str, Any]]] = {}
     for language in LANGUAGES:
-        rows[language] = []
-        for prefix in PREFIXES:
-            rows[language] += await _courses(client, semester, language, course_no=prefix)
+        rows[language] = await _sweep(client, semester, language)
         if not rows[language] and language == LANGUAGES[0]:
             raise NoCourses(f"courses {semester}: no course at all")
         if not rows[language]:

@@ -9,6 +9,8 @@ import gzip
 import json
 import asyncio
 import functools
+import itertools
+import string
 import time
 from collections.abc import Callable, Collection
 from datetime import UTC, date, datetime
@@ -25,6 +27,7 @@ from server.course_catalog import refresh
 from server.course_catalog.models import CourseCatalogSnapshot
 from server.course_catalog.refresh import (
     ATTEMPTS,
+    LANES,
     PREFIXES,
     CatalogFetchError,
     course_query,
@@ -174,12 +177,40 @@ async def test_no_request_sends_the_empty_filter(db_session) -> None:
         course_query("1151", "zh")
 
 
+async def test_the_prefixes_cover_every_course_number_once() -> None:
+    """Course numbers are upper-case letters and digits, and no prefix is
+    longer than three characters."""
+    prefixes = set(PREFIXES)
+    assert len(prefixes) == len(PREFIXES)
+    for start in map("".join, itertools.product(string.digits + string.ascii_uppercase, repeat=3)):
+        assert sum(start[:n] in prefixes for n in (1, 2, 3)) == 1, start
+    # The prefixes with the most rows are not queried whole.
+    assert not prefixes & {"3", "3N", "3T", "C", "E", "M", "T"}
+
+
+async def test_a_sweep_keeps_at_most_three_requests_in_flight(db_session) -> None:
+    factory = await _factory(db_session)
+    school = School()
+    in_flight = peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.001)
+        in_flight -= 1
+        return school(request)
+
+    await refresh_course_catalog(factory, transport=httpx.MockTransport(handler), now=FIRST)
+    assert peak == LANES == 3
+
+
 async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_backoff) -> None:
     factory = await _factory(db_session)
     await refresh_course_catalog(factory, transport=httpx.MockTransport(School()), now=FIRST)
     before = await _snapshots(factory)
     # New counts, so a term that is stored gets the second fetch's time.
-    school = School(fail={("1151", "en", "M"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
+    school = School(fail={("1151", "en", "ME"): 500}, edit=lambda row: row | {"ChooseStudent": 1})
 
     with pytest.raises(CatalogFetchError, match="1151"):
         await refresh_course_catalog(factory, transport=httpx.MockTransport(school), now=SECOND)
@@ -190,7 +221,7 @@ async def test_a_failed_request_keeps_that_terms_last_snapshot(db_session, no_ba
         assert after["1151", language].fetched_at == FIRST
         assert after["1151", language].body == before["1151", language].body
         assert after["1152", language].fetched_at == SECOND
-    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "en", "M")]
+    failing = [b for b in school.bodies() if (b["Semester"], b["Language"], b["CourseNo"]) == ("1151", "en", "ME")]
     assert len(failing) == ATTEMPTS
     # The failed term stops there rather than sweeping on.
     assert not any(b["Semester"] == "1151" and b.get("OnlyIntensive") for b in school.bodies())
@@ -286,7 +317,7 @@ async def test_an_unreadable_row_fails_the_term(db_session) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         response = School()(request)
-        if request.method == "POST" and json.loads(request.content)["CourseNo"] == "E":
+        if request.method == "POST" and json.loads(request.content)["CourseNo"] == "EC":
             return httpx.Response(200, json=[r | {"CreditPoint": None} for r in response.json()])
         return response
 
