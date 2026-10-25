@@ -52,29 +52,30 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **The refresh.** The `course_catalog_refresh` job runs every
   `TIGERDUCK_COURSE_CATALOG_REFRESH_INTERVAL_MINUTES` (default 120; 0 turns
   it off), the first time one interval after the backend starts, so a
-  restart puts the next run up to an interval out. It fetches the
-  current term from the academic calendar and every later term
+  restart puts the next run up to an interval out. It fetches the current
+  term from the academic calendar and every later term
   `querycourse.ntust.edu.tw` lists, three at most. Each run sweeps zh as 281
   course-number prefix queries, three in flight at most, and sends one
-  `OnlyIntensive` query and the option lists. en is swept too only on the
-  first run after 05:00 Taipei time each day, or when a term has no en text
-  stored; the runs between build the en snapshot from their zh rows and the
-  stored en text, and a new course shows its zh text until the next en sweep.
-  A course already there, with the same course number and periods, keeps its
-  stored en name, teacher and notes until the next en sweep, even when zh
-  has changed them.
-  An en sweep that fails still lets zh be stored, with en built from the
-  stored text; en stays due, so the next run sweeps it again, and the job
-  reports an error.
-  A zh run takes about a minute and some 200 s of the school's time per term,
-  a run with en twice that. A request is retried twice with backoff; a term
-  with any failed request keeps its last snapshot, and the job reports an
-  error. So does a term whose zh courses drop by more than 10% from its
-  stored snapshot or lose every intensive course, since the school can
-  answer a query with nothing in a hiccup; a term's first snapshot has
-  nothing to compare with and is stored. A term listed after the current one with no course yet is skipped
-  with a log line and is not an error. Until the first run has stored a term,
-  the app keeps querying the school itself.
+  `OnlyIntensive` query and the option lists. A zh run takes about a minute
+  and some 200 s of the school's time per term, a run with en twice that.
+  Until the first run has stored a term, the app keeps querying the school
+  itself.
+- **The en text.** en is swept too only on the first run after 05:00 Taipei
+  time each day, or when a term has no en text stored. The runs between
+  build the en snapshot from their zh rows and the stored en text: a new
+  course shows its zh text until the next en sweep, and a course already
+  there, with the same course number and periods, keeps its stored en
+  name, teacher and notes until then, even when zh has changed them.
+- **Failures.** A request is retried twice with backoff; a term with any
+  failed zh request keeps its last snapshot, and the job reports an error.
+  So does a term whose zh courses drop by more than 10% from its stored
+  snapshot or lose every intensive course, since the school can answer a
+  query with nothing in a hiccup; a term's first snapshot has nothing to
+  compare with and is stored. An en sweep that fails still lets zh be
+  stored, with en built from the stored text; en stays due, so the next run
+  sweeps it again, and the job reports an error. A term listed after the
+  current one with no course yet is skipped with a log line and is not an
+  error.
 - **Alert.** Grafana's new rule `Course catalog not refreshed` posts when
   the job has not completed for over 6.5 hours, three missed runs, while it
   is scheduled. Grafana reads its provisioning only at start, so after
