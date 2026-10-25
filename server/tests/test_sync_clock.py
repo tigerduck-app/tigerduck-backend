@@ -42,3 +42,13 @@ async def test_answers_outside_v3_carry_no_clock(client) -> None:
     response = await client.get("/health")
     assert response.status_code == 200
     assert CLOCK_HEADER not in response.headers
+
+
+async def test_a_snapshot_carries_the_server_clock(client) -> None:
+    login = await do_login(client)
+    before = to_clock(datetime.now(UTC))
+
+    response = await client.get("/v3/sync/full", headers=bearer(login))
+
+    assert response.status_code == 200
+    assert before <= response.json()["server_hlc"] <= _clock(response)

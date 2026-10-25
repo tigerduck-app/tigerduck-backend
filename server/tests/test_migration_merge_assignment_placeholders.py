@@ -233,6 +233,12 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
                     " ADD COLUMN IF NOT EXISTS user_added BOOLEAN NOT NULL DEFAULT false"
                 )
             )
+            await conn.execute(
+                text(
+                    "ALTER TABLE user_course_overrides ADD COLUMN IF NOT EXISTS"
+                    " custom_names_updated_at JSONB NOT NULL DEFAULT '{}'::jsonb"
+                )
+            )
             await _add_extension_column(conn)
         shown = await _shown(engine, user)
 

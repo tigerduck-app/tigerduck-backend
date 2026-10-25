@@ -153,16 +153,17 @@ async def test_full_sync_carries_the_override(client) -> None:
     replaying the whole changelog."""
     holiday_id = await seed_holiday(client)
     login = await do_login(client)
+    stamp = to_clock(datetime.now(UTC))
     await client.put(
         f"/v3/sync/holiday-overrides/{holiday_id}",
         headers=bearer(login),
-        json={"notify": True},
+        json={"notify": True, "hlc": stamp},
     )
 
     snapshot = await client.get("/v3/sync/full", headers=bearer(login))
     assert snapshot.status_code == 200
     assert snapshot.json()["holiday_overrides"] == [
-        {"holiday_id": holiday_id, "notify": True}
+        {"holiday_id": holiday_id, "notify": True, "hlc": stamp}
     ]
 
 

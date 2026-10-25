@@ -13,6 +13,7 @@ from server.db import SessionDep
 from server.sync import serializers
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
+from server.sync.merge import to_clock
 from server.sync.poll_tracker import record_poll
 from server.sync.models import (
     ChangeEntityType,
@@ -193,6 +194,7 @@ async def _read_full_snapshot(session, user_id, device_id):
     _iso = serializers._iso
     return {
         "current_revision": state.current_revision if state else 0,
+        "server_hlc": to_clock(datetime.now(UTC)),
         "courses_reset_at": _iso(user.courses_reset_at) if user else None,
         # A reset tombstone does not bind the device that wrote it (see
         # `upload_courses`), and the client applies the same rule: between
@@ -225,7 +227,11 @@ async def _read_full_snapshot(session, user_id, device_id):
             )
         ],
         "holiday_overrides": [
-            {"holiday_id": o.holiday_id, "notify": o.notify}
+            {
+                "holiday_id": o.holiday_id,
+                "notify": o.notify,
+                "hlc": serializers.hlc(o.updated_at),
+            }
             for o in holiday_overrides
         ],
         "courses": [serializers.course_to_dict(c) for c in courses],
