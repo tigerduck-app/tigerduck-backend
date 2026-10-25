@@ -44,6 +44,8 @@ server/
 ├── syncjobs/                  # server-side academic sync executor
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
+├── course_catalog/            # NTUST's course list per term and language: model
+│                              #   and the daily refresh from its course query
 ├── academic_calendar/         # semester terms + school holidays (models, schemas,
 │                              #   terms.py: the current term and the days a term
 │                              #   runs on, as the apps take them)
@@ -56,6 +58,7 @@ server/
 │   ├── overrides.py           # /v3/sync/{courses,assignments}/{id}/override
 │   ├── holiday_overrides.py   # /v3/sync/holiday-overrides
 │   ├── academic_calendar.py   # /v3/calendar/*
+│   ├── course_catalog.py      # /v3/course-catalog/{semester}
 │   ├── links.py               # /links/{name} (public, unversioned) + admin router
 │   ├── bulletins_feed.py      # /v3/bulletins/*
 │   ├── bulletins_v3.py        # subscriptions + read-state
