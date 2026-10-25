@@ -161,6 +161,12 @@ class UserCourseOverride(Base):
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Each locale's name is stamped on its own, as a clock value
+    # (`server/sync/merge.py`), so names edited in two locales on two devices
+    # both stay. `custom_name_updated_at` holds the latest of them.
+    custom_names_updated_at: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
 
     # The merge layer (apply_field in academics PUT and initial upload)
     # still speaks a singular, locale-less `custom_name`. Bridge it onto
