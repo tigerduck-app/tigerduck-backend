@@ -34,6 +34,8 @@ server/
 ├── admin_audit.py             # admin_audit_log (the portal writes it) + retention
 ├── tls_pins/                  # the apps' signed TLS pin document: models, document
 │                              #   (the only code that signs), watcher, routes
+├── tls_chain.py               # completes a chain sent without its intermediates
+│                              #   through AIA; the pin watcher and link checker use it
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
