@@ -96,6 +96,15 @@ async def run_now(
             detail={"error": "policy_disabled"},
         )
 
+    if auth.device_id is not None:
+        # The executor claims only for a device seen lately; this one asks
+        # now. Before the job's lock, in a sign-in's order: device, then job.
+        await session.execute(
+            update(UserDevice)
+            .where(UserDevice.id == auth.device_id, UserDevice.user_id == auth.user_id)
+            .values(last_seen_at=now)
+        )
+
     job = (
         await session.execute(
             select(SyncJob)
@@ -183,13 +192,6 @@ async def run_now(
     job.run_after = now
     # Reassign (not mutate) so SQLAlchemy detects the JSONB change.
     job.cursor = {**(job.cursor or {}), "manual_requested_at": now.isoformat()}
-    if auth.device_id is not None:
-        # The executor claims only for a device seen lately; this one asks now.
-        await session.execute(
-            update(UserDevice)
-            .where(UserDevice.id == auth.device_id, UserDevice.user_id == auth.user_id)
-            .values(last_seen_at=now)
-        )
     logger.info(
         "syncjobs.run_now",
         user_id=str(auth.user_id),
