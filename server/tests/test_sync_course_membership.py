@@ -556,9 +556,11 @@ async def test_an_imported_hand_add_outlives_an_older_reset(client, t) -> None:
     assert await shown(client, phone) == {"CS9"}
 
 
-async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client, t) -> None:
+@pytest.mark.parametrize("timed", [True, False], ids=["timed", "untimed"])
+async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client, t, timed) -> None:
     """A newer name keeps CS2, whose colour was never stored. An import timed
-    before the reset leaves it unset, but colours a row the import creates."""
+    before the reset, or untimed, leaves it unset, but colours a row the import
+    creates. An untimed ignore setting is no decision, so it never lands."""
     phone = await login(client)
     android = await login(client, "android-1", protocol=False)
     await upload(client, phone, roster=["CS2"])
@@ -570,7 +572,7 @@ async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client,
     assert named.status_code == 200
     await reset(client, phone, at(t, 10))
 
-    stamp = at(t, 5).isoformat()
+    stamp = at(t, 5).isoformat() if timed else None
     response = await client.post(
         "/v3/sync/initial-upload",
         headers=android,
@@ -598,7 +600,7 @@ async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client,
     assert (overrides["CS2"]["color_hex"], overrides["CS2"]["ignore_assignments"]) == (None, False)
     assert (overrides["CS3"]["color_hex"], overrides["CS3"]["ignore_assignments"]) == (
         "#FF0000",
-        True,
+        timed,
     )
 
 

@@ -159,8 +159,8 @@ class InitialUploadRequest(BaseModel):
 
 
 def _after(ts: datetime | None, reset_at: datetime | None) -> bool:
-    """Whether a value's time, when it has one, is later than the reset."""
-    return ts is None or reset_at is None or ts > reset_at
+    """Whether a value is later than the reset; one without a time is the oldest."""
+    return reset_at is None or (ts or OLDEST) > reset_at
 
 
 @dataclass

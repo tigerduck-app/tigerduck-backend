@@ -169,10 +169,12 @@ async def login(
             moodle_private_token=moodle_private_token,
             now=now,
         )
-        device = await _upsert_device(session, user=user, info=device_info, now=now)
+        # Before the device row: a job run holds its job row while it waits
+        # for the sync lock, and a sync writer holds that lock for the device.
         await ensure_sync_jobs(
             session, user_id=user.id, external_account_id=account.id
         )
+        device = await _upsert_device(session, user=user, info=device_info, now=now)
 
         refresh_token = generate_refresh_token()
         auth_session = AuthSession(
