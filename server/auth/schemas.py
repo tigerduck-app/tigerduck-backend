@@ -64,7 +64,7 @@ class DeviceInfo(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    # The apps also send the student's `password`, which is ignored like any
+    # Older app releases also send the student's `password`, ignored like any
     # unknown field; forbidding extra fields would refuse their logins.
     model_config = ConfigDict(extra="ignore")
 
