@@ -483,6 +483,29 @@ async def test_the_academics_put_refuses_what_a_reset_found_unstored(client, t) 
     assert (kept["color_hex"], kept["ignore_assignments"]) == ("#FF0000", True)
 
 
+async def test_an_imported_hand_add_outlives_an_older_reset(client, t) -> None:
+    phone = await login(client)
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=phone,
+        json={
+            "courses": [
+                {
+                    "semester": SEMESTER,
+                    "course_key": key("CS9"),
+                    "course_no": "CS9",
+                    "source": "user_added",
+                    "course_name": "CS9",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    # A reset made offline before the import arrives after it.
+    assert (await reset(client, phone, at(t, 10)))["deleted"] == 0
+    assert await shown(client, phone) == {"CS9"}
+
+
 async def test_a_second_reset_of_an_emptied_term_still_binds_released_apps(client, t) -> None:
     phone = await login(client)
     android = await login(client, "android-1", protocol=False)

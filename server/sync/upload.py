@@ -220,6 +220,9 @@ async def process_initial_upload(
             course_key=item.course_key,
             course_no=item.course_no,
             source=item.source,
+            # Stamped on arrival, as a released app's re-add is, so an older
+            # reset arriving later keeps it.
+            added_at=now if item.source == "user_added" else None,
             course_name=item.course_name,
             course_name_en=item.course_name_en,
             instructors=item.instructors,

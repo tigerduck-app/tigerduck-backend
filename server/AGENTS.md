@@ -316,8 +316,9 @@ into the backend container via `docker-compose.yml`.
   in `users.courses_reset_at`. A delete or an upload's add wins only when
   later than the key's add, tombstone and covering resets. A reset wins
   only when later than the one it replaces; a released app's reset is
-  recorded too, never moving a stored one back. Turning course sync off
-  everywhere drops tombstones and term resets together.
+  recorded too, never moving a stored one back. A hand-added course the
+  initial upload brings is stamped when it arrives. Turning course sync
+  off everywhere drops tombstones and term resets together.
 - With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
   writes the tombstone even for a course the server lacks; a removal of a
   school row (`source` other than `user_added`) keeps the row and only
