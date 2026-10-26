@@ -11,6 +11,7 @@ import contextlib  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
+from datetime import UTC, datetime
 from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
@@ -20,7 +21,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse  # noqa: E402
 
 from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
@@ -30,6 +31,7 @@ from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
 from server.i18n import require_fallback_bundle
 from server.logging_setup import configure as configure_logging
+from server.sync.merge import CLOCK_HEADER, to_clock
 from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
 # noqa: F401 — imported for the side effect of registering the tables with
 # Base.metadata, which is what create_all in the test fixtures walks.
@@ -390,6 +392,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             )
         return await call_next(request)
+
+    # Every /v3 answer, an error too, carries the server's clock, which the
+    # apps stamp their edits against (`server/sync/merge.py`).
+    v3_path = settings.api_v3_base_path.rstrip("/")
+
+    def _with_clock(request, response):
+        path = request.url.path
+        if path == v3_path or path.startswith(v3_path + "/"):
+            response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
+        return response
+
+    @app.middleware("http")
+    async def _tigersync_clock(request, call_next):
+        return _with_clock(request, await call_next(request))
+
+    # An unhandled error is answered outside every middleware, by Starlette's
+    # ServerErrorMiddleware, which calls this handler and then re-raises.
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request, _exc):
+        return _with_clock(
+            request, PlainTextResponse("Internal Server Error", status_code=500)
+        )
 
     # Added after the 410 middleware so it wraps it (Starlette runs the
     # last-added middleware outermost) and counts those answers too.

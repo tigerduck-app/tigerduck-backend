@@ -636,3 +636,31 @@ async def test_initial_upload_clears_a_name_to_empty_strings(client) -> None:
         assert response.json()["counts"]["course_overrides"] == 1
 
     assert (await stored_override(client)).custom_names == {"zh": "", "en": ""}
+
+
+async def test_initial_upload_values_without_a_time_count_as_the_oldest(client) -> None:
+    """An import sends what the device holds, edited or not. Without a time
+    it fills a field nothing set, and loses to any value that has one."""
+    login = await do_login(client)
+    await seed_course(client, login)
+
+    response = await upload_course_override(client, login, color_hex="#00FF00")
+    assert response.status_code == 200, response.text
+    filled = await stored_override(client)
+    assert filled.color_hex == "#00FF00"
+    assert filled.color_hex_updated_at == datetime(1970, 1, 1, tzinfo=UTC)
+
+    patched = await client.patch(
+        "/v3/sync/courses/1141CS3001301/override",
+        headers=bearer(login),
+        json={"custom_name": "作業系統概論", "locale": "zh"},
+    )
+    assert patched.status_code == 200, patched.text
+    response = await upload_course_override(
+        client, login, color_hex="#0000FF", custom_name="OS"
+    )
+    assert response.status_code == 200, response.text
+    override = await stored_override(client)
+    assert override.color_hex == "#00FF00"
+    # The PATCHed Chinese name stays; the English one had none and takes it.
+    assert override.custom_names == {"zh": "作業系統概論", "en": "OS"}

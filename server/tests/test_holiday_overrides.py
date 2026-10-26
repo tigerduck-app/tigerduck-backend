@@ -6,7 +6,7 @@ is user-scoped and synced. Anything that blurs those two shows up here.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from sqlalchemy import select
 from server.academic_calendar.models import AcademicHoliday
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.sync.merge import to_clock
 from server.sync.models import UserChangeLog
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -73,7 +74,13 @@ async def test_set_and_read_back(client) -> None:
         json={"notify": True},
     )
     assert put.status_code == 200
-    assert put.json() == {"holiday_id": holiday_id, "notify": True}
+    # What released apps were sent, plus the stored setting's stamp.
+    assert put.json() == {
+        "holiday_id": holiday_id,
+        "notify": True,
+        "hlc": put.json()["hlc"],
+        "applied": True,
+    }
 
     listed = await client.get("/v3/sync/holiday-overrides", headers=bearer(login))
     assert listed.json()["overrides"] == [{"holiday_id": holiday_id, "notify": True}]
@@ -146,16 +153,17 @@ async def test_full_sync_carries_the_override(client) -> None:
     replaying the whole changelog."""
     holiday_id = await seed_holiday(client)
     login = await do_login(client)
+    stamp = to_clock(datetime.now(UTC))
     await client.put(
         f"/v3/sync/holiday-overrides/{holiday_id}",
         headers=bearer(login),
-        json={"notify": True},
+        json={"notify": True, "hlc": stamp},
     )
 
     snapshot = await client.get("/v3/sync/full", headers=bearer(login))
     assert snapshot.status_code == 200
     assert snapshot.json()["holiday_overrides"] == [
-        {"holiday_id": holiday_id, "notify": True}
+        {"holiday_id": holiday_id, "notify": True, "hlc": stamp}
     ]
 
 
@@ -179,3 +187,60 @@ async def test_deleting_the_holiday_removes_the_override(client) -> None:
 
     listed = await client.get("/v3/sync/holiday-overrides", headers=bearer(login))
     assert listed.json()["overrides"] == []
+
+
+async def holiday_changes(client) -> int:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return len(
+            (
+                await session.execute(
+                    select(UserChangeLog).where(
+                        UserChangeLog.entity_type == "holiday_override"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+
+async def test_the_setting_with_the_latest_stamp_wins(client) -> None:
+    holiday_id = await seed_holiday(client)
+    login = await do_login(client)
+    headers = {**bearer(login), "X-TigerSync-Protocol": "2"}
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    async def put(notify: bool, at: datetime) -> dict:
+        response = await client.put(
+            f"/v3/sync/holiday-overrides/{holiday_id}",
+            headers=headers,
+            json={"notify": notify, "hlc": to_clock(at)},
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    assert (await put(True, t + timedelta(minutes=10)))["applied"] is True
+    # Turned off earlier on a device that had not synced: it loses.
+    late = await put(False, t)
+    assert (late["notify"], late["applied"], late["hlc"]) == (
+        True,
+        False,
+        to_clock(t + timedelta(minutes=10)),
+    )
+    # The same setting again moves only its stamp.
+    again = await put(True, t + timedelta(minutes=20))
+    assert (again["applied"], again["hlc"]) == (True, to_clock(t + timedelta(minutes=20)))
+    assert await holiday_changes(client) == 1
+
+    unstamped = await client.put(
+        f"/v3/sync/holiday-overrides/{holiday_id}", headers=headers, json={"notify": False}
+    )
+    assert unstamped.status_code == 422
+    ahead = await client.put(
+        f"/v3/sync/holiday-overrides/{holiday_id}",
+        headers=headers,
+        json={"notify": False, "hlc": to_clock(datetime.now(UTC) + timedelta(seconds=30))},
+    )
+    assert (ahead.status_code, ahead.json()["detail"]) == (409, "clock_ahead")
+    assert await holiday_changes(client) == 1

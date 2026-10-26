@@ -85,6 +85,11 @@ class UserCourse(Base):
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # The stamp of the user's add, None for a course only the roster brought
+    # (`server/sync/membership.py`).
+    added_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     __table_args__ = (
         UniqueConstraint("user_id", "semester", "course_key"),
         CheckConstraint(
@@ -161,25 +166,23 @@ class UserCourseOverride(Base):
         ForeignKey("user_devices.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Each locale's name is stamped on its own, as a clock value
+    # (`server/sync/merge.py`), so names edited in two locales on two devices
+    # both stay. `custom_name_updated_at` holds the latest of them.
+    custom_names_updated_at: Mapped[dict] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
 
-    # The merge layer (apply_field in academics PUT and initial upload)
-    # still speaks a singular, locale-less `custom_name`. Bridge it onto
-    # the locale-keyed map with the a1b2c3d4e5f6 backfill convention: one
-    # locale-less name feeds both 'zh' and 'en', the only keys the apps
-    # and portal read. Without this bridge, setattr lands on a transient
-    # instance attribute and the name is silently dropped. A cleared name
+    # One name for readers without a locale (the class reminder copy). The
+    # academics PUT and the initial upload still send a locale-less
+    # `custom_name`, which feeds both 'zh' and 'en' with the a1b2c3d4e5f6
+    # backfill convention (`merge.set_locale_less_name`). A cleared name
     # stays as "" in both, as the override PATCH keeps a cleared locale, so
     # a snapshot carries the clear.
     @property
     def custom_name(self) -> str | None:
         names = self.custom_names or {}
         return names.get("zh") or names.get("en") or None
-
-    @custom_name.setter
-    def custom_name(self, value: str | None) -> None:
-        names = dict(self.custom_names or {})
-        names["zh"] = names["en"] = value or ""
-        self.custom_names = names
 
     color_hex: Mapped[str | None] = mapped_column(String(16), nullable=True)
     color_hex_updated_at: Mapped[datetime | None] = mapped_column(
@@ -220,6 +223,18 @@ class UserCourseOverride(Base):
     )
 
     __table_args__ = (UniqueConstraint("user_id", "user_course_id"),)
+class UserSemesterReset(Base):
+    """The latest reset of one term's courses, by its stamp. The course
+    choices of the term stamped at or before it are cleared and refused
+    (`server/sync/membership.py`); a full reset is `users.courses_reset_at`."""
+
+    __tablename__ = "user_semester_resets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    semester: Mapped[str] = mapped_column(String(16), primary_key=True)
+    reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 class UserCourseSkippedDate(Base):
     __tablename__ = "user_course_skipped_dates"
 

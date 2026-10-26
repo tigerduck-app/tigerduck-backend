@@ -169,10 +169,12 @@ async def login(
             moodle_private_token=moodle_private_token,
             now=now,
         )
-        device = await _upsert_device(session, user=user, info=device_info, now=now)
+        # Before the device row: a job run holds its job row while it waits
+        # for the sync lock, and a sync writer holds that lock for the device.
         await ensure_sync_jobs(
             session, user_id=user.id, external_account_id=account.id
         )
+        device = await _upsert_device(session, user=user, info=device_info, now=now)
 
         refresh_token = generate_refresh_token()
         auth_session = AuthSession(
@@ -597,7 +599,7 @@ async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:
     touches a device or its sessions, so no two of them can deadlock."""
     await session.execute(
         select(ExternalAccount.id)
-        .where(ExternalAccount.user_id.in_(user_ids))
+        .where(in_array(ExternalAccount.user_id, user_ids))
         .order_by(ExternalAccount.id)
         .with_for_update()
     )

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text, update
 
+from server.auth.models import UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.syncjobs.executor import SyncWorker, _claim_due_jobs
 from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -81,6 +84,84 @@ async def test_run_now_queues_high_priority(client):
     assert job.priority == 1
     assert job.run_after <= datetime.now(UTC)
     assert "manual_requested_at" in job.cursor
+
+
+def _claimer(client) -> SyncWorker:
+    return SyncWorker(
+        session_factory=build_session_factory(client.app.state.engine),
+        settings=client.app.state.settings,
+        cipher=None,
+        fetcher=None,
+        course_fetcher=None,
+        worker_id="test-worker",
+    )
+
+
+@pytest.mark.parametrize(
+    ("job", "queued"),
+    [
+        ({}, True),
+        ({"priority": 1, "run_after": datetime.now(UTC) - timedelta(hours=1)}, False),
+    ],
+    ids=["queued-now", "already-queued"],
+)
+async def test_run_now_reaches_the_next_claim_from_a_device_not_seen_lately(
+    client, job, queued
+):
+    """A refresh keeps a session live without moving `last_seen_at`, so the
+    device asking can be past `sync_job_device_active_days`; its request
+    must not wait for good, nor one it made before."""
+    headers = await _login(client)
+    await _set_job(client, cursor={}, **job)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        await session.execute(
+            update(UserDevice).values(last_seen_at=datetime.now(UTC) - timedelta(days=91))
+        )
+        await session.commit()
+
+    response = await client.post(
+        "/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers
+    )
+
+    assert response.json()["queued"] is queued
+    claimed = [job_id for job_id, _ in await _claim_due_jobs(_claimer(client))]
+    assert (await _get_job(client)).id in claimed
+
+
+async def _waiting_on_a_lock(factory) -> None:
+    async with asyncio.timeout(10), factory() as session:
+        while not await session.scalar(
+            text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            )
+        ):
+            # pg_stat_activity holds still for the length of a transaction.
+            await session.rollback()
+            await asyncio.sleep(0.01)
+
+
+async def test_run_now_takes_the_job_before_the_device_as_a_sign_in_does(client):
+    """A sign-in locks the job (`ensure_sync_jobs`), then writes its device.
+    A run-now holding the device while it waited for the job deadlocked
+    with it."""
+    headers = await _login(client)
+    job_id = (await _get_job(client)).id
+    factory = build_session_factory(client.app.state.engine)
+    async with asyncio.timeout(10), factory() as sign_in:
+        await sign_in.execute(
+            select(SyncJob.id).where(SyncJob.id == job_id).with_for_update()
+        )
+        run_now = asyncio.create_task(
+            client.post("/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers)
+        )
+        await _waiting_on_a_lock(factory)
+        await sign_in.execute(update(UserDevice).values(last_login_at=datetime.now(UTC)))
+        await sign_in.commit()
+        response = await run_now
+
+    assert response.status_code == 200, response.text
 
 
 async def test_run_now_cooldown_429(client):

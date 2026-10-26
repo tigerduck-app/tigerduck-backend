@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from server.sync.merge import to_clock
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -23,6 +24,11 @@ from server.sync.models import (
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
+
+
+def hlc(value: datetime | None) -> int | None:
+    """A stamp as the TigerSync clock value the apps compare."""
+    return to_clock(value) if value else None
 
 
 def course_to_dict(c: UserCourse) -> dict:
@@ -46,6 +52,7 @@ def course_to_dict(c: UserCourse) -> dict:
         "fetched_at": _iso(c.fetched_at),
         "updated_at": _iso(c.updated_at),
         "version": c.version,
+        "added_hlc": hlc(c.added_at),
     }
 
 
@@ -65,10 +72,13 @@ def course_override_to_dict(
         "semester": semester,
         "custom_names": o.custom_names or {},
         "custom_name_updated_at": _iso(o.custom_name_updated_at),
+        "custom_names_hlc": dict(o.custom_names_updated_at or {}),
         "color_hex": o.color_hex,
         "color_hex_updated_at": _iso(o.color_hex_updated_at),
+        "color_hex_hlc": hlc(o.color_hex_updated_at),
         "ignore_assignments": o.ignore_assignments,
         "ignore_assignments_updated_at": _iso(o.ignore_assignments_updated_at),
+        "ignore_assignments_hlc": hlc(o.ignore_assignments_updated_at),
         "moodle_course_id": o.moodle_course_id,
     }
 
@@ -114,8 +124,10 @@ def assignment_override_to_dict(
         "moodle_assignment_id": moodle_assignment_id,
         "local_status": o.local_status,
         "local_status_updated_at": _iso(o.local_status_updated_at),
+        "local_status_hlc": hlc(o.local_status_updated_at),
         "note": o.note,
         "note_updated_at": _iso(o.note_updated_at),
+        "note_hlc": hlc(o.note_updated_at),
     }
 
 

@@ -13,6 +13,8 @@ from server.db import SessionDep
 from server.sync import serializers
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
+from server.sync import membership
+from server.sync.merge import ClockProtocolDep, to_clock
 from server.sync.poll_tracker import record_poll
 from server.sync.models import (
     ChangeEntityType,
@@ -88,7 +90,9 @@ async def incremental_sync(
         ],
     }
 @router.get("/full")
-async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request):
+async def full_sync(
+    auth: CurrentAuthDep, session: SessionDep, request: Request, speaks_clock: ClockProtocolDep
+):
     """Authoritative snapshot of all user-scoped data + current_revision.
 
     Runs under REPEATABLE READ so every section and the revision watermark
@@ -120,22 +124,30 @@ async def full_sync(auth: CurrentAuthDep, session: SessionDep, request: Request)
         await snap_session.connection(
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return await _read_full_snapshot(snap_session, auth.user_id, auth.device_id)
-async def _read_full_snapshot(session, user_id, device_id):
+        return await _read_full_snapshot(
+            snap_session, auth.user_id, auth.device_id, speaks_clock=speaks_clock
+        )
+async def _read_full_snapshot(session, user_id, device_id, *, speaks_clock=False):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
 
+    # Before the first query, which fixes what the snapshot sees: a write
+    # whose clock header is earlier than this is in it.
+    server_hlc = to_clock(datetime.now(UTC))
     state = await session.get(UserSyncState, user_id)
     user = await session.get(User, user_id)
     courses = await rows(
         select(UserCourse).where(UserCourse.user_id == user_id)
     )
-    tombstones = await rows(
-        select(UserCourseTombstone).where(
-            UserCourseTombstone.user_id == user_id,
-            UserCourseTombstone.deleted_at > func.now() - text("interval '30 days'"),
+    # Protocol 2 orders every membership edit by these stamps, so it gets
+    # every tombstone; released apps keep the last 30 days.
+    tombstone_scope = [UserCourseTombstone.user_id == user_id]
+    if not speaks_clock:
+        tombstone_scope.append(
+            UserCourseTombstone.deleted_at > func.now() - text("interval '30 days'")
         )
-    )
+    tombstones = await rows(select(UserCourseTombstone).where(*tombstone_scope))
+    resets = await membership.Resets.load(session, user_id)
     # In creation order: a course taken again has an override per term under
     # one course number, and the released apps keep the later row's name and,
     # on Android 2.3.1, the first row's colour, so a new term must not move up.
@@ -193,11 +205,13 @@ async def _read_full_snapshot(session, user_id, device_id):
     _iso = serializers._iso
     return {
         "current_revision": state.current_revision if state else 0,
+        "server_hlc": server_hlc,
         "courses_reset_at": _iso(user.courses_reset_at) if user else None,
-        # A reset tombstone does not bind the device that wrote it (see
-        # `upload_courses`), and the client applies the same rule: between
-        # its reset's DELETE and the re-upload that releases them, a poll
-        # would otherwise read its own tombstones as "hide everything".
+        # For released apps: a reset tombstone does not bind the device that
+        # wrote it (see `upload_courses`), and the client applies the same
+        # rule: between its reset's DELETE and the re-upload that releases
+        # them, a poll would otherwise read its own tombstones as "hide
+        # everything".
         # Authorship is resolved here rather than by sending the device id,
         # so the client needs nothing it does not already have.
         #
@@ -205,27 +219,19 @@ async def _read_full_snapshot(session, user_id, device_id):
         # but the apps hide every other tombstone, so its author never gets
         # it: that device took the course off itself, and hiding it there
         # would keep the roster that lists it later from going up.
-        "course_tombstones": [
-            {
-                "course_key": t.course_key,
-                "course_no": t.course_no,
-                "semester": t.semester,
-                "deleted_at": _iso(t.deleted_at),
-                "deleted_by_reset": t.deleted_by_reset,
-                "deleted_by_this_device": (
-                    device_id is not None and t.deleted_by_device_id == device_id
-                ),
-            }
-            for t in tombstones
-            if not (
-                t.user_added
-                and not t.deleted_by_reset
-                and device_id is not None
-                and t.deleted_by_device_id == device_id
-            )
-        ],
+        "course_tombstones": (
+            [_tombstone_by_stamp(t) for t in tombstones]
+            if speaks_clock
+            else _released_tombstones(tombstones, device_id, {c.course_key for c in courses})
+        ),
+        "courses_reset_hlc": serializers.hlc(resets.full),
+        "term_resets": {term: to_clock(at) for term, at in sorted(resets.terms.items())},
         "holiday_overrides": [
-            {"holiday_id": o.holiday_id, "notify": o.notify}
+            {
+                "holiday_id": o.holiday_id,
+                "notify": o.notify,
+                "hlc": serializers.hlc(o.updated_at),
+            }
             for o in holiday_overrides
         ],
         "courses": [serializers.course_to_dict(c) for c in courses],
@@ -255,6 +261,44 @@ async def _read_full_snapshot(session, user_id, device_id):
         # No bulletin sections: subscriptions belong to one device and read
         # state is never shared, so neither is part of TigerSync.
     }
+
+
+def _tombstone_by_stamp(t: UserCourseTombstone) -> dict:
+    return {
+        "course_key": t.course_key,
+        "course_no": t.course_no,
+        "semester": t.semester,
+        "deleted_at": serializers._iso(t.deleted_at),
+        "hlc": to_clock(t.deleted_at),
+        "kind": membership.tombstone_kind(t),
+    }
+
+
+def _released_tombstones(tombstones, device_id, listed: set[str]) -> list[dict]:
+    """Today's tombstones for the released apps, which hide every course a
+    tombstone names. A removal kept beside a roster row hides nothing, so
+    they do not get it."""
+    return [
+        {
+            "course_key": t.course_key,
+            "course_no": t.course_no,
+            "semester": t.semester,
+            "deleted_at": serializers._iso(t.deleted_at),
+            "deleted_by_reset": t.deleted_by_reset,
+            "deleted_by_this_device": (
+                device_id is not None and t.deleted_by_device_id == device_id
+            ),
+        }
+        for t in tombstones
+        if not (
+            t.user_added
+            and not t.deleted_by_reset
+            and (
+                t.course_key in listed
+                or (device_id is not None and t.deleted_by_device_id == device_id)
+            )
+        )
+    ]
 
 
 async def _keys_for_marks_on_deleted_rows(

@@ -7,7 +7,8 @@ that already exists is left untouched (another device uploaded first; this
 device should pull via /v3/sync instead).
 
 Per-field override values DO merge (via `server/sync/merge.py`) because
-they carry their own client timestamps.
+they carry their own client timestamps. A value sent without one counts as
+the oldest, so it fills a field nothing has set and loses to any edit.
 """
 
 from __future__ import annotations
@@ -30,8 +31,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.push.submission_cancel import cancel_for_submitted
+from server.sync import membership
 from server.sync.changelog import append_change, lock_sync_state
-from server.sync.merge import apply_field
+from server.sync.merge import OLDEST, apply_field, set_locale_less_name
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -156,6 +158,11 @@ class InitialUploadRequest(BaseModel):
     # are not part of TigerSync.
 
 
+def _after(ts: datetime | None, reset_at: datetime | None) -> bool:
+    """Whether a value is later than the reset; one without a time is the oldest."""
+    return reset_at is None or (ts or OLDEST) > reset_at
+
+
 @dataclass
 class UploadResult:
     counts: dict[str, int]
@@ -208,6 +215,7 @@ async def process_initial_upload(
     )
     for course in existing_courses:
         course_by_key[(course.semester, course.course_key)] = course
+    imported: set[tuple[str, str]] = set()
 
     for item in payload.courses:
         key = (item.semester, item.course_key)
@@ -219,6 +227,9 @@ async def process_initial_upload(
             course_key=item.course_key,
             course_no=item.course_no,
             source=item.source,
+            # Stamped on arrival, as a released app's re-add is, so an older
+            # reset arriving later keeps it.
+            added_at=now if item.source == "user_added" else None,
             course_name=item.course_name,
             course_name_en=item.course_name_en,
             instructors=item.instructors,
@@ -234,10 +245,12 @@ async def process_initial_upload(
         session.add(course)
         await session.flush()
         course_by_key[key] = course
+        imported.add(key)
         counts["courses"] += 1
         await log("course", str(course.id))
 
     # --- Course overrides (per-field merge) ---
+    resets = await membership.Resets.load(session, user_id)
     for item in payload.course_overrides:
         course = course_by_key.get((item.semester, item.course_key))
         if course is None:
@@ -246,6 +259,11 @@ async def process_initial_upload(
                 course_key=item.course_key,
             )
             continue
+        # As in the academics PUT, for the rows the server already had: a
+        # field a reset found unstored has no stamp to refuse an older time.
+        reset_at = None if (item.semester, item.course_key) in imported else (
+            resets.covering(course.semester)
+        )
         override = (
             await session.execute(
                 select(UserCourseOverride).where(
@@ -259,26 +277,29 @@ async def process_initial_upload(
             session.add(override)
             await session.flush()
         changed = False
-        for field_name, value, ts in (
-            ("custom_name", item.custom_name, item.custom_name_updated_at),
-            ("color_hex", item.color_hex, item.color_hex_updated_at),
-        ):
-            if value is None:
-                continue
+        if item.custom_name is not None and _after(item.custom_name_updated_at, reset_at):
+            changed |= set_locale_less_name(
+                override,
+                item.custom_name,
+                client_ts=item.custom_name_updated_at or OLDEST,
+                device_id=device_id,
+                now=now,
+            )
+        if item.color_hex is not None and _after(item.color_hex_updated_at, reset_at):
             changed |= apply_field(
                 override,
-                field_name,
-                value,
-                client_ts=ts or now,
+                "color_hex",
+                item.color_hex,
+                client_ts=item.color_hex_updated_at or OLDEST,
                 device_id=device_id,
                 now=now,
             )
         # Only with its own time, unlike the fields above: an import sends a
-        # value for every course, and a false stamped `now` would clear an
-        # ignore another device set since.
+        # value for every course, which is no decision about the setting.
         if (
             item.ignore_assignments is not None
             and item.ignore_assignments_updated_at is not None
+            and _after(item.ignore_assignments_updated_at, reset_at)
         ):
             changed |= apply_field(
                 override,
@@ -419,7 +440,7 @@ async def process_initial_upload(
                 override,
                 field_name,
                 value,
-                client_ts=ts or now,
+                client_ts=ts or OLDEST,
                 device_id=device_id,
                 now=now,
             ):

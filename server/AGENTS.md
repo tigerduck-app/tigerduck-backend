@@ -39,7 +39,8 @@ server/
 ├── logging_setup.py           # structlog console/JSON
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
-├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher
+├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
+│                              #   retirement.py deregisters gone devices daily
 ├── sync/                      # v3 sync models + changelog retention
 ├── syncjobs/                  # server-side academic sync executor
 ├── links/                     # /links/{name} redirects: model, target checks,
@@ -271,22 +272,85 @@ into the backend container via `docker-compose.yml`.
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
   replaces the notification already on screen, so only one would show.
+- A device with no live session that for 7 days was not seen
+  (`last_seen_at`), did not announce itself and took no standard push is
+  deregistered by the `device_retirement` job, daily at 04:00 Taipei
+  (`auth/retirement.py`), the way the portal's deregister does it:
+  soft-deleted, its active push tokens invalidated, one `device.deregister`
+  audit row with actor `system` and the token ids. Signing in on it brings
+  it back.
+- A user's sync jobs are claimed only while a device with TigerSync on was
+  seen within `sync_job_device_active_days` (90, the refresh token's
+  lifetime, so a device that can still sign in counts) or took a standard
+  push within `sync_job_device_push_days` (14); a run-now marks its device
+  seen. Until then they stay pending, and the first tick after a device
+  comes back runs one already due.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
   Live Activity update tokens); a rotated token must not keep its
   predecessor delivering.
-- `/sync/full` tags each course tombstone with `deleted_by_reset` and
-  `deleted_by_this_device`; a client ignores a tombstone that is both,
-  the same rule `upload_courses` applies when it releases them. A course
-  an upload's `force_keys` brings to the server is stored as
-  `user_added`, unless the key brings back a course deleted while it was
-  not; one already there keeps its `source`. A single delete of a
-  `user_added` course leaves a tombstone marked `user_added`, which its
-  author's snapshot leaves out and its author's next upload forcing no
-  key releases. That helps only a removal that hides nothing on the
-  device, today the iPhone's tap-again in Add course: the apps' other
-  removals keep a local hide, so their rosters leave the course out.
+- TigerSync resolves each synced field on its own by its stamp
+  (`sync/merge.py`). A stamp is a clock value, integer microseconds since
+  the epoch, kept exactly in the field's `*_updated_at` (a course name per
+  locale in `custom_names_updated_at`, a holiday setting in `updated_at`)
+  and sent back as `*_hlc`. Every `/v3` answer carries the server's clock
+  in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also in
+  `server_hlc`. A request's `hlc` later than server time plus
+  `MAX_CLOCK_SKEW` is refused with 409 `clock_ahead` before anything is
+  written, never clamped, so a retry keeps the stamp first stored. An edit
+  sent without one is stamped when it arrives, or refused with 422
+  `hlc_required` when the request carries `X-TigerSync-Protocol: 2`. A
+  value in a bulk upload sent without a time counts as `OLDEST`.
+- A stamp no later than the stored one loses, so a tie keeps the stored
+  value; a later stamp with the stored value moves only the stamp, and a
+  field with no stamp takes any edit. A write takes `lock_sync_state`
+  before it reads a stored stamp, so concurrent edits apply one after
+  another, and logs a change and queues a `sync_trigger` only when a
+  value changed. A cleared assignment mark stays as a stamped `none` on
+  every row of the assignment, so an older mark sent late loses to it.
+- Course membership is stamped per key (`sync/membership.py`): an add in
+  `user_courses.added_at`, a hide or removal in its tombstone's
+  `deleted_at` (kind `hide`, `remove`, or `reset` for the per-course
+  reset tombstones), a term reset in `user_semester_resets`, a full reset
+  in `users.courses_reset_at`. A delete or an upload's add wins only when
+  later than the key's add, tombstone and covering resets. A reset wins
+  only when later than the one it replaces; a released app's reset is
+  recorded too, never moving a stored one back. A hand-added course the
+  initial upload brings is stamped when it arrives. Turning course sync
+  off everywhere drops tombstones and term resets together.
+- With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
+  writes the tombstone even for a course the server lacks; a removal of a
+  school row (`source` other than `user_added`) keeps the row and only
+  clears its add. An upload's `adds` replace `force_keys`; the rest of
+  its `courses` is the school's roster, which marks a listed course as a
+  school row, skips a hidden key, lifts a reset tombstone and shows a
+  removed key beside its removal tombstone, which keeps refusing older
+  edits. A reset clears only the term's choices stamped at or before it:
+  a row with a later add stays, and so does a school row with a later
+  override value, with its older choices emptied and stamped at the reset
+  (a name as ""), so every writer refuses an older value. After a term
+  reset each row that goes, and each key with an older tombstone and no
+  row left, has a reset tombstone. The course override PATCH and the
+  academics PUT refuse edits stamped at or before the term's reset, and
+  so do the initial upload and the roster's colour fill on the rows the
+  server already had. Of two adds of one key, the later counts.
+  `/sync/full` returns every tombstone with `hlc` and `kind`.
+- Without the header, released apps get today's rules. `/sync/full`
+  sends the last 30 days of tombstones, each tagged `deleted_by_reset`
+  and `deleted_by_this_device`; a client ignores a tombstone that is
+  both, the same rule `upload_courses` applies when it releases them. It
+  leaves out a removal tombstone beside a roster row, which those apps
+  would read as a hide, and their roster upload still updates that row.
+  A course an upload's `force_keys` brings to the
+  server is stored as `user_added`, unless the key brings back a course
+  deleted while it was not; one already there keeps its `source`. A
+  single delete of a `user_added` course leaves a tombstone marked
+  `user_added`, which its author's snapshot leaves out and its author's
+  next upload forcing no key releases. That helps only a removal that
+  hides nothing on the device, today the iPhone's tap-again in Add
+  course: the apps' other removals keep a local hide, so their rosters
+  leave the course out. A semester reset needs a device id.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
@@ -303,7 +367,7 @@ into the backend container via `docker-compose.yml`.
 - Do not sign in to NTUST SSO or Moodle with a student's password. The
   apps sign in themselves and give `POST /v3/auth/login` the Moodle
   token; a login without one answers `400 moodle_token_required`, and
-  the `password` the apps still send is ignored.
+  the `password` older app releases still send is ignored.
 - Do not send APNs pushes from inside request handlers. Scheduling
   goes through a `push_jobs` row and is delivered by the push pipeline
   (`server/push/pipeline.py`) on its APScheduler tick.
