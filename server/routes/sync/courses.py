@@ -447,7 +447,7 @@ async def delete_course(
         user_id=auth.user_id,
         entity_type=ChangeEntityType.course.value,
         entity_id=str(row.id) if row else course_key,
-        operation="delete" if deleted else "upsert",
+        operation="upsert" if kept_row is not None else "delete",
         payload={"course_key": course_key},
         device_id=auth.device_id,
         locked_state=state,

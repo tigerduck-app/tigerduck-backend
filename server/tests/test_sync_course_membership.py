@@ -6,8 +6,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
+from server.db import build_session_factory
+from server.sync.models import UserChangeLog
 from server.sync.merge import to_clock
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -168,6 +171,35 @@ async def test_a_hide_of_a_course_never_uploaded_binds_the_roster(client, t) -> 
     assert (await upload(client, phone, adds={"CS1": at(t, 5)}))["adds"][0]["applied"] is True
     assert await shown(client, phone) == {"CS1", "CS2"}
     assert await tombstones(client, phone) == {}
+
+
+async def course_changes(client) -> list[str]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return list(
+            (
+                await session.execute(
+                    select(UserChangeLog.operation)
+                    .where(UserChangeLog.entity_type == "course")
+                    .order_by(UserChangeLog.revision)
+                )
+            ).scalars()
+        )
+
+
+async def test_a_hide_of_a_course_never_uploaded_logs_a_delete(client, t) -> None:
+    phone = await login(client)
+    await delete(client, phone, "CS1", at(t, 0))
+    assert await course_changes(client) == ["delete"]
+
+
+async def test_a_removal_that_keeps_the_school_row_logs_an_upsert(client, t) -> None:
+    phone = await login(client)
+    await upload(client, phone, adds={"CS1": at(t, 0)})
+    await upload(client, phone, roster=["CS1"])
+    before = len(await course_changes(client))
+    await delete(client, phone, "CS1", at(t, 10), kind="remove")
+    assert (await course_changes(client))[before:] == ["upsert"]
 
 
 async def test_the_same_hide_again_moves_only_its_stamp(client, t) -> None:
