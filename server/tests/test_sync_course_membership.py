@@ -556,6 +556,52 @@ async def test_an_imported_hand_add_outlives_an_older_reset(client, t) -> None:
     assert await shown(client, phone) == {"CS9"}
 
 
+async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client, t) -> None:
+    """A newer name keeps CS2, whose colour was never stored. An import timed
+    before the reset leaves it unset, but colours a row the import creates."""
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    await upload(client, phone, roster=["CS2"])
+    named = await client.patch(
+        f"/v3/sync/courses/{SEMESTER}CS2/override",
+        headers=phone,
+        json={"custom_name": "New", "locale": "zh", "hlc": to_clock(at(t, 20))},
+    )
+    assert named.status_code == 200
+    await reset(client, phone, at(t, 10))
+
+    stamp = at(t, 5).isoformat()
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=android,
+        json={
+            "courses": [
+                {"semester": SEMESTER, "course_key": key(no), "course_no": no, "course_name": no}
+                for no in ("CS2", "CS3")
+            ],
+            "course_overrides": [
+                {
+                    "semester": SEMESTER,
+                    "course_key": key(no),
+                    "color_hex": "#FF0000",
+                    "color_hex_updated_at": stamp,
+                    "ignore_assignments": True,
+                    "ignore_assignments_updated_at": stamp,
+                }
+                for no in ("CS2", "CS3")
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    overrides = {o["course_no"]: o for o in (await snapshot(client, phone))["course_overrides"]}
+    assert (overrides["CS2"]["color_hex"], overrides["CS2"]["ignore_assignments"]) == (None, False)
+    assert (overrides["CS3"]["color_hex"], overrides["CS3"]["ignore_assignments"]) == (
+        "#FF0000",
+        True,
+    )
+
+
 async def test_a_second_reset_of_an_emptied_term_still_binds_released_apps(client, t) -> None:
     phone = await login(client)
     android = await login(client, "android-1", protocol=False)
