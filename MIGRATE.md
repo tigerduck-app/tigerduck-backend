@@ -38,15 +38,17 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   carries `X-TigerSync-Clock`, the server time in integer microseconds
   since the epoch, and `/v3/sync/full` also sends `server_hlc`. The
   override PATCHes, the holiday PUT, `DELETE /v3/sync/courses/{course_key}`
-  and the course upload take TigerSync stamps. The later stamp wins per
+  and the course upload's `adds` take TigerSync stamps. The later stamp wins per
   field (colour, ignore setting, each locale of a course name, assignment
   mark, holiday setting) and per course key (add, hide, removal, term
   reset, full reset), and a tie keeps the stored value. A stamp more than
   5 s ahead of the server is refused with 409 `clock_ahead` before anything
   is written. A request with `X-TigerSync-Protocol: 2` must send its stamps
-  (422 `hlc_required`); without the header a missing stamp means the time
-  the edit arrives, so released apps keep today's behaviour and need no
-  update.
+  (422 `hlc_required`). Without the header, a direct edit with no stamp
+  counts at the time it arrives, so released apps keep today's behaviour
+  and need no update. A value in a bulk upload, which has no stamp (the
+  initial upload, the roster's colour fill), counts as the oldest and only
+  fills a value that is not set.
 - **Migration `88dbb93dba99`** adds `user_course_overrides.custom_names_updated_at`,
   one stamp per course-name locale, and fills each stored value that has
   no stamp with its row's `updated_at`. The column is added without
