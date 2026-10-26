@@ -239,6 +239,16 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
                     " custom_names_updated_at JSONB NOT NULL DEFAULT '{}'::jsonb"
                 )
             )
+            await conn.execute(
+                text("ALTER TABLE user_courses ADD COLUMN IF NOT EXISTS added_at timestamptz")
+            )
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS user_semester_resets (user_id uuid NOT NULL,"
+                    " semester varchar(16) NOT NULL, reset_at timestamptz NOT NULL,"
+                    " PRIMARY KEY (user_id, semester))"
+                )
+            )
             await _add_extension_column(conn)
         shown = await _shown(engine, user)
 

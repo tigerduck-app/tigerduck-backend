@@ -64,7 +64,7 @@ async def _upload(client, headers: dict, course_nos: list[str], force: list[str]
 
 async def _delete(client, headers: dict, course_no: str) -> None:
     response = await client.delete(f"/v3/sync/courses/{_key(course_no)}", headers=headers)
-    assert response.json() == {"deleted": 1}
+    assert response.json()["deleted"] == 1
 
 
 async def _snapshot(client, headers: dict) -> tuple[dict[str, str], dict[str, dict]]:
@@ -178,7 +178,7 @@ async def test_a_course_added_by_hand_stays_so_through_a_semester_reset(client) 
     phone = await _login(client, "iphone-reset", "ios")
     await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
     reset = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=phone)
-    assert reset.json() == {"deleted": 2}
+    assert reset.json()["deleted"] == 2
     await _upload(client, phone, [ENROLLED])
 
     await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
@@ -229,7 +229,7 @@ async def test_another_devices_reset_takes_the_release_from_the_device_that_remo
     await _upload(client, phone, [ENROLLED, ADDED], force=[ADDED])
     await _delete(client, phone, ADDED)
     reset = await client.delete(f"/v3/sync/courses?semester={SEMESTER}", headers=tablet)
-    assert reset.json() == {"deleted": 1}
+    assert reset.json()["deleted"] == 1
 
     _, on_phone = await _snapshot(client, phone)
     assert on_phone[ADDED]["deleted_by_reset"] is True

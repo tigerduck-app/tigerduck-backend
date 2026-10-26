@@ -19,6 +19,7 @@ from .courses import (
     UserCourseOverride,
     UserCourseSkippedDate,
     UserCourseTombstone,
+    UserSemesterReset,
 )
 from .assignments import (
     UserAssignment,
@@ -57,6 +58,7 @@ __all__ = [
     "UserCourseOverride",
     "UserCourseSkippedDate",
     "UserCourseTombstone",
+    "UserSemesterReset",
     "UserSettingsDocument",
     "UserSyncState",
 ]

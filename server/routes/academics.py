@@ -26,7 +26,7 @@ from sqlalchemy import select
 
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
-from server.sync import serializers
+from server.sync import membership, serializers
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import apply_field, set_locale_less_name
 from server.sync.models import (
@@ -189,6 +189,8 @@ async def put_course_override(
 
     now = datetime.now(UTC)
     changed_fields = []
+    # As in the PATCH: a field the reset found unstored has no stamp to refuse with.
+    reset_at = (await membership.Resets.load(session, auth.user_id)).covering(course.semester)
     for field_name, value, ts in (
         ("custom_name", payload.custom_name, payload.custom_name_updated_at),
         ("color_hex", payload.color_hex, payload.color_hex_updated_at),
@@ -198,7 +200,7 @@ async def put_course_override(
             payload.ignore_assignments_updated_at,
         ),
     ):
-        if ts is None:
+        if ts is None or (reset_at is not None and ts <= reset_at):
             continue
         edit = {"client_ts": ts, "device_id": auth.device_id, "now": now}
         if field_name == "custom_name":

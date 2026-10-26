@@ -126,3 +126,38 @@ async def test_a_preference_update_takes_the_sync_lock_before_the_device_row(cli
     )
     device = next(i for i, s in enumerate(statements) if _WRITE.match(s) and "user_devices" in s)
     assert lock < device
+
+
+_TOUCH = re.compile(r"\b(?:FROM|INTO|UPDATE)\s+(\w+)")
+
+
+@pytest.mark.parametrize(
+    "request_for",
+    [
+        lambda c, h: c.delete(f"/v3/sync/courses/{KEY}", headers=h, params={"hlc": 1}),
+        lambda c, h: c.delete("/v3/sync/courses", headers=h, params={"semester": "1141", "hlc": 1}),
+        lambda c, h: c.post(
+            "/v3/sync/courses/upload",
+            headers=h,
+            json={
+                "courses": [{"semester": "1141", "course_no": "CS3001301", "course_name": "OS"}],
+                "adds": [{"course_key": KEY, "hlc": 1}],
+            },
+        ),
+    ],
+    ids=["course delete", "term reset", "roster upload"],
+)
+async def test_a_protocol_2_writer_reads_its_rows_under_the_sync_lock(client, request_for) -> None:
+    """The stamps it compares are only current under the lock."""
+    login, _ = await _seeded(client)
+    headers = {**bearer(login), "X-TigerSync-Protocol": "2"}
+    statements = await _statements(client, lambda: request_for(client, headers))
+    lock = next(
+        i for i, s in enumerate(statements) if "FROM user_sync_state" in s and "FOR UPDATE" in s
+    )
+    first = next(
+        i
+        for i, s in enumerate(statements)
+        if any(table in SYNC_TABLES for table in _TOUCH.findall(s))
+    )
+    assert lock < first

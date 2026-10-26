@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.push.submission_cancel import cancel_for_submitted
+from server.sync import membership
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import OLDEST, apply_field, set_locale_less_name
 from server.sync.models import (
@@ -157,6 +158,11 @@ class InitialUploadRequest(BaseModel):
     # are not part of TigerSync.
 
 
+def _after(ts: datetime | None, reset_at: datetime | None) -> bool:
+    """Whether a value's time, when it has one, is later than the reset."""
+    return ts is None or reset_at is None or ts > reset_at
+
+
 @dataclass
 class UploadResult:
     counts: dict[str, int]
@@ -209,6 +215,7 @@ async def process_initial_upload(
     )
     for course in existing_courses:
         course_by_key[(course.semester, course.course_key)] = course
+    imported: set[tuple[str, str]] = set()
 
     for item in payload.courses:
         key = (item.semester, item.course_key)
@@ -220,6 +227,9 @@ async def process_initial_upload(
             course_key=item.course_key,
             course_no=item.course_no,
             source=item.source,
+            # Stamped on arrival, as a released app's re-add is, so an older
+            # reset arriving later keeps it.
+            added_at=now if item.source == "user_added" else None,
             course_name=item.course_name,
             course_name_en=item.course_name_en,
             instructors=item.instructors,
@@ -235,10 +245,12 @@ async def process_initial_upload(
         session.add(course)
         await session.flush()
         course_by_key[key] = course
+        imported.add(key)
         counts["courses"] += 1
         await log("course", str(course.id))
 
     # --- Course overrides (per-field merge) ---
+    resets = await membership.Resets.load(session, user_id)
     for item in payload.course_overrides:
         course = course_by_key.get((item.semester, item.course_key))
         if course is None:
@@ -247,6 +259,11 @@ async def process_initial_upload(
                 course_key=item.course_key,
             )
             continue
+        # As in the academics PUT, for the rows the server already had: a
+        # field a reset found unstored has no stamp to refuse an older time.
+        reset_at = None if (item.semester, item.course_key) in imported else (
+            resets.covering(course.semester)
+        )
         override = (
             await session.execute(
                 select(UserCourseOverride).where(
@@ -260,7 +277,7 @@ async def process_initial_upload(
             session.add(override)
             await session.flush()
         changed = False
-        if item.custom_name is not None:
+        if item.custom_name is not None and _after(item.custom_name_updated_at, reset_at):
             changed |= set_locale_less_name(
                 override,
                 item.custom_name,
@@ -268,7 +285,7 @@ async def process_initial_upload(
                 device_id=device_id,
                 now=now,
             )
-        if item.color_hex is not None:
+        if item.color_hex is not None and _after(item.color_hex_updated_at, reset_at):
             changed |= apply_field(
                 override,
                 "color_hex",
@@ -282,6 +299,7 @@ async def process_initial_upload(
         if (
             item.ignore_assignments is not None
             and item.ignore_assignments_updated_at is not None
+            and _after(item.ignore_assignments_updated_at, reset_at)
         ):
             changed |= apply_field(
                 override,
