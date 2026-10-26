@@ -10,7 +10,7 @@ import re
 import pytest
 from sqlalchemy import event
 
-from server.tests.test_sync_overrides import bearer, do_login, seed_course
+from server.tests.test_sync_overrides import LOGIN_BODY, bearer, do_login, seed_course
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -126,6 +126,16 @@ async def test_a_preference_update_takes_the_sync_lock_before_the_device_row(cli
     )
     device = next(i for i, s in enumerate(statements) if _WRITE.match(s) and "user_devices" in s)
     assert lock < device
+
+
+async def test_a_sign_in_takes_the_sync_jobs_before_the_device_row(client) -> None:
+    """A job run holds its job row while it waits for the sync lock, and a
+    sync writer holds that lock while it updates the device row."""
+    await do_login(client)
+    statements = await _statements(client, lambda: client.post("/v3/auth/login", json=LOGIN_BODY))
+    jobs = next(i for i, s in enumerate(statements) if _WRITE.match(s) and "sync_jobs" in s)
+    device = next(i for i, s in enumerate(statements) if _WRITE.match(s) and "user_devices" in s)
+    assert jobs < device
 
 
 _TOUCH = re.compile(r"\b(?:FROM|INTO|UPDATE)\s+(\w+)")
