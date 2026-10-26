@@ -278,6 +278,35 @@ async def test_the_latest_of_two_adds_of_one_key_counts(client, t) -> None:
     assert await shown(client, phone) == {"CS1"}
 
 
+async def test_a_released_apps_roster_updates_a_row_beside_its_removal(client, t) -> None:
+    """Their snapshot leaves that removal out, so they show the course."""
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    await upload(client, phone, adds={"CS1": at(t, 0)})
+    await upload(client, phone, roster=["CS1"])
+    await delete(client, phone, "CS1", at(t, 5), kind="remove")
+
+    response = await client.post(
+        "/v3/sync/courses/upload",
+        headers=android,
+        json={
+            "courses": [
+                {
+                    "semester": SEMESTER,
+                    "course_no": "CS1",
+                    "course_name": "CS1",
+                    "classroom": "TR-313",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["skipped_tombstoned"] == 0
+    (row,) = (await snapshot(client, phone))["courses"]
+    assert row["classroom"] == "TR-313"
+    assert await tombstones(client, phone) == {"CS1": ("remove", to_clock(at(t, 5)))}
+
+
 async def test_a_hand_add_the_roster_lists_moves_the_revision(client, t) -> None:
     """It becomes a school row, which a removal or a reset treats otherwise."""
     phone = await login(client)

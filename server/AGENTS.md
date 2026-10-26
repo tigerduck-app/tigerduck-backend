@@ -340,7 +340,8 @@ into the backend container via `docker-compose.yml`.
   and `deleted_by_this_device`; a client ignores a tombstone that is
   both, the same rule `upload_courses` applies when it releases them. It
   leaves out a removal tombstone beside a roster row, which those apps
-  would read as a hide. A course an upload's `force_keys` brings to the
+  would read as a hide, and their roster upload still updates that row.
+  A course an upload's `force_keys` brings to the
   server is stored as `user_added`, unless the key brings back a course
   deleted while it was not; one already there keeps its `source`. A
   single delete of a `user_added` course leaves a tombstone marked

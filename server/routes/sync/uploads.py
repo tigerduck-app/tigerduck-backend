@@ -187,13 +187,17 @@ async def upload_courses(
             )
 
         # Tombstoned courses must not be resurrected by a bulk portal upload.
-        tombstoned_keys = set(
-            (await session.execute(
-                select(UserCourseTombstone.course_key).where(
+        # A removal kept beside a roster row is left out of these apps'
+        # snapshot (`_released_tombstones`), so that row still updates.
+        tombstoned_keys = {
+            t.course_key
+            for t in (await session.execute(
+                select(UserCourseTombstone).where(
                     UserCourseTombstone.user_id == auth.user_id,
                 )
-            )).scalars().all()
-        )
+            )).scalars()
+            if not (t.user_added and not t.deleted_by_reset and t.course_key in existing_keys)
+        }
         # A released app's re-add is stamped when it arrives.
         added_at = dict.fromkeys(payload.force_keys, now)
 
