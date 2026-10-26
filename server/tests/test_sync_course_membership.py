@@ -446,6 +446,43 @@ async def test_a_reset_clearing_an_older_name_sends_it_as_empty(client, t) -> No
     assert (kept["color_hex"], kept["custom_names"]) == ("#00FF00", {"en": ""})
 
 
+async def test_the_academics_put_refuses_what_a_reset_found_unstored(client, t) -> None:
+    """A newer name keeps the school course; its colour and ignore setting
+    were never stored, and a value stamped before the reset must not land."""
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    await upload(client, phone, roster=["CS2"])
+    named = await client.patch(
+        f"/v3/sync/courses/{SEMESTER}CS2/override",
+        headers=phone,
+        json={"custom_name": "New", "locale": "zh", "hlc": to_clock(at(t, 20))},
+    )
+    assert named.status_code == 200
+    await reset(client, phone, at(t, 10))
+    (course,) = (await snapshot(client, phone))["courses"]
+
+    async def put(minutes: int) -> None:
+        stamp = at(t, minutes).isoformat()
+        response = await client.put(
+            f"/v3/courses/{course['id']}/override",
+            headers=android,
+            json={
+                "color_hex": "#FF0000",
+                "color_hex_updated_at": stamp,
+                "ignore_assignments": True,
+                "ignore_assignments_updated_at": stamp,
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    await put(5)
+    (kept,) = (await snapshot(client, phone))["course_overrides"]
+    assert (kept["color_hex"], kept["ignore_assignments"]) == (None, False)
+    await put(15)
+    (kept,) = (await snapshot(client, phone))["course_overrides"]
+    assert (kept["color_hex"], kept["ignore_assignments"]) == ("#FF0000", True)
+
+
 async def test_a_second_reset_of_an_emptied_term_still_binds_released_apps(client, t) -> None:
     phone = await login(client)
     android = await login(client, "android-1", protocol=False)
