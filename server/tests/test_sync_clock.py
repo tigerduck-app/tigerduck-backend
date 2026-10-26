@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
 
 from server.db import build_session_factory
@@ -80,3 +81,17 @@ async def test_a_snapshot_reads_the_server_clock_before_its_data(client) -> None
         event.remove(sync_engine, "before_cursor_execute", record)
 
     assert _clock(write) < snapshot["server_hlc"] <= first_query[0]
+
+
+async def test_an_unhandled_error_carries_the_server_clock(client) -> None:
+    async def fail() -> None:
+        raise RuntimeError("boom")
+
+    client.app.add_api_route("/v3/test-failure", fail)
+    transport = ASGITransport(app=client.app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as unraised:
+        before = to_clock(datetime.now(UTC))
+        response = await unraised.get("/v3/test-failure")
+
+    assert response.status_code == 500
+    assert before <= _clock(response) <= to_clock(datetime.now(UTC))

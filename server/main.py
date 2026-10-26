@@ -21,7 +21,7 @@ from fastapi import Depends, FastAPI  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse  # noqa: E402
 
 from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
@@ -397,13 +397,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # apps stamp their edits against (`server/sync/merge.py`).
     v3_path = settings.api_v3_base_path.rstrip("/")
 
-    @app.middleware("http")
-    async def _tigersync_clock(request, call_next):
-        response = await call_next(request)
+    def _with_clock(request, response):
         path = request.url.path
         if path == v3_path or path.startswith(v3_path + "/"):
             response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
         return response
+
+    @app.middleware("http")
+    async def _tigersync_clock(request, call_next):
+        return _with_clock(request, await call_next(request))
+
+    # An unhandled error is answered outside every middleware, by Starlette's
+    # ServerErrorMiddleware, which calls this handler and then re-raises.
+    @app.exception_handler(Exception)
+    async def _unhandled_error(request, _exc):
+        return _with_clock(
+            request, PlainTextResponse("Internal Server Error", status_code=500)
+        )
 
     # Added after the 410 middleware so it wraps it (Starlette runs the
     # last-added middleware outermost) and counts those answers too.
