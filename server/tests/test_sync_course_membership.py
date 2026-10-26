@@ -10,8 +10,8 @@ from sqlalchemy import select
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.sync.models import UserChangeLog
 from server.sync.merge import to_clock
+from server.sync.models import UserChangeLog
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -256,6 +256,34 @@ async def test_a_removed_hand_add_the_roster_lists_shows_in_either_order(
     assert (row["course_no"], row["source"], row["added_hlc"]) == ("CS1", "ntust_portal", None)
     assert await tombstones(client, mac) == {"CS1": ("remove", to_clock(at(t, 10)))}
     assert (await delete(client, phone, "CS1", at(t, 5)))["applied"] is False
+
+async def test_a_membership_edit_stamped_ahead_of_the_server_is_refused(client) -> None:
+    phone = await login(client)
+    await upload(client, phone, roster=["CS1"])
+    before = await revision(client, phone)
+    ahead = {"hlc": to_clock(datetime.now(UTC) + timedelta(seconds=30))}
+    responses = [
+        await client.delete(f"/v3/sync/courses/{key('CS1')}", headers=phone, params=ahead),
+        await client.delete(
+            "/v3/sync/courses", headers=phone, params={**ahead, "semester": SEMESTER}
+        ),
+        await client.post(
+            "/v3/sync/courses/upload",
+            headers=phone,
+            json={
+                "courses": [{"semester": SEMESTER, "course_no": "CS2", "course_name": "CS2"}],
+                "adds": [{"course_key": key("CS2"), **ahead}],
+            },
+        ),
+    ]
+    assert [(r.status_code, r.json()["detail"]) for r in responses] == [
+        (409, "clock_ahead")
+    ] * 3
+    assert await revision(client, phone) == before
+    full = await snapshot(client, phone)
+    assert [c["course_no"] for c in full["courses"]] == ["CS1"]
+    assert (full["course_tombstones"], full["term_resets"]) == ([], {})
+
 
 async def test_a_protocol_2_delete_needs_a_stamp(client) -> None:
     phone = await login(client)

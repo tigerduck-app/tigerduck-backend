@@ -90,10 +90,11 @@ async def delete_all_courses(
             status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
         )
     now = datetime.now(UTC)
+    stamp = edit_time(hlc, now)
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
     # Recorded for the apps that compare stamps, which refuse what predates it.
-    reset_at = await _record_reset(session, auth.user_id, semester, edit_time(hlc, now))
+    reset_at = await _record_reset(session, auth.user_id, semester, stamp)
 
     course_scope = [UserCourse.user_id == auth.user_id]
     tombstone_scope = [UserCourseTombstone.user_id == auth.user_id]

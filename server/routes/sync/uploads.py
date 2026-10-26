@@ -105,6 +105,7 @@ async def upload_courses(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="add_not_in_courses"
         )
+    adds = {a.course_key: edit_time(a.hlc, now) for a in payload.adds} if speaks_clock else {}
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
 
@@ -118,7 +119,7 @@ async def upload_courses(
     add_answers: list[dict] = []
     if speaks_clock:
         tombstoned_keys, added_at, add_answers = await _roster_by_stamp(
-            session, auth.user_id, payload, payload_keys, now
+            session, auth.user_id, payload, payload_keys, adds
         )
         added_by_hand = set(added_at)
         back_by_hand: set[str] = set()
@@ -414,15 +415,15 @@ async def upload_courses(
     }
 
 
-async def _roster_by_stamp(session, user_id, payload, payload_keys, now):
+async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
     """Protocol 2's membership rules for an upload (`sync/membership.py`).
 
     An add wins when later than its key's add, tombstone and covering
     resets, and lifts the tombstone. The roster is base data: it skips a
     hidden key, lifts a reset tombstone, and shows a removed key beside its
     removal tombstone, whose stamp keeps refusing older edits. Answers the
-    keys to skip, the winning adds' stamps and one answer per add. The
-    caller holds the user's sync lock.
+    keys to skip, the winning adds' stamps and one answer per add. `adds`
+    holds each add's stamp. The caller holds the user's sync lock.
     """
     rows = {
         r.course_key: r
@@ -446,7 +447,6 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, now):
         ).scalars()
     }
     resets = await membership.Resets.load(session, user_id)
-    adds = {a.course_key: edit_time(a.hlc, now) for a in payload.adds}
     skip: set[str] = set()
     lifted: set[str] = set()
     won: dict[str, datetime] = {}
