@@ -499,6 +499,11 @@ async def update_device_preferences(
     ).scalar_one_or_none()
     if device is None:
         raise HTTPException(status_code=404, detail="device_not_found")
+    # Before the device row changes, since a query autoflushes it: a sync
+    # writer holds the lock while it updates this row's `last_seen_at`.
+    from server.sync.changelog import lock_sync_state
+
+    await lock_sync_state(session, auth.user_id)
     if payload.server_push_enabled is not None:
         device.server_push_enabled = payload.server_push_enabled
     if payload.bulletin_push_enabled is not None:
@@ -581,6 +586,10 @@ async def _cleanup_orphaned_sync_data(
     any_reminders = any(d.sync_assignment_reminders for d in active_devices)
     # (entity_type, entity_id, payload) for the per-row delete entries
     deleted_entries: list[tuple[str, str, dict | None]] = []
+    # Before any row it deletes, as every writer of the user's sync data
+    # takes it, so two writers never wait on each other's rows.
+    if not (any_courses and any_assignments):
+        state = await lock_sync_state(session, user_id)
 
     if not any_courses:
         await session.execute(
@@ -624,7 +633,6 @@ async def _cleanup_orphaned_sync_data(
         )
 
     if deleted_entries:
-        state = await lock_sync_state(session, user_id)
         for entity_type, entity_id, payload in deleted_entries:
             await append_change(
                 session,

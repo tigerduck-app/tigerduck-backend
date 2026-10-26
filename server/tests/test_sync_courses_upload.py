@@ -175,3 +175,24 @@ async def test_delete_all_courses_without_semester_flags_full_reset(client) -> N
     # that: nothing re-uploads a term the student has finished, so those
     # timetables would never come back -- here included.
     assert snap["course_tombstones"] == []
+
+
+async def test_a_roster_colour_never_refills_a_cleared_colour(client) -> None:
+    login = await do_login(client)
+    roster = {
+        "courses": [_course("CS0123", "資料結構")],
+        "course_overrides": [{"course_key": "client:1132:CS0123", "color_hex": "#FF8800"}],
+    }
+    response = await client.post("/v3/sync/courses/upload", headers=bearer(login), json=roster)
+    assert response.json()["overrides_applied"] == 1
+    (course,) = (await client.get("/v3/courses", headers=bearer(login))).json()["courses"]
+    cleared = await client.put(
+        f"/v3/courses/{course['id']}/override",
+        headers=bearer(login),
+        json={"color_hex": None, "color_hex_updated_at": "2026-06-08T10:00:00Z"},
+    )
+    assert cleared.status_code == 200, cleared.text
+
+    response = await client.post("/v3/sync/courses/upload", headers=bearer(login), json=roster)
+    assert response.json()["overrides_applied"] == 0
+    assert await _override_colors(client, login["user"]["id"]) == [""]

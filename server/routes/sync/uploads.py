@@ -12,6 +12,7 @@ from server.db import SessionDep
 from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
+from server.sync.merge import OLDEST, apply_field
 from server.sync.models import (
     ChangeEntityType,
     CourseSource,
@@ -90,6 +91,8 @@ async def upload_courses(
     background_tasks: BackgroundTasks,
 ):
     now = datetime.now(UTC)
+    # Before any row: the override writes take it first too.
+    state = await lock_sync_state(session, auth.user_id)
 
     existing_keys = set(
         (await session.execute(
@@ -227,7 +230,6 @@ async def upload_courses(
         uploaded_keys=sorted(uploaded_keys),
     )
     if new_keys:
-        state = await lock_sync_state(session, auth.user_id)
         new_rows = (await session.execute(
             select(UserCourse.id, UserCourse.course_key)
             .where(
@@ -317,10 +319,16 @@ async def upload_courses(
             session.add(override)
             await session.flush()
             overrides_by_course_id[course.id] = override
-        if override.color_hex is None:
-            override.color_hex = item.color_hex
-            override.color_hex_updated_at = now
-            override.color_hex_device_id = auth.device_id
+        # The device's colour, picked or assigned, fills a course without one
+        # as the oldest value: a colour the user set or cleared outranks it.
+        if override.color_hex is None and apply_field(
+            override,
+            "color_hex",
+            item.color_hex,
+            client_ts=OLDEST,
+            device_id=auth.device_id,
+            now=now,
+        ):
             overrides_applied += 1
             logger.debug(
                 "sync.course_color_set",

@@ -290,6 +290,25 @@ into the backend container via `docker-compose.yml`.
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
   Live Activity update tokens); a rotated token must not keep its
   predecessor delivering.
+- TigerSync resolves each synced field on its own by its stamp
+  (`sync/merge.py`). A stamp is a clock value, integer microseconds since
+  the epoch, kept exactly in the field's `*_updated_at` (a course name per
+  locale in `custom_names_updated_at`, a holiday setting in `updated_at`)
+  and sent back as `*_hlc`. Every `/v3` answer carries the server's clock
+  in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also in
+  `server_hlc`. A request's `hlc` later than server time plus
+  `MAX_CLOCK_SKEW` is refused with 409 `clock_ahead` before anything is
+  written, never clamped, so a retry keeps the stamp first stored. An edit
+  sent without one is stamped when it arrives, or refused with 422
+  `hlc_required` when the request carries `X-TigerSync-Protocol: 2`. A
+  value in a bulk upload sent without a time counts as `OLDEST`.
+- A stamp no later than the stored one loses, so a tie keeps the stored
+  value; a later stamp with the stored value moves only the stamp, and a
+  field with no stamp takes any edit. A write takes `lock_sync_state`
+  before it reads a stored stamp, so concurrent edits apply one after
+  another, and logs a change and queues a `sync_trigger` only when a
+  value changed. A cleared assignment mark stays as a stamped `none` on
+  every row of the assignment, so an older mark sent late loses to it.
 - `/sync/full` tags each course tombstone with `deleted_by_reset` and
   `deleted_by_this_device`; a client ignores a tombstone that is both,
   the same rule `upload_courses` applies when it releases them. A course

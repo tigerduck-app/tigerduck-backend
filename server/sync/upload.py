@@ -7,7 +7,8 @@ that already exists is left untouched (another device uploaded first; this
 device should pull via /v3/sync instead).
 
 Per-field override values DO merge (via `server/sync/merge.py`) because
-they carry their own client timestamps.
+they carry their own client timestamps. A value sent without one counts as
+the oldest, so it fills a field nothing has set and loses to any edit.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.push.submission_cancel import cancel_for_submitted
 from server.sync.changelog import append_change, lock_sync_state
-from server.sync.merge import apply_field
+from server.sync.merge import OLDEST, apply_field, set_locale_less_name
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -259,23 +260,25 @@ async def process_initial_upload(
             session.add(override)
             await session.flush()
         changed = False
-        for field_name, value, ts in (
-            ("custom_name", item.custom_name, item.custom_name_updated_at),
-            ("color_hex", item.color_hex, item.color_hex_updated_at),
-        ):
-            if value is None:
-                continue
+        if item.custom_name is not None:
+            changed |= set_locale_less_name(
+                override,
+                item.custom_name,
+                client_ts=item.custom_name_updated_at or OLDEST,
+                device_id=device_id,
+                now=now,
+            )
+        if item.color_hex is not None:
             changed |= apply_field(
                 override,
-                field_name,
-                value,
-                client_ts=ts or now,
+                "color_hex",
+                item.color_hex,
+                client_ts=item.color_hex_updated_at or OLDEST,
                 device_id=device_id,
                 now=now,
             )
         # Only with its own time, unlike the fields above: an import sends a
-        # value for every course, and a false stamped `now` would clear an
-        # ignore another device set since.
+        # value for every course, which is no decision about the setting.
         if (
             item.ignore_assignments is not None
             and item.ignore_assignments_updated_at is not None
@@ -419,7 +422,7 @@ async def process_initial_upload(
                 override,
                 field_name,
                 value,
-                client_ts=ts or now,
+                client_ts=ts or OLDEST,
                 device_id=device_id,
                 now=now,
             ):

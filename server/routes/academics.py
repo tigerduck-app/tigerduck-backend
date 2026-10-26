@@ -3,7 +3,8 @@
 Reads serve the backend copy (client-uploaded snapshot in Phase 2; kept
 fresh by server-side sync from Phase 3 on). Override writes use per-field
 merge: presence of `<field>_updated_at` marks an edit (so explicit nulls
-can clear nullable fields); timestamps are clamped against clock skew.
+can clear nullable fields); timestamps are clamped against clock skew, and
+compared and written under the user's sync lock.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ from sqlalchemy import select
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
-from server.sync.changelog import append_change
-from server.sync.merge import apply_field
+from server.sync.changelog import append_change, lock_sync_state
+from server.sync.merge import apply_field, set_locale_less_name
 from server.sync.models import (
     AssignmentLocalStatus,
     UserAssignment,
@@ -169,6 +170,7 @@ async def put_course_override(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    state = await lock_sync_state(session, auth.user_id)
     course = await _get_owned_course(session, auth.user_id, course_id)
     override = (
         await session.execute(
@@ -198,14 +200,12 @@ async def put_course_override(
     ):
         if ts is None:
             continue
-        if apply_field(
-            override,
-            field_name,
-            value,
-            client_ts=ts,
-            device_id=auth.device_id,
-            now=now,
-        ):
+        edit = {"client_ts": ts, "device_id": auth.device_id, "now": now}
+        if field_name == "custom_name":
+            changed = set_locale_less_name(override, value, **edit)
+        else:
+            changed = apply_field(override, field_name, value, **edit)
+        if changed:
             changed_fields.append(field_name)
     # No changelog entry for the id alone: no device shows it.
     if payload.moodle_course_id is not None:
@@ -220,6 +220,7 @@ async def put_course_override(
             operation="upsert",
             payload={"fields": changed_fields},
             device_id=auth.device_id,
+            locked_state=state,
         )
     return {"override": _course_override_to_dict(override, course)}
 
@@ -232,6 +233,7 @@ async def put_skipped_date(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    state = await lock_sync_state(session, auth.user_id)
     await _get_owned_course(session, auth.user_id, course_id)
     row = (
         await session.execute(
@@ -264,6 +266,7 @@ async def put_skipped_date(
         entity_id=str(row.id),
         operation="upsert",
         device_id=auth.device_id,
+        locked_state=state,
     )
     return serializers.skipped_date_to_dict(row)
 
@@ -278,6 +281,7 @@ async def delete_skipped_date(
     auth: CurrentAuthDep,
     session: SessionDep,
 ) -> None:
+    state = await lock_sync_state(session, auth.user_id)
     await _get_owned_course(session, auth.user_id, course_id)
     row = (
         await session.execute(
@@ -300,6 +304,7 @@ async def delete_skipped_date(
         entity_id=str(row.id),
         operation="delete",
         device_id=auth.device_id,
+        locked_state=state,
     )
 
 
@@ -343,6 +348,7 @@ async def put_assignment_override(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
+    state = await lock_sync_state(session, auth.user_id)
     assignment = (
         await session.execute(
             select(UserAssignment).where(
@@ -405,5 +411,6 @@ async def put_assignment_override(
             operation="upsert",
             payload={"fields": changed_fields},
             device_id=auth.device_id,
+            locked_state=state,
         )
     return {"override": serializers.assignment_override_to_dict(override)}

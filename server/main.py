@@ -11,6 +11,7 @@ import contextlib  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
+from datetime import UTC, datetime
 from typing import AsyncIterator  # noqa: E402
 
 import httpx  # noqa: E402
@@ -30,6 +31,7 @@ from server.config import Settings, get_settings
 from server.db import build_engine, build_session_factory, session_scope
 from server.i18n import require_fallback_bundle
 from server.logging_setup import configure as configure_logging
+from server.sync.merge import CLOCK_HEADER, to_clock
 from server.system_settings import SystemSetting as _SystemSetting  # noqa: F401 — register model
 # noqa: F401 — imported for the side effect of registering the tables with
 # Base.metadata, which is what create_all in the test fixtures walks.
@@ -390,6 +392,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 },
             )
         return await call_next(request)
+
+    # Every /v3 answer, an error too, carries the server's clock, which the
+    # apps stamp their edits against (`server/sync/merge.py`).
+    v3_path = settings.api_v3_base_path.rstrip("/")
+
+    @app.middleware("http")
+    async def _tigersync_clock(request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == v3_path or path.startswith(v3_path + "/"):
+            response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
+        return response
 
     # Added after the 410 middleware so it wraps it (Starlette runs the
     # last-added middleware outermost) and counts those answers too.
