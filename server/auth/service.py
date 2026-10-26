@@ -597,7 +597,7 @@ async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:
     touches a device or its sessions, so no two of them can deadlock."""
     await session.execute(
         select(ExternalAccount.id)
-        .where(ExternalAccount.user_id.in_(user_ids))
+        .where(in_array(ExternalAccount.user_id, user_ids))
         .order_by(ExternalAccount.id)
         .with_for_update()
     )

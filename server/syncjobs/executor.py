@@ -54,7 +54,14 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import ExternalAccount, ExternalAccountCredential, UserDevice
+from server.auth.models import (
+    DevicePushToken,
+    ExternalAccount,
+    ExternalAccountCredential,
+    PushTokenKind,
+    PushTokenStatus,
+    UserDevice,
+)
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -265,13 +272,26 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
         )
 
 
-# A fetch serves only a device with TigerSync on; signing out deletes the
-# device. Until one is back, the job waits unclaimed (tigerduck-backend#85).
-_has_syncing_device = sa.exists().where(
-    UserDevice.user_id == SyncJob.user_id,
-    UserDevice.deleted_at.is_(None),
-    UserDevice.cloud_sync_enabled.is_(True),
-)
+def _has_syncing_device(settings: Settings, now: datetime) -> sa.Exists:
+    """A fetch serves only a device with TigerSync on that is still in use:
+    seen lately, or reached by a push lately. Signing out deletes the device.
+    Until one is back, the job waits unclaimed (tigerduck-backend#85)."""
+    return sa.exists().where(
+        UserDevice.user_id == SyncJob.user_id,
+        UserDevice.deleted_at.is_(None),
+        UserDevice.cloud_sync_enabled.is_(True),
+        sa.or_(
+            UserDevice.last_seen_at
+            > now - timedelta(days=settings.sync_job_device_active_days),
+            sa.exists().where(
+                DevicePushToken.device_id == UserDevice.id,
+                DevicePushToken.token_kind == PushTokenKind.standard.value,
+                DevicePushToken.status == PushTokenStatus.active.value,
+                DevicePushToken.last_success_at
+                > now - timedelta(days=settings.sync_job_device_push_days),
+            ),
+        ),
+    )
 
 
 async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
@@ -302,7 +322,7 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                     .where(
                         SyncJob.status == SyncJobStatus.pending.value,
                         SyncJob.run_after <= now,
-                        _has_syncing_device,
+                        _has_syncing_device(worker.settings, now),
                         SyncPolicy.enabled.is_(True),
                         sa.or_(
                             SyncPolicy.active_from.is_(None),

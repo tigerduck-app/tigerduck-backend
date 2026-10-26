@@ -14,10 +14,10 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.models import CredentialStatus, ExternalAccount
+from server.auth.models import CredentialStatus, ExternalAccount, UserDevice
 from server.auth.service import PROVIDER_NTUST_SSO
 from server.db import SessionDep
 from server.security import require_shared_secret
@@ -94,6 +94,15 @@ async def run_now(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"error": "policy_disabled"},
+        )
+
+    if auth.device_id is not None:
+        # The executor claims only for a device seen lately; this one asks
+        # now. Before the job's lock, in a sign-in's order: device, then job.
+        await session.execute(
+            update(UserDevice)
+            .where(UserDevice.id == auth.device_id, UserDevice.user_id == auth.user_id)
+            .values(last_seen_at=now)
         )
 
     job = (
