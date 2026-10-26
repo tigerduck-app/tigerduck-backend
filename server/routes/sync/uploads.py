@@ -105,7 +105,11 @@ async def upload_courses(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="add_not_in_courses"
         )
-    adds = {a.course_key: edit_time(a.hlc, now) for a in payload.adds} if speaks_clock else {}
+    adds: dict[str, datetime] = {}
+    for add in payload.adds if speaks_clock else ():
+        # A key sent twice keeps its latest stamp.
+        stamp = edit_time(add.hlc, now)
+        adds[add.course_key] = max(stamp, adds.get(add.course_key, stamp))
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
 

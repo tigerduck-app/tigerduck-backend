@@ -257,6 +257,27 @@ async def test_a_removed_hand_add_the_roster_lists_shows_in_either_order(
     assert await tombstones(client, mac) == {"CS1": ("remove", to_clock(at(t, 10)))}
     assert (await delete(client, phone, "CS1", at(t, 5)))["applied"] is False
 
+async def test_the_latest_of_two_adds_of_one_key_counts(client, t) -> None:
+    phone = await login(client)
+    await delete(client, phone, "CS1", at(t, 20))
+    response = await client.post(
+        "/v3/sync/courses/upload",
+        headers=phone,
+        json={
+            "courses": [{"semester": SEMESTER, "course_no": "CS1", "course_name": "CS1"}],
+            "adds": [
+                {"course_key": key("CS1"), "hlc": to_clock(at(t, 30))},
+                {"course_key": key("CS1"), "hlc": to_clock(at(t, 10))},
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["adds"] == [
+        {"course_key": key("CS1"), "applied": True, "hlc": to_clock(at(t, 30))}
+    ]
+    assert await shown(client, phone) == {"CS1"}
+
+
 async def test_a_hand_add_the_roster_lists_moves_the_revision(client, t) -> None:
     """It becomes a school row, which a removal or a reset treats otherwise."""
     phone = await login(client)
