@@ -499,6 +499,11 @@ async def update_device_preferences(
     ).scalar_one_or_none()
     if device is None:
         raise HTTPException(status_code=404, detail="device_not_found")
+    # Before the device row changes, since a query autoflushes it: a sync
+    # writer holds the lock while it updates this row's `last_seen_at`.
+    from server.sync.changelog import lock_sync_state
+
+    await lock_sync_state(session, auth.user_id)
     if payload.server_push_enabled is not None:
         device.server_push_enabled = payload.server_push_enabled
     if payload.bulletin_push_enabled is not None:

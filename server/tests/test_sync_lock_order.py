@@ -107,3 +107,22 @@ async def test_removing_a_skipped_date_takes_the_sync_lock_first(client) -> None
     assert (await client.put(path, headers=bearer(login), json={})).status_code == 200
     statements = await _statements(client, lambda: client.delete(path, headers=bearer(login)))
     assert _lock_comes_first(statements)
+
+
+async def test_a_preference_update_takes_the_sync_lock_before_the_device_row(client) -> None:
+    """A roster upload holds the sync lock while it updates the device's
+    `last_seen_at`, so the preference update must lock in the same order."""
+    login, _ = await _seeded(client)
+    statements = await _statements(
+        client,
+        lambda: client.patch(
+            "/v3/devices/iphone-abc/preferences",
+            headers=bearer(login),
+            json={"sync_assignments": False},
+        ),
+    )
+    lock = next(
+        i for i, s in enumerate(statements) if "FROM user_sync_state" in s and "FOR UPDATE" in s
+    )
+    device = next(i for i, s in enumerate(statements) if _WRITE.match(s) and "user_devices" in s)
+    assert lock < device
