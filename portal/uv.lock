@@ -670,7 +670,7 @@ wheels = [
 
 [[package]]
 name = "tigerduck-portal"
-version = "3.6.0"
+version = "3.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },

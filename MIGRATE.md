@@ -32,6 +32,45 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.7.0
+
+- **TigerSync last-writer-wins (tigerduck-app#689).** Every `/v3` answer
+  carries `X-TigerSync-Clock`, the server time in integer microseconds
+  since the epoch, and `/v3/sync/full` also sends `server_hlc`. The
+  override PATCHes, the holiday PUT, `DELETE /v3/sync/courses/{course_key}`
+  and the course upload take TigerSync stamps. The later stamp wins per
+  field (colour, ignore setting, each locale of a course name, assignment
+  mark, holiday setting) and per course key (add, hide, removal, term
+  reset, full reset), and a tie keeps the stored value. A stamp more than
+  5 s ahead of the server is refused with 409 `clock_ahead` before anything
+  is written. A request with `X-TigerSync-Protocol: 2` must send its stamps
+  (422 `hlc_required`); without the header a missing stamp means the time
+  the edit arrives, so released apps keep today's behaviour and need no
+  update.
+- **Migration `88dbb93dba99`** adds `user_course_overrides.custom_names_updated_at`,
+  one stamp per course-name locale, and fills each stored value that has
+  no stamp with its row's `updated_at`. The column is added without
+  rewriting the table.
+- **Migration `8d70b4ee9cc7`** adds `user_courses.added_at`, set to
+  `created_at` for courses added by hand, and `user_semester_resets`, one
+  row per user and term holding the latest reset, filled from the reset
+  tombstones.
+- **Sync jobs wait for a device in use.** A user's Moodle jobs run only
+  while a device with TigerSync on was seen within
+  `TIGERDUCK_SYNC_JOB_DEVICE_ACTIVE_DAYS` (default 90) or took an accepted
+  standard push within `TIGERDUCK_SYNC_JOB_DEVICE_PUSH_DAYS` (default 14).
+  The other users' jobs stay `pending`; a sign-in, launch, full sync,
+  upload or run-now moves the device and runs any job already due.
+- **Daily device retirement.** The `device_retirement` job runs at 04:00
+  Asia/Taipei and deregisters, as the portal does, every device with no
+  live session that for 7 days was not seen, did not announce itself and
+  took no accepted standard push. Signing in on the device brings it back.
+  The first run after the upgrade retires every device that already
+  qualifies.
+- **No `.env` change.** Rollback: `alembic downgrade 5d2a9c7e4f1b`, then
+  check out 3.6.0. The downgrade drops the new column and table and the
+  removal tombstones kept beside a school-listed course.
+
 ## Upgrading to 3.6.0
 
 - **The course catalog (tigerduck-app#547).** `GET
