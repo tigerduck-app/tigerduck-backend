@@ -380,6 +380,46 @@ async def test_an_edit_stamped_at_the_reset_is_refused(client, t) -> None:
     assert await shown(client, phone) == {"CS1", "CS2"}
 
 
+async def test_a_second_reset_of_an_emptied_term_still_binds_released_apps(client, t) -> None:
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    await upload(client, phone, roster=["CS1"], adds={"CS9": at(t, 0)})
+    await reset(client, phone, at(t, 10))
+    assert (await reset(client, phone, at(t, 20)))["applied"] is True
+
+    stale = await upload(client, android, roster=["CS1", "CS9"])
+    assert stale["skipped_tombstoned"] == 2
+    assert await tombstones(client, phone) == {
+        "CS1": ("reset", to_clock(at(t, 20))),
+        "CS9": ("reset", to_clock(at(t, 20))),
+    }
+
+
+async def test_a_reset_drops_the_older_removal_beside_a_course_it_keeps(client, t) -> None:
+    """Released apps would hide a course a reset tombstone names."""
+    phone = await login(client)
+    await upload(client, phone, adds={"CS1": at(t, 0)})
+    await upload(client, phone, roster=["CS1"])
+    await delete(client, phone, "CS1", at(t, 5), kind="remove")
+    await colour(client, phone, "CS1", "#FF0000", at(t, 20))
+    await reset(client, phone, at(t, 10))
+
+    legacy = await snapshot(client, await login(client, "android-1", protocol=False))
+    assert [c["course_no"] for c in legacy["courses"]] == ["CS1"]
+    assert legacy["course_tombstones"] == []
+
+
+async def test_a_released_apps_reset_of_an_empty_term_moves_the_revision(client) -> None:
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    before = await revision(client, phone)
+    response = await client.delete(
+        "/v3/sync/courses", headers=android, params={"semester": SEMESTER}
+    )
+    assert response.status_code == 200
+    assert await revision(client, phone) > before
+
+
 async def test_an_older_reset_changes_nothing(client, t) -> None:
     phone = await login(client)
     await reset(client, phone, at(t, 10))

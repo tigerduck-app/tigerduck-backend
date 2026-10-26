@@ -184,17 +184,18 @@ async def delete_all_courses(
                 )
             )
 
-    if not rows:
-        return {"deleted": 0, "reset_hlc": to_clock(reset_at)}
-
-    for row in rows:
+    changes = [(row.id, "delete", {"course_key": row.course_key}) for row in rows]
+    # An emptied term's reset still moves `term_resets`, which devices poll for.
+    for entity_id, operation, change in changes or [
+        (semester or "*", "upsert", {"reset": semester})
+    ]:
         await append_change(
             session,
             user_id=auth.user_id,
             entity_type=ChangeEntityType.course.value,
-            entity_id=str(row.id),
-            operation="delete",
-            payload={"course_key": row.course_key},
+            entity_id=str(entity_id),
+            operation=operation,
+            payload=change,
             device_id=auth.device_id,
             locked_state=state,
         )
@@ -261,11 +262,6 @@ async def _reset_by_stamp(session, auth, semester, stamp, now, request, backgrou
     if semester:
         course_scope.append(UserCourse.semester == semester)
         tombstone_scope.append(UserCourseTombstone.semester == semester)
-    await session.execute(
-        delete(UserCourseTombstone).where(
-            *tombstone_scope, UserCourseTombstone.deleted_at <= stamp
-        )
-    )
     rows = (await session.execute(select(UserCourse).where(*course_scope))).scalars().all()
     overrides = {
         o.user_course_id: o
@@ -295,8 +291,25 @@ async def _reset_by_stamp(session, auth, semester, stamp, now, request, backgrou
     ]
     if gone:
         await session.execute(delete(UserCourse).where(UserCourse.id.in_(gone_ids)))
+    covered = [*tombstone_scope, UserCourseTombstone.deleted_at <= stamp]
+    if semester:
+        # A covered tombstone of a course left out becomes this reset's, or a
+        # second reset of an emptied term would free released apps' uploads.
+        kept_keys = [r.course_key for r in rows if r.id not in gone_ids]
+        await session.execute(
+            delete(UserCourseTombstone).where(
+                *covered, UserCourseTombstone.course_key.in_(kept_keys)
+            )
+        )
+        await session.execute(
+            update(UserCourseTombstone)
+            .where(*covered)
+            .values(deleted_at=stamp, deleted_by_device_id=auth.device_id, deleted_by_reset=True)
+        )
+    else:
+        await session.execute(delete(UserCourseTombstone).where(*covered))
     if gone and semester:
-        # A later tombstone of the key stayed, and already keeps the course out.
+        # A tombstone the key still has already keeps the course out.
         later = set(
             (
                 await session.execute(
