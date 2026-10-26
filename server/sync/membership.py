@@ -104,7 +104,9 @@ def _at_or_before(stamp: datetime | None, reset_at: datetime) -> bool:
 
 def clear_before(row: UserCourse, override: UserCourseOverride | None, reset_at: datetime) -> bool:
     """Return each of the row's choices stamped at or before the reset to its
-    empty, unstamped state; True when anything changed."""
+    empty value, stamped at the reset so every writer refuses an older one; a
+    cleared name stays as "", since the apps apply only the locales listed.
+    True when anything changed."""
     changed = False
     if row.added_at is not None and row.added_at <= reset_at:
         row.added_at = None
@@ -114,24 +116,25 @@ def clear_before(row: UserCourse, override: UserCourseOverride | None, reset_at:
     stamp = override.color_hex_updated_at
     if (override.color_hex is not None or stamp) and _at_or_before(stamp, reset_at):
         override.color_hex = None
-        override.color_hex_updated_at = None
+        override.color_hex_updated_at = reset_at
         override.color_hex_device_id = None
         changed = True
     stamp = override.ignore_assignments_updated_at
     if (override.ignore_assignments or stamp) and _at_or_before(stamp, reset_at):
         override.ignore_assignments = False
-        override.ignore_assignments_updated_at = None
+        override.ignore_assignments_updated_at = reset_at
         override.ignore_assignments_device_id = None
         changed = True
     clock = to_clock(reset_at)
-    names = override.custom_names or {}
-    stamps = override.custom_names_updated_at or {}
-    kept = {k: v for k, v in stamps.items() if k in names and v > clock}
-    if set(names) != set(kept):
-        override.custom_names = {k: names[k] for k in kept}
-        override.custom_names_updated_at = kept
-        override.custom_name_updated_at = from_clock(max(kept.values())) if kept else None
-        if not kept:
+    names = dict(override.custom_names or {})
+    stamps = dict(override.custom_names_updated_at or {})
+    cleared = {k for k in names.keys() | stamps.keys() if stamps.get(k, 0) <= clock}
+    if cleared:
+        stamps |= dict.fromkeys(cleared, clock)
+        override.custom_names = names | dict.fromkeys(cleared, "")
+        override.custom_names_updated_at = stamps
+        override.custom_name_updated_at = from_clock(max(stamps.values()))
+        if max(stamps.values()) == clock:
             override.custom_name_device_id = None
         changed = True
     return changed

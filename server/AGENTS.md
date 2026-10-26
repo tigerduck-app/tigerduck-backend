@@ -327,10 +327,11 @@ into the backend container via `docker-compose.yml`.
   removed key beside its removal tombstone, which keeps refusing older
   edits. A reset clears only the term's choices stamped at or before it:
   a row with a later add stays, and so does a school row with a later
-  override value, with its older choices emptied. After a term reset
-  each row that goes, and each key with an older tombstone and no row
-  left, has a reset tombstone. The course override PATCH refuses edits
-  stamped at or before the term's reset. `/sync/full` returns
+  override value, with its older choices emptied and stamped at the reset
+  (a name as ""), so every writer refuses an older value. After a term
+  reset each row that goes, and each key with an older tombstone and no
+  row left, has a reset tombstone. The course override PATCH refuses
+  edits stamped at or before the term's reset. `/sync/full` returns
   every tombstone with `hlc` and `kind`.
 - Without the header, released apps get today's rules. `/sync/full`
   sends the last 30 days of tombstones, each tagged `deleted_by_reset`
