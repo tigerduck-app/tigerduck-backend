@@ -142,22 +142,22 @@ async def _waiting_on_a_lock(factory) -> None:
             await asyncio.sleep(0.01)
 
 
-async def test_run_now_takes_the_device_before_the_job_as_a_sign_in_does(client):
-    """A sign-in writes its device, then locks the job (`ensure_sync_jobs`).
-    A run-now holding the job while it waited for the device deadlocked
+async def test_run_now_takes_the_job_before_the_device_as_a_sign_in_does(client):
+    """A sign-in locks the job (`ensure_sync_jobs`), then writes its device.
+    A run-now holding the device while it waited for the job deadlocked
     with it."""
     headers = await _login(client)
     job_id = (await _get_job(client)).id
     factory = build_session_factory(client.app.state.engine)
     async with asyncio.timeout(10), factory() as sign_in:
-        await sign_in.execute(update(UserDevice).values(last_login_at=datetime.now(UTC)))
+        await sign_in.execute(
+            select(SyncJob.id).where(SyncJob.id == job_id).with_for_update()
+        )
         run_now = asyncio.create_task(
             client.post("/v3/sync-jobs/run-now?job_type=moodle_assignments", headers=headers)
         )
         await _waiting_on_a_lock(factory)
-        await sign_in.execute(
-            select(SyncJob.id).where(SyncJob.id == job_id).with_for_update()
-        )
+        await sign_in.execute(update(UserDevice).values(last_login_at=datetime.now(UTC)))
         await sign_in.commit()
         response = await run_now
 
