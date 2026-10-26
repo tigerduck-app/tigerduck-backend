@@ -116,6 +116,7 @@ async def set_override(
         )
 
     now = datetime.now(UTC)
+    stamp = edit_time(payload.hlc, now)
     state = await lock_sync_state(session, auth.user_id)
     existing = (
         await session.execute(
@@ -133,7 +134,7 @@ async def set_override(
         existing,
         "notify",
         payload.notify,
-        client_ts=edit_time(payload.hlc, now),
+        client_ts=stamp,
         device_id=auth.device_id,
         now=now,
         stamp_field="updated_at",

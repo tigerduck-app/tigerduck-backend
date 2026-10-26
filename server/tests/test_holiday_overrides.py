@@ -237,3 +237,10 @@ async def test_the_setting_with_the_latest_stamp_wins(client) -> None:
         f"/v3/sync/holiday-overrides/{holiday_id}", headers=headers, json={"notify": False}
     )
     assert unstamped.status_code == 422
+    ahead = await client.put(
+        f"/v3/sync/holiday-overrides/{holiday_id}",
+        headers=headers,
+        json={"notify": False, "hlc": to_clock(datetime.now(UTC) + timedelta(seconds=30))},
+    )
+    assert (ahead.status_code, ahead.json()["detail"]) == (409, "clock_ahead")
+    assert await holiday_changes(client) == 1

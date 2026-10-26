@@ -1,10 +1,13 @@
-"""Unit tests for per-field merge with clock-skew clamping."""
+"""Unit tests for per-field merge and the TigerSync clock."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+
+import pytest
+from fastapi import HTTPException
 
 from server.sync.merge import (
     MAX_CLOCK_SKEW,
@@ -120,11 +123,15 @@ def test_clock_values_are_exact_microseconds() -> None:
     assert from_clock(0) == OLDEST
 
 
-def test_edit_time_is_arrival_without_a_stamp_and_clamped_with_one() -> None:
+def test_edit_time_is_arrival_without_a_stamp_and_refuses_one_ahead() -> None:
     assert edit_time(None, NOW) == NOW
     week_ago = NOW - timedelta(days=7)
     assert edit_time(to_clock(week_ago), NOW) == week_ago
-    assert edit_time(2**63 - 1, NOW) == NOW + MAX_CLOCK_SKEW
+    assert edit_time(to_clock(NOW + MAX_CLOCK_SKEW), NOW) == NOW + MAX_CLOCK_SKEW
+    for ahead in (to_clock(NOW + MAX_CLOCK_SKEW) + 1, 2**63 - 1):
+        with pytest.raises(HTTPException) as refused:
+            edit_time(ahead, NOW)
+        assert (refused.value.status_code, refused.value.detail) == (409, "clock_ahead")
 
 
 def test_same_value_raises_the_stamp_without_a_change() -> None:

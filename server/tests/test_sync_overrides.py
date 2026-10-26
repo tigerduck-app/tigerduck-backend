@@ -799,17 +799,33 @@ async def test_an_edit_without_a_stamp_is_stamped_when_it_arrives(client) -> Non
     assert response.json()["local_status_hlc"] >= clock(sent_at)
 
 
-async def test_a_stamp_from_the_future_is_clamped(client) -> None:
+async def test_a_stamp_ahead_of_the_server_is_refused(client) -> None:
+    """Clamping would stamp each retry of the edit later; a refusal carries
+    the server's clock, by which the app stamps it again."""
     login = await do_login(client)
     await seed_assignment(client, login["user"]["id"], moodle_course_id=101)
-
-    sent_at = datetime.now(UTC)
-    answer = await mark(client, login, "ignored", sent_at + timedelta(days=1))
-    assert (
-        clock(sent_at)
-        <= answer["local_status_hlc"]
-        <= clock(datetime.now(UTC) + timedelta(seconds=5))
+    await seed_course(
+        client,
+        login["user"]["id"],
+        semester="1141",
+        course_key="client:1141:CS3001301",
+        moodle_id="1141CS3001301",
     )
+    before = await revision(client, login)
+    ahead = clock(datetime.now(UTC) + timedelta(seconds=30))
+
+    for path, body in (
+        ("/v3/sync/assignments/9001/override", {"local_status": "ignored"}),
+        ("/v3/sync/courses/1141CS3001301/override", {"color_hex": "#FF0000"}),
+    ):
+        response = await client.patch(path, headers=stamped(login), json={**body, "hlc": ahead})
+        assert (response.status_code, response.json()["detail"]) == (409, "clock_ahead")
+        assert int(response.headers["X-TigerSync-Clock"]) < ahead
+    assert await assignment_marks(client) == []
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        assert (await session.execute(select(UserCourseOverride))).scalars().all() == []
+    assert await revision(client, login) == before
 
 
 async def course_patch(client, login: dict, body: dict, at: datetime) -> dict:

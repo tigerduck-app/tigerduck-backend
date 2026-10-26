@@ -97,11 +97,11 @@ async def patch_assignment_override(
 ):
     require_stamp(speaks_clock, payload.hlc)
     now = datetime.now(UTC)
+    stamp = edit_time(payload.hlc, now)
     state = await lock_sync_state(session, auth.user_id)
     assignment = await _get_assignment_by_moodle_id(
         session, auth.user_id, moodle_assignment_id
     )
-    stamp = edit_time(payload.hlc, now)
     clearing = payload.local_status == AssignmentLocalStatus.none.value
 
     # A clear goes to every row of the assignment: `/sync/full` keys a mark
@@ -213,6 +213,7 @@ async def patch_course_override(
     if payload.color_hex is not None or names or payload.ignore_assignments is not None:
         require_stamp(speaks_clock, payload.hlc)
     now = datetime.now(UTC)
+    stamp = edit_time(payload.hlc, now)
     state = await lock_sync_state(session, auth.user_id)
     course = await _get_course_by_moodle_id(session, auth.user_id, moodle_id)
 
@@ -235,7 +236,6 @@ async def patch_course_override(
         )
         session.add(existing)
 
-    stamp = edit_time(payload.hlc, now)
     edit = {"client_ts": stamp, "device_id": auth.device_id, "now": now}
     changed_fields: list[str] = []
     sent: dict[str, bool] = {}

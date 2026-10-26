@@ -8,10 +8,11 @@ one — so two devices editing different fields never clobber each other.
 TigerSync edits carry a clock value: integer microseconds since the Unix
 epoch (`to_clock` / `from_clock`), which a timestamp column holds exactly.
 An edit sent without one is stamped with the time it arrives (`edit_time`).
-A TigerSync stamp is clamped to `now + MAX_CLOCK_SKEW`: past stamps are
-kept (offline edits merge correctly), and a device with a clock far ahead
-cannot write a value that outranks every honest edit for the next year.
-Ties lose: server state wins on equal timestamps, keeping replays
+A TigerSync stamp later than `now + MAX_CLOCK_SKEW` is refused with 409
+`clock_ahead`: clamping it would stamp each retry of one edit later, so a
+retry could beat an edit made meanwhile. Past stamps are kept, so offline
+edits merge correctly. The older paths' timestamps are still clamped
+(`apply_field`). Ties lose: server state wins on equal timestamps, keeping replays
 idempotent. An edit carrying the stored value raises the stored stamp
 instead of changing the value, so a later edit of the same value still
 outranks an earlier, different one (`apply_field`).
@@ -51,13 +52,15 @@ def clamp_ts(
 
 
 def edit_time(clock: int | None, now: datetime) -> datetime:
-    """A request's stamp as a time: arrival when it sent none, else clamped.
-
-    Clamped on the integer, so a stamp past year 9999 never builds a datetime.
+    """A request's stamp as a time: arrival when it sent none. A stamp later
+    than `now + MAX_CLOCK_SKEW` is refused before anything is written, and
+    compared as an integer, so one past year 9999 never builds a datetime.
     """
     if clock is None:
         return now
-    return from_clock(min(clock, to_clock(now + MAX_CLOCK_SKEW)))
+    if clock > to_clock(now + MAX_CLOCK_SKEW):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="clock_ahead")
+    return from_clock(clock)
 
 
 def _speaks_clock_protocol(

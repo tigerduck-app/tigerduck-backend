@@ -282,11 +282,12 @@ into the backend container via `docker-compose.yml`.
   locale in `custom_names_updated_at`, a holiday setting in `updated_at`)
   and sent back as `*_hlc`. Every `/v3` answer carries the server's clock
   in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also in
-  `server_hlc`. A request's `hlc` is clamped to server time plus
-  `MAX_CLOCK_SKEW`; an edit sent without one is stamped when it arrives,
-  or refused with 422 `hlc_required` when the request carries
-  `X-TigerSync-Protocol: 2`. A value in a bulk upload sent without a time
-  counts as `OLDEST`.
+  `server_hlc`. A request's `hlc` later than server time plus
+  `MAX_CLOCK_SKEW` is refused with 409 `clock_ahead` before anything is
+  written, never clamped, so a retry keeps the stamp first stored. An edit
+  sent without one is stamped when it arrives, or refused with 422
+  `hlc_required` when the request carries `X-TigerSync-Protocol: 2`. A
+  value in a bulk upload sent without a time counts as `OLDEST`.
 - A stamp no later than the stored one loses, so a tie keeps the stored
   value; a later stamp with the stored value moves only the stamp, and a
   field with no stamp takes any edit. A write takes `lock_sync_state`
