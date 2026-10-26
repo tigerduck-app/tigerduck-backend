@@ -109,11 +109,14 @@ async def upload_courses(
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
 
-    existing_keys = set(
+    existing_sources = dict(
         (await session.execute(
-            select(UserCourse.course_key).where(UserCourse.user_id == auth.user_id)
-        )).scalars().all()
+            select(UserCourse.course_key, UserCourse.source).where(
+                UserCourse.user_id == auth.user_id
+            )
+        )).all()
     )
+    existing_keys = set(existing_sources)
 
     added_at: dict[str, datetime] = {}
     add_answers: list[dict] = []
@@ -255,9 +258,12 @@ async def upload_courses(
 
     new_keys = uploaded_keys - existing_keys
     # Under protocol 2 an add to a row the server holds changes what the
-    # snapshot says of it too.
+    # snapshot says of it too, and so does a hand-add the roster now lists.
     if speaks_clock:
-        new_keys |= set(added_at) & uploaded_keys
+        by_school = {
+            k for k in listed_by_school if existing_sources.get(k) == CourseSource.user_added
+        }
+        new_keys |= (set(added_at) | by_school) & uploaded_keys
     logger.info(
         "sync.upload_courses",
         user_id=str(auth.user_id),

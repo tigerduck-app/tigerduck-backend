@@ -257,6 +257,17 @@ async def test_a_removed_hand_add_the_roster_lists_shows_in_either_order(
     assert await tombstones(client, mac) == {"CS1": ("remove", to_clock(at(t, 10)))}
     assert (await delete(client, phone, "CS1", at(t, 5)))["applied"] is False
 
+async def test_a_hand_add_the_roster_lists_moves_the_revision(client, t) -> None:
+    """It becomes a school row, which a removal or a reset treats otherwise."""
+    phone = await login(client)
+    await upload(client, phone, adds={"CS1": at(t, 0)})
+    before = await revision(client, phone)
+    await upload(client, phone, roster=["CS1"])
+    assert await revision(client, phone) > before
+    (row,) = (await snapshot(client, phone))["courses"]
+    assert row["source"] == "ntust_portal"
+
+
 async def test_a_membership_edit_stamped_ahead_of_the_server_is_refused(client) -> None:
     phone = await login(client)
     await upload(client, phone, roster=["CS1"])
