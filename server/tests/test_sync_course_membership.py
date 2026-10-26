@@ -367,6 +367,19 @@ async def test_a_reset_clears_an_older_hand_add_despite_a_newer_colour(client, t
         ("CS2", "#FF0000")
     ]
 
+async def test_an_edit_stamped_at_the_reset_is_refused(client, t) -> None:
+    phone = await login(client)
+    await upload(client, phone, roster=["CS1"])
+    await reset(client, phone, at(t, 10))
+    await upload(client, phone, roster=["CS1", "CS2"])
+
+    tie = await colour(client, phone, "CS2", "#FF0000", at(t, 10))
+    assert (tie["color_hex"], tie["applied"]) == (None, [])
+    assert (await delete(client, phone, "CS1", at(t, 10)))["applied"] is False
+    assert (await upload(client, phone, adds={"CS3": at(t, 10)}))["adds"][0]["applied"] is False
+    assert await shown(client, phone) == {"CS1", "CS2"}
+
+
 async def test_an_older_reset_changes_nothing(client, t) -> None:
     phone = await login(client)
     await reset(client, phone, at(t, 10))
