@@ -604,6 +604,40 @@ async def test_an_import_keeps_the_reset_from_older_times_on_rows_it_had(client,
     )
 
 
+async def test_a_roster_colour_skips_a_course_the_reset_kept(client, t) -> None:
+    """A newer name keeps CS2, whose colour was never stored. The roster's
+    colour fill counts as the oldest, so it leaves CS2 unset but colours CS3,
+    which the upload adds after the reset."""
+    phone = await login(client)
+    android = await login(client, "android-1", protocol=False)
+    await upload(client, phone, roster=["CS2"])
+    named = await client.patch(
+        f"/v3/sync/courses/{SEMESTER}CS2/override",
+        headers=phone,
+        json={"custom_name": "New", "locale": "zh", "hlc": to_clock(at(t, 20))},
+    )
+    assert named.status_code == 200
+    await reset(client, phone, at(t, 10))
+
+    response = await client.post(
+        "/v3/sync/courses/upload",
+        headers=android,
+        json={
+            "courses": [
+                {"semester": SEMESTER, "course_no": no, "course_name": no} for no in ("CS2", "CS3")
+            ],
+            "course_overrides": [
+                {"course_key": key(no), "color_hex": "#FF0000"} for no in ("CS2", "CS3")
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    overrides = {o["course_no"]: o for o in (await snapshot(client, phone))["course_overrides"]}
+    assert overrides["CS2"]["color_hex"] is None
+    assert overrides["CS3"]["color_hex"] == "#FF0000"
+
+
 async def test_a_second_reset_of_an_emptied_term_still_binds_released_apps(client, t) -> None:
     phone = await login(client)
     android = await login(client, "android-1", protocol=False)
