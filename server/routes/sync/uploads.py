@@ -358,9 +358,14 @@ async def upload_courses(
                 )
             ).scalars()
         }
+    resets = await membership.Resets.load(session, auth.user_id) if override_items else None
     for item in override_items:
         course = courses_by_key.get(item.course_key)
         if course is None:
+            continue
+        # The fill counts as the oldest value, so a course the server had
+        # refuses it under its term's reset; one this upload adds does not.
+        if item.course_key in existing_keys and resets.covering(course.semester) is not None:
             continue
         override = overrides_by_course_id.get(course.id)
         if override is None:
