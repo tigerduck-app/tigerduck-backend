@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import delete, select, update
+import structlog
+from sqlalchemy import delete, select, text, update
+from structlog.testing import capture_logs
 
-from server.auth.models import ExternalAccount, ExternalAccountCredential
+from server.auth import service
+
+from server.auth.models import ExternalAccount, ExternalAccountCredential, User
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
 from server.syncjobs.models import SyncJob
@@ -20,15 +24,17 @@ LOGIN_BODY = {
 }
 
 
-def allow_moodle(client) -> None:
+def allow_moodle(client, fullname: str | None = None) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=True, username="b11015000")
+        MoodleVerifyResult(ok=True, username="b11015000", fullname=fullname)
     )
 
 
-def deny_moodle(client, error: str = "invalid_token") -> None:
+def deny_moodle(
+    client, error: str = "invalid_token", fullname: str | None = None
+) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=False, error=error)
+        MoodleVerifyResult(ok=False, error=error, fullname=fullname)
     )
 
 
@@ -220,3 +226,109 @@ async def test_an_account_deleted_while_moodle_answers_is_not_updated(client) ->
 
     assert response.status_code == 200, response.text
     assert response.json()["updated"] is False
+
+
+async def _refresh_with_name(client, login: dict, fullname: str | None) -> None:
+    allow_moodle(client, fullname=fullname)
+    response = await client.patch(
+        "/v3/auth/credentials",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+        json={"moodle_token": "fresh-tok"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["updated"] is True
+
+
+async def _stored_name_and_row_version(client) -> tuple[str | None, int]:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = (
+            await session.execute(
+                select(User.display_name, text("users.xmin::text::bigint"))
+            )
+        ).one()
+        return row[0], row[1]
+
+
+async def test_a_credential_refresh_stores_the_moodle_full_name(client) -> None:
+    login = await _login(client)
+
+    await _refresh_with_name(client, login, "  Test Student  ")
+
+    name, _ = await _stored_name_and_row_version(client)
+    assert name == "Test Student"
+
+
+@pytest.mark.parametrize("fullname", [None, "", "   "])
+async def test_a_refresh_without_a_full_name_keeps_the_stored_one(
+    client, fullname
+) -> None:
+    login = await _login(client)
+    await _refresh_with_name(client, login, "Test Student")
+
+    await _refresh_with_name(client, login, fullname)
+
+    name, _ = await _stored_name_and_row_version(client)
+    assert name == "Test Student"
+
+
+async def test_a_refresh_cuts_a_long_full_name_to_the_column(client) -> None:
+    login = await _login(client)
+
+    await _refresh_with_name(client, login, "名" * 200)
+
+    name, _ = await _stored_name_and_row_version(client)
+    assert name == "名" * 128
+
+
+async def test_a_refresh_with_the_same_name_leaves_the_row_alone(client) -> None:
+    login = await _login(client)
+    await _refresh_with_name(client, login, "Test Student")
+    _, version = await _stored_name_and_row_version(client)
+
+    await _refresh_with_name(client, login, " Test Student ")
+
+    assert await _stored_name_and_row_version(client) == ("Test Student", version)
+
+
+async def test_a_name_the_database_refuses_keeps_the_refreshed_token(
+    client, monkeypatch
+) -> None:
+    login = await _login(client)
+    await _mark_account_invalid_with_disabled_jobs(client)
+
+    monkeypatch.setattr(service, "logger", structlog.get_logger(service.__name__))
+    with capture_logs() as logs:
+        # Postgres refuses a NUL in text, so the name write fails for real.
+        await _refresh_with_name(client, login, "Test\x00Student")
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        account = (await session.execute(select(ExternalAccount))).scalar_one()
+        assert account.credential_status == "active"
+        jobs = (await session.execute(select(SyncJob))).scalars().all()
+        assert jobs and all(job.status == "pending" for job in jobs)
+        credential = (
+            await session.execute(select(ExternalAccountCredential))
+        ).scalar_one()
+        assert credential.rotated_at is not None
+    name, _ = await _stored_name_and_row_version(client)
+    assert name is None
+    assert any(e["event"] == "auth.display_name.not_stored" for e in logs)
+    assert "Student" not in repr(logs)
+
+
+@pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
+async def test_a_rejected_refresh_stores_no_name(client, error) -> None:
+    login = await _login(client)
+    await _refresh_with_name(client, login, "Test Student")
+
+    deny_moodle(client, error=error, fullname="Other Student")
+    response = await client.patch(
+        "/v3/auth/credentials",
+        headers={"Authorization": f"Bearer {login['access_token']}"},
+        json={"moodle_token": "fresh-tok"},
+    )
+    assert response.json()["updated"] is False
+    name, _ = await _stored_name_and_row_version(client)
+    assert name == "Test Student"
