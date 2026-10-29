@@ -236,3 +236,11 @@ async def test_lookup_and_preview_leave_out_deregistered_devices(pool):
 
     assert student["devices"] == 1
     assert [d["device_id"] for d in preview["devices"]] == [str(phone)]
+
+
+async def test_a_preview_matches_the_student_id_in_any_case(pool):
+    await _person(pool, "B99900001", "王小明", ("ios", "iphone"))
+
+    preview = _body(await preview_student(_request(), pool=pool, student_id=" b99900001 "))
+
+    assert preview["student_id"] == "B99900001"

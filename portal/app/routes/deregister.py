@@ -85,7 +85,8 @@ async def preview_student(
     """What `deregister_student` would delete, in its report's shape."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, student_id, display_name, created_at FROM users WHERE student_id = $1",
+            "SELECT id, student_id, display_name, created_at FROM users"
+            " WHERE lower(student_id) = lower($1)",
             student_id.strip(),
         )
         if row is None:
