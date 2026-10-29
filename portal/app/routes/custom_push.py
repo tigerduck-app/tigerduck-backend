@@ -296,7 +296,9 @@ async def send(
             if body.course_code is not None and course is None:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"no student takes {body.course_code} in {term}",
+                    detail=f"no student takes {body.course_code} in {term}"
+                    if term
+                    else "no term is published",
                 )
             where, params = _targeting_where(body, term)
             targets = await conn.fetch(
