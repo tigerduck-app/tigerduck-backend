@@ -1176,6 +1176,33 @@ async def test_a_changed_room_and_start_reach_the_reminder(
     assert job.dedupe_key.endswith(f":{int(start.timestamp())}")
 
 
+async def test_a_change_reaches_a_holiday_the_user_put_back(
+    db_session, prepared_engine, test_settings
+):
+    from server.academic_calendar.models import UserHolidayOverride
+
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, kind="room", room="IB-302")
+    )
+    holiday = _holiday(local)
+    db_session.add(holiday)
+    await db_session.flush()
+    db_session.add(UserHolidayOverride(user_id=user.id, holiday_id=holiday.id, notify=True))
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert job.payload["body"] == f"{local:%H:%M} · IB-302"
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    (request,) = apple.requests
+    assert request.message["aps"]["alert"]["body"] == f"{local:%H:%M} · IB-302"
+
+
 async def test_a_start_changed_after_filing_moves_the_reminder(
     db_session, prepared_engine, test_settings
 ):
