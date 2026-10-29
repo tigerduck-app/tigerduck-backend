@@ -32,6 +32,24 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.9.0
+
+- **Course changes feed (#192).** `GET /v3/calendar/course-changes?term=`
+  serves a term's course changes, the current term by default, each with
+  the class days the server works out, behind an ETag. It needs no token.
+- **Course changes at send time (#192).** Class reminders and class Live
+  Activity starts take the school's course changes. The scan applies them
+  when it files a reminder, and the pipeline again right before the first
+  delivery: a cancelled class, or a reminder whose class moved since, is
+  cancelled (`class_changed`). A start takes the new room and times and
+  waits for a later start, checked again at least every 5 minutes. A check
+  that cannot answer cancels the push (`unverified_before_send`). Android
+  paths read none of it.
+- **Portal.** A start or end change names one meeting, for a single day or
+  a date range.
+- **No migration and no `.env` change.** Rollback: check out 3.8.2 and run
+  `./start.sh`.
+
 ## Upgrading to 3.8.2
 
 - **Names spelled name first.** Some users' Moodle spells the full name
