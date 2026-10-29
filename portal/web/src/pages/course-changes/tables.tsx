@@ -190,11 +190,13 @@ export function AllChanges({
   scope,
   byNo,
   onCourse,
+  onDelete,
 }: {
   rows: Change[];
   scope: "upcoming" | "past";
   byNo: ReadonlyMap<string, Course>;
   onCourse: (no: string) => void;
+  onDelete: (c: Change) => void;
 }) {
   const table = useTable({
     rows,
@@ -249,6 +251,18 @@ export function AllChanges({
         sortValue: (c) => c.created_at,
         className: "whitespace-nowrap py-2.5 text-[13px] tabular-nums text-ink-3",
         cell: (c) => monthDay(c.created_at),
+      },
+      {
+        key: "actions",
+        label: "",
+        className: "whitespace-nowrap py-1.5 text-right last:pr-4",
+        // A course nobody takes any more has no table of its own to delete from.
+        cell: (c) =>
+          !byNo.has(c.course_no) && (
+            <Button variant="quiet" size="icon" aria-label="Delete" title="Delete" className="rounded-lg text-ink-2" onClick={() => onDelete(c)}>
+              <Trash2 />
+            </Button>
+          ),
       },
     ],
   });

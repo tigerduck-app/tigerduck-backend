@@ -355,6 +355,7 @@ export function CourseChangesPage() {
             scope={scope}
             byNo={byNo}
             onCourse={select}
+            onDelete={askDelete}
           />
         </Panel>
       )}
