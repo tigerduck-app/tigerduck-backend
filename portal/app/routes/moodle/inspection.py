@@ -305,6 +305,12 @@ async def sync_events(
             "ORDER BY pj.fire_at, pj.id LIMIT 300",
             uid,
         )
+        # What /push-clear cancels, which the 300 listed may fall short of.
+        queued_total = await conn.fetchval(
+            "SELECT count(*) FROM push_jobs "
+            "WHERE user_id = $1 AND status IN ('pending', 'processing')",
+            uid,
+        )
         tokens = await conn.fetch(
             "SELECT t.device_id, t.token_kind, t.scope_key "
             "FROM device_push_tokens t "
@@ -360,6 +366,7 @@ async def sync_events(
         "push_jobs": [dict(p) for p in push_jobs],
         "push_deliveries": [dict(d) for d in push_deliveries],
         "queued_jobs": queued_jobs,
+        "queued_total": queued_total,
     }
 COURSE_PALETTE_LIGHT = [
     "#FF6B6B", "#4ECDC4", "#45B7D1", "#F39C12", "#DDA0DD",

@@ -35,6 +35,7 @@ function shortLabel(j: QueuedJob): string {
 
 export function ClearQueueDialog({
   jobs,
+  total,
   studentId,
   name,
   pending,
@@ -42,6 +43,7 @@ export function ClearQueueDialog({
   onConfirm,
 }: {
   jobs: QueuedJob[];
+  total: number;
   studentId: string;
   name: string | null;
   pending: boolean;
@@ -54,7 +56,7 @@ export function ClearQueueDialog({
     const label = kind ? GROUP[kind as keyof typeof GROUP] : pushLabel(j);
     groups.set(label, [...(groups.get(label) ?? []), j]);
   }
-  const n = jobs.length;
+  const n = total;
   return (
     <FormDialog
       open

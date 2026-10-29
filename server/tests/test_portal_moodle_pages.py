@@ -343,6 +343,26 @@ async def test_inspection_keeps_sent_pushes_and_the_jobs_a_device_started(
     ] == [(job.id, tablet.id, "sent", "system", "sync_trigger")]
 
 
+async def test_inspection_counts_every_queued_push_the_clear_cancels(db_session, pool):
+    """The queue lists the first 300; Clear queue cancels all of them, so
+    its dialog needs the full count."""
+    user = await _user(db_session, "B99915023")
+    now = datetime.now(UTC)
+    db_session.add_all([
+        PushJob(
+            user_id=user.id, dedupe_key=f"reminder:{i}", channel="course",
+            scenario="course_reminder", fire_at=now + timedelta(minutes=i),
+            available_at=now, status="pending" if i % 2 else "processing", payload={},
+        )
+        for i in range(301)
+    ])
+    await db_session.commit()
+
+    events = await sync_events(_request(), student_id="B99915023", limit=100, pool=pool)
+
+    assert (len(events["queued_jobs"]), events["queued_total"]) == (300, 301)
+
+
 async def test_status_counts_what_the_retry_dialog_offers(db_session, pool):
     """Retry failed also takes a pending job that keeps its last error, and
     the notice goes to students waiting to sign in with an iPhone syncing."""

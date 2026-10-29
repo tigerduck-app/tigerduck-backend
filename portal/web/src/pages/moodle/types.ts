@@ -209,6 +209,8 @@ export type SyncEventsResponse = {
   push_jobs?: SourceJob[];
   push_deliveries?: PushDeliveryRow[];
   queued_jobs?: QueuedJob[];
+  /** Every pending push Clear queue cancels; `queued_jobs` lists the first 300. */
+  queued_total?: number;
   topology?: {
     revision: number;
     course_count: number;

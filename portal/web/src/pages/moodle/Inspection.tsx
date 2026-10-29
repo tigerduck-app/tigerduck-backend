@@ -140,6 +140,7 @@ function Student({
   const devices = (found?.devices ?? []).filter((d) => !d.deleted_at);
   const name = found?.student?.display_name ?? null;
   const queued = found?.queued_jobs ?? [];
+  const queuedTotal = found?.queued_total ?? queued.length;
   const device = devices.find((d) => d.id === node);
 
   return (
@@ -161,7 +162,7 @@ function Student({
                 variant="line"
                 size="bar"
                 className="border-badge-danger-fg/30 text-[13px] font-normal text-badge-danger-fg"
-                disabled={queued.length === 0}
+                disabled={queuedTotal === 0}
                 onClick={() => setDialog({ kind: "clear" })}
               >
                 <Trash2 />
@@ -229,6 +230,7 @@ function Student({
       {dialog?.kind === "clear" && (
         <ClearQueueDialog
           jobs={queued}
+          total={queuedTotal}
           studentId={studentId}
           name={name}
           pending={clear.isPending}
