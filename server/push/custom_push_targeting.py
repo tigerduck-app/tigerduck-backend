@@ -20,7 +20,7 @@ from typing import Literal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.models import DeviceListMember, DevicePlatform, DeviceRegistration
+from server.models import DevicePlatform, DeviceRegistration
 
 TargetClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
 
@@ -30,10 +30,9 @@ class TargetFilter:
     target_classes: list[TargetClass] = field(default_factory=list)
     user_id: str | None = None
     device_id: str | None = None
-    # Operator-managed cohort (see `device_lists` table). When set, ANDs
-    # with the other filters — e.g. "iPhone members of list 7", not "list
-    # 7 OR iPhones". Empty list (`list_id` set but no members yet)
-    # naturally yields zero matches.
+    # Operator-managed cohort (see `device_lists` table). Its members are
+    # signed-in devices (`user_devices`), so with it set no anonymous
+    # registration matches.
     list_id: int | None = None
 
 
@@ -58,7 +57,7 @@ async def resolve_target_device_ids(
 ) -> list[str]:
     """Return device_ids matching the filter. Order: ascending device_id."""
     classes = list(filt.target_classes)
-    if not classes:
+    if not classes or filt.list_id is not None:
         return []
 
     legacy_platforms = _legacy_platforms_for(classes)
@@ -100,14 +99,6 @@ async def resolve_target_device_ids(
         stmt = stmt.where(DeviceRegistration.user_id == filt.user_id)
     if filt.device_id is not None:
         stmt = stmt.where(DeviceRegistration.device_id == filt.device_id)
-    if filt.list_id is not None:
-        stmt = stmt.where(
-            DeviceRegistration.device_id.in_(
-                select(DeviceListMember.device_id).where(
-                    DeviceListMember.list_id == filt.list_id
-                )
-            )
-        )
     stmt = stmt.order_by(DeviceRegistration.device_id)
 
     rows = (await session.execute(stmt)).scalars().all()

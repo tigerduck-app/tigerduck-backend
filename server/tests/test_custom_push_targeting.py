@@ -4,7 +4,8 @@ and the custom-push dispatcher."""
 import pytest
 from sqlalchemy import insert
 
-from server.models import DeviceRegistration
+from server.auth.models import User, UserDevice
+from server.models import DeviceList, DeviceListMember, DeviceRegistration
 from server.push.custom_push_targeting import (
     TargetFilter,
     count_by_class,
@@ -147,6 +148,25 @@ async def test_device_id_filter(db_session):
         TargetFilter(target_classes=["iphone"], device_id="p1"),
     )
     assert ids == ["p1"]
+
+
+async def test_a_device_list_matches_no_anonymous_registration(db_session):
+    """A list holds signed-in devices (`user_devices`), never an anonymous
+    registration; comparing the two ids made the query fail outright."""
+    await _seed(db_session, device_id="p1")
+    user = User(student_id="b1")
+    db_session.add(user)
+    await db_session.flush()
+    phone = UserDevice(user_id=user.id, client_device_id="p1", platform="ios")
+    cohort = DeviceList(name="beta")
+    db_session.add_all([phone, cohort])
+    await db_session.flush()
+    db_session.add(DeviceListMember(list_id=cohort.id, device_id=phone.id))
+    await db_session.commit()
+    filt = TargetFilter(target_classes=["iphone"], list_id=cohort.id)
+
+    assert await resolve_target_device_ids(db_session, filt) == []
+    assert await count_by_class(db_session, filt) == {"iphone": 0, "total": 0}
 
 
 async def test_count_by_class_basic(db_session):
