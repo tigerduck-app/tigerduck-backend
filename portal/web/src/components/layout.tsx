@@ -1,5 +1,5 @@
 import * as React from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
@@ -82,14 +82,28 @@ export function Layout() {
     try { localStorage.setItem("sidebar-collapsed", String(collapsed)); } catch {}
   }, [collapsed]);
 
+  // The phone top bar scrolls sideways; keep the current page's label in view.
+  const bar = React.useRef<HTMLDivElement>(null);
+  const { pathname } = useLocation();
+  React.useEffect(() => {
+    const el = bar.current;
+    const current = el?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!el || !current || el.scrollWidth <= el.clientWidth) return;
+    const offset = current.getBoundingClientRect().left - el.getBoundingClientRect().left;
+    el.scrollLeft += offset - (el.clientWidth - current.offsetWidth) / 2;
+  }, [pathname]);
+
   return (
     <div className="@container/app flex min-h-screen flex-wrap content-start bg-ground font-sans text-sm leading-[1.45] text-ink">
       <nav
         aria-label="Portal"
         data-rail={collapsed}
-        className="flex-[1_1_248px] bg-side text-side-ink rail:flex-[0_0_68px] phone:flex-[1_1_100%]"
+        className="min-w-0 flex-[1_1_248px] bg-side text-side-ink rail:flex-[0_0_68px] phone:flex-[1_1_100%]"
       >
-        <div className="sticky top-0 flex h-screen flex-col gap-5 overflow-y-auto px-3.5 py-5 [scrollbar-width:none] rail:items-center rail:gap-3.5 rail:px-2.5 rail:py-4 phone:static phone:h-auto phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-visible phone:px-3 phone:py-2">
+        <div
+          ref={bar}
+          className="sticky top-0 flex h-screen flex-col gap-5 overflow-y-auto px-3.5 py-5 [scrollbar-width:none] rail:items-center rail:gap-3.5 rail:px-2.5 rail:py-4 phone:static phone:h-auto phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-visible phone:px-3 phone:py-2"
+        >
           <Brand collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
           {env.data && <EnvCard env={env.data} />}
           {NAV.map((g) => (
