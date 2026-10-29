@@ -49,8 +49,10 @@ server/
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
 │                              #   (models, schemas, terms.py: the current term and
-│                              #   the days a term runs on, as the apps take them);
-│                              #   the portal writes course changes, nothing reads them yet
+│                              #   the days a term runs on, as the apps take them;
+│                              #   changes.py: the course changes with their class
+│                              #   days, for the feed and the class pushes); the
+│                              #   portal writes course changes
 ├── routes/
 │   ├── auth.py                # /v3/auth/*
 │   ├── user_devices.py        # /v3/devices/*
@@ -59,7 +61,7 @@ server/
 │   ├── academics.py           # /v3/courses, /v3/assignments
 │   ├── overrides.py           # /v3/sync/{courses,assignments}/{id}/override
 │   ├── holiday_overrides.py   # /v3/sync/holiday-overrides
-│   ├── academic_calendar.py   # /v3/calendar/*
+│   ├── academic_calendar.py   # /v3/calendar/*: semesters, course-changes (ETag)
 │   ├── course_catalog.py      # /v3/course-catalog/{semester}
 │   ├── links.py               # /links/{name} (public, unversioned) + admin router
 │   ├── bulletins_feed.py      # /v3/bulletins/*
@@ -85,7 +87,8 @@ server/
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment and class
 │   │                          #   reminders
 │   ├── session_reauth.py      # asks a device left without a session to sign in again
-│   ├── course_reminders.py    # course reminder scan
+│   ├── course_reminders.py    # course reminder scan, and its check before sending
+│   ├── class_starts.py        # course changes applied to a class Live Activity start
 │   ├── custom_push_targeting.py   # device filters; used by the anonymous bulletin dispatcher
 │   ├── custom_push_dispatcher.py  # drains the legacy custom_push_dispatches table on a
 │   │                              #   tick; nothing writes that table any more
@@ -269,6 +272,15 @@ into the backend container via `docker-compose.yml`.
   pre-send grace leaves room for the next round; a device still
   unregistered then gets it, as does one whose start did not go out. A
   reminder left out on every device ends `cancelled` (`countdown_start_sent`).
+- Class reminders and class Live Activity starts (`classPreparing`,
+  `inClass`) take the school's course changes (`academic_calendar/changes.py`)
+  per day and period: a change applies to the meeting that starts in one of
+  its periods. The scan applies them when it files a reminder, and the
+  pipeline again right before the first delivery: a cancelled class, or a
+  reminder's class moved since, is cancelled (`class_changed`), a start takes
+  the new room and times and waits for a later start, and a check that
+  cannot answer cancels the push (`unverified_before_send`). Android paths
+  read none of it; the app applies the feed itself.
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
