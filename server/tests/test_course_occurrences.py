@@ -91,6 +91,20 @@ class TestCourseOccurrences:
             _utc(2026, 6, 12, 12, 20),
         ]
 
+    def test_meetings_follow_the_school_order_whatever_the_table_order(self):
+        occs = course_occurrences(
+            {"3": ["3", "5"], "5": ["1", "2"]},
+            window_start=datetime(2026, 6, 10, 0, 0, tzinfo=UTC),
+            window_end=datetime(2026, 6, 13, 0, 0, tzinfo=UTC),
+            tz=TAIPEI,
+            period_times={"10": "17:30", "2": "09:10", "5": "12:20", "1": "08:10", "3": "10:20"},
+        )
+        assert occs == [
+            _utc(2026, 6, 10, 10, 20),
+            _utc(2026, 6, 10, 12, 20),
+            _utc(2026, 6, 12, 8, 10),
+        ]
+
     def test_the_object_form_skips_keys_and_periods_it_cannot_read(self):
         occs = course_occurrences(
             {"9": ["3"], "Wed": ["3"], "3": ["99"], "4": "3"},

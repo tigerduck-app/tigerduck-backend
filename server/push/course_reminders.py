@@ -53,6 +53,11 @@ logger = structlog.get_logger(__name__)
 
 _ISO_WEEKDAYS = range(1, 8)
 _WEEKDAY_KEYS = {str(day) for day in _ISO_WEEKDAYS}
+# NTUST's period order; periods next to each other in it make one meeting, as in the apps.
+_PERIOD_RANK = {
+    period: rank
+    for rank, period in enumerate((*(str(n) for n in range(1, 11)), "A", "B", "C", "D"))
+}
 
 CHANNEL = "course"
 
@@ -92,22 +97,21 @@ def _entry_start_time(
     return day, *min(starts)
 
 
-def _schedule_entries(schedule_json: object, period_order: list[str]) -> list:
+def _schedule_entries(schedule_json: object) -> list:
     """The schedule as list entries. A weekday's periods in the object form
     are one entry per run of consecutive periods, the meetings the portal
-    shows; periods the table lacks are left out."""
+    shows; periods NTUST does not have are left out."""
     if isinstance(schedule_json, list):
         return schedule_json
     if not isinstance(schedule_json, dict):
         return []
-    rank = {period: index for index, period in enumerate(period_order)}
     entries: list[dict] = []
     for day, periods in schedule_json.items():
         if day not in _WEEKDAY_KEYS or not isinstance(periods, list):
             continue
         run: list[str] = []
-        for period in sorted({str(p) for p in periods if str(p) in rank}, key=rank.get):
-            if run and rank[period] != rank[run[-1]] + 1:
+        for period in sorted({str(p) for p in periods if str(p) in _PERIOD_RANK}, key=_PERIOD_RANK.get):
+            if run and _PERIOD_RANK[period] != _PERIOD_RANK[run[-1]] + 1:
                 entries.append({"day": int(day), "periods": run})
                 run = []
             run.append(period)
@@ -153,7 +157,7 @@ def class_meetings(
     """`course_occurrences`, each with the period it starts in."""
     slots = [
         slot
-        for entry in _schedule_entries(schedule_json, list(period_times))
+        for entry in _schedule_entries(schedule_json)
         if (slot := _entry_start_time(entry, period_times)) is not None
     ]
     if not slots:
