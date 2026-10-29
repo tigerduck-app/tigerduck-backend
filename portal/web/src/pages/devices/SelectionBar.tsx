@@ -207,7 +207,7 @@ export function SelectionBar({
                 <span className="w-16 shrink-0 text-[13px]">{platformName(d.platform)}</span>
                 <span className="font-mono text-[13px]">{shortId(d.device_id)}</span>
                 <span className="truncate font-mono text-[13px] text-ink-3">{d.student_id ?? "—"}</span>
-                <span className="ml-auto font-mono text-xs text-ink-3 phone:hidden">
+                <span className="ml-auto font-mono text-xs text-ink-3 max-[720px]:hidden">
                   {d.app_version ?? "—"}
                 </span>
               </li>

@@ -111,7 +111,7 @@ export function deviceColumns(devices: DeviceRow[]): Column<DeviceRow>[] {
     {
       key: "student",
       label: "Student ID",
-      pii: 130,
+      pii: 115,
       sortValue: (d) => d.student_id ?? "",
       className: "font-mono text-[13px]",
       cell: (d) => d.student_id ?? "—",
@@ -119,7 +119,7 @@ export function deviceColumns(devices: DeviceRow[]): Column<DeviceRow>[] {
     {
       key: "name",
       label: "Name",
-      pii: 160,
+      pii: 130,
       sortValue: (d) => d.display_name ?? "",
       className: "font-medium",
       cell: (d) => d.display_name ?? "—",
