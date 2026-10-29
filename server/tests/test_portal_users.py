@@ -321,7 +321,7 @@ async def test_user_list_has_devices_activity_sync_and_account(db_session, porta
     assert [a["action"] for a in audits] == ["user.list"]
 
 
-async def test_user_page_shows_devices_week_pushes_and_last_sync(db_session, portal_pool):
+async def test_user_page_shows_devices_week_pushes_and_last_upload(db_session, portal_pool):
     now = datetime.now(UTC)
     today = _today()
     monday = today - timedelta(days=today.isoweekday() - 1)
@@ -435,7 +435,7 @@ async def test_user_page_shows_devices_week_pushes_and_last_sync(db_session, por
         ("sent", "course", phone.id),
     ]
     assert {p["title"] for p in page["pushes"]} == {"Class soon", ""}
-    assert page["last_sync"]["device_id"] == phone.id
+    assert page["last_upload"]["device_id"] == phone.id
     audits = await portal_pool.fetch("SELECT action, target_user_id FROM admin_audit_log")
     assert [(a["action"], a["target_user_id"]) for a in audits] == [("user.view", user.id)]
 

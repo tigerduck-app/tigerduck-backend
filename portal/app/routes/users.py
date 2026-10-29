@@ -328,7 +328,8 @@ GROUP BY 1
 # The page lists this many; `push_counts` still counts them all.
 _PUSH_ROWS = 500
 
-_LAST_SYNC_SQL = """
+# A full sync leaves no row, so only a device's last upload can be shown.
+_LAST_UPLOAD_SQL = """
 SELECT created_at AS at, device_id FROM user_change_log
 WHERE user_id = $1 AND device_id IS NOT NULL
 ORDER BY revision DESC LIMIT 1
@@ -360,7 +361,7 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
         courses = await conn.fetch(_COURSES_SQL, user_id, term, week_start) if term else []
         pushes = await conn.fetch(_PUSHES_SQL, user_id, _PUSH_ROWS)
         counts = {r["status"]: r["pushes"] for r in await conn.fetch(_PUSH_COUNTS_SQL, user_id)}
-        last_sync = await conn.fetchrow(_LAST_SYNC_SQL, user_id)
+        last_upload = await conn.fetchrow(_LAST_UPLOAD_SQL, user_id)
         await audit(conn, request, "user.view", user_id=user_id)
     return {
         **dict(user),
@@ -375,7 +376,7 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
         ],
         "pushes": [_push(p) for p in pushes],
         "push_counts": {k: counts.get(k, 0) for k in ("sent", "failed", "cancelled")},
-        "last_sync": dict(last_sync) if last_sync else None,
+        "last_upload": dict(last_upload) if last_upload else None,
     }
 
 

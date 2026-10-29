@@ -95,15 +95,15 @@ function UserContent({ user }: { user: UserDetail }) {
   const lastActive = devices.map((d) => d.last_seen_at).filter(Boolean).sort().pop() ?? null;
   const cloudSync = devices.length ? devices.some((d) => d.cloud_sync_enabled) : null;
   const { sent, failed } = user.push_counts;
-  const syncDevice = user.last_sync && byId.get(user.last_sync.device_id);
-  const syncMs = user.last_sync ? Date.parse(user.last_sync.at) : 0;
-  const syncDay =
-    localDay(syncMs) === localDay(Date.now())
+  const uploadDevice = user.last_upload && byId.get(user.last_upload.device_id);
+  const uploadMs = user.last_upload ? Date.parse(user.last_upload.at) : 0;
+  const uploadDay =
+    localDay(uploadMs) === localDay(Date.now())
       ? "Today"
-      : localDay(syncMs) === localDay(Date.now() - 86_400_000)
+      : localDay(uploadMs) === localDay(Date.now() - 86_400_000)
         ? "Yesterday"
-        : user.last_sync
-          ? fullDate(user.last_sync.at)
+        : user.last_upload
+          ? fullDate(user.last_upload.at)
           : "";
 
   const tiles = [
@@ -119,11 +119,11 @@ function UserContent({ user }: { user: UserDetail }) {
     },
     { label: "Pushes, last 7 days", value: String(sent + failed), note: `${failed} failed` },
     {
-      label: "Last sync",
-      value: user.last_sync
-        ? new Date(syncMs).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
+      label: "Last upload",
+      value: user.last_upload
+        ? new Date(uploadMs).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
         : "—",
-      note: user.last_sync ? `${syncDay}${syncDevice ? `, from ${deviceName(syncDevice)}` : ""}` : "",
+      note: user.last_upload ? `${uploadDay}${uploadDevice ? `, from ${deviceName(uploadDevice)}` : ""}` : "",
     },
   ];
 

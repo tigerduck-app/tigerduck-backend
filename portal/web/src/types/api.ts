@@ -212,7 +212,7 @@ export type UserDetail = {
   pushes: UserPush[];
   /** Every push of the last 7 days, by status. */
   push_counts: Record<UserPush["status"], number>;
-  last_sync: { at: string; device_id: string } | null;
+  last_upload: { at: string; device_id: string } | null;
 };
 
 export type DeviceInfo = {
