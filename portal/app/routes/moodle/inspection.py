@@ -107,13 +107,23 @@ SELECT coalesce(
 )
 """
 
-# Changes from today on; one already over has nothing left to show.
+# Changes from today on; one already over has nothing left to show. The days
+# each still reaches come from the shared rule, which skips holidays.
 _CHANGES_SQL = f"""
-SELECT course_no, kind, mode, start_date, end_date, excluded_weekdays, periods,
-       room, start_time, end_time, note_zh, note_en
-FROM course_changes
-WHERE term_code = $1 AND course_no = ANY($2::text[]) AND end_date >= {_TODAY}
-ORDER BY start_date, id
+SELECT ch.course_no, ch.kind, ch.mode, ch.start_date, ch.end_date,
+       ch.excluded_weekdays, ch.periods, ch.room, ch.start_time, ch.end_time,
+       ch.note_zh, ch.note_en,
+       course_class_days(ch.term_code, uc.schedule_json, greatest(ch.start_date, {_TODAY}),
+                         ch.end_date, ch.excluded_weekdays, ch.periods) AS class_days
+FROM course_changes ch
+CROSS JOIN LATERAL (
+    SELECT schedule_json FROM user_courses
+    WHERE user_id = $3 AND semester = ch.term_code AND course_no = ch.course_no
+      AND enrollment_status = 'enrolled'
+    ORDER BY id LIMIT 1
+) AS uc
+WHERE ch.term_code = $1 AND ch.course_no = ANY($2::text[]) AND ch.end_date >= {_TODAY}
+ORDER BY ch.start_date, ch.id
 """
 
 
@@ -155,7 +165,7 @@ async def student_timetable(
         )
         course_nos = [r["course_no"] for r in rows if r["course_no"]]
         changes = (
-            await conn.fetch(_CHANGES_SQL, chosen, course_nos)
+            await conn.fetch(_CHANGES_SQL, chosen, course_nos, uid)
             if chosen == current and course_nos else []
         )
         await audit(conn, request, "user.view", user_id=uid)

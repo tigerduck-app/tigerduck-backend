@@ -74,6 +74,8 @@ export type CourseChange = {
   end_time: string | null;
   note_zh: string | null;
   note_en: string | null;
+  /** The days from today on it reaches: in the term, not a holiday, on the course's meetings. */
+  class_days: string[];
 };
 
 export type TimetableResponse = {

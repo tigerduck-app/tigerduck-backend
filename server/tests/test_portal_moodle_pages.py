@@ -24,7 +24,7 @@ from portal.app.routes.moodle.inspection import (  # noqa: E402
     sync_events,
 )
 from portal.app.routes.moodle.status import moodle_stats, moodle_status  # noqa: E402
-from server.academic_calendar.models import CourseChange, SemesterTerm  # noqa: E402
+from server.academic_calendar.models import AcademicHoliday, CourseChange, SemesterTerm  # noqa: E402
 from server.auth.models import (  # noqa: E402
     DevicePushToken,
     ExternalAccount,
@@ -222,6 +222,28 @@ async def test_timetable_drops_schedule_entries_that_are_not_meetings(db_session
 
     schedules = {c["course_no"]: c["schedule"] for c in current["courses"]}
     assert schedules["X2"] == [{"day": 5, "periods": ["1"]}]
+
+
+async def test_timetable_changes_name_the_days_the_class_meets(db_session, pool):
+    """A change carries the days it reaches by the shared rule
+    (course_class_days): a holiday on its first Tuesday drops that day."""
+    user = await _timetable_fixture(db_session)
+    today = date.today()
+    tuesday = today + timedelta(days=(1 - today.weekday()) % 7 or 7)
+    db_session.add_all([
+        AcademicHoliday(name_zh="校慶", name_en="Anniversary", start_date=tuesday, end_date=tuesday),
+        CourseChange(
+            term_code="1151", course_no="CS2001301", mode="range", kind="cancelled",
+            start_date=tuesday, end_date=tuesday + timedelta(days=7), excluded_weekdays=[4],
+            created_by="ops@example.com", updated_by="ops@example.com",
+        ),
+    ])
+    await db_session.commit()
+
+    current = await student_timetable(_request(), student_id="B99915023", term=None, pool=pool)
+
+    ranged = [c for c in current["changes"] if c["mode"] == "range"]
+    assert [c["class_days"] for c in ranged] == [[tuesday + timedelta(days=7)]]
 
 
 async def test_timetable_offers_only_term_codes_as_terms(db_session, pool):

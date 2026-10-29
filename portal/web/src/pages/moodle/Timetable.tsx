@@ -47,28 +47,15 @@ function isoDay(date: string): number {
   return new Date(`${date}T00:00:00Z`).getUTCDay() || 7;
 }
 
-function addDays(date: string, n: number): string {
-  const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-/** The first coming change that falls on this meeting: its weekday and one of its periods. */
-function changeFor(block: Omit<Block, "change">, changes: CourseChange[], today: string): Block["change"] {
+/** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods. */
+function changeFor(block: Omit<Block, "change">, changes: CourseChange[]): Block["change"] {
   const periods = PERIODS.slice(block.from, block.to + 1).map(([id]) => id);
   let best: { date: string; c: CourseChange } | null = null;
   for (const c of changes) {
     if (c.course_no !== block.code) continue;
     if (c.periods && !c.periods.some((p) => periods.includes(String(p)))) continue;
-    let date = c.start_date > today ? c.start_date : today;
-    // A range runs at most a term; a year bounds a bad row.
-    for (let i = 0; i < 366 && date <= c.end_date; i++, date = addDays(date, 1)) {
-      const day = isoDay(date);
-      if (day === block.day && !c.excluded_weekdays.includes(day)) {
-        if (!best || date < best.date) best = { date, c };
-        break;
-      }
-    }
+    const date = c.class_days.find((d) => isoDay(d) === block.day);
+    if (date && (!best || date < best.date)) best = { date, c };
   }
   if (!best) return null;
   const { c, date } = best;
@@ -82,7 +69,7 @@ function changeFor(block: Omit<Block, "change">, changes: CourseChange[], today:
   return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}` };
 }
 
-function blocksOf(data: TimetableResponse, today: string): Block[] {
+function blocksOf(data: TimetableResponse): Block[] {
   const out: Omit<Block, "change">[] = [];
   data.courses.forEach((c, ci) => {
     c.schedule.forEach((entry, ei) => {
@@ -108,7 +95,7 @@ function blocksOf(data: TimetableResponse, today: string): Block[] {
       });
     });
   });
-  return out.map((b) => ({ ...b, change: changeFor(b, data.changes, today) }));
+  return out.map((b) => ({ ...b, change: changeFor(b, data.changes) }));
 }
 
 const periodText = (b: Block) =>
@@ -145,7 +132,7 @@ export function Timetable({ studentId }: { studentId: string }) {
   const today = taipeiToday();
   const current = !!data && data.term === data.current_term;
   const todayDay = current ? isoDay(today) : -1;
-  const blocks = data ? blocksOf(data, today) : [];
+  const blocks = data ? blocksOf(data) : [];
   const dayCount = Math.max(5, ...blocks.map((b) => b.day));
   const periodCount = Math.max(10, ...blocks.map((b) => b.to + 1));
   const day = pickedDay ?? (todayDay >= 1 && todayDay <= dayCount ? todayDay : 1);
