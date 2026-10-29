@@ -184,6 +184,7 @@ export function ChangeDialog({
               variant="line"
               size="form"
               className="gap-1.5 border-danger/30 px-3.5 font-normal text-danger hover:text-danger"
+              disabled={pending}
               onClick={onDelete}
             >
               <Trash2 className="!size-[15px]" />
