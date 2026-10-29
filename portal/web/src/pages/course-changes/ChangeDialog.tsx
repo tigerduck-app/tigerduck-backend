@@ -108,10 +108,15 @@ export function ChangeDialog({
   const days = isRange ? (from && to ? classDays(course, term, holidays, from, to, off) : []) : day ? [day] : [];
   const meeting = days[0] ? meetingOn(course, days[0]) : undefined;
   const dayPeriods = !isRange && meeting ? meeting.periods : [];
-  const showChips = !isRange && meeting !== undefined && (periodRuns(dayPeriods).length > 1 || chosen !== null);
+  const runs = periodRuns(dayPeriods);
+  const showChips = !isRange && meeting !== undefined && (runs.length > 1 || chosen !== null);
+  // A new start or end belongs to one meeting, so the chips pick a meeting, none at first.
+  const oneMeeting = (kind === "start" || kind === "end") && runs.length > 1;
+  const pickedRun = runs.find((r) => r.length === chosen?.length && r.every((p) => chosen.includes(p)));
   // A range shows no chips, so an edited range keeps the periods it has.
   const keptPeriods = isRange && change?.mode === "range" ? change.periods : null;
-  const periods = keptPeriods ?? (showChips && chosen ? chosen : (meeting?.periods ?? []));
+  const sentPeriods = keptPeriods ?? (oneMeeting ? (pickedRun ?? []) : showChips ? chosen : null);
+  const periods = sentPeriods ?? meeting?.periods ?? [];
   const span = periodSpan(periods);
   const regStart = span?.[0] ?? "";
   const regEnd = span?.[1] ?? "";
@@ -131,6 +136,7 @@ export function ChangeDialog({
     }
   };
   const togglePeriod = (p: string) => {
+    if (oneMeeting) return setChosen(runs.find((r) => r.includes(p)) ?? null);
     const current = chosen ?? dayPeriods;
     const next = current.includes(p) ? current.filter((x) => x !== p) : dayPeriods.filter((x) => x === p || current.includes(x));
     setChosen(next.length === dayPeriods.length ? null : next);
@@ -158,7 +164,7 @@ export function ChangeDialog({
       mode,
       ...(isRange ? { from: from!, to: to!, excluded_weekdays: off } : { day: day! }),
       // No periods means the whole day.
-      ...(keptPeriods ? { periods: keptPeriods } : showChips && chosen ? { periods: chosen } : {}),
+      ...(sentPeriods ? { periods: sentPeriods } : {}),
       room: room.trim(),
       start: startNew,
       end: endNew,
