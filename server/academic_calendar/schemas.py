@@ -8,9 +8,9 @@ holiday starts.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SemesterOut(BaseModel):
@@ -47,3 +47,37 @@ class AcademicCalendarResponse(BaseModel):
     revision: int
     semesters: list[SemesterOut]
     holidays: list[HolidayOut]
+
+
+class CourseChangeOut(BaseModel):
+    """One change to a course's classes. Dates are Taipei school days, times
+    `HH:mm` in Taipei; `class_days` are the days it applies to, resolved
+    against the term, its holidays and the course's meetings."""
+
+    id: int
+    course_no: str
+    #: `cancelled`, `room`, `start`, `end` or `note`.
+    kind: str
+    #: `day` uses `day`; `range` uses `from`, `to` and `excluded_weekdays`.
+    mode: str
+    day: date | None
+    from_: date | None = Field(serialization_alias="from")
+    to: date | None
+    #: ISO weekdays, 1 (Monday) to 7.
+    excluded_weekdays: list[int]
+    #: NTUST periods; None is every period of the course that day.
+    periods: list[str] | None
+    class_days: list[date]
+    room: str | None
+    start: str | None
+    end: str | None
+    note_zh: str | None
+    note_en: str | None
+    updated_at: datetime
+
+
+class CourseChangesResponse(BaseModel):
+    """A term's changes, whole: one missing from a later answer was deleted."""
+
+    term: str
+    changes: list[CourseChangeOut]
