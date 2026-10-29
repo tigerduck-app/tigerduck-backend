@@ -103,6 +103,9 @@ export function SemesterDatesPage() {
   const terms = data?.terms ?? [];
   const holidays = data?.holidays ?? [];
   const termOf = (day: string) => terms.find((t) => day >= t.start_date && day <= t.end_date);
+  const yearStart = `${ay + 1911}-08-01`;
+  const yearEnd = `${ay + 1912}-07-31`;
+  const inYear = (r: { start_date: string; end_date: string }) => r.end_date >= yearStart && r.start_date <= yearEnd;
 
   const termRows: TermRow[] = [
     ...terms
@@ -116,8 +119,9 @@ export function SemesterDatesPage() {
       .filter((c) => Number(c.slice(0, 3)) === ay)
       .map((code) => ({ code, term: null, status: "No dates" as Status })),
   ];
+  // A break running from July into August belongs to both years.
   const holidayRows: HolidayRow[] = holidays
-    .filter((h) => ayOf(h.start_date) === ay)
+    .filter(inYear)
     .map((h) => {
       const t = termOf(h.start_date);
       return { ...h, during: t ? termLabel(t.code) : "Between terms" };
@@ -132,11 +136,10 @@ export function SemesterDatesPage() {
   });
 
   // Years with data, today's, and one empty year ahead to add the next term in.
-  const years = [...terms.map((t) => t.start_date), ...holidays.map((h) => h.start_date)].map(ayOf);
+  const years = [...terms, ...holidays].flatMap((r) => [r.start_date, r.end_date]).map(ayOf);
   const minAy = Math.min(ayOf(today), ...years);
   const maxAy = Math.max(ayOf(today), ...years) + 1;
-  const yearHasData = termRows.length > 0 || holidayRows.length > 0
-    || terms.some((t) => t.end_date >= `${ay + 1911}-08-01` && t.start_date <= `${ay + 1912}-07-31`);
+  const yearHasData = termRows.length > 0 || holidayRows.length > 0 || terms.some(inYear);
 
   const dialogCodes = data?.undated_terms ?? [];
 
@@ -198,7 +201,7 @@ export function SemesterDatesPage() {
             <div className="flex min-w-[190px] flex-col text-center">
               <h2 className="text-[15px] font-semibold">Academic year {ay}</h2>
               <span className="text-xs tabular-nums text-ink-3">
-                {rangeText(`${ay + 1911}-08-01`, `${ay + 1912}-07-31`)}
+                {rangeText(yearStart, yearEnd)}
               </span>
             </div>
             <Button variant="quiet" size="icon" aria-label="Next academic year" className="rounded-lg text-ink-2" disabled={ay >= maxAy} onClick={() => setAy(ay + 1)}>
