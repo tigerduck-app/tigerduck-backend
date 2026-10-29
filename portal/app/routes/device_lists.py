@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 
 from ..audit import audit
 from ..db import get_pool
+from .devices import DEVICE_CLASS_SQL
 
 router = APIRouter(prefix="/api/device-lists")
 
@@ -98,6 +99,14 @@ async def update_list(
             return JSONResponse(
                 status_code=400, content={"detail": "name cannot be blank"}
             )
+        if name is not None and await conn.fetchval(
+            "SELECT 1 FROM device_lists WHERE name = $1 AND id <> $2",
+            name.strip(),
+            list_id,
+        ):
+            return JSONResponse(
+                status_code=409, content={"detail": "list name already exists"}
+            )
         await conn.execute(
             """
             UPDATE device_lists
@@ -130,12 +139,10 @@ _MEMBERS_SQL = """
 SELECT
     m.device_id::text                      AS device_id,
     COALESCE(u.student_id, u.id::text)     AS user_id,
+    u.student_id                           AS student_id,
+    u.display_name                         AS display_name,
     ud.platform                            AS platform,
-    CASE ud.platform
-        WHEN 'ios'    THEN 'iphone'
-        WHEN 'ipados' THEN 'ipad'
-        ELSE ''
-    END                                    AS device_class,
+    """ + DEVICE_CLASS_SQL + """     AS device_class,
     m.added_at                             AS added_at
 FROM device_list_members m
 JOIN user_devices ud ON ud.id = m.device_id
@@ -176,6 +183,8 @@ async def list_members(
                 {
                     "device_id": r["device_id"],
                     "user_id": r["user_id"],
+                    "student_id": r["student_id"],
+                    "display_name": r["display_name"],
                     "platform": r["platform"],
                     "device_class": r["device_class"],
                     "added_at": r["added_at"].isoformat()

@@ -1,580 +1,261 @@
-import { useState } from "react";
+// Custom push: one-off notifications from an operator, to device classes
+// narrowed by a list, a course this term, a student or a device. The portal
+// files the push jobs itself; the backend's pipeline delivers them.
+
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Loader2, Megaphone, Send, Plus, Minus } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
+import { Send } from "lucide-react";
+import { api, errorText } from "@/lib/api";
+import { monthDayTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
-import { PageHeader, Section } from "@/components/ui/section";
-import { useEnv } from "@/hooks/use-env";
+import { Skeleton } from "@/components/ui/skeleton";
+import { DataTable, useTable, type Column } from "@/components/data-table";
+import { Dot, EmptyState, ErrorAlert, PageHeading, Panel, Pill } from "@/components/page";
 import type {
-  CustomPushPreviewResponse,
   CustomPushRecentItem,
   CustomPushRequest,
   CustomPushSendResponse,
-  CustomPushTargetClass,
   DeviceList,
 } from "@/types/api";
+import { CustomPushDialog } from "./custom-push/CustomPushDialog";
+import { CLASSES, ClassIcon, KINDS } from "./custom-push/kinds";
 
-// Matches the portal's other pages (e.g. announcement.tsx uses
-// "/api/announcement/..."). The portal app proxies /api/custom-push/*
-// → backend /v2/custom-push/* once that route is wired in portal/app.
-const API_PREFIX = "/api";
+const WEEK_MS = 7 * 24 * 3600 * 1000;
+const SHOWN = 30;
 
-type FormState = {
-  title: string;
-  body: string;
-  keeps_record: boolean;
-  force_ring: boolean;
-  target_iphone: boolean;
-  target_ipad: boolean;
-  target_mac: boolean;
-  target_android: boolean;
-  target_android_tablet: boolean;
-  // Empty string means "no list filter". Stored as string to match the
-  // Select primitive's value contract; converted to int before sending.
-  list_id: string;
-  user_id: string;
-  device_id: string;
-  show_advanced: boolean;
-};
-
-const EMPTY: FormState = {
-  title: "",
-  body: "",
-  keeps_record: true,
-  force_ring: true,
-  target_iphone: true,
-  target_ipad: true,
-  target_mac: true,
-  target_android: true,
-  target_android_tablet: true,
-  list_id: "",
-  user_id: "",
-  device_id: "",
-  show_advanced: false,
-};
-
-function selectedClasses(f: FormState): CustomPushTargetClass[] {
-  const out: CustomPushTargetClass[] = [];
-  if (f.target_iphone) out.push("iphone");
-  if (f.target_ipad) out.push("ipad");
-  if (f.target_mac) out.push("mac");
-  if (f.target_android) out.push("android");
-  if (f.target_android_tablet) out.push("android_tablet");
-  return out;
+function targets(r: CustomPushRecentItem): string {
+  if (CLASSES.every((c) => r.target_classes.includes(c.id))) return "All classes";
+  return CLASSES.filter((c) => r.target_classes.includes(c.id))
+    .map((c) => c.label)
+    .join(" + ");
 }
 
-function buildRequest(f: FormState): CustomPushRequest {
-  const req: CustomPushRequest = {
-    target_classes: selectedClasses(f),
-    title: f.title,
-    body: f.body,
-    keeps_record: f.keeps_record,
-    force_ring: f.force_ring,
-  };
-  const u = f.user_id.trim();
-  const d = f.device_id.trim();
-  if (u) req.user_id = u;
-  if (d) req.device_id = d;
-  if (f.list_id) req.list_id = Number(f.list_id);
-  return req;
-}
-
-export function CustomPushPage() {
-  const env = useEnv();
-  const isProd = env.data?.env !== "development";
-  const qc = useQueryClient();
-
-  const [form, setForm] = useState<FormState>(EMPTY);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [previewCounts, setPreviewCounts] =
-    useState<Record<string, number> | null>(null);
-
-  const recentQ = useQuery<CustomPushRecentItem[]>({
-    queryKey: ["custom-push-recent"],
-    queryFn: () =>
-      api<CustomPushRecentItem[]>(`${API_PREFIX}/custom-push/recent?limit=30`),
-    // Live-update without manual refresh. 2s while anything is still
-    // queueing (scheduler tick is on the order of seconds, so the
-    // operator sees total/sent_at fill in quickly) and 10s otherwise so
-    // sends from other browser tabs / direct API calls also show up.
-    refetchInterval: (q) =>
-      q.state.data?.some((r) => r.is_queueing) ? 2000 : 10_000,
-    refetchOnWindowFocus: true,
-  });
-
-  const listsQ = useQuery<DeviceList[]>({
-    queryKey: ["device-lists"],
-    queryFn: () => api<DeviceList[]>("/api/device-lists"),
-  });
-
-  const previewMut = useMutation({
-    mutationFn: () =>
-      api<CustomPushPreviewResponse>(`${API_PREFIX}/custom-push/preview`, {
-        method: "POST",
-        json: {
-          target_classes: selectedClasses(form),
-          ...(form.user_id.trim() ? { user_id: form.user_id.trim() } : {}),
-          ...(form.device_id.trim() ? { device_id: form.device_id.trim() } : {}),
-          ...(form.list_id ? { list_id: Number(form.list_id) } : {}),
-        },
-      }),
-    onSuccess: (r) => setPreviewCounts(r.matched),
-    onError: (e) => toast.error(asMessage(e)),
-  });
-
-  const sendMut = useMutation({
-    mutationFn: () =>
-      api<CustomPushSendResponse>(`${API_PREFIX}/custom-push`, {
-        method: "POST",
-        json: buildRequest(form),
-      }),
-    onSuccess: (r) => {
-      toast.success(
-        `Pushed (${r.kind}) → request ${r.request_id}, queued ${r.queued}`,
-      );
-      setForm(EMPTY);
-      setPreviewCounts(null);
-      qc.invalidateQueries({ queryKey: ["custom-push-recent"] });
-    },
-    onError: (e) => toast.error(asMessage(e)),
-  });
-
-  function canSubmit(): boolean {
-    if (!form.title.trim()) return false;
-    if (!form.body.trim()) return false;
-    if (selectedClasses(form).length === 0) return false;
-    return !sendMut.isPending && !previewMut.isPending;
-  }
-
-  function handleSend(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canSubmit()) return;
-    if (isProd) {
-      setConfirmOpen(true);
-    } else {
-      sendMut.mutate();
-    }
-  }
-
-  const pending = sendMut.isPending || previewMut.isPending;
-
+function KindPill({ kind }: { kind: CustomPushRecentItem["kind"] }) {
+  const { label, icon: Icon, tone } = KINDS[kind];
   return (
-    <div className="space-y-8">
-      <PageHeader
-        title="Custom push"
-        description={
-          isProd ? (
-            <span>
-              <Badge variant="warning" className="mr-2">
-                production
-              </Badge>
-              Sends a real one-off notification. Confirm dialog required.
-            </span>
-          ) : (
-            "Send a real one-off notification to a specific device class."
-          )
-        }
-      />
-
-      <GoingPushes items={recentQ.data ?? []} />
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Megaphone className="h-5 w-5 text-muted-foreground" />
-            <CardTitle>New custom push</CardTitle>
-          </div>
-          <CardDescription>
-            Title appears on the lock-screen; body is the alert text. With
-            "Keep record" on, it also lands in the Announcement page.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form className="space-y-5" onSubmit={handleSend}>
-            <div className="grid gap-1.5">
-              <Label htmlFor="title">Title</Label>
-              <Input
-                id="title"
-                value={form.title}
-                onChange={(e) => setForm({ ...form, title: e.target.value })}
-                maxLength={500}
-                required
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="body">Body</Label>
-              <Textarea
-                id="body"
-                rows={4}
-                value={form.body}
-                onChange={(e) => setForm({ ...form, body: e.target.value })}
-                maxLength={2000}
-                required
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={form.keeps_record}
-                  onCheckedChange={(v) =>
-                    setForm({ ...form, keeps_record: v === true })
-                  }
-                />
-                Keep record (appears in Announcement page)
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={form.force_ring}
-                  onCheckedChange={(v) =>
-                    setForm({ ...form, force_ring: v === true })
-                  }
-                />
-                Force ring (play sound)
-              </label>
-            </div>
-
-            <div className="grid gap-1.5">
-              <Label>Target classes</Label>
-              <div className="flex flex-wrap gap-4 text-sm">
-                <label className="flex items-center gap-2">
-                  <Checkbox
-                    checked={form.target_iphone}
-                    onCheckedChange={(v) =>
-                      setForm({ ...form, target_iphone: v === true })
-                    }
-                  />
-                  iPhone
-                </label>
-                <label className="flex items-center gap-2">
-                  <Checkbox
-                    checked={form.target_ipad}
-                    onCheckedChange={(v) =>
-                      setForm({ ...form, target_ipad: v === true })
-                    }
-                  />
-                  iPad
-                </label>
-                <label className="flex items-center gap-2">
-                  <Checkbox
-                    checked={form.target_mac}
-                    onCheckedChange={(v) =>
-                      setForm({ ...form, target_mac: v === true })
-                    }
-                  />
-                  Mac
-                </label>
-                <label className="flex items-center gap-2">
-                  <Checkbox
-                    checked={form.target_android}
-                    onCheckedChange={(v) =>
-                      setForm({ ...form, target_android: v === true })
-                    }
-                  />
-                  Android
-                </label>
-                <label className="flex items-center gap-2">
-                  <Checkbox
-                    checked={form.target_android_tablet}
-                    onCheckedChange={(v) =>
-                      setForm({ ...form, target_android_tablet: v === true })
-                    }
-                  />
-                  Android tablet
-                </label>
-              </div>
-            </div>
-
-            <div className="grid gap-1.5">
-              <Label htmlFor="target-list">Target list (optional)</Label>
-              <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value={form.list_id}
-                  onValueChange={(v) => setForm({ ...form, list_id: v })}
-                >
-                  <SelectTrigger id="target-list" className="w-72 max-w-full">
-                    <SelectValue placeholder="No list filter — all matching devices" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(listsQ.data ?? []).map((l) => (
-                      <SelectItem key={l.id} value={String(l.id)}>
-                        {l.name} · {l.member_count}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {form.list_id && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setForm({ ...form, list_id: "" })}
-                  >
-                    Clear
-                  </Button>
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                When set, ANDs with the class checkboxes — e.g. pick
-                "beta-android" + check Android to send only to Android
-                beta members.
-              </p>
-            </div>
-
-            <div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  setForm({ ...form, show_advanced: !form.show_advanced })
-                }
-              >
-                {form.show_advanced ? (
-                  <Minus className="mr-1 h-4 w-4" />
-                ) : (
-                  <Plus className="mr-1 h-4 w-4" />
-                )}
-                Advanced filters
-              </Button>
-              {form.show_advanced && (
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="user_id">Student ID (optional)</Label>
-                    <Input
-                      id="user_id"
-                      placeholder="e.g. B11315025"
-                      value={form.user_id}
-                      onChange={(e) =>
-                        setForm({ ...form, user_id: e.target.value })
-                      }
-                      maxLength={64}
-                    />
-                  </div>
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="device_id">Device ID (optional)</Label>
-                    <Input
-                      id="device_id"
-                      placeholder="e.g. 3f28fcff-d162-..."
-                      value={form.device_id}
-                      onChange={(e) =>
-                        setForm({ ...form, device_id: e.target.value })
-                      }
-                      maxLength={128}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => previewMut.mutate()}
-                disabled={pending || selectedClasses(form).length === 0}
-              >
-                Preview match count
-              </Button>
-              {previewCounts && (
-                <span className="text-sm text-muted-foreground">
-                  {Object.entries(previewCounts)
-                    .filter(([k]) => k !== "total")
-                    .map(([k, v]) => `${v} ${k}`)
-                    .join(" · ")}{" "}
-                  (total {previewCounts.total ?? 0})
-                </span>
-              )}
-            </div>
-
-            <div className="flex gap-2">
-              <Button type="submit" disabled={!canSubmit()}>
-                <Send className="mr-1 h-4 w-4" />
-                {pending ? "Working…" : "Send"}
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-
-      <Section title="Recent sends (last 30)">
-        {recentQ.isLoading && (
-          <div className="text-sm text-muted-foreground">Loading…</div>
-        )}
-        {recentQ.data && recentQ.data.length === 0 && (
-          <div className="text-sm text-muted-foreground">No sends yet.</div>
-        )}
-        {recentQ.data && recentQ.data.length > 0 && (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>#</TableHead>
-                <TableHead>Kind</TableHead>
-                <TableHead>Title</TableHead>
-                <TableHead>Targets</TableHead>
-                <TableHead>Total</TableHead>
-                <TableHead>Sent</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {recentQ.data.map((r) => (
-                <TableRow key={r.id}>
-                  <TableCell className="font-mono text-xs">{r.id}</TableCell>
-                  <TableCell>
-                    <Badge
-                      variant={r.kind === "record" ? "default" : "secondary"}
-                      className="text-[10px] uppercase"
-                    >
-                      {r.kind}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="max-w-md truncate">{r.title}</TableCell>
-                  <TableCell className="text-xs">
-                    {r.target_classes.join(" + ") || "—"}
-                  </TableCell>
-                  <TableCell className="tabular-nums">
-                    {r.is_queueing ? (
-                      <Badge variant="warning" className="text-[10px] uppercase">
-                        queueing
-                      </Badge>
-                    ) : (
-                      r.total
-                    )}
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {r.sent_at ? r.sent_at.replace("T", " ").slice(0, 16) : "—"}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </Section>
-
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Send custom push in production?</DialogTitle>
-            <DialogDescription>
-              The server will fan out to every matched device. This is real
-              and immediate.
-              <br />
-              <span className="font-mono text-xs">{form.title}</span>
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                setConfirmOpen(false);
-                sendMut.mutate();
-              }}
-            >
-              Send
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+    <Pill tone={tone}>
+      <Icon aria-hidden="true" className="size-3" strokeWidth={2.4} />
+      {label}
+    </Pill>
   );
 }
 
-function asMessage(e: unknown): string {
-  if (e instanceof ApiError) return `HTTP ${e.status} — ${e.message}`;
-  if (e instanceof Error) return e.message;
-  return String(e);
-}
+const columns: Column<CustomPushRecentItem>[] = [
+  {
+    key: "request",
+    label: "Request",
+    sortValue: (r) => r.id,
+    hide: "tablet",
+    className: "font-mono text-[13px] text-ink-3",
+    cell: (r) => <span title={r.id}>{r.id.slice(0, 8)}</span>,
+  },
+  {
+    key: "kind",
+    label: "Kind",
+    filterValue: (r) => KINDS[r.kind].label,
+    filterOptions: ["Record", "Popup"],
+    hide: "phone",
+    cell: (r) => <KindPill kind={r.kind} />,
+  },
+  {
+    key: "title",
+    label: "Title",
+    sortValue: (r) => r.title,
+    className: "w-full min-w-[200px] max-w-0 phone:min-w-[120px]",
+    cell: (r) => (
+      <div title={r.title} className="truncate font-medium">
+        {r.title}
+      </div>
+    ),
+  },
+  {
+    key: "targets",
+    label: "Targets",
+    filterValue: targets,
+    hide: "phone",
+    cell: (r) => (
+      <div className="flex items-center gap-1.5">
+        <span className="sr-only">{targets(r)}</span>
+        {CLASSES.map((c) => {
+          const on = r.target_classes.includes(c.id);
+          return (
+            <ClassIcon
+              key={c.id}
+              d={c.d}
+              title={on ? c.label : `${c.label} (not targeted)`}
+              className={on ? "size-4 shrink-0 text-ink" : "size-4 shrink-0 text-field"}
+            />
+          );
+        })}
+      </div>
+    ),
+  },
+  {
+    key: "devices",
+    label: "Devices",
+    sortValue: (r) => (r.is_queueing ? -1 : r.total),
+    align: "right",
+    className: "tabular-nums",
+    cell: (r) => (r.is_queueing ? <Pill tone="warning">Queueing</Pill> : r.total.toLocaleString("en-US")),
+  },
+  {
+    key: "sent",
+    label: "Sent",
+    sortValue: (r) => r.sent_at ?? "",
+    className: "whitespace-nowrap text-[13px] tabular-nums text-ink-2",
+    cell: (r) => (r.sent_at ? monthDayTime(r.sent_at) : "—"),
+  },
+];
 
-function GoingPushes({ items }: { items: CustomPushRecentItem[] }) {
-  const going = items.filter((r) => r.is_queueing);
-  if (going.length === 0) return null;
+export function CustomPushPage() {
+  const qc = useQueryClient();
+  // null: closed; otherwise the device list it starts targeting, "" for none.
+  const [composing, setComposing] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const listParam = params.get("list");
+  const listsQ = useQuery<DeviceList[]>({
+    queryKey: ["device-lists"],
+    queryFn: () => api<DeviceList[]>("/api/device-lists"),
+    enabled: listParam !== null,
+  });
+
+  // shortcut: the 7-day tiles count the latest 100 sends; add a stats route if a week ever holds more.
+  const recentQ = useQuery<CustomPushRecentItem[]>({
+    queryKey: ["custom-push-recent"],
+    queryFn: () => api<CustomPushRecentItem[]>("/api/custom-push/recent?limit=100"),
+    // Fast while a send is still queueing, so its count fills in; slower otherwise.
+    refetchInterval: (q) => (q.state.data?.some((r) => r.is_queueing) ? 2000 : 10_000),
+    refetchOnWindowFocus: true,
+  });
+
+  const sendMut = useMutation({
+    mutationFn: (req: CustomPushRequest) =>
+      api<CustomPushSendResponse>("/api/custom-push", { method: "POST", json: req }),
+    onSuccess: (r) => {
+      toast.success(`Queued ${r.queued.toLocaleString("en-US")} devices · request ${r.request_id.slice(0, 8)}`);
+      setComposing(null);
+      qc.invalidateQueries({ queryKey: ["custom-push-recent"] });
+    },
+    onError: (e) => toast.error(`Send failed · ${errorText(e)}`),
+  });
+
+  const sends = recentQ.data;
+  const table = useTable({
+    rows: sends?.slice(0, SHOWN) ?? [],
+    columns,
+    initialSort: { key: "sent", dir: "desc" },
+  });
+  const going = sends?.filter((s) => s.is_queueing) ?? [];
+  const now = Date.now();
+  const week = sends?.filter((s) => s.sent_at && now - Date.parse(s.sent_at) < WEEK_MS) ?? [];
+  const last = sends?.find((s) => s.sent_at);
+  const tiles = [
+    {
+      label: "Sends, 7 days",
+      value: String(week.length),
+      note: `${week.filter((s) => s.kind === "record").length} record · ${week.filter((s) => s.kind === "popup").length} popup`,
+    },
+    {
+      label: "Devices reached, 7 days",
+      value: week.reduce((n, s) => n + s.total, 0).toLocaleString("en-US"),
+      note: "Sum of matched devices",
+    },
+    { label: "Last send", value: last?.sent_at ? monthDayTime(last.sent_at) : "—", note: last?.title ?? "" },
+  ];
+  // While a send is in flight the dialog stays, so a reopened one cannot send it twice.
+  const open = (listId = "") => {
+    if (sendMut.isPending) return;
+    sendMut.reset();
+    setComposing(listId);
+  };
+  // Device lists links here with ?list=<id>; it is dropped once read, so a reload opens nothing.
+  useEffect(() => {
+    if (listParam === null || !(listsQ.data || listsQ.isError)) return;
+    setParams(
+      (p) => {
+        p.delete("list");
+        return p;
+      },
+      { replace: true },
+    );
+    if (listsQ.data?.some((l) => String(l.id) === listParam)) open(listParam);
+  }, [listParam, listsQ.data, listsQ.isError]);
+  const newButton = (
+    <Button variant="ink" size="form" onClick={() => open()}>
+      <Send />
+      New push
+    </Button>
+  );
+
   return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-2">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-          <CardTitle>Going pushes</CardTitle>
-        </div>
-        <CardDescription>
-          Queued sends the dispatcher hasn't fanned out yet. Refreshes every 2s.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>#</TableHead>
-              <TableHead>Kind</TableHead>
-              <TableHead>Title</TableHead>
-              <TableHead>Targets</TableHead>
-              <TableHead>Status</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {going.map((r) => (
-              <TableRow key={r.id}>
-                <TableCell className="font-mono text-xs">{r.id}</TableCell>
-                <TableCell>
-                  <Badge
-                    variant={r.kind === "record" ? "default" : "secondary"}
-                    className="text-[10px] uppercase"
-                  >
-                    {r.kind}
-                  </Badge>
-                </TableCell>
-                <TableCell className="max-w-md truncate">{r.title}</TableCell>
-                <TableCell className="text-xs">
-                  {r.target_classes.join(" + ") || "—"}
-                </TableCell>
-                <TableCell>
-                  <Badge variant="warning" className="text-[10px] uppercase">
-                    queueing
-                  </Badge>
-                </TableCell>
-              </TableRow>
+    <>
+      <PageHeading group="Push" title="Custom push" actions={newButton} />
+
+      {going.length > 0 && (
+        <Panel
+          title={
+            <span className="flex items-center gap-2">
+              <Dot tone="warn" />
+              Sending now
+            </span>
+          }
+          aside={<span className="text-xs text-ink-3 phone:hidden">Updates every 2 s</span>}
+        >
+          <ul>
+            {going.map((g) => (
+              <li
+                key={g.id}
+                className="flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-divider px-6 py-3.5 first:border-t-0 phone:px-4"
+              >
+                <span className="font-mono text-[13px] text-ink-3 phone:hidden">{g.id.slice(0, 8)}</span>
+                <KindPill kind={g.kind} />
+                <span className="min-w-0 flex-[1_1_240px] truncate font-medium">{g.title}</span>
+                <div aria-hidden="true" className="h-1.5 flex-[0_1_220px] overflow-hidden rounded-full bg-divider">
+                  <div className="h-full w-2/5 animate-pulse rounded-full bg-dot-warn motion-reduce:animate-none" />
+                </div>
+                <span className="text-[13px] text-ink-2">Queueing</span>
+              </li>
             ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
+          </ul>
+        </Panel>
+      )}
+
+      {sends && sends.length > 0 && (
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
+          {tiles.map((k) => (
+            <div key={k.label} className="flex min-w-0 flex-col gap-1 rounded-[14px] border border-line bg-surface px-[18px] py-3.5">
+              <span className="text-xs font-medium text-ink-3">{k.label}</span>
+              <span className="text-[22px] font-semibold tabular-nums">{k.value}</span>
+              <span className="truncate text-xs text-ink-2">{k.note}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Panel title="Recent sends" aside={<span className="text-xs text-ink-3">Last 30</span>}>
+        {recentQ.isLoading && <Skeleton className="m-6 h-40" />}
+        {recentQ.isError && (
+          <ErrorAlert className="m-6 items-center" onRetry={() => recentQ.refetch()}>
+            Couldn’t load recent sends
+            <div className="font-mono text-xs">{errorText(recentQ.error)}</div>
+          </ErrorAlert>
+        )}
+        {sends && sends.length === 0 && <EmptyState icon={Send} title="No sends yet" action={newButton} />}
+        {sends && sends.length > 0 && (
+          <DataTable table={table} rowKey={(r) => r.id} minWidth={860} empty="No sends match" />
+        )}
+      </Panel>
+
+      {composing !== null && (
+        <CustomPushDialog
+          listId={composing}
+          pending={sendMut.isPending}
+          onClose={() => !sendMut.isPending && setComposing(null)}
+          onSend={(req) => sendMut.mutate(req)}
+        />
+      )}
+    </>
   );
 }

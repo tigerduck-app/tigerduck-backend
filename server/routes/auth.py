@@ -18,6 +18,7 @@ from server.auth.models import (
 )
 
 from server.auth import service
+from server.auth.moodle import display_name_from
 from server.auth.schemas import (
     LoginRequest,
     LoginResponse,
@@ -71,6 +72,11 @@ async def login(
         device_info=payload.device_info,
         client_ip=_client_ip(request),
     )
+    # The sign-in is stored first, so a failed name write cannot cost it.
+    await session.commit()
+    stored = await service.try_store_display_name(
+        state.session_factory, result.user.id, result.fullname
+    )
     return LoginResponse(
         access_token=result.access_token,
         refresh_token=result.refresh_token,
@@ -78,7 +84,10 @@ async def login(
         user=UserOut(
             id=str(result.user.id),
             student_id=result.user.student_id,
-            display_name=result.user.display_name,
+            display_name=(
+                (stored and display_name_from(result.fullname))
+                or result.user.display_name
+            ),
         ),
         device_id=str(result.device.id),
     )
@@ -225,7 +234,11 @@ async def update_credentials(
                 last_error=None,
             )
         )
-
+    # The token is stored first, so a failed name write cannot cost it.
+    await session.commit()
+    await service.try_store_display_name(
+        request.app.state.session_factory, auth.user_id, verify.fullname
+    )
     return UpdateCredentialsResponse(updated=True)
 
 

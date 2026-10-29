@@ -6,11 +6,12 @@ test_course_occurrences.py.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import func, insert, literal, select
+from sqlalchemy import event, func, insert, literal, select
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
@@ -655,6 +656,125 @@ async def test_a_term_without_dates_gets_no_reminders(
         terms=lambda first: [_term("1151", first - timedelta(days=120), first)],
     )
     assert filed == [("1151", first)]
+
+
+@contextmanager
+def _semesters_read():
+    """The semesters of the courses loaded from the database meanwhile."""
+    read: set[str] = set()
+
+    def record(course, _context):
+        read.add(course.semester)
+
+    event.listen(UserCourse, "load", record)
+    try:
+        yield read
+    finally:
+        event.remove(UserCourse, "load", record)
+
+
+async def test_a_scan_reads_no_course_of_a_term_that_ended(
+    db_session, prepared_engine, test_settings
+):
+    with _semesters_read() as read:
+        first, filed = await _scan_two_class_days(
+            db_session,
+            prepared_engine,
+            test_settings,
+            semesters=["1151", "1152"],
+            terms=lambda first: [
+                _term("1151", first - timedelta(days=300), first - timedelta(days=180)),
+                _term("1152", first - timedelta(days=120), first + timedelta(days=60)),
+            ],
+        )
+    assert filed == [("1152", first), ("1152", first + timedelta(days=1))]
+    assert read == {"1152"}
+
+
+async def test_a_scan_across_a_terms_first_day_reads_both_terms(
+    db_session, prepared_engine, test_settings
+):
+    with _semesters_read() as read:
+        first, filed = await _scan_two_class_days(
+            db_session,
+            prepared_engine,
+            test_settings,
+            semesters=["1142", "1151", "1152"],
+            terms=lambda first: [
+                _term("1151", first - timedelta(days=120), first),
+                _term("1152", first + timedelta(days=1), first + timedelta(days=120)),
+            ],
+        )
+    assert filed == [("1151", first), ("1152", first + timedelta(days=1))]
+    assert read == {"1151", "1152"}
+
+
+async def test_a_reminder_the_day_before_a_terms_first_day_is_filed(
+    db_session, prepared_engine, test_settings
+):
+    """Scanned in the break, a day before the term's first class: the
+    reminder fires in the break too, and only the new term is read."""
+    user = await _make_user(db_session)
+    local, schedule = _occurrence_in(26)
+    day = local.date()
+    db_session.add_all(
+        [
+            _course(user, course_key="OLD1", semester="1151", schedule_json=schedule),
+            _course(user, course_key="NEW1", semester="1152", schedule_json=schedule),
+            _term("1151", day - timedelta(days=200), day - timedelta(days=30)),
+            _term("1152", day, day + timedelta(days=120)),
+        ]
+    )
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local).model_copy(
+        update={"course_reminder_default_offsets_minutes": [24 * 60]}
+    )
+    with _semesters_read() as read:
+        created = await scan_course_reminders(
+            build_session_factory(prepared_engine), settings
+        )
+    assert created == 1
+    [job] = await _jobs(db_session, user.id)
+    assert job.payload["semester"] == "1152"
+    assert job.fire_at.astimezone(ZoneInfo("Asia/Taipei")).date() == day - timedelta(
+        days=1
+    )
+    assert read == {"1152"}
+
+
+async def test_with_no_term_published_a_scan_reads_every_term(
+    db_session, prepared_engine, test_settings
+):
+    """The latest synced term rings, so every term's courses are read."""
+    with _semesters_read() as read:
+        first, filed = await _scan_two_class_days(
+            db_session,
+            prepared_engine,
+            test_settings,
+            semesters=["1132", "1141"],
+            terms=lambda first: [],
+        )
+    assert filed == [("1141", first), ("1141", first + timedelta(days=1))]
+    assert read == {"1132", "1141"}
+
+
+async def test_a_scan_inside_a_break_reads_no_course(
+    db_session, prepared_engine, test_settings
+):
+    with _semesters_read() as read:
+        _first, filed = await _scan_two_class_days(
+            db_session,
+            prepared_engine,
+            test_settings,
+            semesters=["1151", "1152"],
+            terms=lambda first: [
+                _term("1151", first - timedelta(days=200), first - timedelta(days=10)),
+                _term("1152", first + timedelta(days=30), first + timedelta(days=150)),
+            ],
+        )
+    assert filed == []
+    assert read == set()
 
 
 async def test_an_opted_in_holiday_in_the_break_stays_quiet(

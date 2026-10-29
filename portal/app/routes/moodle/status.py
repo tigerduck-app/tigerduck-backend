@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from ...audit import audit
 from ...db import get_pool
+from .jobs import WAITING_TO_SIGN_IN
 
 router = APIRouter(prefix="/api/moodle")
 
@@ -29,21 +30,28 @@ async def moodle_status(pool=Depends(get_pool)):
                 except ValueError:
                     pass
 
-        counts = await conn.fetchrow("""
+        counts = await conn.fetchrow(f"""
             SELECT
                 COUNT(*) FILTER (WHERE status = 'pending')  AS active,
                 COUNT(*) FILTER (WHERE status = 'running')  AS running,
                 COUNT(*) FILTER (WHERE status = 'failed')   AS failed,
-                COUNT(*) FILTER (WHERE status = 'disabled') AS disabled
+                COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
+                COUNT(*) FILTER (
+                    WHERE status = 'pending' AND last_error IS NOT NULL
+                ) AS pending_with_error,
+                (SELECT COUNT(DISTINCT user_id) {WAITING_TO_SIGN_IN}) AS waiting_to_sign_in
             FROM sync_jobs
             WHERE job_type IN ('moodle_assignments', 'ntust_courses')
         """)
+        interval = await conn.fetchval(
+            "SELECT default_interval_seconds FROM sync_policies "
+            "WHERE job_type = 'moodle_assignments'"
+        )
 
     return {
         "suspended_until": suspended_until,
-        "job_counts": dict(counts) if counts else {
-            "active": 0, "running": 0, "failed": 0, "disabled": 0
-        },
+        "job_counts": dict(counts),
+        "interval_seconds": interval,
     }
 @router.get("/stats")
 async def moodle_stats(request: Request, pool=Depends(get_pool)):
@@ -60,6 +68,20 @@ async def moodle_stats(request: Request, pool=Depends(get_pool)):
                     FILTER (WHERE status = 'succeeded')      AS total_fetched
             FROM sync_runs
             WHERE started_at > now() - INTERVAL '24 hours'
+        """)
+        hourly = await conn.fetch("""
+            SELECT h AS hour,
+                   COUNT(sr.id) FILTER (WHERE sr.status = 'succeeded') AS succeeded,
+                   COUNT(sr.id) FILTER (WHERE sr.status = 'failed')    AS failed
+            FROM generate_series(
+                date_trunc('hour', now()) - INTERVAL '23 hours',
+                date_trunc('hour', now()),
+                INTERVAL '1 hour'
+            ) AS h
+            LEFT JOIN sync_runs sr
+                ON sr.started_at >= h AND sr.started_at < h + INTERVAL '1 hour'
+            GROUP BY h
+            ORDER BY h
         """)
         recent = await conn.fetch("""
             SELECT
@@ -82,6 +104,10 @@ async def moodle_stats(request: Request, pool=Depends(get_pool)):
             "avg_duration_s": round(float(summary["avg_duration_s"] or 0), 1),
             "total_fetched": summary["total_fetched"] or 0,
         },
+        "hourly": [
+            {"hour": h["hour"].isoformat(), "succeeded": h["succeeded"], "failed": h["failed"]}
+            for h in hourly
+        ],
         "recent_runs": [
             {
                 "id": r["id"],

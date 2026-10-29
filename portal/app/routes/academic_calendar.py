@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import asyncpg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -60,15 +61,19 @@ def _parse_range(body: dict) -> tuple[date, date] | JSONResponse:
 
 @router.get("")
 async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
-    """Terms, holidays, and the coverage gaps worth an operator's attention."""
+    """Terms, holidays, and the terms the clients use that have no dates."""
     async with pool.acquire() as conn:
         terms = await conn.fetch(
             "SELECT code, start_date, end_date, name_zh, name_en "
             "FROM semester_terms ORDER BY code DESC"
         )
+        # One grouped scan: the overrides' indexes lead with user_id.
         holidays = await conn.fetch(
-            "SELECT id, name_zh, name_en, start_date, end_date "
-            "FROM academic_holidays ORDER BY start_date"
+            "SELECT h.id, h.name_zh, h.name_en, h.start_date, h.end_date, "
+            "coalesce(o.n, 0) AS overrides FROM academic_holidays h "
+            "LEFT JOIN (SELECT holiday_id, count(*) AS n FROM user_holiday_overrides "
+            "WHERE notify GROUP BY holiday_id) o ON o.holiday_id = h.id "
+            "ORDER BY h.start_date"
         )
         # Terms the clients have filed courses under but that have no dates
         # yet. Without dates the apps cannot place a semester boundary in the
@@ -83,52 +88,13 @@ async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
     return JSONResponse(
         content={
             "terms": [_term_to_dict(r) for r in terms],
-            "holidays": [_holiday_to_dict(r) for r in holidays],
+            # How many users chose reminders anyway, which a delete drops.
+            "holidays": [
+                {**_holiday_to_dict(r), "overrides": r["overrides"]} for r in holidays
+            ],
             "undated_terms": [r["code"] for r in undated],
-            "gaps": _uncovered_gaps(terms, holidays),
         }
     )
-
-
-def _uncovered_gaps(terms, holidays) -> list[dict]:
-    """Between-term stretches that no holiday covers.
-
-    Suppression comes only from holidays, so a gap nobody authored a holiday
-    for is a stretch where every device keeps ringing for the previous
-    term's timetable. This is the one failure mode of that rule, and it is
-    silent — the operator sees nothing wrong until a student is woken at 8am
-    over winter break. Surfacing it turns a silent mistake into a visible
-    to-do.
-    """
-    ordered = sorted(terms, key=lambda r: r["start_date"])
-    covered = [(h["start_date"], h["end_date"]) for h in holidays]
-    gaps: list[dict] = []
-    for earlier, later in zip(ordered, ordered[1:]):
-        gap_start = earlier["end_date"]
-        gap_end = later["start_date"]
-        # The day after one term ends through the day before the next opens.
-        # A zero-length or negative gap means the terms touch or overlap;
-        # there is nothing to cover.
-        if (gap_end - gap_start).days <= 1:
-            continue
-        day_after = gap_start.toordinal() + 1
-        day_before = gap_end.toordinal() - 1
-        uncovered = [
-            date.fromordinal(d)
-            for d in range(day_after, day_before + 1)
-            if not any(s <= date.fromordinal(d) <= e for s, e in covered)
-        ]
-        if uncovered:
-            gaps.append(
-                {
-                    "after": earlier["code"],
-                    "before": later["code"],
-                    "start_date": uncovered[0].isoformat(),
-                    "end_date": uncovered[-1].isoformat(),
-                    "uncovered_days": len(uncovered),
-                }
-            )
-    return gaps
 
 
 @router.put("/terms/{code}")
@@ -163,9 +129,15 @@ async def upsert_term(code: str, request: Request, pool=Depends(get_pool)) -> JS
 async def delete_term(
     code: str, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("DELETE FROM semester_terms WHERE code = $1", code)
-        await audit(conn, request, "calendar.term.delete", code=code)
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM semester_terms WHERE code = $1", code)
+            await audit(conn, request, "calendar.term.delete", code=code)
+    except asyncpg.ForeignKeyViolationError:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "delete the term's course changes first"},
+        )
     return JSONResponse(content={"deleted": code})
 
 

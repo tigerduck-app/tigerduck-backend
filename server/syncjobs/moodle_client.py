@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -204,7 +205,12 @@ class AssignmentFetcher(Protocol):
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]: ...
 
     async def fetch_submission_status(
-        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+        self,
+        *,
+        token: str,
+        assignment_ids: list[int],
+        max_concurrency: int,
+        on_fullname: Callable[[str], None] | None = None,
     ) -> dict[int, FetchedSubmission]: ...
 
 
@@ -215,7 +221,9 @@ class SubmissionStatusChecker(Protocol):
 
 
 class CourseFetcher(Protocol):
-    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]: ...
+    async def fetch_courses(
+        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+    ) -> list[FetchedCourse]: ...
 
 
 class TokenObtainer(Protocol):
@@ -301,8 +309,13 @@ def _without_token(exc: BaseException, token: str) -> BaseException:
 
 
 async def _get_moodle_userid(
-    client: httpx.AsyncClient, base_url: str, token: str
+    client: httpx.AsyncClient,
+    base_url: str,
+    token: str,
+    on_fullname: Callable[[str], None] | None = None,
 ) -> int:
+    """The token owner's Moodle user id, handing their full name, which the
+    same answer carries, to `on_fullname`."""
     params = {
         "wstoken": token,
         "wsfunction": "core_webservice_get_site_info",
@@ -319,6 +332,9 @@ async def _get_moodle_userid(
         raise MoodleUnreachable(errorcode or "moodle_exception")
     if not isinstance(body, dict) or "userid" not in body:
         raise MoodleUnreachable("missing_userid_in_site_info")
+    fullname = body.get("fullname")
+    if on_fullname is not None and isinstance(fullname, str):
+        on_fullname(fullname)
     return int(body["userid"])
 
 
@@ -499,7 +515,12 @@ class HttpAssignmentFetcher:
         return fetched
 
     async def fetch_submission_status(
-        self, *, token: str, assignment_ids: list[int], max_concurrency: int
+        self,
+        *,
+        token: str,
+        assignment_ids: list[int],
+        max_concurrency: int,
+        on_fullname: Callable[[str], None] | None = None,
     ) -> dict[int, FetchedSubmission]:
         """Submission state for the given assignments, keyed by assignment id.
 
@@ -558,7 +579,9 @@ class HttpAssignmentFetcher:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                userid = await _get_moodle_userid(client, self._base_url, token)
+                userid = await _get_moodle_userid(
+                    client, self._base_url, token, on_fullname
+                )
 
                 async def probe(assignment_id: int) -> None:
                     # This `try` wraps `probe`'s *whole body*, not just the
@@ -778,12 +801,16 @@ class HttpCourseFetcher:
         self._timeout = timeout_seconds
         self._transport = transport
 
-    async def fetch_courses(self, *, token: str) -> list[FetchedCourse]:
+    async def fetch_courses(
+        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+    ) -> list[FetchedCourse]:
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                userid = await _get_moodle_userid(client, self._base_url, token)
+                userid = await _get_moodle_userid(
+                    client, self._base_url, token, on_fullname
+                )
                 params = {
                     "wstoken": token,
                     "wsfunction": "core_enrol_get_users_courses",

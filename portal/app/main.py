@@ -34,6 +34,7 @@ from .routes import (
     announcement,
     audit,
     backup,
+    course_changes,
     custom_push,
     deregister,
     device_lists,
@@ -43,6 +44,7 @@ from .routes import (
     moodle,
     status,
     tls_pins,
+    users,
 )
 
 
@@ -90,6 +92,7 @@ if (_WEB_DIST / "assets").exists():
     )
 
 app.include_router(academic_calendar.router)
+app.include_router(course_changes.router)
 app.include_router(status.router)
 app.include_router(status.liveness_router)
 app.include_router(logs.router)
@@ -103,6 +106,7 @@ app.include_router(links.router)
 app.include_router(moodle.router)
 app.include_router(audit.router)
 app.include_router(tls_pins.router)
+app.include_router(users.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

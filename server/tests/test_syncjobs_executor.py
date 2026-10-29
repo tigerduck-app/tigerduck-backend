@@ -27,12 +27,19 @@ from server.db import build_session_factory
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key, scan_assignment_reminders
 from server.logging_setup import configure
-from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
+from server.auth import service as auth_service
+from server.sync.models import (
+    UserAssignment,
+    UserChangeLog,
+    UserCourse,
+    UserSyncState,
+)
 from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
+    FetchedCourse,
     FetchedSubmission,
     HttpAssignmentFetcher,
     MoodleRateLimited,
@@ -65,13 +72,16 @@ class StubFetcher:
 
 
 class StubCourseFetcher:
-    def __init__(self, results=None, errors=()):
+    def __init__(self, results=None, errors=(), fullname=None):
         self.results = results if results is not None else []
         self.errors = list(errors)
+        self.fullname = fullname
 
-    async def fetch_courses(self, *, token):
+    async def fetch_courses(self, *, token, on_fullname=None):
         if self.errors:
             raise self.errors.pop(0)
+        if on_fullname is not None and self.fullname is not None:
+            on_fullname(self.fullname)
         return self.results
 
 
@@ -1237,7 +1247,7 @@ async def test_assignment_sync_probes_submission_status(
     await _setup_user_job(db_session)
     probed: list[list[int]] = []
 
-    async def fake_probe(*, token, assignment_ids, max_concurrency):
+    async def fake_probe(*, token, assignment_ids, max_concurrency, **_):
         probed.append(list(assignment_ids))
         return {}
 
@@ -1263,7 +1273,7 @@ async def test_probe_failure_does_not_fail_the_run(
     """A dead probe must not take the assignment sync down with it."""
     _, _, job = await _setup_user_job(db_session)
 
-    async def exploding_probe(*, token, assignment_ids, max_concurrency):
+    async def exploding_probe(*, token, assignment_ids, max_concurrency, **_):
         raise RuntimeError("moodle is having a day")
 
     fetcher = StubFetcher(
@@ -1300,7 +1310,7 @@ async def test_submission_probe_token_invalid_disables_job(
     identically either way."""
     _, account, job = await _setup_user_job(db_session)
 
-    async def dead_token_probe(*, token, assignment_ids, max_concurrency):
+    async def dead_token_probe(*, token, assignment_ids, max_concurrency, **_):
         raise MoodleTokenInvalid("invalidtoken")
 
     fetcher = StubFetcher(
@@ -1329,7 +1339,7 @@ async def test_submission_probe_rate_limit_reaches_backoff(
     swallowed as routine probe noise."""
     _, _, job = await _setup_user_job(db_session)
 
-    async def rate_limited_probe(*, token, assignment_ids, max_concurrency):
+    async def rate_limited_probe(*, token, assignment_ids, max_concurrency, **_):
         raise MoodleRateLimited("http_429")
 
     fetcher = StubFetcher(
@@ -1414,7 +1424,7 @@ async def test_submission_status_settings_are_threaded_through(
     await _setup_user_job(db_session)
     seen: dict = {}
 
-    async def recording_probe(*, token, assignment_ids, max_concurrency):
+    async def recording_probe(*, token, assignment_ids, max_concurrency, **_):
         seen["assignment_ids"] = list(assignment_ids)
         seen["max_concurrency"] = max_concurrency
         return {}
@@ -1480,7 +1490,7 @@ async def test_a_probe_escalation_keeps_the_committed_list_sync(
     on the probe roll back a list sync that had succeeded."""
     user, _, job = await _setup_user_job(db_session)
 
-    async def escalating_probe(*, token, assignment_ids, max_concurrency):
+    async def escalating_probe(*, token, assignment_ids, max_concurrency, **_):
         raise escalation
 
     fetcher = StubFetcher(
@@ -1539,7 +1549,7 @@ async def test_the_probe_waits_on_moodle_without_the_sync_state_lock(
     await db_session.commit()
     seen: dict = {}
 
-    async def observing_probe(*, token, assignment_ids, max_concurrency):
+    async def observing_probe(*, token, assignment_ids, max_concurrency, **_):
         async with prepared_engine.connect() as conn:
             try:
                 row = (
@@ -1597,7 +1607,7 @@ async def test_a_job_taken_back_while_the_probe_ran_is_left_to_its_new_owner(
     _, _, job = await _setup_user_job(db_session)
 
     async def probe_while_the_job_is_recovered(
-        *, token, assignment_ids, max_concurrency
+        *, token, assignment_ids, max_concurrency, **_
     ):
         async with prepared_engine.begin() as conn:
             await conn.execute(
@@ -1695,7 +1705,7 @@ async def test_an_unexpected_probe_failure_is_logged_without_the_token(
     inner_message = f"upstream refused {leaky_url}"
     outer_message = f"probe blew up handling {leaky_url}"
 
-    async def leaky_probe(*, token, assignment_ids, max_concurrency):
+    async def leaky_probe(*, token, assignment_ids, max_concurrency, **_):
         try:
             raise ValueError(inner_message)
         except ValueError:
@@ -1749,7 +1759,7 @@ async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
     await db_session.commit()
     submitted_at = datetime(2026, 9, 10, 12, 0, tzinfo=UTC)
 
-    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+    async def submitted_probe(*, token, assignment_ids, max_concurrency, **_):
         return {
             aid: FetchedSubmission(
                 moodle_assignment_id=aid, is_submitted=True, submitted_at=submitted_at
@@ -1787,7 +1797,7 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
     user, _, _ = await _setup_user_job(db_session)
     due_at = datetime.now(UTC) + timedelta(hours=10)
 
-    async def submitted_probe(*, token, assignment_ids, max_concurrency):
+    async def submitted_probe(*, token, assignment_ids, max_concurrency, **_):
         return {
             aid: FetchedSubmission(
                 moodle_assignment_id=aid, is_submitted=True, submitted_at=None
@@ -1836,7 +1846,7 @@ async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_
         MoodleUnreachable("submission_probe_unreachable"),
     ]
 
-    async def probe(*, token, assignment_ids, max_concurrency):
+    async def probe(*, token, assignment_ids, max_concurrency, **_):
         answer = answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -1897,7 +1907,7 @@ async def test_a_date_the_list_moves_back_is_probed_and_the_answer_decides(
     await db_session.commit()
     probed: list[list[int]] = []
 
-    async def probe(*, token, assignment_ids, max_concurrency):
+    async def probe(*, token, assignment_ids, max_concurrency, **_):
         probed.append(list(assignment_ids))
         if answer == "no-answer":
             return {}
@@ -1925,3 +1935,146 @@ async def test_a_date_the_list_moves_back_is_probed_and_the_answer_decides(
         )
     ).scalar_one()
     assert due_at == (later if kept else moodle_due)
+
+
+async def _display_name(db_session, user) -> str | None:
+    user_id = user.id
+    db_session.expire_all()
+    return await db_session.scalar(
+        select(User.display_name).where(User.id == user_id)
+    )
+
+
+async def _setup_course_job(db_session, *, display_name=None):
+    user, _, job = await _setup_user_job(db_session)
+    job.job_type = SyncJobType.ntust_courses.value
+    user.display_name = display_name
+    await db_session.execute(
+        update(SyncPolicy)
+        .where(SyncPolicy.job_type == SyncJobType.ntust_courses.value)
+        .values(enabled=True)
+    )
+    await db_session.commit()
+    return user
+
+
+async def test_a_course_sync_fills_in_a_missing_name(
+    db_session, prepared_engine, test_settings
+):
+    user = await _setup_course_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(fullname="  Test Student  "),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert await _display_name(db_session, user) == "Test Student"
+
+
+async def test_a_course_sync_without_a_name_keeps_the_stored_one(
+    db_session, prepared_engine, test_settings
+):
+    user = await _setup_course_job(db_session, display_name="Test Student")
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(fullname="   "),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert await _display_name(db_session, user) == "Test Student"
+
+
+async def test_the_submission_probe_fills_in_a_missing_name(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    user, _, _ = await _setup_user_job(db_session)
+
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+        on_fullname("Test Student")
+        return {}
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert await _display_name(db_session, user) == "Test Student"
+
+
+# Postgres refuses a NUL in text, so the name write fails for real.
+_REFUSED_NAME = "Test\x00Student"
+
+
+async def test_a_name_the_database_refuses_keeps_the_course_sync(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    user = await _setup_course_job(db_session)
+    user_id = user.id
+    course = FetchedCourse(
+        moodle_course_id=7001,
+        short_name="DS",
+        full_name="Data Structures",
+        category_id=None,
+        enrolled_user_count=None,
+    )
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(results=[course], fullname=_REFUSED_NAME),
+    )
+    monkeypatch.setattr(
+        auth_service, "logger", structlog.get_logger(auth_service.__name__)
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        assert await run_sync_tick(worker) == 1
+
+    assert await _display_name(db_session, user) is None
+    courses = await db_session.scalars(
+        select(UserCourse).where(UserCourse.user_id == user_id)
+    )
+    assert len(courses.all()) == 1
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "succeeded"
+    assert any(e["event"] == "auth.display_name.not_stored" for e in logs)
+    assert "Student" not in repr(logs)
+
+
+async def test_a_name_the_database_refuses_keeps_the_probe_result(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    user, _, _ = await _setup_user_job(db_session)
+    user_id = user.id
+
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+        on_fullname(_REFUSED_NAME)
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=True,
+                submitted_at=datetime.now(UTC),
+            )
+        }
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert await _display_name(db_session, user) is None
+    assignment = await db_session.scalar(
+        select(UserAssignment).where(UserAssignment.user_id == user_id)
+    )
+    assert assignment.provider_is_submitted is True
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "succeeded"

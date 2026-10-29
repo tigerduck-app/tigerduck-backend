@@ -31,14 +31,20 @@ BACKEND_AUDITED_WRITES = {
 # devices (user.list).
 PERSONAL_READS = {
     ("audit.py", "list_audit"),
+    ("deregister.py", "lookup_students"),
+    ("deregister.py", "preview_student"),
     ("device_lists.py", "list_members"),
     ("devices.py", "list_devices"),
     ("moodle/inspection.py", "list_moodle_students"),
+    ("moodle/inspection.py", "search_students"),
+    ("moodle/inspection.py", "student_timetable"),
     ("moodle/inspection.py", "sync_courses"),
     ("moodle/inspection.py", "sync_events"),
     ("moodle/jobs.py", "list_moodle_jobs"),
     ("moodle/logs.py", "sync_logs"),
     ("moodle/status.py", "moodle_stats"),
+    ("users.py", "get_user"),
+    ("users.py", "list_users"),
 }
 # GETs that return neither.
 OTHER_READS = {
@@ -46,6 +52,8 @@ OTHER_READS = {
     ("announcement.py", "get_bulletin"),
     ("announcement.py", "list_bulletins"),
     ("announcement.py", "taxonomy"),
+    ("course_changes.py", "list_changes"),
+    ("course_changes.py", "list_courses"),
     ("custom_push.py", "recent"),
     ("device_lists.py", "get_list"),
     ("device_lists.py", "list_lists"),
@@ -57,7 +65,9 @@ OTHER_READS = {
     ("status.py", "health"),
     ("status.py", "ready"),
     ("status.py", "status_payload"),
+    ("status.py", "version_info"),
     ("tls_pins.py", "get_tls_pins"),
+    ("users.py", "user_stats"),
 }
 
 

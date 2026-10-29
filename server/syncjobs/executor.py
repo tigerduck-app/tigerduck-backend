@@ -45,6 +45,7 @@ import asyncio
 import os
 import socket
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -62,6 +63,7 @@ from server.auth.models import (
     PushTokenStatus,
     UserDevice,
 )
+from server.auth.service import try_store_display_name
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -364,10 +366,13 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             return
         job_type, user_id, token, credential_nonce = started
         now = datetime.now(UTC)
+        names: list[str] = []
         probe_submissions = job_type != SyncJobType.ntust_courses.value
         if not probe_submissions:
             try:
-                fetched = await worker.course_fetcher.fetch_courses(token=token)
+                fetched = await worker.course_fetcher.fetch_courses(
+                    token=token, on_fullname=names.append
+                )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
         else:
@@ -445,12 +450,18 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     now=now,
                     listed={a.moodle_assignment_id: a for a in fetched},
                     recheck_ids=stats.recheck_ids,
+                    on_fullname=names.append,
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
             await _finish_after_probe(
                 worker, job_id=job_id, run_id=run_id, stats=stats, now=now
             )
+        # Last, once the fetched data is stored: a user who does not sign in
+        # again still gets a name, and a failed write costs nothing else.
+        await try_store_display_name(
+            worker.session_factory, user_id, names[-1] if names else None
+        )
     except CredentialInvalid as exc:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
@@ -676,6 +687,7 @@ async def _refresh_submission_status(
     now: datetime,
     listed: dict[int, FetchedAssignment],
     recheck_ids: frozenset[int],
+    on_fullname: Callable[[str], None],
 ) -> None:
     """Best-effort probe of assignments near their due date, or with an
     extension, and of those whose due date the list sync just moved back
@@ -744,6 +756,7 @@ async def _refresh_submission_status(
                 token=token,
                 assignment_ids=assignment_ids,
                 max_concurrency=settings.submission_status_max_concurrency,
+                on_fullname=on_fullname,
             )
         except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
             raise

@@ -4,53 +4,49 @@
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Link2, Pencil, Play, Plus } from "lucide-react";
+import { Link2, Pencil, Play, Plus, Search } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/cn";
+import { monthDay, monthDayTime } from "@/lib/format";
+import { useEnv } from "@/hooks/use-env";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { PageHeader } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DataTable, useTable, type Column } from "@/components/data-table";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
+  Dot,
+  EmptyState,
+  ErrorAlert,
+  PageHeading,
+  Panel,
+  Pill,
+  Switch,
+  type DotTone,
+  type Tone,
+} from "@/components/page";
 import type { LinkRow, LinkTestResult } from "@/types/api";
-import { asMessage, formatTs } from "./lists/format";
+import { asMessage } from "./lists/format";
+import { LinkDialog, type LinkBody } from "./links/LinkDialog";
 
-const RULES_EXAMPLE = `[
-  {"type": "status", "equals": 200},
-  {"type": "final_host", "in": ["www.academic.ntust.edu.tw"]},
-  {"type": "href_suffix_count", "suffix": ".ics", "min": 1}
-]`;
-
-type Draft = {
-  name: string;
-  target_url: string;
-  check_interval_minutes: string;
-  expectations: string;
+type Check = "OK" | "Failing" | "Not checked" | "Disabled";
+const CHECKS: Check[] = ["OK", "Failing", "Not checked", "Disabled"];
+const CHECK_TONE: Record<Check, [Tone, DotTone]> = {
+  OK: ["success", "ok"],
+  Failing: ["danger", "bad"],
+  "Not checked": ["neutral", "off"],
+  Disabled: ["neutral", "off"],
 };
 
-const EMPTY: Draft = {
-  name: "",
-  target_url: "",
-  check_interval_minutes: "60",
-  expectations: "",
-};
+function checkOf(link: LinkRow): Check {
+  if (!link.enabled) return "Disabled";
+  if (link.last_check_ok === null) return "Not checked";
+  return link.last_check_ok ? "OK" : "Failing";
+}
+
+function every(minutes: number): string {
+  if (minutes % 1440 === 0) return `${minutes / 1440} d`;
+  if (minutes % 60 === 0) return `${minutes / 60} h`;
+  return `${minutes} min`;
+}
 
 // FastAPI answers a body it cannot validate with a list of errors.
 function errorText(e: unknown): string {
@@ -68,20 +64,15 @@ function errorText(e: unknown): string {
   return asMessage(e);
 }
 
-function CheckBadge({ link }: { link: LinkRow }) {
-  if (!link.enabled) return <Badge variant="muted">Disabled</Badge>;
-  if (link.last_check_ok === null) return <Badge variant="muted">Not checked</Badge>;
-  if (link.last_check_ok) return <Badge variant="success">OK</Badge>;
-  return <Badge variant="destructive">Failing</Badge>;
-}
-
 export function LinksPage() {
   const qc = useQueryClient();
-  // null: closed. `name` is "" for a new link; `key` tells editors apart.
-  const [editor, setEditor] = useState<{ key: number; name: string } | null>(null);
-  const editing = editor?.name ?? null;
+  const env = useEnv();
+  // null: closed. `link` is null for a new one; `key` tells editors apart.
+  const [editor, setEditor] = useState<{ key: number; link: LinkRow | null } | null>(null);
+  const editorKey = useRef(0);
+  editorKey.current = editor?.key ?? 0;
   const openedEditors = useRef(0);
-  const [draft, setDraft] = useState<Draft>(EMPTY);
+  const [query, setQuery] = useState("");
 
   const linksQ = useQuery<{ links: LinkRow[] }>({
     queryKey: ["links"],
@@ -92,24 +83,11 @@ export function LinksPage() {
   const refresh = () => qc.invalidateQueries({ queryKey: ["links"] });
 
   const saveMut = useMutation({
-    mutationFn: async ({ target, draft }: { key: number; target: string; draft: Draft }) => {
-      let expectations: unknown;
-      try {
-        expectations = JSON.parse(draft.expectations || "[]");
-      } catch {
-        throw new Error("Rules must be a JSON array");
-      }
-      const body = {
-        target_url: draft.target_url.trim(),
-        check_interval_minutes: Number(draft.check_interval_minutes),
-        expectations,
-      };
+    mutationFn: ({ target, body }: { key: number; target: string; body: LinkBody }) => {
+      const { name, ...fields } = body;
       return target
-        ? api<LinkRow>(`/api/links/${target}`, { method: "PATCH", json: body })
-        : api<LinkRow>("/api/links", {
-            method: "POST",
-            json: { name: draft.name.trim(), ...body },
-          });
+        ? api<LinkRow>(`/api/links/${target}`, { method: "PATCH", json: fields })
+        : api<LinkRow>("/api/links", { method: "POST", json: { name, ...fields } });
     },
     onSuccess: (link, { key, target }) => {
       toast.success(`${target ? "Saved" : "Created"} ${link.name}`);
@@ -117,7 +95,10 @@ export function LinksPage() {
       setEditor((current) => (current?.key === key ? null : current));
       refresh();
     },
-    onError: (e) => toast.error(errorText(e)),
+    // The open editor shows its own error; one closed meanwhile gets a toast.
+    onError: (e, { key }) => {
+      if (editorKey.current !== key) toast.error(errorText(e));
+    },
   });
 
   const toggleMut = useMutation({
@@ -144,212 +125,252 @@ export function LinksPage() {
   });
 
   const openEditor = (link: LinkRow | null) => {
-    setDraft(
-      link
-        ? {
-            name: link.name,
-            target_url: link.target_url,
-            check_interval_minutes: String(link.check_interval_minutes),
-            expectations: JSON.stringify(link.expectations, null, 2),
-          }
-        : EMPTY,
-    );
     openedEditors.current += 1;
-    setEditor({ key: openedEditors.current, name: link ? link.name : "" });
+    setEditor({ key: openedEditors.current, link });
   };
 
+  const columns: Column<LinkRow>[] = [
+    {
+      key: "name",
+      label: "Name",
+      sortValue: (l) => l.name,
+      cell: (l) => (
+        <div title={l.name} className="max-w-[240px] truncate tablet:max-w-[160px] phone:max-w-[140px]">
+          {l.name}
+        </div>
+      ),
+      className: "whitespace-nowrap font-mono text-[13px] font-medium",
+    },
+    {
+      key: "target",
+      label: "Target",
+      sortValue: (l) => l.target_url,
+      hide: "phone",
+      // Takes the room the other columns leave, truncating the URL to fit.
+      className: "w-full min-w-[160px] max-w-0 tablet:min-w-[120px]",
+      cell: (l) => (
+        <>
+          <a
+            href={l.target_url}
+            target="_blank"
+            rel="noreferrer noopener"
+            title={l.target_url}
+            className="block truncate text-[13px] text-link hover:text-link-hover"
+          >
+            {l.target_url}
+          </a>
+          <span className="text-xs text-ink-3">
+            {l.expectations.length} {l.expectations.length === 1 ? "rule" : "rules"}
+          </span>
+        </>
+      ),
+    },
+    {
+      key: "check",
+      label: "Check",
+      sortValue: checkOf,
+      filterValue: checkOf,
+      filterOptions: CHECKS,
+      className: "max-w-[200px] tablet:max-w-[180px]",
+      cell: (l) => {
+        const check = checkOf(l);
+        return (
+          <>
+            <Pill tone={CHECK_TONE[check][0]} dot={CHECK_TONE[check][1]}>
+              {check}
+            </Pill>
+            {l.enabled && l.last_check_detail && (
+              <div
+                title={l.last_check_detail}
+                className="mt-1 truncate text-xs text-ink-3 phone:hidden"
+              >
+                {l.last_check_detail}
+              </div>
+            )}
+          </>
+        );
+      },
+    },
+    {
+      key: "checked",
+      label: "Last checked",
+      sortValue: (l) => l.last_check_at ?? "",
+      hide: "phone",
+      className: "whitespace-nowrap text-[13px] tabular-nums text-ink-2",
+      cell: (l) => (l.last_check_at ? monthDayTime(l.last_check_at) : "—"),
+    },
+    {
+      key: "interval",
+      label: "Every",
+      sortValue: (l) => l.check_interval_minutes,
+      align: "right",
+      hide: "tablet",
+      className: "whitespace-nowrap text-[13px] tabular-nums",
+      cell: (l) => every(l.check_interval_minutes),
+    },
+    {
+      key: "updated",
+      label: "Updated",
+      sortValue: (l) => l.updated_at,
+      hide: "tablet",
+      className: "whitespace-nowrap text-[13px] text-ink-2",
+      cell: (l) => (
+        <>
+          {monthDay(l.updated_at)}
+          <div className="text-xs text-ink-3">{l.updated_by}</div>
+        </>
+      ),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "py-2 last:pr-4",
+      cell: (l) => (
+        <div className="flex items-center justify-end gap-1 whitespace-nowrap">
+          <Button
+            variant="line"
+            className="h-[34px] gap-1.5 rounded-lg px-3 text-[13px] font-normal [&_svg]:size-[13px]"
+            disabled={testMut.isPending}
+            onClick={() => testMut.mutate(l.name)}
+          >
+            <Play className="fill-current" strokeWidth={0} />
+            {testMut.isPending && testMut.variables === l.name ? "Testing…" : "Test"}
+          </Button>
+          <Switch
+            checked={l.enabled}
+            label={`${l.enabled ? "Disable" : "Enable"} ${l.name}`}
+            disabled={toggleMut.isPending}
+            onCheckedChange={() => toggleMut.mutate(l)}
+            className="mx-1"
+          />
+          <Button
+            variant="quiet"
+            size="iconSm"
+            aria-label={`Edit ${l.name}`}
+            title="Edit"
+            onClick={() => openEditor(l)}
+          >
+            <Pencil />
+          </Button>
+        </div>
+      ),
+    },
+  ];
+
   const links = linksQ.data?.links;
+  const q = query.trim().toLowerCase();
+  const table = useTable({
+    rows: links ?? [],
+    columns,
+    initialSort: { key: "name", dir: "asc" },
+    search: q,
+    match: (l, term) =>
+      l.name.toLowerCase().includes(term) || l.target_url.toLowerCase().includes(term),
+  });
+  const checkFilter = table.filters.check ?? [];
+  const host = env.data?.backend_public_url.replace(/^https?:\/\//, "").replace(/\/+$/, "") ?? "";
 
   return (
-    <div className="space-y-6">
-      <PageHeader
+    <>
+      <PageHeading
+        group="System"
         title="Links"
-        description="Redirects served at /links/<name>."
+        meta={`${host}/links/<name>`}
         actions={
-          <Button onClick={() => openEditor(null)}>
-            <Plus className="mr-1 h-4 w-4" />
+          <Button variant="ink" size="form" onClick={() => openEditor(null)}>
+            <Plus />
             New link
           </Button>
         }
       />
 
-      {linksQ.isLoading && <Skeleton className="h-40" />}
-      {linksQ.isError && (
-        <Card>
-          <CardContent className="text-sm text-destructive">
-            Failed to load links: {errorText(linksQ.error)}
-          </CardContent>
-        </Card>
-      )}
-      {links && links.length === 0 && (
-        <Card>
-          <CardContent className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Link2 className="h-4 w-4" />
-            No links yet.
-          </CardContent>
-        </Card>
-      )}
       {links && links.length > 0 && (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Check</TableHead>
-              <TableHead>Last checked</TableHead>
-              <TableHead className="text-right" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {links.map((link) => (
-              <TableRow key={link.name}>
-                <TableCell
-                  className="max-w-[10rem] truncate font-mono text-sm font-medium"
-                  title={link.name}
-                >
-                  {link.name}
-                </TableCell>
-                <TableCell className="max-w-[12rem] lg:max-w-xs">
-                  <a
-                    href={link.target_url}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="block truncate text-sm text-primary underline-offset-4 hover:underline"
-                    title={link.target_url}
-                  >
-                    {link.target_url}
-                  </a>
-                </TableCell>
-                <TableCell className="max-w-[14rem]">
-                  <CheckBadge link={link} />
-                  {link.last_check_detail && (
-                    <div
-                      className="mt-1 truncate text-xs text-muted-foreground"
-                      title={link.last_check_detail}
-                    >
-                      {link.last_check_detail}
-                    </div>
-                  )}
-                </TableCell>
-                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                  <div>{link.last_check_at ? formatTs(link.last_check_at) : "—"}</div>
-                  <div>every {link.check_interval_minutes} min</div>
-                </TableCell>
-                <TableCell>
-                  <div className="flex justify-end gap-1 whitespace-nowrap">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={testMut.isPending}
-                      onClick={() => testMut.mutate(link.name)}
-                    >
-                      <Play className="mr-1 h-3.5 w-3.5" />
-                      {testMut.isPending && testMut.variables === link.name
-                        ? "Testing…"
-                        : "Test"}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={toggleMut.isPending}
-                      onClick={() => toggleMut.mutate(link)}
-                    >
-                      {link.enabled ? "Disable" : "Enable"}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8"
-                      title="Edit"
-                      aria-label={`Edit ${link.name}`}
-                      onClick={() => openEditor(link)}
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3 phone:grid-cols-2">
+          {CHECKS.map((k) => {
+            const on = checkFilter.length === 1 && checkFilter[0] === k;
+            return (
+              <button
+                key={k}
+                type="button"
+                aria-pressed={on}
+                onClick={() => table.setFilter("check", on ? [] : [k])}
+                className={cn(
+                  "flex flex-col gap-1 rounded-[14px] border-2 bg-surface px-4 py-3.5 text-left",
+                  on ? "border-ink" : "border-line hover:border-field",
+                )}
+              >
+                <span className="flex items-center gap-1.5 text-xs font-medium text-ink-3">
+                  <Dot tone={CHECK_TONE[k][1]} />
+                  {k}
+                </span>
+                <span className="text-2xl font-semibold tabular-nums">
+                  {links.filter((l) => checkOf(l) === k).length}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       )}
 
-      <Dialog
-        open={editing !== null}
-        onOpenChange={(open) => !open && setEditor(null)}
+      <Panel
+        title="Redirects"
+        aside={
+          <label className="flex h-9 w-[280px] max-w-full items-center gap-2 rounded-[9px] border border-field px-3 text-ink-3">
+            <Search className="h-[15px] w-[15px] shrink-0" />
+            <input
+              type="search"
+              aria-label="Search links"
+              placeholder="Name or target"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-3"
+            />
+          </label>
+        }
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{editing ? `Edit ${editing}` : "New link"}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            {!editing && (
-              <div className="grid gap-1.5">
-                <Label htmlFor="link-name">Name</Label>
-                <Input
-                  id="link-name"
-                  value={draft.name}
-                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  placeholder="ntust-calendar"
-                  maxLength={64}
-                  autoFocus
-                />
-              </div>
-            )}
-            <div className="grid gap-1.5">
-              <Label htmlFor="link-target">Target URL</Label>
-              <Input
-                id="link-target"
-                value={draft.target_url}
-                onChange={(e) => setDraft({ ...draft, target_url: e.target.value })}
-                placeholder="https://www.academic.ntust.edu.tw/…"
-                maxLength={2048}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="link-interval">Check every (minutes)</Label>
-              <Input
-                id="link-interval"
-                type="number"
-                min={5}
-                max={1440}
-                value={draft.check_interval_minutes}
-                onChange={(e) =>
-                  setDraft({ ...draft, check_interval_minutes: e.target.value })
-                }
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="link-rules">Rules (JSON)</Label>
-              <Textarea
-                id="link-rules"
-                rows={6}
-                className="font-mono text-xs"
-                value={draft.expectations}
-                onChange={(e) => setDraft({ ...draft, expectations: e.target.value })}
-                placeholder={RULES_EXAMPLE}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setEditor(null)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={
-                saveMut.isPending ||
-                !draft.target_url.trim() ||
-                (!editing && !draft.name.trim())
-              }
-              onClick={() =>
-                editor && saveMut.mutate({ key: editor.key, target: editor.name, draft })
-              }
-            >
-              {editing ? "Save" : "Create"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+        {linksQ.isLoading && <Skeleton className="m-6 h-40" />}
+        {linksQ.isError && (
+          <ErrorAlert className="m-6 items-center" onRetry={() => linksQ.refetch()}>
+            Failed to load links: {errorText(linksQ.error)}
+          </ErrorAlert>
+        )}
+        {links && links.length === 0 && (
+          <EmptyState
+            icon={Link2}
+            title="No links yet"
+            action={
+              <Button variant="ink" size="form" onClick={() => openEditor(null)}>
+                New link
+              </Button>
+            }
+          />
+        )}
+        {links && links.length > 0 && (
+          <DataTable
+            table={table}
+            rowKey={(l) => l.name}
+            minWidth={980}
+            empty="No links match"
+          />
+        )}
+      </Panel>
+
+      {editor && (
+        <LinkDialog
+          key={editor.key}
+          link={editor.link}
+          pending={saveMut.isPending}
+          error={
+            saveMut.isError && saveMut.variables?.key === editor.key
+              ? errorText(saveMut.error)
+              : null
+          }
+          onClose={() => setEditor(null)}
+          onSave={(body) =>
+            saveMut.mutate({ key: editor.key, target: editor.link?.name ?? "", body })
+          }
+        />
+      )}
+    </>
   );
 }

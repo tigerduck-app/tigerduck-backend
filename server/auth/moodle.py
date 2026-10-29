@@ -11,7 +11,7 @@ token works and belongs to the claimed student id.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import httpx
@@ -26,6 +26,14 @@ _WS_PATH = "/webservice/rest/server.php"
 # maintenance mode, is Moodle failing and says nothing about the token.
 _TOKEN_ERRORCODES = frozenset({"invalidtoken", "accessexception"})
 
+# The length of `users.display_name`.
+_DISPLAY_NAME_MAX = 128
+
+
+def display_name_from(fullname: str | None) -> str | None:
+    """Moodle's full name as `users.display_name` stores it; None when blank."""
+    return (fullname or "").strip()[:_DISPLAY_NAME_MAX].rstrip() or None
+
 
 @dataclass(frozen=True)
 class MoodleVerifyResult:
@@ -33,6 +41,7 @@ class MoodleVerifyResult:
     username: str | None = None
     # "invalid_token" | "username_mismatch" | "unreachable"
     error: str | None = None
+    fullname: str | None = field(default=None, repr=False)
 
 
 class MoodleVerifier(Protocol):
@@ -87,7 +96,12 @@ class HttpMoodleVerifier:
                 moodle_username=username,
             )
             return MoodleVerifyResult(ok=False, error="username_mismatch")
-        return MoodleVerifyResult(ok=True, username=username)
+        fullname = body.get("fullname")
+        return MoodleVerifyResult(
+            ok=True,
+            username=username,
+            fullname=fullname if isinstance(fullname, str) else None,
+        )
 
 
 class StaticMoodleVerifier:

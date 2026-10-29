@@ -44,15 +44,19 @@ LOGIN_BODY = {
 }
 
 
-def allow_moodle(client, username: str = "b11015000") -> None:
+def allow_moodle(
+    client, username: str = "b11015000", fullname: str | None = None
+) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=True, username=username)
+        MoodleVerifyResult(ok=True, username=username, fullname=fullname)
     )
 
 
-def deny_moodle(client, error: str = "invalid_token") -> None:
+def deny_moodle(
+    client, error: str = "invalid_token", fullname: str | None = None
+) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=False, error=error)
+        MoodleVerifyResult(ok=False, error=error, fullname=fullname)
     )
 
 
@@ -383,3 +387,86 @@ async def test_unconfigured_auth_returns_503(client) -> None:
         client.app.state.settings.auth_jwt_secret = (
             "test-jwt-secret-0123456789abcdef0123456789abcdef"
         )
+
+
+async def _stored_display_name(client) -> str | None:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return await session.scalar(
+            select(User.display_name).where(User.student_id == "B11015000")
+        )
+
+
+async def test_sign_in_stores_the_moodle_full_name(client) -> None:
+    allow_moodle(client, fullname="  Test Student  ")
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] == "Test Student"
+    assert await _stored_display_name(client) == "Test Student"
+
+    allow_moodle(client, fullname="Renamed Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert await _stored_display_name(client) == "Renamed Student"
+
+
+@pytest.mark.parametrize("fullname", [None, "", "   "])
+async def test_a_blank_or_missing_full_name_keeps_the_stored_one(
+    client, fullname
+) -> None:
+    allow_moodle(client, fullname="Test Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+
+    allow_moodle(client, fullname=fullname)
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] == "Test Student"
+    assert await _stored_display_name(client) == "Test Student"
+
+
+@pytest.mark.parametrize(
+    ("fullname", "stored"),
+    [("名" * 200, "名" * 128), ("a" * 127 + " b", "a" * 127)],
+    ids=["cut", "no-trailing-space-after-cut"],
+)
+async def test_a_long_full_name_is_cut_to_the_column(
+    client, fullname, stored
+) -> None:
+    allow_moodle(client, fullname=fullname)
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert await _stored_display_name(client) == stored
+
+
+# Postgres refuses a NUL in text, so the name write fails for real.
+_REFUSED_NAME = "Test\x00Student"
+
+
+async def test_a_name_the_database_refuses_still_signs_in(
+    client, monkeypatch
+) -> None:
+    allow_moodle(client, fullname=_REFUSED_NAME)
+    monkeypatch.setattr(service, "logger", structlog.get_logger(service.__name__))
+    with capture_logs() as logs:
+        response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] is None
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        user = (await session.execute(select(User))).scalar_one()
+        assert user.display_name is None
+        assert user.last_login_at is not None
+        assert (await session.execute(select(AuthSession))).scalars().all()
+    assert any(e["event"] == "auth.display_name.not_stored" for e in logs)
+    assert "Student" not in repr(logs)
+
+
+@pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
+async def test_a_refused_sign_in_stores_no_name(client, error) -> None:
+    allow_moodle(client, fullname="Test Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+
+    deny_moodle(client, error=error, fullname="Other Student")
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 401
+    assert await _stored_display_name(client) == "Test Student"

@@ -11,6 +11,7 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from ...audit import audit
 from ...db import get_pool
 from ._push_queue import payload_of, recipients, summary
@@ -63,6 +64,139 @@ async def list_moodle_students(
         "counts": dict(counts) if counts else {"valid": 0, "expired": 0},
         "students": [dict(r) for r in rows],
     }
+# Any part of a student id or name, in any case; strpos takes a typed % or _
+# as itself, where LIKE would read it as a wildcard.
+_SEARCH_SQL = """
+SELECT u.student_id, u.display_name,
+       count(d.id) AS devices, max(d.last_seen_at) AS last_seen_at
+FROM users u
+LEFT JOIN user_devices d ON d.user_id = u.id AND d.deleted_at IS NULL
+WHERE u.deleted_at IS NULL AND u.student_id IS NOT NULL
+  AND (strpos(lower(u.student_id), lower($1)) > 0
+       OR strpos(lower(coalesce(u.display_name, '')), lower($1)) > 0)
+GROUP BY u.id
+ORDER BY max(d.last_seen_at) DESC NULLS LAST, u.student_id
+LIMIT 8
+"""
+
+
+@router.get("/student-search")
+async def search_students(
+    request: Request,
+    q: str = Query(min_length=1, max_length=64),
+    pool=Depends(get_pool),
+):
+    term = q.strip()
+    if not term:
+        return {"students": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_SEARCH_SQL, term)
+        await audit(conn, request, "user.list", count=len(rows))
+    return {"students": [dict(r) for r in rows]}
+
+
+_TODAY = "(now() AT TIME ZONE 'Asia/Taipei')::date"
+
+# The term the apps take as current (server/academic_calendar/terms.py
+# current_term_code): the one begun last, or the earliest before any begins.
+_CURRENT_TERM_SQL = f"""
+SELECT coalesce(
+    (SELECT code FROM semester_terms WHERE start_date <= {_TODAY}
+     ORDER BY start_date DESC, code DESC LIMIT 1),
+    (SELECT code FROM semester_terms ORDER BY start_date, code DESC LIMIT 1)
+)
+"""
+
+# Changes from today on; one already over has nothing left to show. The days
+# each still reaches come from the shared rule, which skips holidays.
+_CHANGES_SQL = f"""
+SELECT ch.course_no, ch.kind, ch.mode, ch.start_date, ch.end_date,
+       ch.excluded_weekdays, ch.periods, ch.room, ch.start_time, ch.end_time,
+       ch.note_zh, ch.note_en,
+       course_class_days(ch.term_code, uc.schedule_json, greatest(ch.start_date, {_TODAY}),
+                         ch.end_date, ch.excluded_weekdays, ch.periods) AS class_days
+FROM course_changes ch
+CROSS JOIN LATERAL (
+    SELECT schedule_json FROM user_courses
+    WHERE user_id = $3 AND semester = ch.term_code AND course_no = ch.course_no
+      AND enrollment_status = 'enrolled'
+    ORDER BY id LIMIT 1
+) AS uc
+WHERE ch.term_code = $1 AND ch.course_no = ANY($2::text[]) AND ch.end_date >= {_TODAY}
+ORDER BY ch.start_date, ch.id
+"""
+
+
+@router.get("/timetable")
+async def student_timetable(
+    request: Request,
+    student_id: str = Query(..., min_length=1),
+    term: str | None = Query(default=None, max_length=8),
+    pool=Depends(get_pool),
+):
+    """One student's classes in a term, and the school's changes to them
+    when the term is the current one."""
+    async with pool.acquire() as conn:
+        uid = await conn.fetchval(
+            "SELECT id FROM users WHERE student_id = $1", student_id
+        )
+        if uid is None:
+            return JSONResponse({"error": "user not found"}, 404)
+        current = await conn.fetchval(_CURRENT_TERM_SQL)
+        # Moodle mirror rows carry an empty semester and hand-added ones any
+        # string; only a term code (server/academic_calendar/terms.py) is a term.
+        held = await conn.fetch(
+            "SELECT DISTINCT semester FROM user_courses "
+            "WHERE user_id = $1 AND semester ~ '^[0-9]{3}[12H]$'",
+            uid,
+        )
+        terms = sorted({r["semester"] for r in held} | ({current} if current else set()), reverse=True)
+        chosen = term or current or (terms[0] if terms else None)
+        rows = await conn.fetch(
+            "SELECT c.course_no, c.course_name, c.classroom, "
+            "(SELECT coalesce(jsonb_agg(jsonb_build_object('day', weekday, 'periods', periods) "
+            "ORDER BY weekday), '[]') FROM course_meetings(c.schedule_json)) AS schedule_json, "
+            "o.color_hex "
+            "FROM user_courses c "
+            "LEFT JOIN user_course_overrides o "
+            "  ON o.user_id = c.user_id AND o.user_course_id = c.id "
+            "WHERE c.user_id = $1 AND c.semester = $2 "
+            "AND c.enrollment_status = 'enrolled' "
+            "ORDER BY c.course_no, c.id",
+            uid, chosen,
+        )
+        course_nos = [r["course_no"] for r in rows if r["course_no"]]
+        changes = (
+            await conn.fetch(_CHANGES_SQL, chosen, course_nos, uid)
+            if chosen == current and course_nos else []
+        )
+        await audit(conn, request, "user.view", user_id=uid)
+
+    return {
+        "terms": terms,
+        "term": chosen,
+        "current_term": current,
+        "courses": [
+            {
+                "course_no": r["course_no"],
+                "name": _plain_course_name(r["course_name"]),
+                "classroom": r["classroom"],
+                "color": r["color_hex"]
+                or COURSE_PALETTE_LIGHT[_course_hash_index(r["course_no"] or "")],
+                "schedule": _schedule(r["schedule_json"]),
+            }
+            for r in rows
+        ],
+        "changes": [dict(c) for c in changes],
+    }
+
+
+def _schedule(raw) -> list:
+    """asyncpg hands JSONB back as text; a malformed upload or entry shows no meetings."""
+    value = json.loads(raw) if isinstance(raw, str) else raw
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
+
+
 @router.get("/sync-events")
 async def sync_events(
     request: Request,
@@ -79,6 +213,16 @@ async def sync_events(
 
         uid = user["id"]
         await audit(conn, request, "user.view", user_id=uid)
+
+        student = await conn.fetchrow(
+            "SELECT u.display_name, ("
+            "  SELECT credential_status FROM external_accounts "
+            "  WHERE user_id = u.id AND provider = 'ntust_sso' "
+            "  ORDER BY updated_at DESC LIMIT 1"
+            ") AS credential_status "
+            "FROM users u WHERE u.id = $1",
+            uid,
+        )
 
         jobs = await conn.fetch(
             "SELECT id, job_type, status AS job_status, attempts, "
@@ -114,34 +258,43 @@ async def sync_events(
             "app_version, os_version, locale, last_seen_at, last_login_at, created_at, "
             "cloud_sync_enabled, sync_courses, sync_course_colors, sync_course_names, "
             "sync_assignments, sync_assignment_reminders, sync_live_activity, "
-            "server_push_enabled, bulletin_push_enabled, deleted_at "
+            "server_push_enabled, bulletin_push_enabled, deleted_at, "
+            "EXISTS (SELECT 1 FROM device_push_tokens t "
+            "  WHERE t.device_id = user_devices.id AND t.token_kind = 'standard' "
+            "  AND t.status = 'active' "
+            "  AND (t.expires_at IS NULL OR t.expires_at > now())) AS has_push_token "
             "FROM user_devices WHERE user_id = $1 "
             "ORDER BY last_seen_at DESC NULLS LAST",
             uid,
         )
 
+        # The pushes a device's own write caused, whatever became of them.
         push_jobs = await conn.fetch(
             "SELECT pj.id, pj.scenario, pj.status, pj.attempts, pj.max_attempts, "
             "pj.fire_at, pj.sent_at, pj.last_error, pj.dedupe_key, pj.created_at, "
             "pj.payload->>'source_device_id' AS source_device_id "
             "FROM push_jobs pj "
-            "WHERE pj.user_id = $1 AND pj.status IN ('pending', 'processing') "
+            "WHERE pj.user_id = $1 AND pj.payload->>'source_device_id' IS NOT NULL "
             "ORDER BY pj.created_at DESC LIMIT 20",
             uid,
         )
 
-        push_deliveries = []
-        if push_jobs:
-            pj_ids = [pj["id"] for pj in push_jobs]
-            push_deliveries = await conn.fetch(
-                "SELECT pd.id, pd.push_job_id, pd.device_id, pd.provider, "
-                "pd.status, pd.attempts, pd.max_attempts, pd.failure_code, "
-                "pd.failure_message, pd.sent_at, pd.created_at "
-                "FROM push_deliveries pd "
-                "WHERE pd.push_job_id = ANY($1::bigint[]) "
-                "ORDER BY pd.created_at",
-                pj_ids,
-            )
+        # Recent deliveries to every device, and all of those jobs' deliveries.
+        push_deliveries = await conn.fetch(
+            "SELECT pd.id, pd.push_job_id, pd.device_id, pd.provider, "
+            "pd.status, pd.attempts, pd.max_attempts, pd.failure_code, "
+            "pd.failure_message, pd.sent_at, pd.created_at, "
+            "pj.channel, pj.scenario, pj.payload->>'kind' AS kind "
+            "FROM push_deliveries pd "
+            "JOIN push_jobs pj ON pj.id = pd.push_job_id "
+            "WHERE pd.id IN ("
+            "  (SELECT id FROM push_deliveries WHERE user_id = $1 "
+            "   ORDER BY created_at DESC LIMIT 200) "
+            "  UNION SELECT id FROM push_deliveries WHERE push_job_id = ANY($2::bigint[])"
+            ") "
+            "ORDER BY pd.created_at DESC",
+            uid, [pj["id"] for pj in push_jobs],
+        )
 
         # Everything still due to go out, soonest first, plus every usable
         # token on the account, so each device panel can say what the server
@@ -152,6 +305,12 @@ async def sync_events(
             "FROM push_jobs pj "
             "WHERE pj.user_id = $1 AND pj.status IN ('pending', 'processing') "
             "ORDER BY pj.fire_at, pj.id LIMIT 300",
+            uid,
+        )
+        # What /push-clear cancels, which the 300 listed may fall short of.
+        queued_total = await conn.fetchval(
+            "SELECT count(*) FROM push_jobs "
+            "WHERE user_id = $1 AND status IN ('pending', 'processing')",
             uid,
         )
         tokens = await conn.fetch(
@@ -171,15 +330,6 @@ async def sync_events(
             "  (SELECT courses_reset_at FROM users WHERE id = $1) AS courses_reset_at",
             uid,
         )
-
-    poll_status = {}
-    try:
-        from server.sync.poll_tracker import is_foreground
-        for d in devices:
-            cid = d["client_device_id"]
-            poll_status[str(d["id"])] = "foreground" if is_foreground(str(uid), cid) else "background"
-    except ImportError:
-        pass
 
     device_rows = [dict(d) for d in devices]
     token_rows = [dict(t) for t in tokens]
@@ -204,13 +354,13 @@ async def sync_events(
     return {
         "student_id": student_id,
         "found": True,
+        "student": dict(student),
         "topology": {
             "revision": topology["revision"] or 0 if topology else 0,
             "course_count": topology["course_count"] or 0 if topology else 0,
             "tombstone_count": topology["tombstone_count"] or 0 if topology else 0,
             "courses_reset_at": str(topology["courses_reset_at"]) if topology and topology["courses_reset_at"] else None,
         },
-        "poll_status": poll_status,
         "jobs": [dict(j) for j in jobs],
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],
@@ -218,6 +368,7 @@ async def sync_events(
         "push_jobs": [dict(p) for p in push_jobs],
         "push_deliveries": [dict(d) for d in push_deliveries],
         "queued_jobs": queued_jobs,
+        "queued_total": queued_total,
     }
 COURSE_PALETTE_LIGHT = [
     "#FF6B6B", "#4ECDC4", "#45B7D1", "#F39C12", "#DDA0DD",
@@ -350,6 +501,16 @@ def _current_semester_prefix() -> str:
         return f"{roc_year - 1}2"
     else:
         return f"{roc_year - 1}1"
+
+
+def _plain_course_name(name: str | None) -> str:
+    """A Moodle course name without its term, unit and course number."""
+    name = name or ""
+    bracket_end = name.find("】")
+    if bracket_end < 0:
+        return name
+    rest = name[bracket_end + 1:].strip()
+    return rest.split(" ", 1)[-1] if " " in rest else rest
 
 
 def _custom_names(raw: str | dict | None) -> dict | None:
@@ -510,14 +671,7 @@ async def sync_courses(
         zh_names = zh_by_semester.get(semester, {})
         en_names = en_by_semester.get(semester, {})
         zh_name = zh_names.get(course_no)
-        if zh_name:
-            d["course_name"] = zh_name
-        else:
-            name = d.get("course_name") or ""
-            bracket_end = name.find("】")
-            if bracket_end >= 0:
-                rest = name[bracket_end + 1:].strip()
-                d["course_name"] = rest.split(" ", 1)[-1] if " " in rest else rest
+        d["course_name"] = zh_name or _plain_course_name(d.get("course_name"))
         en_name = en_names.get(course_no)
         if en_name:
             d["course_name_en"] = en_name

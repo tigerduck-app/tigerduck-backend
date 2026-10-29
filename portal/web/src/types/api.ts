@@ -3,6 +3,8 @@
 // upstream backend schemas it proxies). Keep them in sync if you change
 // either side.
 
+import type { CourseChange } from "@/pages/moodle/types";
+
 export type EnvInfo = {
   env: "development" | "production" | string;
   apns_env: string;
@@ -106,10 +108,116 @@ export type LogsTab = {
   needles?: string[] | null;
 };
 
+export type LogLevel = "error" | "warning" | "info" | "debug";
+
+export type LogLine = {
+  /** Docker's receive time, to the millisecond. */
+  ts: string | null;
+  level: LogLevel | null;
+  logger: string;
+  event: string;
+  kv: [string, string][];
+  raw: string;
+};
+
 export type LogsPayload = {
   ok: boolean;
-  text: string;
+  lines: LogLine[];
   detail?: string;
+};
+
+export type AccountState = "signed_in" | "needs_sign_in" | "failing";
+
+export type UserStats = {
+  users: { total: number; new_7d: number; weekly: { week: string; users: number }[] };
+  active: { last_7d: number; daily: { day: string; users: number }[] };
+  devices: {
+    versions: { platform: string; app_version: string; devices: number }[];
+    /** Users with a signed-in device: what `class_reminders` counts out of. */
+    users: number;
+    /** Devices with each switch on; `class_reminders`, a user setting, counts users. */
+    features: Record<
+      | "class_reminders"
+      | "bulletin_push"
+      | "live_activity"
+      | "assignment_reminders"
+      | "cloud_sync"
+      | "course_name_sync",
+      number
+    >;
+    daily: { day: string; devices: number }[];
+  };
+  anonymous_devices: number;
+  accounts: Record<AccountState, number>;
+  pushes: {
+    channels: { channel: string; sent: number; failed: number }[];
+    daily: { day: string; sent: number; failed: number }[];
+  };
+};
+
+export type UserRow = {
+  id: string;
+  student_id: string | null;
+  display_name: string | null;
+  created_at: string;
+  platforms: string[];
+  last_active_at: string | null;
+  /** Null without a device. */
+  cloud_sync: boolean | null;
+  account: AccountState | null;
+};
+
+export type UserDevice = {
+  id: string;
+  device_name: string | null;
+  device_model: string | null;
+  platform: string;
+  os_version: string | null;
+  app_version: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+  cloud_sync_enabled: boolean;
+  bulletin_push_enabled: boolean;
+  sync_live_activity: boolean;
+  push_token: { provider: string; environment: string | null } | null;
+};
+
+export type UserPush = {
+  id: string;
+  at: string;
+  channel: string;
+  scenario: string;
+  title: string;
+  device_id: string | null;
+  status: "sent" | "failed" | "cancelled";
+};
+
+export type UserDetail = {
+  id: string;
+  student_id: string | null;
+  display_name: string | null;
+  locale: string | null;
+  created_at: string;
+  account: AccountState | null;
+  class_reminders: boolean;
+  devices: UserDevice[];
+  term: string | null;
+  week_start: string;
+  courses: {
+    id: number;
+    course_no: string | null;
+    name: string;
+    classroom: string | null;
+    schedule: { day?: number; periods?: string[] }[];
+    skipped: string[];
+  }[];
+  /** The school's changes to those courses, with their class days from `week_start` on. */
+  changes: CourseChange[];
+  /** Up to 500, newest first. */
+  pushes: UserPush[];
+  /** Every push of the last 7 days, by status. */
+  push_counts: Record<UserPush["status"], number>;
+  last_upload: { at: string; device_id: string } | null;
 };
 
 export type DeviceInfo = {
@@ -126,6 +234,11 @@ export type DeviceInfo = {
 export type DeviceRow = {
   device_id: string;
   user_id: string;
+  /** The internal id, which keys the user page. */
+  user_uuid: string;
+  client_device_id: string;
+  student_id: string | null;
+  display_name: string | null;
   platform: string;
   device_class: string;
   bundle_id: string;
@@ -137,6 +250,7 @@ export type DeviceRow = {
   app_version: string | null;
   os_version: string | null;
   cloud_sync_enabled: boolean | null;
+  last_seen_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -201,6 +315,7 @@ export type CustomPushTargetFilter = {
   user_id?: string;
   device_id?: string;
   list_id?: number;
+  course_code?: string;
 };
 
 export type DeviceList = {
@@ -215,6 +330,8 @@ export type DeviceList = {
 export type DeviceListMemberRow = {
   device_id: string;
   user_id: string;
+  student_id: string | null;
+  display_name: string | null;
   platform: string;
   device_class: string;
   added_at: string;
@@ -233,8 +350,16 @@ export type AddMembersResponse = {
   unknown: number;
 };
 
+export type CustomPushCourse = { code: string; name: string; students: number };
+
 export type CustomPushPreviewResponse = {
   matched: Record<string, number>;
+  /** The part of `matched` that no account is signed in on. */
+  anonymous: Record<string, number>;
+  /** The current term's code, null while none is published. */
+  term: string | null;
+  /** The filter's course in `term`; null when nobody takes it or none was given. */
+  course: CustomPushCourse | null;
 };
 
 export type CustomPushRequest = CustomPushTargetFilter & {

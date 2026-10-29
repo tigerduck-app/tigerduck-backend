@@ -18,12 +18,21 @@ const buttonVariants = cva(
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
+        // The redesign's buttons.
+        ink: "bg-ink text-on-ink hover:bg-ink/85 disabled:bg-disabled disabled:text-white disabled:opacity-100",
+        line: "border border-field bg-surface text-ink hover:bg-row-hover",
+        danger:
+          "bg-danger text-white hover:bg-danger/90 disabled:bg-disabled disabled:opacity-100",
+        quiet: "text-ink-3 hover:bg-soft hover:text-ink",
       },
       size: {
         default: "h-9 px-4 py-2",
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-10 rounded-md px-6",
         icon: "h-9 w-9",
+        form: "h-10 rounded-[9px] px-4",
+        bar: "h-9 rounded-[9px] px-3.5",
+        iconSm: "size-[34px] rounded-lg",
       },
     },
     defaultVariants: {

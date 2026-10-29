@@ -9,7 +9,10 @@ is transparent to the frontend.
 Field mapping (v2 device_registrations → v3):
   device_id        ← user_devices.id            (server UUID, stable key)
   user_id          ← users.student_id           (human-meaningful owner)
-  device_class     ← platform (ios→iphone, ipados→ipad, else "")
+  user_uuid        ← users.id                   (the user page's key)
+  device_class     ← user_devices.device_class, or from platform for a row
+                     registered before that column (ios→iphone, ipados→ipad,
+                     macos→mac, else "")
   bundle_id/apns_env ← the device's push token row
   has_pts_token    ← a push_to_start token exists
   has_device_token ← a standard token exists
@@ -24,19 +27,22 @@ from ..db import get_pool
 
 router = APIRouter(prefix="/api/devices")
 
-# One row per device. device_class is derived so the SPA's iPhone/iPad
-# tabs (which match on device_class) keep working without a real column.
+# The stored form factor, or the one a pre-column row's platform implies.
+DEVICE_CLASS_SQL = """COALESCE(NULLIF(ud.device_class, ''), CASE ud.platform
+            WHEN 'ios'    THEN 'iphone'
+            WHEN 'ipados' THEN 'ipad'
+            WHEN 'macos'  THEN 'mac'
+            ELSE ''
+        END)"""
+
 _LIST_SQL = """
 WITH dev AS (
     SELECT
         ud.id::text                            AS device_id,
         COALESCE(u.student_id, u.id::text)     AS user_id,
+        u.id::text                             AS user_uuid,
         ud.platform                            AS platform,
-        CASE ud.platform
-            WHEN 'ios'    THEN 'iphone'
-            WHEN 'ipados' THEN 'ipad'
-            ELSE ''
-        END                                    AS device_class,
+        """ + DEVICE_CLASS_SQL + """         AS device_class,
         ud.server_push_enabled                 AS server_push_enabled,
         ud.created_at                          AS created_at,
         ud.updated_at                          AS updated_at,
@@ -44,7 +50,9 @@ WITH dev AS (
         ud.app_version                         AS app_version,
         ud.os_version                          AS os_version,
         ud.cloud_sync_enabled                  AS cloud_sync_enabled,
+        ud.last_seen_at                        AS last_seen_at,
         u.student_id                           AS student_id,
+        u.display_name                         AS display_name,
         (
             SELECT t.bundle_id FROM device_push_tokens t
             WHERE t.device_id = ud.id AND t.status = 'active'
@@ -83,6 +91,7 @@ WHERE (
     $1::text IS NULL
     OR lower(client_device_id) LIKE $1
     OR lower(COALESCE(student_id, '')) LIKE $1
+    OR lower(COALESCE(display_name, '')) LIKE $1
     OR device_id LIKE $1
 )
 ORDER BY updated_at DESC, device_id
@@ -98,6 +107,7 @@ WHERE ud.deleted_at IS NULL
     $1::text IS NULL
     OR lower(ud.client_device_id) LIKE $1
     OR lower(COALESCE(u.student_id, '')) LIKE $1
+    OR lower(COALESCE(u.display_name, '')) LIKE $1
     OR ud.id::text LIKE $1
   )
 """
@@ -107,6 +117,10 @@ def _row_to_device(r) -> dict:
     return {
         "device_id": r["device_id"],
         "user_id": r["user_id"],
+        "user_uuid": r["user_uuid"],
+        "client_device_id": r["client_device_id"],
+        "student_id": r["student_id"],
+        "display_name": r["display_name"],
         "platform": r["platform"],
         "device_class": r["device_class"],
         "bundle_id": r["bundle_id"] or "",
@@ -118,6 +132,7 @@ def _row_to_device(r) -> dict:
         "app_version": r["app_version"] or None,
         "os_version": r["os_version"] or None,
         "cloud_sync_enabled": r["cloud_sync_enabled"],
+        "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
     }
@@ -127,7 +142,8 @@ def _row_to_device(r) -> dict:
 async def list_devices(
     request: Request,
     pool=Depends(get_pool),
-    limit: int = Query(default=200, ge=1, le=1000),
+    # The Devices page loads every device at once for its own sorting and charts.
+    limit: int = Query(default=200, ge=1, le=10_000),
     offset: int = Query(default=0, ge=0),
     search: str | None = Query(default=None, max_length=128),
 ) -> JSONResponse:
@@ -160,12 +176,22 @@ async def deregister_devices(
         # autocommits, and a crash between them would leave a soft-deleted
         # device with still-active push tokens.
         async with conn.transaction():
+            # Signs the devices out as the app's own sign-out does
+            # (`delete_device` in server/routes/user_devices.py), taking the
+            # account locks first as every sign-in and sign-out does.
+            await conn.execute("""
+                SELECT a.id FROM external_accounts a
+                JOIN user_devices d ON d.user_id = a.user_id
+                WHERE d.id::text = ANY($1::text[]) AND d.deleted_at IS NULL
+                ORDER BY a.id
+                FOR UPDATE OF a
+            """, device_ids)
             deleted = await conn.fetch("""
                 UPDATE user_devices
                 SET deleted_at = now()
                 WHERE id::text = ANY($1::text[])
                   AND deleted_at IS NULL
-                RETURNING id, user_id
+                RETURNING id, user_id, client_device_id
             """, device_ids)
             count = len(deleted)
             for d in deleted:
@@ -174,6 +200,7 @@ async def deregister_devices(
                     user_id=d["user_id"], device_id=d["id"],
                 )
             if count > 0:
+                await _sign_out(conn, deleted)
                 await conn.execute("""
                     UPDATE device_push_tokens
                     SET status = 'invalidated'
@@ -181,3 +208,38 @@ async def deregister_devices(
                       AND status = 'active'
                 """, device_ids)
     return JSONResponse(content={"deleted": count})
+
+
+async def _sign_out(conn, deleted) -> None:
+    """Revoke the deregistered devices' sessions, unlink their anonymous
+    registrations and drop a Moodle token no device of its student is left
+    for (tigerduck-backend#85)."""
+    device_ids = [d["id"] for d in deleted]
+    # In id order and repeated, for the reasons `delete_device` gives.
+    while live := await conn.fetch("""
+        SELECT id FROM auth_sessions
+        WHERE device_id = ANY($1::uuid[]) AND revoked_at IS NULL
+        ORDER BY id
+        FOR UPDATE
+    """, device_ids):
+        await conn.execute("""
+            UPDATE auth_sessions
+            SET revoked_at = now(), revoked_reason = 'admin_revoked'
+            WHERE id = ANY($1::bigint[])
+        """, [r["id"] for r in live])
+    await conn.execute("""
+        UPDATE device_registrations r
+        SET linked_user_id = NULL
+        FROM unnest($1::text[], $2::uuid[]) AS d(client_device_id, user_id)
+        WHERE r.device_id = d.client_device_id AND r.linked_user_id = d.user_id
+    """, [d["client_device_id"] for d in deleted], [d["user_id"] for d in deleted])
+    await conn.execute("""
+        DELETE FROM external_account_credentials c
+        USING external_accounts a
+        WHERE c.external_account_id = a.id
+          AND a.user_id = ANY($1::uuid[])
+          AND NOT EXISTS (
+              SELECT 1 FROM user_devices d
+              WHERE d.user_id = a.user_id AND d.deleted_at IS NULL
+          )
+    """, list({d["user_id"] for d in deleted}))

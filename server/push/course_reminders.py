@@ -265,20 +265,39 @@ async def scan_course_reminders(
     cancelled = 0
 
     async with session_scope(session_factory) as session:
-        rows = (
-            await session.execute(
-                select(UserCourse, UserCourseOverride)
-                .outerjoin(
-                    UserCourseOverride,
-                    UserCourseOverride.user_course_id == UserCourse.id,
-                )
-                .where(
-                    UserCourse.enrollment_status == "enrolled",
-                    UserCourse.schedule_json != text("'{}'::jsonb"),
-                    UserCourse.schedule_json != text("'[]'::jsonb"),
+        # The term whose courses meet on each day of the window: the one
+        # both apps show that day. The next term's courses, synced weeks
+        # ahead once course selection serves them, wait for it to begin,
+        # and the term before keeps its own until then.
+        terms = await load_term_dates(session)
+        term_on = await _current_terms(session, now, window_end, tz) if terms else {}
+
+        query = (
+            select(UserCourse, UserCourseOverride)
+            .outerjoin(
+                UserCourseOverride,
+                UserCourseOverride.user_course_id == UserCourse.id,
+            )
+            .where(
+                UserCourse.enrollment_status == "enrolled",
+                UserCourse.schedule_json != text("'{}'::jsonb"),
+                UserCourse.schedule_json != text("'[]'::jsonb"),
+            )
+        )
+        if term_on:
+            # Every occurrence is held to its day's term and in-session check
+            # below, so no other term's course could file or keep a reminder
+            # (https://github.com/tigerduck-app/tigerduck-backend/issues/95).
+            query = query.where(
+                UserCourse.semester.in_(
+                    [
+                        code
+                        for day, code in term_on.items()
+                        if not outside_term(day, terms)
+                    ]
                 )
             )
-        ).all()
+        rows = (await session.execute(query)).all()
 
         # Latest semester per user, which stands in for the term while none
         # is published. It prefers portal-sourced courses and `user_added`
@@ -301,13 +320,6 @@ async def scan_course_reminders(
             if current is None or course.semester > current:
                 bucket[course.user_id] = course.semester
         latest_semester = {**fallback_latest, **portal_latest}
-
-        # The term whose courses meet on each day of the window: the one
-        # both apps show that day. The next term's courses, synced weeks
-        # ahead once course selection serves them, wait for it to begin,
-        # and the term before keeps its own until then.
-        terms = await load_term_dates(session)
-        term_on = await _current_terms(session, now, window_end, tz) if terms else {}
 
         # Days classes do not meet: no published term runs on them, or a
         # holiday the user did not put back covers them. Apple guards twice
@@ -349,12 +361,7 @@ async def scan_course_reminders(
         # Removed courses are hard-deleted, so any course still present is
         # eligible.
         if term_on:
-            current_terms = set(term_on.values())
-            eligible = [
-                (course, override)
-                for course, override in rows
-                if course.semester in current_terms
-            ]
+            eligible = rows
         else:
             eligible = [
                 (course, override)

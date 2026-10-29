@@ -126,6 +126,7 @@ def summary(job: dict[str, Any]) -> dict[str, str]:
             "body": str(p.get("course_name") or ""),
         }
     return {
-        "title": str(p.get("title") or ""),
+        # A class reminder's title is also written at send time, around its course name.
+        "title": str(p.get("title") or p.get("course_name") or ""),
         "body": str(p.get("body") or p.get("subtitle") or ""),
     }

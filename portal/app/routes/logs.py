@@ -1,8 +1,8 @@
 """Logs JSON endpoints.
 
 The React side renders the tab strip from `/api/logs/tabs` and tails a
-specific source via `/api/logs/data?source=&tail=`. Same back-end data
-funnel as before; only the serialization changed.
+specific source via `/api/logs/data?source=&tail=`, which returns each line
+split by `parse_line` for the Logs table.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from ..logs import (
     MAX_TAIL,
     container_logs,
     filter_lines,
+    parse_line,
 )
 
 router = APIRouter(prefix="/api/logs")
@@ -48,11 +49,12 @@ async def data(source: str = "backend", tail: int = DEFAULT_TAIL) -> JSONRespons
     res = await container_logs(tab["container"], tail=tail)
     if not res["ok"]:
         return JSONResponse(
-            {"ok": False, "text": "", "detail": res.get("detail") or "log unavailable"}
+            {"ok": False, "lines": [], "detail": res.get("detail") or "log unavailable"}
         )
     text = (
         filter_lines(res["text"], tab["needles"])
         if tab["kind"] == "filter"
         else res["text"]
     )
-    return JSONResponse({"ok": True, "text": text})
+    lines = [parse_line(line) for line in text.splitlines() if line.strip()]
+    return JSONResponse({"ok": True, "lines": lines})

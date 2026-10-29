@@ -7,7 +7,7 @@ pragmatic); the route layer is a thin adapter.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import uuid
 
@@ -15,7 +15,7 @@ import structlog
 from fastapi import HTTPException, status
 from sqlalchemy import delete, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
@@ -29,7 +29,7 @@ from server.auth.models import (
     UserDevice,
     UserStatus,
 )
-from server.auth.moodle import MoodleVerifier
+from server.auth.moodle import MoodleVerifier, display_name_from
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.auth.schemas import DeviceInfo
 from server.auth.tokens import (
@@ -38,7 +38,7 @@ from server.auth.tokens import (
     issue_access_token,
 )
 from server.config import Settings
-from server.db import in_array
+from server.db import in_array, session_scope
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
@@ -58,6 +58,8 @@ class LoginResult:
     expires_in: int
     user: User
     device: UserDevice
+    # Moodle's, for the caller to store once the sign-in has committed.
+    fullname: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -221,6 +223,7 @@ async def login(
         expires_in=settings.auth_access_token_ttl_seconds,
         user=user,
         device=device,
+        fullname=result.fullname,
     )
 
 
@@ -591,6 +594,41 @@ async def logout(session: AsyncSession, *, session_id: int) -> None:
     auth_session.revoked_reason = SessionRevokedReason.logout.value
     auth_session.last_used_at = now
     logger.info("auth.logout", session_id=session_id)
+
+
+async def store_display_name(
+    session: AsyncSession, user_id: uuid.UUID, fullname: str | None
+) -> None:
+    """Store Moodle's full name for the user. A blank one keeps the stored
+    name, and an unchanged one leaves the row unwritten."""
+    name = display_name_from(fullname)
+    if name is not None:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id, User.display_name.is_distinct_from(name))
+            .values(display_name=name)
+        )
+
+
+async def try_store_display_name(
+    factory: async_sessionmaker[AsyncSession],
+    user_id: uuid.UUID,
+    fullname: str | None,
+) -> bool:
+    """`store_display_name` in a transaction of its own, after the caller's
+    work committed, so a failure costs only the name. False when it failed."""
+    try:
+        async with session_scope(factory) as session:
+            await store_display_name(session, user_id, fullname)
+    except Exception as exc:
+        # Only the type: the error renders the statement's parameters, the name too.
+        logger.warning(
+            "auth.display_name.not_stored",
+            user_id=str(user_id),
+            error=type(exc).__name__,
+        )
+        return False
+    return True
 
 
 async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:

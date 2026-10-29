@@ -18,7 +18,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..audit import audit
 from ..db import get_pool
@@ -190,6 +190,14 @@ class _CreateSubmission(BaseModel):
         min_length=1,
         max_length=1000,
     )
+
+    @field_validator("source_url")
+    @classmethod
+    def _http_only(cls, v: str) -> str:
+        # The apps and the portal open it as a link.
+        if not v.lower().startswith(("http://", "https://")):
+            raise ValueError("source_url must be an http or https URL")
+        return v
 
 
 @router.post("")
