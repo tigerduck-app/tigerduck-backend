@@ -171,7 +171,15 @@ export function courseChangeColumns(
           </Button>
         );
         if (c.stale) return <div className="inline-flex">{remove}</div>;
-        if (finalDay(c) < today) return <span className="text-xs text-ink-3">Past</span>;
+        // A past change stays read-only but can go, so it never blocks a term delete.
+        if (finalDay(c) < today) {
+          return (
+            <div className="inline-flex items-center gap-2">
+              <span className="text-xs text-ink-3">Past</span>
+              {remove}
+            </div>
+          );
+        }
         return (
           <div className="inline-flex gap-0.5">
             <Button variant="quiet" size="icon" aria-label="Edit" title="Edit" className="rounded-lg text-ink-2" onClick={() => onEdit(c)}>
