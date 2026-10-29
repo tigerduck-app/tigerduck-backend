@@ -16,6 +16,7 @@ import {
   PanelLeftOpen,
   Search,
   Send,
+  Server,
   Smartphone,
   UserMinus,
   type LucideIcon,
@@ -66,6 +67,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: "System",
     items: [
+      { to: "/stack", label: "Stack", icon: Server },
       { to: "/links", label: "Links", icon: Link },
       { to: "/tls-pins", label: "TLS pins", icon: Lock },
       { to: "/backup", label: "Backup", icon: HardDrive },
@@ -102,7 +104,7 @@ export function Layout() {
       >
         <div
           ref={bar}
-          className="sticky top-0 flex h-screen flex-col gap-5 overflow-y-auto px-3.5 py-5 [scrollbar-width:none] rail:items-center rail:gap-3.5 rail:px-2.5 rail:py-4 phone:static phone:h-auto phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-visible phone:px-3 phone:py-2"
+          className="sticky top-0 flex h-screen flex-col gap-5 overflow-y-auto px-3.5 py-5 [scrollbar-color:var(--color-side-chip)_transparent] [scrollbar-width:thin] phone:[scrollbar-width:none] rail:items-center rail:gap-3.5 rail:px-2.5 rail:py-4 phone:static phone:h-auto phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-visible phone:px-3 phone:py-2"
         >
           <Brand collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
           {env.data && <EnvCard env={env.data} />}
