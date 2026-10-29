@@ -32,6 +32,18 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.8.1
+
+- **Class reminders are sent.** The scan now reads the weekday-keyed
+  schedule both apps upload, which it took as no meetings before, so it had
+  never filed a class reminder. iPhone and iPad accounts with class
+  reminders on, the iOS default, get one before each meeting. Accounts with
+  only Android devices still get none from the server. The reminders do not
+  take the school's course changes into account yet.
+- **No migration and no `.env` change.** Rollback: check out 3.8.0 and
+  run `./start.sh`. Class reminders already filed then stay pending and go
+  out as filed.
+
 ## Upgrading to 3.8.0
 
 - **Course changes (#177).** Migration `ea77513de257` adds
