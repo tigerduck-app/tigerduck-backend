@@ -2,6 +2,7 @@
 // platform buttons set the Platform filter.
 
 import { Copy } from "lucide-react";
+import { Link } from "react-router-dom";
 import type { Column } from "@/components/data-table";
 import { Pill } from "@/components/page";
 import { copyText } from "@/lib/copy";
@@ -114,7 +115,14 @@ export function deviceColumns(devices: DeviceRow[]): Column<DeviceRow>[] {
       pii: 115,
       sortValue: (d) => d.student_id ?? "",
       className: "font-mono text-[13px]",
-      cell: (d) => d.student_id ?? "—",
+      cell: (d) =>
+        d.student_id ? (
+          <Link to={`/users/${d.user_uuid}`} className="text-link no-underline hover:text-link-hover">
+            {d.student_id}
+          </Link>
+        ) : (
+          "—"
+        ),
     },
     {
       key: "name",
