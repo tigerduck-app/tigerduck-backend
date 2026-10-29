@@ -293,9 +293,12 @@ SELECT COALESCE(
 
 _WEEK_SQL = f"SELECT {_TODAY} - (extract(isodow FROM {_TODAY})::int - 1)"
 
-# Enrolled courses of the term, as course_reminders.py reads them.
+# Enrolled courses of the term, each meeting as course_meetings reads it.
 _COURSES_SQL = """
-SELECT c.id, c.course_no, c.course_name AS name, c.classroom, c.schedule_json AS schedule,
+SELECT c.id, c.course_no, c.course_name AS name, c.classroom,
+       (SELECT coalesce(jsonb_agg(jsonb_build_object('day', weekday, 'periods', periods)
+                                 ORDER BY weekday), '[]')
+        FROM course_meetings(c.schedule_json)) AS schedule,
        COALESCE(
            array_agg(s.skipped_on ORDER BY s.skipped_on) FILTER (WHERE s.id IS NOT NULL),
            '{}'

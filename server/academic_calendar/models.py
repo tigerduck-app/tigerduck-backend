@@ -232,21 +232,28 @@ class CourseChange(Base):
 
 
 # The weekdays a `user_courses.schedule_json` meets on, ISO 1-7, each with its
-# NTUST periods as text. Entries the class reminder scan skips are skipped.
+# NTUST periods as text. The apps upload `{"<weekday>": [periods]}`; the list of
+# `{"day", "periods"}` entries the class reminder scan reads is accepted too.
 COURSE_MEETINGS_SQL = """
 CREATE OR REPLACE FUNCTION course_meetings(schedule jsonb)
 RETURNS TABLE (weekday integer, periods text[])
 LANGUAGE sql IMMUTABLE
 AS $$
-    SELECT (entry->>'day')::integer, array_agg(DISTINCT period)
-    FROM jsonb_array_elements(
-        CASE jsonb_typeof(schedule) WHEN 'array' THEN schedule ELSE '[]' END
-    ) AS e(entry)
+    SELECT day::integer, array_agg(DISTINCT period)
+    FROM (
+        SELECT key, value
+        FROM jsonb_each(CASE jsonb_typeof(schedule) WHEN 'object' THEN schedule ELSE '{}' END)
+        UNION ALL
+        SELECT entry->>'day', entry->'periods'
+        FROM jsonb_array_elements(
+            CASE jsonb_typeof(schedule) WHEN 'array' THEN schedule ELSE '[]' END
+        ) AS e(entry)
+        WHERE jsonb_typeof(entry->'day') = 'number'
+    ) AS m(day, list)
     CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE jsonb_typeof(entry->'periods') WHEN 'array' THEN entry->'periods' ELSE '[]' END
+        CASE jsonb_typeof(list) WHEN 'array' THEN list ELSE '[]' END
     ) AS p(period)
-    WHERE jsonb_typeof(entry->'day') = 'number'
-      AND entry->>'day' IN ('1', '2', '3', '4', '5', '6', '7')
+    WHERE day IN ('1', '2', '3', '4', '5', '6', '7')
       AND period IS NOT NULL
     GROUP BY 1
 $$

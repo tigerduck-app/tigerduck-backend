@@ -45,9 +45,10 @@ class _Edit(SimpleNamespace):
     async def json(self) -> dict:
         return self.body
 
-# Tuesday periods 3-4 and Thursday 2-3; periods as ints, as some uploads send them.
-_DS = [{"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": [2, 3]}]
-# Two meetings on one Monday.
+# Tuesday periods 3-4 and Thursday 2-3, keyed by ISO weekday as the apps upload it;
+# periods as ints too, as some uploads send them.
+_DS = {"2": ["3", "4"], "4": [2, 3]}
+# Two meetings on one Monday, in the list form the course upload also takes.
 _EL = [{"day": 1, "periods": ["2"]}, {"day": 1, "periods": ["6"]}]
 
 

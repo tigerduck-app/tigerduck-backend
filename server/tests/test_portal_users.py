@@ -357,7 +357,7 @@ async def test_user_page_shows_devices_week_pushes_and_last_upload(db_session, p
         course_no="CS1",
         course_name="資料結構",
         classroom="TR-412",
-        schedule_json=[{"day": 2, "periods": ["3", "4"]}],
+        schedule_json={"2": ["3", "4"]},
     )
     db_session.add_all(
         [
