@@ -274,7 +274,7 @@ function LogsViewer({
       key: "time",
       label: "Time",
       sortValue: (r) => r.ms ?? 0,
-      className: "whitespace-nowrap py-1.5 font-mono text-xs tabular-nums text-ink-2",
+      className: "whitespace-nowrap py-1.5 font-mono text-xs tabular-nums text-ink-2 phone:px-1.5",
       cell: (r) => (r.ms === null ? "—" : <Time ms={r.ms} iso={r.ts!} />),
     },
     {
@@ -282,7 +282,7 @@ function LogsViewer({
       label: "Level",
       filterValue: (r) => (r.level ? LEVEL_LABEL[r.level] : null),
       filterOptions: LEVELS.map(([, label]) => label),
-      className: "py-1.5",
+      className: "py-1.5 phone:px-1.5",
       cell: (r) =>
         r.level && (
           <span className={cn("inline-flex rounded-full px-[7px] py-px text-[11px] font-semibold", LEVEL_PILL[r.level])}>
@@ -306,7 +306,7 @@ function LogsViewer({
         <button
           type="button"
           onClick={() => toggle(r)}
-          className="block w-full truncate text-left text-ink"
+          className="block w-full truncate text-left text-ink phone:line-clamp-2 phone:whitespace-normal phone:break-all"
         >
           <span className="font-medium">{r.event}</span>
           {r.kv.length > 0 && (
@@ -476,7 +476,7 @@ function Time({ ms, iso }: { ms: number; iso: string }) {
   return (
     <span title={iso}>
       {d.toLocaleTimeString("en-GB", { hour12: false })}
-      <span className="text-side-muted">.{String(d.getMilliseconds()).padStart(3, "0")}</span>
+      <span className="text-side-muted phone:hidden">.{String(d.getMilliseconds()).padStart(3, "0")}</span>
     </span>
   );
 }
