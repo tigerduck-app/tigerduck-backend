@@ -2,7 +2,7 @@
 // or edits a scraped one. The backend's dispatcher pushes a new bulletin to
 // the devices whose subscriptions match it.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Megaphone, Pencil, Plus, RefreshCw, Search } from "lucide-react";
@@ -86,15 +86,19 @@ export function AnnouncementPage() {
     b.canonical_org ? (orgs.find((o) => o.id === b.canonical_org)?.label ?? b.canonical_org) : null;
   const tagLabel = (id: string) => tags.find((t) => t.id === id)?.label ?? id;
   const shownTitle = (b: BulletinSummary) => b.title_clean || b.title;
+  // Only the latest open applies, so a slow load cannot replace a newer draft.
+  const opened = useRef(0);
   // While a save is in flight the dialog stays, so a reopened one cannot send it twice.
   const open = async (id: number | null) => {
     if (saveMut.isPending) return;
     saveMut.reset();
+    const seq = ++opened.current;
     if (id === null) return setEditing({ bulletin: null });
     try {
-      setEditing({ bulletin: await api<BulletinDetail>(`/api/announcement/${id}`) });
+      const bulletin = await api<BulletinDetail>(`/api/announcement/${id}`);
+      if (seq === opened.current) setEditing({ bulletin });
     } catch (e) {
-      toast.error(errorText(e));
+      if (seq === opened.current) toast.error(errorText(e));
     }
   };
 
