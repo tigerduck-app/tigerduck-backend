@@ -43,6 +43,12 @@ async def test_upgrade_builds_the_table_the_model_declares(
         async with engine.connect() as conn:
             assert set((await conn.scalars(_SHAPE)).all()) == declared
 
+        # A second run, after a rollback that kept the table, changes nothing.
+        _alembic(migration_db_url, "stamp", BEFORE)
+        _alembic(migration_db_url, "upgrade", REVISION)
+        async with engine.connect() as conn:
+            assert set((await conn.scalars(_SHAPE)).all()) == declared
+
         _alembic(migration_db_url, "downgrade", BEFORE)
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT to_regclass('course_changes')")) is None

@@ -22,7 +22,8 @@ _HHMM = "'^([01][0-9]|2[0-3]):[0-5][0-9]$'"
 
 
 def upgrade() -> None:
-    """The table `CourseChange` in server/academic_calendar/models.py declares."""
+    """The table `CourseChange` in server/academic_calendar/models.py
+    declares. A second run, after a rollback that kept it, changes nothing."""
     op.create_table(
         "course_changes",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -97,11 +98,15 @@ def upgrade() -> None:
             " AND (note_en IS NULL OR kind = 'note') AND btrim(note_en) <> ''",
             name="chk_course_change_note",
         ),
+        if_not_exists=True,
     )
     op.create_index(
-        "ix_course_changes_term_course", "course_changes", ["term_code", "course_no"]
+        "ix_course_changes_term_course",
+        "course_changes",
+        ["term_code", "course_no"],
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_table("course_changes")
+    op.drop_table("course_changes", if_exists=True)
