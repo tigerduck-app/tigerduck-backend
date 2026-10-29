@@ -45,29 +45,31 @@ export function isoDate(start: string, offset: number): string {
 
 /** Each meeting split into runs of consecutive periods. */
 function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
+  const rooms = changes.filter((c) => c.kind === "room");
+  const cancels = changes.filter((c) => c.kind === "cancelled");
   const out: Block[] = [];
   for (const c of courses) {
+    const code = c.course_no ?? "";
     for (const entry of c.schedule) {
       const day = entry.day;
       if (typeof day !== "number" || day < 1 || day > 7 || !Array.isArray(entry.periods)) continue;
       const rows = [...new Set(entry.periods.map((p) => PERIODS.findIndex(([id]) => id === String(p))))]
         .filter((i) => i >= 0)
         .sort((a, b) => a - b);
-      const cancelled = c.skipped.includes(isoDate(weekStart, day - 1));
+      const date = isoDate(weekStart, day - 1);
+      const skipped = c.skipped.includes(date);
       rows.forEach((row, i) => {
+        // Period by period, since a change may cover only some of a meeting's periods.
+        const one = { code, day, from: row, to: row };
+        const cancelled = skipped || changeFor(one, cancels)?.date === date;
+        const tag = cancelled ? null : (changeFor(one, rooms)?.label ?? null);
         const last = out[out.length - 1];
-        if (i > 0 && last.to === row - 1) last.to = row;
-        else
-          out.push({ name: c.name, code: c.course_no ?? "", room: c.classroom ?? "", day, from: row, to: row, cancelled, tag: null });
+        if (i > 0 && last.to === row - 1 && last.cancelled === cancelled && last.tag === tag) last.to = row;
+        else out.push({ name: c.name, code, room: c.classroom ?? "", day, from: row, to: row, cancelled, tag });
       });
     }
   }
-  const rooms = changes.filter((c) => c.kind === "room");
-  const cancels = changes.filter((c) => c.kind === "cancelled");
-  return out.map((b) => {
-    const cancelled = b.cancelled || changeFor(b, cancels)?.date === isoDate(weekStart, b.day - 1);
-    return { ...b, cancelled, tag: cancelled ? null : (changeFor(b, rooms)?.label ?? null) };
-  });
+  return out;
 }
 
 export function Timetable({ user }: { user: UserDetail }) {
@@ -133,8 +135,12 @@ export function Timetable({ user }: { user: UserDetail }) {
                 : "bg-badge-info text-ink",
             )}
             style={{ gridColumn: b.day + 1, gridRow: `${b.from + 2} / span ${b.to - b.from + 1}` }}
+            // A one-period block has room for the name only.
+            title={[b.name, b.room, b.cancelled ? "Cancelled" : b.tag].filter(Boolean).join(" · ")}
           >
-            <span className={cn("truncate text-xs font-semibold", b.cancelled && "line-through")}>{b.name}</span>
+            <span className={cn("shrink-0 truncate text-xs font-semibold", b.cancelled && "line-through")}>
+              {b.name}
+            </span>
             <span className={cn("font-mono text-[11px]", b.cancelled && "line-through")}>{b.room}</span>
             {b.cancelled && (
               <span className="mt-auto self-start rounded-full bg-badge-danger px-1.5 py-px text-[10px] font-semibold text-badge-danger-fg">
@@ -143,7 +149,6 @@ export function Timetable({ user }: { user: UserDetail }) {
             )}
             {b.tag && (
               <span
-                title={b.tag}
                 className="mt-auto max-w-full self-start truncate rounded-full bg-surface px-1.5 py-px text-[10px] font-semibold text-badge-info-fg"
               >
                 {b.tag}
