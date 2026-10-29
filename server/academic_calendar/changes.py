@@ -31,7 +31,9 @@ WITH latest AS (
     ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
 )
 SELECT c.*, course_class_days(c.term_code, l.schedule_json, c.start_date,
-                              c.end_date, c.excluded_weekdays, c.periods) AS class_days
+                              c.end_date, c.excluded_weekdays, c.periods) AS class_days,
+       ARRAY(SELECT m.weekday FROM course_meetings(l.schedule_json) AS m
+             WHERE c.periods IS NULL OR c.periods <@ m.periods) AS meeting_weekdays
 FROM course_changes c
 LEFT JOIN latest l ON l.semester = c.term_code AND l.course_no = c.course_no
 WHERE c.term_code = ANY(:terms)
@@ -74,9 +76,9 @@ def meeting_changes(
     `period` on `day`; notes left out.
 
     The portal takes one change of a kind per course, day and period, so a
-    kind has at most one here. A change covers the days of its own range, not
-    `class_days`, so it reaches a holiday the user put back too; a push on any
-    other holiday is stopped before it asks.
+    kind has at most one here. A change covers the days of its own range the
+    course still meets on in its periods, holidays too, so it reaches a holiday
+    the user put back; a push on any other holiday is stopped before it asks.
     """
     return {
         change.kind: change
@@ -86,5 +88,6 @@ def meeting_changes(
         and change.course_no == course_no
         and change.start_date <= day <= change.end_date
         and day.isoweekday() not in change.excluded_weekdays
+        and day.isoweekday() in change.meeting_weekdays
         and (change.periods is None or period in change.periods)
     }

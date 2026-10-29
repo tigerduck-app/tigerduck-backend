@@ -1203,6 +1203,21 @@ async def test_a_change_reaches_a_holiday_the_user_put_back(
     assert request.message["aps"]["alert"]["body"] == f"{local:%H:%M} · IB-302"
 
 
+async def test_a_change_to_periods_the_course_no_longer_meets_in_is_left_out(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule,
+        _course_change(local, kind="room", room="IB-302", periods=["1", "2"]),
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert "IB-302" not in job.payload["body"]
+
+
 async def test_a_start_changed_after_filing_moves_the_reminder(
     db_session, prepared_engine, test_settings
 ):
