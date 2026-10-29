@@ -60,7 +60,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   must be http or https (422).
 - **Class reminder scan (#174)** reads only the terms that run in its
   window.
-- **No `.env` change.** Rollback: `alembic downgrade 8d70b4ee9cc7`, then
+- **No `.env` change.** Rollback: run
+  `docker compose exec backend alembic downgrade 8d70b4ee9cc7`, then
   check out 3.7.0. The downgrade drops `course_changes` and the two
   functions; names already written to `users.display_name` stay.
 
