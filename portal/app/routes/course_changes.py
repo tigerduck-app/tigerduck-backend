@@ -91,6 +91,22 @@ def _period_key(period: str) -> tuple:
     return (not numeric, int(period) if numeric else 0, period)
 
 
+# NTUST's period order; periods next to each other in it make one meeting, as in the apps.
+_ORDER = (*(str(n) for n in range(1, 11)), "A", "B", "C", "D")
+
+
+def _meetings(periods) -> list[list[str]]:
+    """A day's periods as its meetings: runs of periods back to back in `_ORDER`."""
+    runs: list[list[str]] = []
+    for period in sorted(periods, key=_period_key):
+        last = runs[-1][-1] if runs else None
+        if last in _ORDER and period in _ORDER and _ORDER.index(period) == _ORDER.index(last) + 1:
+            runs[-1].append(period)
+        else:
+            runs.append([period])
+    return runs
+
+
 def _change_to_dict(r) -> dict:
     single = r["mode"] == "day"
     return {
@@ -276,6 +292,18 @@ async def _check(
                 missing = set(columns["periods"]) - meets[day.isoweekday()]
                 listed = ", ".join(sorted(missing, key=_period_key))
                 return _bad(f"the course has no class in period {listed} on {day}")
+    # A new start or end is one meeting's, so the apps and pushes know which.
+    if columns["kind"] in ("start", "end"):
+        for day in days:
+            meetings = _meetings(meets[day.isoweekday()])
+            if columns["periods"] is None and len(meetings) > 1:
+                return _bad(
+                    f"the course meets more than once on {day};"
+                    f" a {columns['kind']} change needs the periods of one meeting"
+                )
+            if columns["periods"] is not None and columns["periods"] not in meetings:
+                listed = ", ".join(columns["periods"])
+                return _bad(f"period {listed} is not one meeting of the course on {day}")
     # An exam and a make-up class can share a day; two values of another kind cannot.
     if columns["kind"] == "note":
         return columns
