@@ -56,6 +56,13 @@ export function DevicesPage() {
     ...table,
     columns: [selectColumn(table.rows, selected, setSelected), ...table.columns],
   };
+  // A new search or filter clears the selection, so the actions only reach rows in view.
+  const scope = JSON.stringify([term, table.filters]);
+  const [selectedScope, setSelectedScope] = useState(scope);
+  if (selectedScope !== scope) {
+    setSelectedScope(scope);
+    setSelected(new Set());
+  }
   const chosenRows = devices.filter((d) => selected.has(d.device_id));
   const platformFilter = table.filters.platform ?? [];
   const activePlatform = platformFilter.length === 1 ? platformFilter[0] : "All";
