@@ -166,7 +166,6 @@ export function SyncTab() {
       {data?.found && (
         <TopologyOverview
           topology={data.topology}
-          pollStatus={data.poll_status}
           devices={data.devices ?? []}
           pushJobs={data.push_jobs}
           selectedNode={selectedNode}

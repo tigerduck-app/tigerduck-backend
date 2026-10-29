@@ -307,7 +307,6 @@ export type SyncEventsResponse = {
     tombstone_count: number;
     courses_reset_at: string | null;
   };
-  poll_status?: Record<string, "foreground" | "background">;
 };
 
 export type LogEntry = {

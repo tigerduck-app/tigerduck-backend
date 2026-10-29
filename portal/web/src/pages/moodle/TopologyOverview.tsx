@@ -15,14 +15,12 @@ import type { PushJobRow, SyncDevice, SyncEventsResponse, TopologyNode } from ".
 
 export function TopologyOverview({
   topology,
-  pollStatus,
   devices,
   pushJobs,
   selectedNode,
   onSelectNode,
 }: {
   topology: SyncEventsResponse["topology"];
-  pollStatus: SyncEventsResponse["poll_status"];
   devices: SyncDevice[];
   pushJobs?: PushJobRow[];
   selectedNode: TopologyNode | null;
@@ -87,11 +85,10 @@ export function TopologyOverview({
           {/* Device nodes */}
           <div className="space-y-2">
             {sortedDevices(devices).map((device) => {
-              const ps = pollStatus?.[device.id];
               const seenAgo = device.last_seen_at
                 ? (Date.now() - new Date(device.last_seen_at).getTime()) / 1000
                 : Infinity;
-              const isOnline = ps ? ps === "foreground" : seenAgo < 30;
+              const isOnline = seenAgo < 30;
               const isMacOs = device.platform === "macos";
               const pending = pendingByDevice(device.id);
               const isSelected =
