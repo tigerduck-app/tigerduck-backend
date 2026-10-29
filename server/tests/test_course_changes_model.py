@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from server.academic_calendar.models import SemesterTerm
+from server.academic_calendar.models import AcademicHoliday, SemesterTerm
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -117,3 +117,59 @@ async def test_a_term_with_changes_is_not_deleted(db_session) -> None:
 
     with pytest.raises(IntegrityError):
         await db_session.execute(text("DELETE FROM semester_terms WHERE code = '1151'"))
+
+
+# Tuesday periods 3-4 and Thursday 2-3, the shape the apps upload.
+_SCHEDULE = '[{"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": [2, 3]}]'
+
+
+async def _class_days(db_session, first, last, excluded=(), periods=None, schedule=_SCHEDULE):
+    days = await db_session.scalar(
+        text(
+            "SELECT course_class_days('1151', CAST(:schedule AS jsonb), :first, :last,"
+            " CAST(:excluded AS smallint[]), CAST(:periods AS text[]))"
+        ),
+        {
+            "schedule": schedule, "first": first, "last": last,
+            "excluded": list(excluded), "periods": periods,
+        },
+    )
+    return [day.isoformat() for day in days]
+
+
+async def test_class_days_follow_the_term_holidays_weekdays_and_periods(db_session) -> None:
+    """The one computation the portal, the feed and the class reminders share."""
+    await _term(db_session)
+    db_session.add(
+        AcademicHoliday(
+            name_zh="校慶", name_en="Anniversary",
+            start_date=date(2026, 11, 12), end_date=date(2026, 11, 12),
+        )
+    )
+    await db_session.commit()
+    nov = (date(2026, 11, 2), date(2026, 11, 15))
+
+    assert await _class_days(db_session, *nov) == [
+        "2026-11-03", "2026-11-05", "2026-11-10",
+    ]
+    assert await _class_days(db_session, *nov, excluded=[2]) == ["2026-11-05"]
+    assert await _class_days(db_session, *nov, periods=["4"]) == ["2026-11-03", "2026-11-10"]
+    assert await _class_days(db_session, *nov, periods=["2", "3"]) == ["2026-11-05"]
+    assert await _class_days(db_session, date(2027, 1, 1), date(2027, 1, 31)) == [
+        "2027-01-05", "2027-01-07",
+    ]
+    for schedule in ("null", '"Tue 3-4"', "5", '[null, {"day": "2", "periods": [3]}, {"day": 4}]'):
+        assert await _class_days(db_session, *nov, schedule=schedule) == []
+    assert await _class_days(db_session, *nov, schedule=None) == []
+
+
+async def test_meetings_read_each_weekday_once(db_session) -> None:
+    rows = await db_session.execute(
+        text(
+            "SELECT weekday, periods FROM course_meetings(CAST(:schedule AS jsonb))"
+            " ORDER BY weekday"
+        ),
+        {"schedule": '[{"day": 1, "periods": ["2"]}, {"day": 1, "periods": [6, "2"]}, {"day": 9, "periods": [1]}]'},
+    )
+
+    assert [(weekday, sorted(periods)) for weekday, periods in rows] == [(1, ["2", "6"])]

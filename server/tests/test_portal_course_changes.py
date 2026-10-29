@@ -17,7 +17,11 @@ import pytest_asyncio
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from portal.app.db import _asyncpg_dsn  # noqa: E402
-from portal.app.routes.academic_calendar import delete_term  # noqa: E402
+from portal.app.routes.academic_calendar import (  # noqa: E402
+    create_holiday,
+    delete_term,
+    upsert_term,
+)
 from portal.app.routes.course_changes import (  # noqa: E402
     create_change,
     delete_change,
@@ -33,6 +37,13 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 _REQUEST = SimpleNamespace(state=SimpleNamespace(actor="ops@example.com"))
 _OTHER = SimpleNamespace(state=SimpleNamespace(actor="lead@example.com"))
+
+
+class _Edit(SimpleNamespace):
+    """A request to a calendar route, which reads its own body."""
+
+    async def json(self) -> dict:
+        return self.body
 
 # Tuesday periods 3-4 and Thursday 2-3; periods as ints, as some uploads send them.
 _DS = [{"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": [2, 3]}]
@@ -182,6 +193,8 @@ async def test_a_day_change_is_recorded_with_who_made_it(term, pool) -> None:
     assert status == 200
     assert isinstance(change["id"], int)
     assert {k: v for k, v in change.items() if k not in ("id", "created_at", "updated_at")} == {
+        "class_days": ["2026-11-05"],
+        "stale": False,
         "term": "1151",
         "course_no": "CS2001301",
         "kind": "room",
@@ -494,3 +507,36 @@ async def test_a_malformed_schedule_counts_as_no_meetings(term, pool, schedule) 
 
     assert (el["course_no"], el["meetings"], el["classroom_map"]) == ("EE2005701", [], {})
     assert status == 404
+
+
+async def test_a_change_lists_the_class_days_a_calendar_edit_leaves_it(term, pool) -> None:
+    """Calendar edits stay open; a change shows what is left of it."""
+    _, ranged = await _create(
+        pool, kind="room", room="T4-201", mode="range",
+        **{"from": "2026-11-16", "to": "2026-12-31"}, excluded_weekdays=[4],
+    )
+    _, single = await _create(pool, day="2026-11-05")
+    assert ranged["class_days"] == [
+        "2026-11-17", "2026-11-24", "2026-12-01", "2026-12-08",
+        "2026-12-15", "2026-12-22", "2026-12-29",
+    ]
+
+    async def edit_term(end: str) -> int:
+        body = {"start_date": "2026-09-14", "end_date": end}
+        return (await upsert_term("1151", _Edit(state=_REQUEST.state, body=body), pool=pool)).status_code
+
+    async def listed() -> dict[int, tuple[list[str], bool]]:
+        changes = _body(await list_changes("1151", pool=pool))["changes"]
+        return {c["id"]: (c["class_days"], c["stale"]) for c in changes}
+
+    assert await edit_term("2026-11-20") == 200
+    holiday = {"name_zh": "停課", "name_en": "No classes", "start_date": "2026-11-05", "end_date": "2026-11-05"}
+    response = await create_holiday(_Edit(state=_REQUEST.state, body=holiday), pool=pool)
+    assert response.status_code == 200
+    assert await listed() == {
+        ranged["id"]: (["2026-11-17"], False),
+        single["id"]: ([], True),
+    }
+
+    assert await edit_term("2026-11-13") == 200
+    assert (await listed())[ranged["id"]] == ([], True)

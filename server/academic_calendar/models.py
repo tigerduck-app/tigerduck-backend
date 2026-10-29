@@ -25,6 +25,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     Date,
@@ -36,6 +37,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     func,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
@@ -227,3 +229,59 @@ class CourseChange(Base):
         ),
         Index("ix_course_changes_term_course", "term_code", "course_no"),
     )
+
+
+# The weekdays a `user_courses.schedule_json` meets on, ISO 1-7, each with its
+# NTUST periods as text. Entries the class reminder scan skips are skipped.
+COURSE_MEETINGS_SQL = """
+CREATE OR REPLACE FUNCTION course_meetings(schedule jsonb)
+RETURNS TABLE (weekday integer, periods text[])
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT (entry->>'day')::integer, array_agg(DISTINCT period)
+    FROM jsonb_array_elements(
+        CASE jsonb_typeof(schedule) WHEN 'array' THEN schedule ELSE '[]' END
+    ) AS e(entry)
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE jsonb_typeof(entry->'periods') WHEN 'array' THEN entry->'periods' ELSE '[]' END
+    ) AS p(period)
+    WHERE jsonb_typeof(entry->'day') = 'number'
+      AND entry->>'day' IN ('1', '2', '3', '4', '5', '6', '7')
+      AND period IS NOT NULL
+    GROUP BY 1
+$$
+"""
+
+# A change's class days by today's calendar: the days from first to last,
+# inside the term, not a holiday or an excluded weekday, on which the course
+# meets in every one of `wanted` (any period when NULL). One computation for
+# the portal, the apps' feed and the class reminders.
+COURSE_CLASS_DAYS_SQL = """
+CREATE OR REPLACE FUNCTION course_class_days(
+    term text, schedule jsonb, first_day date, last_day date,
+    excluded smallint[], wanted text[]
+)
+RETURNS date[]
+LANGUAGE sql STABLE
+AS $$
+    SELECT coalesce(array_agg(class_day ORDER BY class_day), '{}')
+    FROM semester_terms
+    CROSS JOIN LATERAL generate_series(
+        greatest(first_day, start_date), least(last_day, end_date), interval '1 day'
+    ) AS g(moment)
+    CROSS JOIN LATERAL (SELECT moment::date AS class_day) AS d
+    JOIN course_meetings(schedule) AS m
+      ON m.weekday = extract(isodow FROM class_day)::integer
+    WHERE code = term
+      AND extract(isodow FROM class_day)::smallint <> ALL (excluded)
+      AND (wanted IS NULL OR wanted <@ m.periods)
+      AND NOT EXISTS (
+          SELECT 1 FROM academic_holidays AS h
+          WHERE class_day BETWEEN h.start_date AND h.end_date
+      )
+$$
+"""
+
+# After every table: a sql function's body names tables that must exist.
+event.listen(Base.metadata, "after_create", DDL(COURSE_MEETINGS_SQL))
+event.listen(Base.metadata, "after_create", DDL(COURSE_CLASS_DAYS_SQL))

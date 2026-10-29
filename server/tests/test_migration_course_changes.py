@@ -14,7 +14,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 REVISION = "ea77513de257"
 BEFORE = "8d70b4ee9cc7"
 
-# Columns, constraints and indexes as Postgres reports them.
+# Columns, constraints, indexes and functions as Postgres reports them.
 _SHAPE = text(
     """
     SELECT a.attname || ' ' || format_type(a.atttypid, a.atttypmod)
@@ -29,7 +29,14 @@ _SHAPE = text(
     WHERE conrelid = 'course_changes'::regclass
     UNION ALL
     SELECT indexdef FROM pg_indexes WHERE tablename = 'course_changes'
+    UNION ALL
+    SELECT pg_get_functiondef(oid) FROM pg_proc
+    WHERE proname IN ('course_meetings', 'course_class_days')
     """
+)
+
+_FUNCTIONS = text(
+    "SELECT count(*) FROM pg_proc WHERE proname IN ('course_meetings', 'course_class_days')"
 )
 
 
@@ -37,6 +44,7 @@ async def test_upgrade_builds_the_table_the_model_declares(
     migration_db_url: str, db_session
 ) -> None:
     declared = set((await db_session.scalars(_SHAPE)).all())
+    assert len([shape for shape in declared if "FUNCTION" in shape]) == 2
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)
     try:
@@ -52,5 +60,6 @@ async def test_upgrade_builds_the_table_the_model_declares(
         _alembic(migration_db_url, "downgrade", BEFORE)
         async with engine.connect() as conn:
             assert await conn.scalar(text("SELECT to_regclass('course_changes')")) is None
+            assert await conn.scalar(_FUNCTIONS) == 0
     finally:
         await engine.dispose()

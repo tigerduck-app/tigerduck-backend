@@ -20,10 +20,57 @@ depends_on: str | Sequence[str] | None = None
 
 _HHMM = "'^([01][0-9]|2[0-3]):[0-5][0-9]$'"
 
+_COURSE_MEETINGS = """
+CREATE OR REPLACE FUNCTION course_meetings(schedule jsonb)
+RETURNS TABLE (weekday integer, periods text[])
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT (entry->>'day')::integer, array_agg(DISTINCT period)
+    FROM jsonb_array_elements(
+        CASE jsonb_typeof(schedule) WHEN 'array' THEN schedule ELSE '[]' END
+    ) AS e(entry)
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE jsonb_typeof(entry->'periods') WHEN 'array' THEN entry->'periods' ELSE '[]' END
+    ) AS p(period)
+    WHERE jsonb_typeof(entry->'day') = 'number'
+      AND entry->>'day' IN ('1', '2', '3', '4', '5', '6', '7')
+      AND period IS NOT NULL
+    GROUP BY 1
+$$
+"""
+
+_COURSE_CLASS_DAYS = """
+CREATE OR REPLACE FUNCTION course_class_days(
+    term text, schedule jsonb, first_day date, last_day date,
+    excluded smallint[], wanted text[]
+)
+RETURNS date[]
+LANGUAGE sql STABLE
+AS $$
+    SELECT coalesce(array_agg(class_day ORDER BY class_day), '{}')
+    FROM semester_terms
+    CROSS JOIN LATERAL generate_series(
+        greatest(first_day, start_date), least(last_day, end_date), interval '1 day'
+    ) AS g(moment)
+    CROSS JOIN LATERAL (SELECT moment::date AS class_day) AS d
+    JOIN course_meetings(schedule) AS m
+      ON m.weekday = extract(isodow FROM class_day)::integer
+    WHERE code = term
+      AND extract(isodow FROM class_day)::smallint <> ALL (excluded)
+      AND (wanted IS NULL OR wanted <@ m.periods)
+      AND NOT EXISTS (
+          SELECT 1 FROM academic_holidays AS h
+          WHERE class_day BETWEEN h.start_date AND h.end_date
+      )
+$$
+"""
+
 
 def upgrade() -> None:
     """The table `CourseChange` in server/academic_calendar/models.py
-    declares. A second run, after a rollback that kept it, changes nothing."""
+    declares, and the functions that give a change its class days
+    (`COURSE_CLASS_DAYS_SQL` there). A second run, after a rollback that kept
+    them, changes nothing."""
     op.create_table(
         "course_changes",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -106,7 +153,14 @@ def upgrade() -> None:
         ["term_code", "course_no"],
         if_not_exists=True,
     )
+    op.execute(_COURSE_MEETINGS)
+    op.execute(_COURSE_CLASS_DAYS)
 
 
 def downgrade() -> None:
+    op.execute(
+        "DROP FUNCTION IF EXISTS"
+        " course_class_days(text, jsonb, date, date, smallint[], text[])"
+    )
+    op.execute("DROP FUNCTION IF EXISTS course_meetings(jsonb)")
     op.drop_table("course_changes", if_exists=True)
