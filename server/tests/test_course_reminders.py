@@ -11,11 +11,12 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import event, func, insert, literal, select
+from sqlalchemy import delete, event, func, insert, literal, select
 
-from server.academic_calendar.models import SemesterTerm
+from server.academic_calendar.models import CourseChange, SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
+from server.push import course_reminders as course_reminders_module
 from server.push.apns_client import RecordingSender
 from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
@@ -1058,3 +1059,280 @@ async def test_a_class_reminder_filed_before_send_time_titles_goes_out_as_filed(
         "title": "上課提醒：資料結構",
         "body": "10 分鐘後上課 · TR-212",
     }
+
+
+# --- the school's course changes (tigerduck-backend#177) ---
+
+
+def _course_change(local, **fields) -> CourseChange:
+    """A change to CS2006301 on `local`'s day, in term 1141."""
+    return CourseChange(
+        **{
+            "term_code": "1141",
+            "course_no": "CS2006301",
+            "kind": "cancelled",
+            "mode": "day",
+            "start_date": local.date(),
+            "end_date": local.date(),
+            "excluded_weekdays": [],
+            "created_by": "ops@example.com",
+            "updated_by": "ops@example.com",
+            **fields,
+        }
+    )
+
+
+def _term_around(local) -> SemesterTerm:
+    return SemesterTerm(
+        code="1141",
+        start_date=local.date() - timedelta(days=30),
+        end_date=local.date() + timedelta(days=30),
+    )
+
+
+def _moved(local, minutes: int) -> datetime:
+    """`local` moved by `minutes`, toward noon so it stays on its day."""
+    return local + timedelta(minutes=minutes if local.hour < 12 else -minutes)
+
+
+async def _course_with_change(db_session, local, schedule, *changes):
+    user = await _make_user(db_session)
+    db_session.add_all([_term_around(local), _course(user, schedule_json=schedule)])
+    await db_session.flush()
+    db_session.add_all(changes)
+    await db_session.commit()
+    return user
+
+
+async def _send_due(factory, settings, db_session, user):
+    """Makes the user's filed reminders due and runs the pipeline once."""
+    for job in await _jobs(db_session, user.id):
+        job.fire_at = job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+    apple = RecordingSender()
+    await run_push_tick(
+        PushPipelineWorker(
+            session_factory=factory,
+            settings=settings,
+            router=PushRouter(apple=apple, android=RecordingSender()),
+            worker_id="course-test-worker",
+        )
+    )
+    return apple
+
+
+@pytest.mark.parametrize("periods", [None, ["1"]])
+async def test_no_reminder_for_a_cancelled_class(
+    db_session, prepared_engine, test_settings, periods
+):
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, periods=periods)
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 0
+    assert await _jobs(db_session, user.id) == []
+
+
+async def test_a_cancelled_meeting_leaves_the_days_other_meeting(
+    db_session, prepared_engine, test_settings
+):
+    local, _ = _occurrence_in(26)
+    schedule = [
+        {"day": local.isoweekday(), "periods": [1]},
+        {"day": local.isoweekday(), "periods": [2]},
+    ]
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, periods=["2"])
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert job.payload["start_epoch"] == int(local.replace(second=0, microsecond=0).timestamp())
+
+
+async def test_a_changed_room_and_start_reach_the_reminder(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(26)
+    start = _moved(local, 40).replace(second=0, microsecond=0)
+    user = await _course_with_change(
+        db_session,
+        local,
+        schedule,
+        _course_change(local, kind="room", room="IB-302"),
+        _course_change(local, kind="start", start_time=f"{start:%H:%M}", periods=["1"]),
+        _course_change(local, kind="end", end_time="23:59"),
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert job.fire_at == start - timedelta(minutes=10)
+    assert job.payload["body"] == f"{start:%H:%M} · IB-302"
+    assert job.payload["start_epoch"] == int(start.timestamp())
+    assert job.dedupe_key.endswith(f":{int(start.timestamp())}")
+
+
+async def test_a_change_reaches_a_holiday_the_user_put_back(
+    db_session, prepared_engine, test_settings
+):
+    from server.academic_calendar.models import UserHolidayOverride
+
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, kind="room", room="IB-302")
+    )
+    holiday = _holiday(local)
+    db_session.add(holiday)
+    await db_session.flush()
+    db_session.add(UserHolidayOverride(user_id=user.id, holiday_id=holiday.id, notify=True))
+    await db_session.commit()
+
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert job.payload["body"] == f"{local:%H:%M} · IB-302"
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    (request,) = apple.requests
+    assert request.message["aps"]["alert"]["body"] == f"{local:%H:%M} · IB-302"
+
+
+async def test_a_change_to_periods_the_course_no_longer_meets_in_is_left_out(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule,
+        _course_change(local, kind="room", room="IB-302", periods=["1", "2"]),
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert "IB-302" not in job.payload["body"]
+
+
+async def test_a_start_changed_after_filing_moves_the_reminder(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    start = _moved(local, 40).replace(second=0, microsecond=0)
+    db_session.add(_course_change(local, kind="start", start_time=f"{start:%H:%M}"))
+    await db_session.commit()
+
+    assert await scan_course_reminders(factory, settings) == 1
+    first, moved = await _jobs(db_session, user.id)
+    assert first.status == "cancelled"
+    assert (moved.status, moved.fire_at) == ("pending", start - timedelta(minutes=10))
+
+
+async def test_a_class_moved_to_later_today_keeps_its_reminder(
+    db_session, prepared_engine, test_settings
+):
+    """A class whose own start has passed but whose new one has not."""
+    now = datetime.now(ZoneInfo("Asia/Taipei"))
+    if not 1 <= now.hour <= 21:
+        pytest.skip("needs room on both sides of now on one day")
+    local = now - timedelta(minutes=30)
+    start = (now + timedelta(minutes=50)).replace(second=0, microsecond=0)
+    user = await _course_with_change(
+        db_session,
+        local,
+        [{"day": local.isoweekday(), "periods": [1]}],
+        _course_change(local, kind="start", start_time=f"{start:%H:%M}"),
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert job.fire_at == start - timedelta(minutes=10)
+
+
+async def test_a_room_changed_after_filing_reaches_the_reminder_at_send(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    db_session.add(_course_change(local, kind="room", room="IB-302"))
+    await db_session.commit()
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    (request,) = apple.requests
+    assert request.message["aps"]["alert"]["body"] == f"{local:%H:%M} · IB-302"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"kind": "cancelled"}, {"kind": "start", "start_time": None}],
+)
+async def test_a_change_after_filing_holds_the_reminder_at_send(
+    db_session, prepared_engine, test_settings, fields
+):
+    """Cancelled, or moved to a start the scan files a reminder of its own for."""
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    if fields["kind"] == "start":
+        fields = {**fields, "start_time": f"{_moved(local, 40):%H:%M}"}
+    db_session.add(_course_change(local, **fields))
+    await db_session.commit()
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert apple.requests == []
+    (job,) = await _jobs(db_session, user.id)
+    assert (job.status, job.last_error) == ("cancelled", "class_changed")
+
+
+async def test_a_reminder_is_dropped_when_its_check_fails(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+
+    async def unreachable(*args, **kwargs):
+        raise ConnectionError("database gone")
+
+    monkeypatch.setattr(course_reminders_module, "load_course_changes", unreachable)
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert apple.requests == []
+    (job,) = await _jobs(db_session, user.id)
+    assert (job.status, job.last_error) == ("cancelled", "unverified_before_send")
+
+
+async def test_a_reminder_for_a_removed_course_is_dropped_at_send(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    await db_session.execute(delete(UserCourse))
+    await db_session.commit()
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert apple.requests == []
+    (job,) = await _jobs(db_session, user.id)
+    assert job.status == "cancelled"

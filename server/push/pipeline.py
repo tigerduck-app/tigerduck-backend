@@ -69,8 +69,10 @@ from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import lift_timeouts, session_scope
 from server.push.apns_client import SendResult
+from server.push.class_starts import recheck_class_start
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
+from server.push.course_reminders import recheck_class_reminder
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
 from server.push.dedupe import activity_id as _activity_id
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
@@ -353,6 +355,7 @@ async def _process_job(
                 session,
                 job,
                 school_tz=worker.settings.course_reminder_timezone,
+                period_times=worker.settings.course_period_start_times,
                 countdown_window=timedelta(
                     seconds=worker.settings.push_countdown_dedupe_window_seconds
                 ),
@@ -390,6 +393,7 @@ async def _materialize(
     job: PushJob,
     *,
     school_tz: str,
+    period_times: dict[str, str],
     countdown_window: timedelta,
     presend_grace: timedelta,
 ) -> bool:
@@ -526,6 +530,14 @@ async def _materialize(
                 reason=quiet,
             )
             return False
+        elif (
+            job.scenario in _CLASS_SCENARIOS
+            and not await _has_deliveries(session, job)
+            and await _held_by_course_changes(
+                session, job, school_tz=school_tz, period_times=period_times
+            )
+        ):
+            return False
         elif not await _has_deliveries(session, job) and (
             await _activity_already_registered(
                 session, job=job, activity_id=activity_id, now=now
@@ -554,6 +566,15 @@ async def _materialize(
                 "push.activity_already_running", job_id=job.id, activity_id=activity_id
             )
             return False
+
+    if (
+        job.channel == COURSE_CHANNEL
+        and not await _has_deliveries(session, job)
+        and await _held_by_course_changes(
+            session, job, school_tz=school_tz, period_times=period_times
+        )
+    ):
+        return False
 
     is_sync_trigger = job.scenario == "sync_trigger"
     source_device_id: str | None = None
@@ -719,6 +740,66 @@ async def _materialize(
         )
     )
     return True
+
+
+# A held class start is checked again at least this often, so an edit that
+# shortens or removes its change wakes it in time.
+_HELD_START_RECHECK = timedelta(minutes=5)
+
+
+async def _held_by_course_changes(
+    session: AsyncSession,
+    job: PushJob,
+    *,
+    school_tz: str,
+    period_times: dict[str, str],
+) -> bool:
+    """Applies the school's course changes to a class reminder or class Live
+    Activity start right before its first delivery; True when that settled
+    the job or put it back.
+
+    Fails closed: a push whose class the check cannot confirm is cancelled
+    (`unverified_before_send`), and so is a reminder whose class was
+    cancelled or moved and a start whose class was cancelled
+    (`class_changed`). A start whose class begins later waits as long.
+    """
+    now = datetime.now(UTC)
+    delay = timedelta(0)
+    try:
+        # A savepoint, so a failed query leaves the job's transaction usable.
+        async with session.begin_nested():
+            tz = ZoneInfo(school_tz)
+            if job.channel == COURSE_CHANNEL:
+                payload = await recheck_class_reminder(
+                    session, job.payload or {}, tz=tz, period_times=period_times
+                )
+            else:
+                payload, delay = await recheck_class_start(
+                    session, job.payload or {}, tz=tz
+                )
+    except Exception:
+        logger.exception("push.course_changes_check_failed", job_id=job.id)
+        _settle(
+            job, status=PushJobStatus.cancelled, error="unverified_before_send", now=now
+        )
+        return True
+    if payload is None:
+        _settle(job, status=PushJobStatus.cancelled, error="class_changed", now=now)
+        logger.info("push.class_changed", job_id=job.id, channel=job.channel)
+        return True
+    if job.fire_at + delay > now:
+        # Only `available_at` moves and the filed payload stays, so the app's
+        # re-sync keeps the job and a later check measures from the filed start.
+        job.status = PushJobStatus.pending.value
+        job.available_at = min(job.fire_at + delay, now + _HELD_START_RECHECK)
+        job.locked_by = None
+        job.locked_at = None
+        logger.info(
+            "push.class_start_moved", job_id=job.id, until=job.available_at.isoformat()
+        )
+        return True
+    job.payload = payload
+    return False
 
 
 def _settle(job: PushJob, *, status: PushJobStatus, error: str, now: datetime) -> None:

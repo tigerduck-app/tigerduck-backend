@@ -367,6 +367,81 @@ async def test_a_change_of_a_kind_clashes_only_where_its_periods_meet(term, pool
     assert (await _create(pool, course_no="EE2005701", day="2026-11-02", periods=["6"]))[0] == 409
 
 
+async def test_changes_of_a_kind_clash_on_a_holiday_a_user_may_put_back(term, pool) -> None:
+    assert (await _create(pool, **_range("2026-11-10", "2026-11-12")))[0] == 200
+
+    status, body = await _create(pool, **_range("2026-11-12", "2026-11-17", room="T4-202"))
+
+    assert (status, body["day"]) == (409, "2026-11-12")
+
+
+async def test_a_start_change_names_one_meeting_on_a_holiday_too(term, pool, db_session) -> None:
+    student = await _user(db_session, "b4")
+    db_session.add(
+        _course(student, "PE1001301", course_name="體育", schedule_json={"2": ["3"], "4": ["2", "6"]})
+    )
+    await db_session.commit()
+
+    status, body = await _create(
+        pool, course_no="PE1001301", kind="start", start="13:40",
+        mode="range", **{"from": "2026-11-10", "to": "2026-11-12"},
+    )
+
+    assert status == 400
+    assert "2026-11-12" in body["detail"]
+
+
+@pytest.mark.parametrize("kind", ["start", "end"])
+@pytest.mark.parametrize(
+    ("fields", "status"),
+    [
+        ({"course_no": "EE2005701", "day": "2026-11-02"}, 400),  # Monday meets 2 and 6
+        ({"course_no": "EE2005701", "day": "2026-11-02", "periods": ["2", "6"]}, 400),
+        ({"course_no": "EE2005701", "day": "2026-11-02", "periods": ["6"]}, 200),
+        ({"day": "2026-11-05", "periods": ["2"]}, 400),  # Thursday meets 2-3
+        ({"day": "2026-11-05", "periods": ["3", "2"]}, 200),
+        ({"mode": "range", "from": "2026-11-16", "to": "2026-11-30"}, 200),
+        (
+            {
+                "mode": "range", "from": "2026-11-16", "to": "2026-11-30",
+                "periods": ["3"], "excluded_weekdays": [4],
+            },
+            400,
+        ),
+        (
+            {
+                "course_no": "EE2005701", "mode": "range",
+                "from": "2026-11-02", "to": "2026-11-30",
+            },
+            400,
+        ),
+    ],
+)
+async def test_a_start_or_end_change_names_one_meeting(
+    term, pool, kind, fields, status
+) -> None:
+    code, body = await _create(pool, kind=kind, **{kind: "13:40"}, **fields)
+
+    assert code == status, body
+    if status == 400:
+        assert "meeting" in body["detail"]
+
+
+async def test_an_edit_of_a_start_change_names_one_meeting(term, pool) -> None:
+    _, change = await _create(
+        pool, course_no="EE2005701", kind="start", start="09:30",
+        day="2026-11-02", periods=["2"],
+    )
+
+    response = await update_change(
+        change["id"], _OTHER, pool=pool,
+        body={"kind": "start", "mode": "day", "day": "2026-11-02", "start": "09:40"},
+    )
+
+    assert response.status_code == 400
+    assert _body(await list_changes("1151", pool=pool))["changes"][0]["start"] == "09:30"
+
+
 async def test_an_edit_keeps_the_change_and_its_author(term, pool) -> None:
     _, first = await _create(pool, kind="start", day="2026-11-05", start="09:40")
     _, other = await _create(pool, kind="end", day="2026-11-10", end="12:00")

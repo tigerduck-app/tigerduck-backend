@@ -33,6 +33,7 @@ clients do, and a 2.0.2 iPhone still runs AssignmentReminderScheduler.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -51,6 +52,7 @@ from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
+from server.sync.models import UserCourse
 from server.tests.conftest import SubmissionStatusStub
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -237,6 +239,35 @@ async def test_bulletin_channel_is_not_gated(
     assert device.id in delivered, case
 
 
+async def _course_reminder(session, user, *, dedupe_key):
+    """A class reminder for a course the user has, today at period 1, which
+    the pipeline confirms before it sends."""
+    start = datetime.now(ZoneInfo("Asia/Taipei")).replace(hour=8, minute=10, second=0, microsecond=0)
+    course = UserCourse(
+        user_id=user.id,
+        semester="1141",
+        course_key="CS2006301",
+        course_no="CS2006301",
+        course_name="資料結構",
+        schedule_json=[{"day": start.isoweekday(), "periods": [1]}],
+    )
+    session.add(course)
+    await session.flush()
+    return _job(
+        user,
+        channel=COURSE_CHANNEL,
+        scenario="reminder_10m",
+        dedupe_key=dedupe_key,
+        payload={
+            "kind": "course_reminder",
+            "title": "上課提醒：資料結構",
+            "body": "10 分鐘後上課",
+            "user_course_id": course.id,
+            "start_epoch": int(start.timestamp()),
+        },
+    )
+
+
 async def test_course_reminder_skips_android(
     db_session, prepared_engine, test_settings
 ):
@@ -252,17 +283,7 @@ async def test_course_reminder_skips_android(
     iphone = await _device_with_token(
         db_session, user, client_device_id="dev-iphone", platform="ios"
     )
-    job = _job(
-        user,
-        channel=COURSE_CHANNEL,
-        scenario="reminder_10m",
-        dedupe_key="course:test:11",
-        payload={
-            "kind": "course_reminder",
-            "title": "上課提醒：資料結構",
-            "body": "10 分鐘後上課",
-        },
-    )
+    job = await _course_reminder(db_session, user, dedupe_key="course:test:11")
     db_session.add(job)
     await db_session.commit()
 
@@ -289,17 +310,7 @@ async def test_course_reminder_reaches_only_iphone_and_ipad(
     iphone = await _device_with_token(
         db_session, user, client_device_id="dev-iphone", platform="ios"
     )
-    job = _job(
-        user,
-        channel=COURSE_CHANNEL,
-        scenario="reminder_10m",
-        dedupe_key=f"course:test:12:{platform}",
-        payload={
-            "kind": "course_reminder",
-            "title": "上課提醒：資料結構",
-            "body": "10 分鐘後上課",
-        },
-    )
+    job = await _course_reminder(db_session, user, dedupe_key=f"course:test:12:{platform}")
     db_session.add(job)
     await db_session.commit()
 
