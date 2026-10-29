@@ -57,7 +57,7 @@ export function TlsPinDialog({
     kind === "pin"
       ? !(spkiOk && label.trim())
       : kind === "hosts"
-        ? lines.length === 0 || badHosts > 0
+        ? badHosts > 0
         : kind === "expiry"
           ? !date || daysFromNow(date) <= 0
           : false;
