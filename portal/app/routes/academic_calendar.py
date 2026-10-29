@@ -67,11 +67,13 @@ async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
             "SELECT code, start_date, end_date, name_zh, name_en "
             "FROM semester_terms ORDER BY code DESC"
         )
+        # One grouped scan: the overrides' indexes lead with user_id.
         holidays = await conn.fetch(
             "SELECT h.id, h.name_zh, h.name_en, h.start_date, h.end_date, "
-            "(SELECT count(*) FROM user_holiday_overrides o "
-            "WHERE o.holiday_id = h.id AND o.notify) AS overrides "
-            "FROM academic_holidays h ORDER BY h.start_date"
+            "coalesce(o.n, 0) AS overrides FROM academic_holidays h "
+            "LEFT JOIN (SELECT holiday_id, count(*) AS n FROM user_holiday_overrides "
+            "WHERE notify GROUP BY holiday_id) o ON o.holiday_id = h.id "
+            "ORDER BY h.start_date"
         )
         # Terms the clients have filed courses under but that have no dates
         # yet. Without dates the apps cannot place a semester boundary in the
