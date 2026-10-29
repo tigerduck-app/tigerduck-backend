@@ -32,6 +32,38 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.8.0
+
+- **Course changes (#177).** Migration `ea77513de257` adds
+  `course_changes`, a course's class changes per term (cancelled, room,
+  start, end, note) for one day or a date range, and the SQL functions
+  `course_meetings` and `course_class_days`, which resolve a change's
+  class days. Operators edit them on the portal's Course changes page. A
+  term that still has changes cannot be deleted (409). Nothing outside the
+  portal reads the table yet.
+- **Stored names.** `users.display_name` holds the name Moodle reports. It
+  is written at sign-in, on `PATCH /auth/credentials` and by the course
+  sync and submission check, each time after the main work commits, and a
+  failed write only logs a warning. The sign-in response's `display_name`,
+  always null before, now carries it.
+- **Portal redesign (#178).** The portal is rebuilt on a new shell, with
+  new routes for users, course changes, the deregister lookup and the
+  Moodle student search and timetable. The user list, a user page, the
+  lookups and the timetable write audit entries. `/api/version` answers
+  503 when the backend cannot be reached.
+- **Deregister signs devices out (#176).** It revokes the devices'
+  sessions, unlinks their anonymous registrations and drops the stored
+  Moodle token once the student has no device left.
+- **Custom push to a course.** `POST /api/custom-push` takes `course_code`
+  and reaches the devices of the course's students this term, as a popup
+  only (422 when it asks to keep a record). A new bulletin's source URL
+  must be http or https (422).
+- **Class reminder scan (#174)** reads only the terms that run in its
+  window.
+- **No `.env` change.** Rollback: `alembic downgrade 8d70b4ee9cc7`, then
+  check out 3.7.0. The downgrade drops `course_changes` and the two
+  functions; names already written to `users.display_name` stay.
+
 ## Upgrading to 3.7.0
 
 - **TigerSync last-writer-wins (tigerduck-app#689).** Every `/v3` answer
