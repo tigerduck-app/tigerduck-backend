@@ -1,103 +1,153 @@
-// Presentation helpers shared by the Moodle tabs: timestamp formatting,
-// device ordering and labelling, and the status badges.
+// Words, times and status pills the two Moodle pages share.
 
-import { Monitor, Tablet, Smartphone } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { PLATFORM_LABELS, platformLabel } from "@/lib/platform";
-import type { SyncDevice } from "./types";
+import { api, ApiError } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { monthDayTime } from "@/lib/format";
+import { platformLabel } from "@/lib/platform";
+import { Pill, type Tone } from "@/components/page";
 
-export function fmt(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString();
+const JOB_TYPE: Record<string, string> = {
+  moodle_assignments: "Moodle assignments",
+  ntust_courses: "NTUST courses",
+};
+export const JOB_TYPES = Object.values(JOB_TYPE);
+export const jobType = (t: string) => JOB_TYPE[t] ?? t;
+
+function span(mins: number): string {
+  if (mins < 60) return `${mins}m`;
+  if (mins < 1440) return `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`;
 }
 
-export function relativeTime(iso: string | null): string {
-  if (!iso) return "never";
-  const diff = Date.now() - new Date(iso).getTime();
-  if (diff < 0) return "just now";
-  const secs = Math.floor(diff / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+/** "12s ago", "21m ago", "3h 4m ago" */
+export function ago(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const secs = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000));
+  return secs < 60 ? `${secs}s ago` : `${span(Math.floor(secs / 60))} ago`;
 }
 
-/** "in 3h 20m" for a time ahead, "due 5m ago" for one already passed. */
-export function timeUntil(iso: string | null): string {
-  if (!iso) return "—";
-  const diff = new Date(iso).getTime() - Date.now();
-  const mins = Math.floor(Math.abs(diff) / 60_000);
-  const text =
-    mins < 60 ? `${mins}m`
-    : mins < 1440 ? `${Math.floor(mins / 60)}h ${mins % 60}m`
-    : `${Math.floor(mins / 1440)}d ${Math.floor((mins % 1440) / 60)}h`;
+/** "in 7h 39m", or "due 5m ago" once passed. */
+export function until(iso: string): string {
+  const diff = Date.parse(iso) - Date.now();
+  const text = span(Math.floor(Math.abs(diff) / 60_000));
   return diff < 0 ? `due ${text} ago` : `in ${text}`;
 }
 
-export function statusBadge(s: string) {
-  switch (s) {
-    case "pending": return <Badge variant="default">pending</Badge>;
-    case "running": return <Badge className="bg-blue-600">running</Badge>;
-    case "failed": return <Badge variant="destructive">failed</Badge>;
-    case "disabled": return <Badge variant="outline">disabled</Badge>;
-    default: return <Badge variant="secondary">{s}</Badge>;
-  }
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** "08:31" */
+export function clock(iso: string | Date, seconds = false): string {
+  const d = new Date(iso);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}${seconds ? `:${pad(d.getSeconds())}` : ""}`;
 }
 
-export function RunStatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    succeeded: "bg-green-500/10 text-green-600",
-    running: "bg-blue-500/10 text-blue-600",
-    pending: "bg-yellow-500/10 text-yellow-600",
-    failed: "bg-red-500/10 text-red-600",
-    disabled: "bg-gray-500/10 text-gray-600",
-    cancelled: "bg-gray-500/10 text-gray-600",
-    ignored: "bg-gray-500/10 text-gray-600",
-    locally_completed: "bg-green-500/10 text-green-600",
-    none: "bg-gray-500/10 text-gray-600",
-  };
+/** "08:31", "Yesterday 08:31" or "Oct 27 08:31" */
+export function dayClock(iso: string): string {
+  const d = new Date(iso);
+  const days = Math.round(
+    (new Date().setHours(0, 0, 0, 0) - new Date(iso).setHours(0, 0, 0, 0)) / 86_400_000,
+  );
+  if (days === 0) return clock(d);
+  if (days === 1) return `Yesterday ${clock(d)}`;
+  return monthDayTime(iso);
+}
+
+/** "1151" -> "115-1" */
+export const termLabel = (code: string) => `${code.slice(0, 3)}-${code.slice(3)}`;
+
+const DEVICE: Record<string, string> = { ios: "iPhone", ipados: "iPad", macos: "Mac" };
+export const deviceNoun = (platform: string) => DEVICE[platform] ?? platformLabel(platform);
+
+/** The reason a portal route gave: our routes answer `error`, FastAPI `detail`. */
+export function errorText(e: unknown): string {
+  if (e instanceof ApiError && e.body && typeof e.body === "object") {
+    const body = e.body as { error?: unknown; detail?: unknown };
+    const reason = body.error ?? body.detail;
+    if (reason) return typeof reason === "string" ? reason : JSON.stringify(reason);
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** A POST whose `ok: false` answer counts as a failure too. */
+export async function post<T = Record<string, unknown>>(path: string, json?: unknown): Promise<T> {
+  const body = await api<T & { ok?: boolean; error?: string }>(path, { method: "POST", json });
+  if (body && body.ok === false) throw new Error(body.error ?? "Failed");
+  return body;
+}
+
+const STATUS: Record<string, [string, Tone, string]> = {
+  pending: ["Pending", "neutral", "bg-dot-off"],
+  running: ["Running", "info", "bg-link"],
+  processing: ["Processing", "warning", "bg-dot-warn"],
+  failed: ["Failed", "danger", "bg-dot-bad"],
+  disabled: ["Disabled", "warning", "bg-dot-warn"],
+  succeeded: ["Succeeded", "success", "bg-dot-ok"],
+  sent: ["Sent", "success", "bg-dot-ok"],
+  skipped: ["Skipped", "neutral", "bg-dot-off"],
+  cancelled: ["Cancelled", "neutral", "bg-dot-off"],
+  partial_failed: ["Failed", "danger", "bg-dot-bad"],
+};
+
+export const statusLabel = (s: string) => STATUS[s]?.[0] ?? s;
+
+export function StatusPill({ status, dot = true }: { status: string; dot?: boolean }) {
+  const [label, tone, color] = STATUS[status] ?? [status, "neutral" as Tone, "bg-dot-off"];
   return (
-    <Badge variant="default" className={colors[status] ?? "bg-gray-500/10 text-gray-600"}>
-      {status}
-    </Badge>
+    <Pill tone={tone}>
+      {dot && <span aria-hidden="true" className={cn("size-[7px] rounded-full", color)} />}
+      {label}
+    </Pill>
   );
 }
 
-export const CHART_COLORS = [
-  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
-  "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
-];
-
-// Platform naming is shared with the devices pages — see lib/platform.
-// Re-exported here so the Moodle tabs can keep importing it from this module.
-export { PLATFORM_LABELS, platformLabel };
-
-export const PLATFORM_ORDER: Record<string, number> = {
-  android: 0, wearos: 1, ios: 2, ipados: 3, macos: 4, watchos: 5, web: 6,
+const LA_SCENARIO: Record<string, string> = {
+  classPreparing: "class preparing",
+  inClass: "in class",
+  assignmentUrgent: "assignment due",
 };
 
-export function sortedDevices(devices: SyncDevice[]): SyncDevice[] {
-  return [...devices].sort((a, b) => {
-    const pa = PLATFORM_ORDER[a.platform] ?? 99;
-    const pb = PLATFORM_ORDER[b.platform] ?? 99;
-    if (pa !== pb) return pa - pb;
-    return a.client_device_id.localeCompare(b.client_device_id);
-  });
+/** What a push job is, in the words the apps use. */
+export function pushLabel(j: { channel: string; scenario: string; kind: string | null }): string {
+  const offset = /^reminder_(\d+(?:\.\d+)?)(m|h)$/.exec(j.scenario);
+  const lead = offset ? ` · ${offset[1]} ${offset[2] === "m" ? "min" : "h"} before` : "";
+  switch (j.channel) {
+    case "schedule":
+      return j.kind === "live_activity_end"
+        ? "Live Activity end"
+        : `Live Activity start · ${LA_SCENARIO[j.scenario] ?? j.scenario}`;
+    case "course":
+      return `Class reminder${lead}`;
+    case "assignment":
+      return `Assignment due reminder${lead}`;
+    case "bulletin":
+      return "Bulletin";
+    case "custom":
+      return "Custom push";
+    case "system":
+      if (j.scenario === "sync_trigger") return "Silent sync trigger";
+      if (j.scenario === "reauth_required") return "Sign-in expired notice";
+      return `System · ${j.scenario}`;
+    default:
+      return `${j.channel} · ${j.scenario}`;
+  }
 }
 
-export function deviceLabel(deviceId: string | null | undefined, devices: SyncDevice[]): string {
-  if (!deviceId) return "—";
-  const d = devices.find(d => d.id === deviceId);
-  if (!d) return deviceId.slice(0, 8);
-  return `${platformLabel(d.platform)} ${d.client_device_id.slice(0, 8)}`;
+/** The run's length in seconds, or null while it runs. */
+export function duration(started: string | null, finished: string | null): number | null {
+  return started && finished ? (Date.parse(finished) - Date.parse(started)) / 1000 : null;
 }
 
-export function platformIcon(platform: string) {
-  if (["android", "wearos"].includes(platform))
-    return <Tablet className="h-5 w-5" />;
-  if (["ios", "ipados", "watchos"].includes(platform))
-    return <Smartphone className="h-5 w-5" />;
-  return <Monitor className="h-5 w-5" />;
+/** "3.2 s" with a bar against 12 s, the scale the design draws. */
+export function DurationBar({ seconds }: { seconds: number | null }) {
+  return (
+    <div className="flex items-center justify-end gap-2">
+      <span className="font-mono text-[13px]">{seconds === null ? "—" : `${seconds.toFixed(1)} s`}</span>
+      <span aria-hidden="true" className="block h-1.5 w-[60px] rounded-full bg-divider">
+        <span
+          className="block h-1.5 rounded-full bg-chart-1"
+          style={{ width: `${Math.min(100, ((seconds ?? 0) / 12) * 100)}%` }}
+        />
+      </span>
+    </div>
+  );
 }
