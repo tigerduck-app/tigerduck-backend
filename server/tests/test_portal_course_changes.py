@@ -540,3 +540,54 @@ async def test_a_change_lists_the_class_days_a_calendar_edit_leaves_it(term, poo
 
     assert await edit_term("2026-11-13") == 200
     assert (await listed())[ranged["id"]] == ([], True)
+
+
+def _range(first: str, last: str, **fields) -> dict:
+    return {"kind": "room", "room": "T4-201", "mode": "range", "from": first, "to": last, **fields}
+
+
+async def test_an_edit_turns_a_day_into_a_range_and_changes_its_weekdays(term, pool) -> None:
+    _, change = await _create(pool, kind="room", room="T4-201", day="2026-11-05")
+
+    ranged = _body(
+        await update_change(
+            change["id"], _OTHER, pool=pool, body=_range("2026-11-16", "2026-11-30")
+        )
+    )
+    tuesdays = _body(
+        await update_change(
+            change["id"], _OTHER, pool=pool,
+            body=_range("2026-11-16", "2026-11-30", excluded_weekdays=[4]),
+        )
+    )
+
+    assert (ranged["mode"], ranged["day"], ranged["from"], ranged["to"]) == (
+        "range", None, "2026-11-16", "2026-11-30",
+    )
+    assert ranged["class_days"] == [
+        "2026-11-17", "2026-11-19", "2026-11-24", "2026-11-26",
+    ]
+    assert tuesdays["excluded_weekdays"] == [4]
+    assert tuesdays["class_days"] == ["2026-11-17", "2026-11-24"]
+    (stored,) = _body(await list_changes("1151", pool=pool))["changes"]
+    assert stored == tuesdays
+
+
+async def test_an_edit_into_another_changes_range_clashes(term, pool) -> None:
+    _, ranged = await _create(pool, **_range("2026-11-16", "2026-11-30", excluded_weekdays=[4]))
+    _, single = await _create(pool, kind="room", room="IB-101", day="2026-11-19")
+
+    onto_a_tuesday = await update_change(
+        single["id"], _OTHER, pool=pool,
+        body={"kind": "room", "room": "IB-101", "mode": "day", "day": "2026-11-24"},
+    )
+    widened = await update_change(
+        ranged["id"], _OTHER, pool=pool, body=_range("2026-11-16", "2026-11-30")
+    )
+
+    assert (onto_a_tuesday.status_code, _body(onto_a_tuesday)["day"]) == (409, "2026-11-24")
+    assert (widened.status_code, _body(widened)["day"]) == (409, "2026-11-19")
+    assert {c["id"]: c["class_days"] for c in _body(await list_changes("1151", pool=pool))["changes"]} == {
+        ranged["id"]: ["2026-11-17", "2026-11-24"],
+        single["id"]: ["2026-11-19"],
+    }
