@@ -594,6 +594,20 @@ async def logout(session: AsyncSession, *, session_id: int) -> None:
     logger.info("auth.logout", session_id=session_id)
 
 
+async def store_display_name(
+    session: AsyncSession, user_id: uuid.UUID, fullname: str | None
+) -> None:
+    """Store Moodle's full name for the user. A blank one keeps the stored
+    name, and an unchanged one leaves the row unwritten."""
+    name = display_name_from(fullname)
+    if name is not None:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id, User.display_name.is_distinct_from(name))
+            .values(display_name=name)
+        )
+
+
 async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:
     """Lock the students' accounts, lowest id first, until the transaction
     ends. Every path that signs a device in or out takes them before it

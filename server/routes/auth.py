@@ -225,6 +225,7 @@ async def update_credentials(
                 last_error=None,
             )
         )
+    await service.store_display_name(session, auth.user_id, verify.fullname)
 
     return UpdateCredentialsResponse(updated=True)
 

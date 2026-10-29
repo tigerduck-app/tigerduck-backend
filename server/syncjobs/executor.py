@@ -60,10 +60,9 @@ from server.auth.models import (
     ExternalAccountCredential,
     PushTokenKind,
     PushTokenStatus,
-    User,
     UserDevice,
 )
-from server.auth.moodle import display_name_from
+from server.auth.service import store_display_name
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -801,15 +800,9 @@ async def _store_display_name(
     """Refresh the user's name from the site-info answer a fetch already got,
     so a user who does not sign in again still gets one. Its own
     transaction, so the users row is never locked behind the job's locks."""
-    name = display_name_from(fullnames[-1]) if fullnames else None
-    if name is None:
-        return
-    async with session_scope(worker.session_factory) as session:
-        await session.execute(
-            update(User)
-            .where(User.id == user_id, User.display_name.is_distinct_from(name))
-            .values(display_name=name)
-        )
+    if fullnames:
+        async with session_scope(worker.session_factory) as session:
+            await store_display_name(session, user_id, fullnames[-1])
 
 
 async def _handle_moodle_failure(
