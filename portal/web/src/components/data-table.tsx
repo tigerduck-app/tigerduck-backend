@@ -121,6 +121,10 @@ export function useTable<R>({
     : filtered;
   const pages = Math.max(1, Math.ceil(sorted.length / perPage));
   const current = Math.min(page, pages);
+  // Keeps the clamp when rows shrink, so rows coming back do not reopen that page.
+  React.useEffect(() => {
+    if (page > pages) setPage(pages);
+  }, [page, pages]);
   const start = Number.isFinite(perPage) ? (current - 1) * perPage : 0;
 
   return {
