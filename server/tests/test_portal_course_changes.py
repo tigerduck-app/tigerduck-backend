@@ -17,6 +17,7 @@ import pytest_asyncio
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from portal.app.db import _asyncpg_dsn  # noqa: E402
+from portal.app.routes.academic_calendar import delete_term  # noqa: E402
 from portal.app.routes.course_changes import (  # noqa: E402
     create_change,
     delete_change,
@@ -423,3 +424,12 @@ async def test_the_changes_list_is_by_date_and_filters_by_course(term, pool) -> 
     assert [c["id"] for c in one] == [early["id"], late["id"]]
     assert _body(await list_changes("1152", pool=pool))["changes"] == []
 
+
+
+async def test_a_term_with_changes_is_kept(term, pool) -> None:
+    await _create(pool, day="2026-11-05")
+
+    response = await delete_term("1151", _REQUEST, pool=pool)
+
+    assert response.status_code == 409
+    assert await pool.fetchval("SELECT count(*) FROM semester_terms WHERE code = '1151'") == 1

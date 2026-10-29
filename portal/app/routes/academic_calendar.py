@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import asyncpg
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -121,9 +122,15 @@ async def upsert_term(code: str, request: Request, pool=Depends(get_pool)) -> JS
 async def delete_term(
     code: str, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute("DELETE FROM semester_terms WHERE code = $1", code)
-        await audit(conn, request, "calendar.term.delete", code=code)
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM semester_terms WHERE code = $1", code)
+            await audit(conn, request, "calendar.term.delete", code=code)
+    except asyncpg.ForeignKeyViolationError:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "delete the term's course changes first"},
+        )
     return JSONResponse(content={"deleted": code})
 
 
