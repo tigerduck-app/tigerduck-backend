@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import { Pill } from "@/components/page";
 import { cn } from "@/lib/cn";
 import { Chips } from "./controls";
-import { clock } from "./format";
+import { clock, errorText } from "./format";
 import type { LogEntry } from "./types";
 
 const KEEP = 500;
@@ -23,6 +23,7 @@ export function LiveLog({ studentId }: { studentId: string }) {
   const [paused, setPaused] = useState(false);
   const [level, setLevel] = useState<Level>("all");
   const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [failure, setFailure] = useState<string | null>(null);
   const latest = useRef(0);
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -39,7 +40,9 @@ export function LiveLog({ studentId }: { studentId: string }) {
         const r = await api<{ entries: LogEntry[]; latest_id: number }>(
           `/api/moodle/sync-logs?student_id=${encodeURIComponent(studentId)}&after_id=${latest.current}`,
         );
-        if (!alive || r.entries.length === 0) return;
+        if (!alive) return;
+        setFailure(null);
+        if (r.entries.length === 0) return;
         const first = latest.current === 0;
         latest.current = r.latest_id;
         setEntries((prev) => [...prev, ...r.entries].slice(-KEEP));
@@ -50,8 +53,9 @@ export function LiveLog({ studentId }: { studentId: string }) {
             window.setTimeout(() => setFresh((s) => new Set([...s].filter((id) => !ids.includes(id)))), 2000),
           );
         }
-      } catch {
-        // The next tick asks again.
+      } catch (e) {
+        // The next tick asks again; until one answers, say the log is down rather than empty.
+        if (alive) setFailure(errorText(e));
       } finally {
         busy = false;
       }
@@ -153,7 +157,14 @@ export function LiveLog({ studentId }: { studentId: string }) {
             <span className="min-w-0 text-ink [overflow-wrap:anywhere]">{e.message}</span>
           </div>
         ))}
-        {shown.length === 0 && <div className="p-10 text-center font-sans text-[13px] text-ink-3">No lines at this level</div>}
+        {failure ? (
+          <div role="alert" className="flex flex-col items-center gap-1 p-10 text-center font-sans text-[13px]">
+            <span className="font-semibold text-badge-danger-fg">Log unavailable</span>
+            <span className="break-all text-ink-3">{failure}</span>
+          </div>
+        ) : (
+          shown.length === 0 && <div className="p-10 text-center font-sans text-[13px] text-ink-3">No lines at this level</div>
+        )}
       </div>
     </section>
   );
