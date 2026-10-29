@@ -179,18 +179,21 @@ export function DataTable<R>({
   showPii = false,
   selected,
   rowClassName,
+  detail,
 }: {
   table: TableModel<R>;
   rowKey: (row: R) => string;
   /** Extra classes for a row, such as the selected one's. */
-  rowClassName?: (row: R) => string | false;
+  rowClassName?: (row: R) => string | false | undefined;
   /** Below this width the table scrolls sideways; dropped at tablet width. */
   minWidth?: number;
-  /** Shown under the headers when no row matches. */
+  /** Shown under the headers when no row matches; a string gets the muted line. */
   empty: React.ReactNode;
   showPii?: boolean;
   /** Highlights the rows it returns true for. */
   selected?: (row: R) => boolean;
+  /** A full-width row under `row`, for a row opened in place. */
+  detail?: (row: R) => React.ReactNode;
 }) {
   const active = table.columns.filter((c) => table.filters[c.key]?.length);
   return (
@@ -235,43 +238,57 @@ export function DataTable<R>({
             </tr>
           </thead>
           <tbody>
-            {table.rows.map((row) => (
-              <tr
-                key={rowKey(row)}
-                className={cn(
-                  "border-t border-divider",
-                  selected?.(row) ? "bg-selected" : "hover:bg-row-hover",
-                  rowClassName?.(row),
-                )}
-              >
-                {table.columns.map((c) => (
-                  <td
-                    key={c.key}
+            {table.rows.map((row) => {
+              const opened = detail?.(row);
+              return (
+                <React.Fragment key={rowKey(row)}>
+                  <tr
                     className={cn(
-                      "px-3 py-3 align-middle first:pl-6 last:pr-6 phone:first:pl-4",
-                      c.align === "right" && "text-right",
-                      c.hide && HIDE[c.hide],
-                      c.className,
-                      c.pii && "px-0",
+                      "border-t border-divider",
+                      selected?.(row) ? "bg-selected" : "hover:bg-row-hover",
+                      rowClassName?.(row),
                     )}
                   >
-                    {c.pii ? (
-                      <Reveal shown={showPii} width={c.pii}>
-                        {c.cell(row)}
-                      </Reveal>
-                    ) : (
-                      c.cell(row)
-                    )}
-                  </td>
-                ))}
-              </tr>
-            ))}
+                    {table.columns.map((c) => (
+                      <td
+                        key={c.key}
+                        className={cn(
+                          "px-3 py-3 align-middle first:pl-6 last:pr-6 phone:first:pl-4",
+                          c.align === "right" && "text-right",
+                          c.hide && HIDE[c.hide],
+                          c.className,
+                          c.pii && "px-0",
+                        )}
+                      >
+                        {c.pii ? (
+                          <Reveal shown={showPii} width={c.pii}>
+                            {c.cell(row)}
+                          </Reveal>
+                        ) : (
+                          c.cell(row)
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                  {opened && (
+                    <tr className="bg-row-hover">
+                      <td colSpan={table.columns.length} className="px-6 pb-4 pt-1 phone:px-4">
+                        {opened}
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
-      {table.total === 0 && (
-        <div className="px-6 py-8 text-center text-[13px] text-ink-3">{empty}</div>
-      )}
+      {table.total === 0 &&
+        (typeof empty === "string" ? (
+          <div className="px-6 py-8 text-center text-[13px] text-ink-3">{empty}</div>
+        ) : (
+          empty
+        ))}
       {Number.isFinite(table.perPage) && <Pager table={table} />}
     </>
   );

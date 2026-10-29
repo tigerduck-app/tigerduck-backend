@@ -106,10 +106,107 @@ export type LogsTab = {
   needles?: string[] | null;
 };
 
+export type LogLevel = "error" | "warning" | "info" | "debug";
+
+export type LogLine = {
+  /** Docker's receive time, to the millisecond. */
+  ts: string | null;
+  level: LogLevel | null;
+  logger: string;
+  event: string;
+  kv: [string, string][];
+  raw: string;
+};
+
 export type LogsPayload = {
   ok: boolean;
-  text: string;
+  lines: LogLine[];
   detail?: string;
+};
+
+export type AccountState = "signed_in" | "needs_sign_in" | "failing";
+
+export type UserStats = {
+  users: { total: number; new_7d: number; weekly: { week: string; users: number }[] };
+  active: { last_7d: number; daily: { day: string; users: number }[] };
+  devices: {
+    versions: { platform: string; app_version: string; devices: number }[];
+    features: Record<
+      | "class_reminders"
+      | "bulletin_push"
+      | "live_activity"
+      | "assignment_reminders"
+      | "cloud_sync"
+      | "course_name_sync",
+      number
+    >;
+    daily: { day: string; devices: number }[];
+  };
+  anonymous_devices: number;
+  accounts: Record<AccountState, number>;
+  pushes: {
+    channels: { channel: string; sent: number; failed: number }[];
+    daily: { day: string; sent: number; failed: number }[];
+  };
+};
+
+export type UserRow = {
+  id: string;
+  student_id: string | null;
+  display_name: string | null;
+  created_at: string;
+  platforms: string[];
+  last_active_at: string | null;
+  /** Null without a device. */
+  cloud_sync: boolean | null;
+  account: AccountState | null;
+};
+
+export type UserDevice = {
+  id: string;
+  device_name: string | null;
+  device_model: string | null;
+  platform: string;
+  os_version: string | null;
+  app_version: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+  cloud_sync_enabled: boolean;
+  bulletin_push_enabled: boolean;
+  sync_live_activity: boolean;
+  push_token: { provider: string; environment: string | null } | null;
+};
+
+export type UserPush = {
+  id: string;
+  at: string;
+  channel: string;
+  scenario: string;
+  title: string;
+  device_id: string | null;
+  status: "sent" | "failed" | "cancelled";
+};
+
+export type UserDetail = {
+  id: string;
+  student_id: string | null;
+  display_name: string | null;
+  locale: string | null;
+  created_at: string;
+  account: AccountState | null;
+  class_reminders: boolean;
+  devices: UserDevice[];
+  term: string | null;
+  week_start: string;
+  courses: {
+    id: number;
+    name: string;
+    classroom: string | null;
+    schedule: { day?: number; periods?: string[] }[];
+    skipped: string[];
+  }[];
+  pushes: UserPush[];
+  last_sync: { at: string; device_id: string } | null;
 };
 
 export type DeviceInfo = {
