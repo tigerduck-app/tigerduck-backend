@@ -150,7 +150,9 @@ export function CustomPushPage() {
     },
     { label: "Last send", value: last?.sent_at ? monthDayTime(last.sent_at) : "—", note: last?.title ?? "" },
   ];
+  // While a send is in flight the dialog stays, so a reopened one cannot send it twice.
   const open = () => {
+    if (sendMut.isPending) return;
     sendMut.reset();
     setComposing(true);
   };
@@ -223,7 +225,7 @@ export function CustomPushPage() {
       {composing && (
         <CustomPushDialog
           pending={sendMut.isPending}
-          onClose={() => setComposing(false)}
+          onClose={() => !sendMut.isPending && setComposing(false)}
           onSend={(req) => sendMut.mutate(req)}
         />
       )}

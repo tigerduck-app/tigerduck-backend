@@ -86,7 +86,9 @@ export function AnnouncementPage() {
     b.canonical_org ? (orgs.find((o) => o.id === b.canonical_org)?.label ?? b.canonical_org) : null;
   const tagLabel = (id: string) => tags.find((t) => t.id === id)?.label ?? id;
   const shownTitle = (b: BulletinSummary) => b.title_clean || b.title;
+  // While a save is in flight the dialog stays, so a reopened one cannot send it twice.
   const open = async (id: number | null) => {
+    if (saveMut.isPending) return;
     saveMut.reset();
     if (id === null) return setEditing({ bulletin: null });
     try {
@@ -280,7 +282,7 @@ export function AnnouncementPage() {
           bulletin={editing.bulletin}
           taxonomy={taxonomyQ.data}
           pending={saveMut.isPending}
-          onClose={() => setEditing(null)}
+          onClose={() => !saveMut.isPending && setEditing(null)}
           onSubmit={(d) => saveMut.mutate({ d, original: editing.bulletin })}
         />
       )}
