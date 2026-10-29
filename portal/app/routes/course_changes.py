@@ -258,7 +258,13 @@ async def _check(
     schedule = await conn.fetchval(_SCHEDULE, term, course_no)
     meets = _meetings(schedule) if schedule else {}
     if not meets:
-        return _bad(f"no student has {course_no} with class times in {term}", 404)
+        if change_id is None:
+            return _bad(f"no student has {course_no} with class times in {term}", 404)
+        return _bad(
+            f"no student has {course_no} with class times in {term} any more,"
+            " so the change can only be deleted",
+            409,
+        )
     holidays = await conn.fetch(
         "SELECT start_date, end_date FROM academic_holidays"
         " WHERE end_date >= $1 AND start_date <= $2",

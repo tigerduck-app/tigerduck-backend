@@ -447,3 +447,21 @@ async def test_an_edit_cannot_move_a_change_to_another_course(term, pool) -> Non
     assert "CS2001301" in _body(response)["detail"]
     (stored,) = _body(await list_changes("1151", pool=pool))["changes"]
     assert (stored["course_no"], stored["day"]) == ("CS2001301", "2026-11-05")
+
+
+async def test_a_change_of_a_course_nobody_takes_any_more_can_only_be_deleted(
+    term, pool
+) -> None:
+    _, change = await _create(pool, day="2026-11-05")
+    await pool.execute(
+        "UPDATE user_courses SET enrollment_status = 'dropped' WHERE course_no = 'CS2001301'"
+    )
+
+    response = await update_change(
+        change["id"], _OTHER, pool=pool,
+        body={"kind": "cancelled", "mode": "day", "day": "2026-11-10"},
+    )
+
+    assert response.status_code == 409
+    assert "delete" in _body(response)["detail"]
+    assert (await delete_change(change["id"], _OTHER, pool=pool)).status_code == 200
