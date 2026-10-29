@@ -1,6 +1,6 @@
 [project]
 name = "tigerduck-portal"
-version = "3.8.0"
+version = "3.8.1"
 description = "Stateless operator portal for the TigerDuck backend stack. Surfaces stack status, per-container logs, and pg_dump-based export/import. Its API requires a Cloudflare Access JWT outside development."
 requires-python = ">=3.13"
 dependencies = [
