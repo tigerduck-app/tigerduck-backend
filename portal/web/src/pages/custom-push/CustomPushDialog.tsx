@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { Bell, BellOff, BookOpen, ChevronDown, ChevronUp, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Dot, FormDialog, Pill, Switch, fieldClass } from "@/components/page";
+import { Dot, ErrorAlert, FormDialog, Pill, Switch, fieldClass } from "@/components/page";
 import { AndroidPreview, IphonePreview, PushCard } from "@/components/push-preview";
 import { useEnv } from "@/hooks/use-env";
-import { api } from "@/lib/api";
+import { api, errorText } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type {
   CustomPushPreviewResponse,
@@ -150,6 +150,8 @@ export function CustomPushDialog({
   const fresh = (q: typeof selQ) => (settledKey === filterKey && !q.isPlaceholderData ? q.data : undefined);
   const sel = classes.length ? fresh(selQ) : undefined;
   const all = fresh(allQ);
+  // A failed count is shown as the failure, never as an audience of zero.
+  const failed = settledKey !== filterKey ? null : [classes.length ? selQ : null, allQ].find((q) => q?.isError);
 
   const term = (all ?? allQ.data)?.term ?? null;
   const course = all?.course ?? null;
@@ -247,7 +249,7 @@ export function CustomPushDialog({
         <>
           <span className="mr-auto flex items-center gap-1.5 self-center text-[13px] text-ink-2 max-[720px]:mr-0 max-[720px]:basis-full">
             <Users aria-hidden="true" className="size-[15px]" />
-            {count(total, "device")} · {kindLabel} · {sound ? "Sound" : "Silent"}
+            {[sel && count(total, "device"), kindLabel, sound ? "Sound" : "Silent"].filter(Boolean).join(" · ")}
           </span>
           <Button variant="line" size="form" onClick={onClose} className="max-[720px]:flex-1">
             Cancel
@@ -448,19 +450,31 @@ export function CustomPushDialog({
               </div>
             )}
 
-            <div className="flex flex-col gap-2.5 rounded-xl border border-line px-4 py-3.5">
-              <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <div className="flex items-baseline gap-2">
-                  <span className="text-2xl font-semibold tabular-nums">{fmt(total)}</span>
-                  <span className="text-ink-2">devices</span>
+            {failed ? (
+              <ErrorAlert
+                className="items-center"
+                onRetry={() => {
+                  selQ.refetch();
+                  allQ.refetch();
+                }}
+              >
+                {errorText(failed.error)}
+              </ErrorAlert>
+            ) : (
+              <div className="flex flex-col gap-2.5 rounded-xl border border-line px-4 py-3.5">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-semibold tabular-nums">{sel ? fmt(total) : "—"}</span>
+                    <span className="text-ink-2">devices</span>
+                  </div>
+                  <Legend />
                 </div>
-                <Legend />
+                <Bars rows={rows} />
+                {kind === "popup" && (
+                  <span className="text-xs text-ink-3">Popup reaches signed-in devices only.</span>
+                )}
               </div>
-              <Bars rows={rows} />
-              {kind === "popup" && (
-                <span className="text-xs text-ink-3">Popup reaches signed-in devices only.</span>
-              )}
-            </div>
+            )}
           </fieldset>
         </div>
 
