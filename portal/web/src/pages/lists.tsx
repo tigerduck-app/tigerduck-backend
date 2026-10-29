@@ -155,13 +155,18 @@ function useListActions(onDeleted: (list: DeviceList) => void) {
       )}
       <FormDialog
         open={deleting !== null}
-        onOpenChange={(o) => !o && setDeleting(null)}
+        onOpenChange={(o) => !o && !deleteMut.isPending && setDeleting(null)}
         width={520}
         icon={<DialogIcon icon={Trash2} danger />}
         title={deleting ? `Delete ${deleting.name}?` : ""}
         footer={
           <>
-            <Button variant="line" size="form" onClick={() => setDeleting(null)}>
+            <Button
+              variant="line"
+              size="form"
+              disabled={deleteMut.isPending}
+              onClick={() => setDeleting(null)}
+            >
               Cancel
             </Button>
             <Button
@@ -397,6 +402,11 @@ export function ListDetailPage() {
     onError: (e) => toast.error(errorText(e)),
   });
 
+  // A failed add's error belongs to the dialog it failed in.
+  const openAdd = () => {
+    addMut.reset();
+    setAdding(true);
+  };
   const members = membersQ.data?.items ?? [];
   const memberIds = new Set(members.map((m) => m.device_id));
   const columns: Column<DeviceListMemberRow>[] = [
@@ -640,10 +650,7 @@ export function ListDetailPage() {
             variant="ink"
             size="bar"
             className="gap-1.5"
-            onClick={() => {
-              addMut.reset();
-              setAdding(true);
-            }}
+            onClick={openAdd}
           >
             <Plus className="!size-[15px]" />
             Add members
@@ -660,7 +667,7 @@ export function ListDetailPage() {
             icon={Smartphone}
             title="No members yet"
             action={
-              <Button variant="line" size="bar" className="font-normal" onClick={() => setAdding(true)}>
+              <Button variant="line" size="bar" className="font-normal" onClick={openAdd}>
                 Add members
               </Button>
             }
