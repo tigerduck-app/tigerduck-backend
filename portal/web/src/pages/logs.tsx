@@ -194,6 +194,7 @@ export function LogsPage() {
           <LogsViewer
             key={active.id}
             payload={q.data}
+            fetchedAt={q.dataUpdatedAt}
             error={q.isError ? (q.error as Error).message : null}
             loading={q.isLoading}
             live={live}
@@ -209,6 +210,7 @@ export function LogsPage() {
 
 function LogsViewer({
   payload,
+  fetchedAt,
   error,
   loading,
   live,
@@ -217,6 +219,7 @@ function LogsViewer({
   onRetry,
 }: {
   payload: LogsPayload | undefined;
+  fetchedAt: number;
   error: string | null;
   loading: boolean;
   live: boolean;
@@ -248,8 +251,9 @@ function LogsViewer({
     before.current = Number.isFinite(newest) ? newest : null;
   }, [newest]);
 
+  // Measured from the fetch, so a quiet container empties out as live polls arrive.
   const inRange = range
-    ? rows.filter((r) => r.ms !== null && newest - r.ms <= range * 60_000)
+    ? rows.filter((r) => r.ms !== null && fetchedAt - r.ms <= range * 60_000)
     : rows;
 
   const toggle = (r: Row) => setOpen((o) => (o === r.key ? null : r.key));
