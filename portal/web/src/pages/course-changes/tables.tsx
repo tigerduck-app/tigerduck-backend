@@ -12,7 +12,7 @@ import {
   firstDay,
   KIND,
   KIND_LABELS,
-  lastDay,
+  finalDay,
   meetsText,
   rangeSub,
   type Change,
@@ -171,7 +171,7 @@ export function courseChangeColumns(
           </Button>
         );
         if (c.stale) return <div className="inline-flex">{remove}</div>;
-        if (lastDay(c) < today) return <span className="text-xs text-ink-3">Past</span>;
+        if (finalDay(c) < today) return <span className="text-xs text-ink-3">Past</span>;
         return (
           <div className="inline-flex gap-0.5">
             <Button variant="quiet" size="icon" aria-label="Edit" title="Edit" className="rounded-lg text-ink-2" onClick={() => onEdit(c)}>

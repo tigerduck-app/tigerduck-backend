@@ -36,7 +36,7 @@ import { asMessage } from "./lists/format";
 import { ChangeDialog, type ChangeBody } from "./course-changes/ChangeDialog";
 import {
   changeError,
-  lastDay,
+  finalDay,
   reach,
   roomOf,
   type Change,
@@ -152,8 +152,8 @@ export function CourseChangesPage() {
     perPage: 5,
     initialSort: { key: "date", dir: "asc" },
   });
-  const upcomingMine = mine.filter((c) => lastDay(c) >= today).length;
-  const upcomingAll = changes.filter((c) => lastDay(c) >= today).length;
+  const upcomingMine = mine.filter((c) => finalDay(c) >= today).length;
+  const upcomingAll = changes.filter((c) => finalDay(c) >= today).length;
 
   if (calendarQ.isError) {
     return (
@@ -350,7 +350,7 @@ export function CourseChangesPage() {
         >
           <AllChanges
             key={`${code}-${scope}`}
-            rows={changes.filter((c) => (lastDay(c) >= today) === (scope === "upcoming"))}
+            rows={changes.filter((c) => (finalDay(c) >= today) === (scope === "upcoming"))}
             scope={scope}
             byNo={byNo}
             onCourse={select}

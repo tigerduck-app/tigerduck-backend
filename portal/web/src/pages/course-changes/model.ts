@@ -111,6 +111,8 @@ export const KIND_LABELS = KINDS.map((k) => k.label);
 
 export const firstDay = (c: Change) => (c.mode === "day" ? c.day! : c.from!);
 export const lastDay = (c: Change) => (c.mode === "day" ? c.day! : c.to!);
+/** The day a change turns past: its last class day, else its last date. */
+export const finalDay = (c: Change) => c.class_days.at(-1) ?? lastDay(c);
 
 export const meetingOn = (course: Course | undefined, iso: string) =>
   course?.meetings.find((m) => m.day === isoWeekday(iso));
