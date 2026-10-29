@@ -1,5 +1,5 @@
 import { cn } from "@/lib/cn";
-import { addDays, dayDate, daysBetween, mondayOf, WEEKDAYS, type Term } from "@/lib/academic";
+import { addDays, dayDate, mondayOf, WEEKDAYS, weeks, type Term } from "@/lib/academic";
 import { KIND, meetingOn, type Change, type Course } from "./model";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -33,7 +33,7 @@ export function TermStrip({
   onEdit: (change: Change) => void;
 }) {
   const monday = mondayOf(term.start_date);
-  const weekCount = Math.ceil((daysBetween(monday, term.end_date) + 1) / 7);
+  const weekCount = weeks(term.start_date, term.end_date);
   // Weekends only when the course meets then.
   const weekdays = [1, 2, 3, 4, 5, 6, 7].filter((d) => d <= 5 || course.meetings.some((m) => m.day === d));
   const changeOn = new Map<string, Change>();

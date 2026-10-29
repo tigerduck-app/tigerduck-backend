@@ -20,6 +20,7 @@ import {
   termLabel,
   todayIso,
   WEEKDAYS,
+  weeks,
   type Term,
 } from "@/lib/academic";
 import { Button } from "@/components/ui/button";
@@ -55,7 +56,7 @@ function defaultTerm(terms: readonly Term[], today: string): Term | undefined {
 }
 
 function termMeta(term: Term, today: string): string {
-  const total = Math.ceil((daysBetween(mondayOf(term.start_date), term.end_date) + 1) / 7);
+  const total = weeks(term.start_date, term.end_date);
   const range = rangeText(term.start_date, term.end_date);
   if (today < term.start_date || today > term.end_date) return `${range} · ${total} weeks`;
   return `${range} · Week ${Math.floor(daysBetween(mondayOf(term.start_date), today) / 7) + 1} of ${total}`;

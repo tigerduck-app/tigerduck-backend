@@ -78,7 +78,8 @@ export function rangeText(from: string, to: string): string {
     : `${longDate(from)} – ${longDate(to)}`;
 }
 
-export const weeks = (from: string, to: string) => Math.ceil((daysBetween(from, to) + 1) / 7);
+/** Calendar weeks the range touches, counted from the Monday of its first week. */
+export const weeks = (from: string, to: string) => Math.ceil((daysBetween(mondayOf(from), to) + 1) / 7);
 
 /** Each holiday day mapped to "國慶日 National Day". */
 export function holidayNames(holidays: readonly Holiday[]): Map<string, string> {
