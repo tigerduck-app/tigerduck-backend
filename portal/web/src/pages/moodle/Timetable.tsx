@@ -3,6 +3,7 @@
 
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { CalendarX } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
@@ -38,7 +39,7 @@ type Block = {
   /** Rows in PERIODS. */
   from: number;
   to: number;
-  change: { kind: CourseChange["kind"]; label: string } | null;
+  change: { kind: CourseChange["kind"]; label: string; date: string } | null;
 };
 
 const taipeiToday = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Taipei" });
@@ -48,7 +49,10 @@ function isoDay(date: string): number {
 }
 
 /** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods. */
-function changeFor(block: Omit<Block, "change">, changes: CourseChange[]): Block["change"] {
+export function changeFor(
+  block: Pick<Block, "code" | "day" | "from" | "to">,
+  changes: CourseChange[],
+): Block["change"] {
   const periods = PERIODS.slice(block.from, block.to + 1).map(([id]) => id);
   let best: { date: string; c: CourseChange } | null = null;
   for (const c of changes) {
@@ -66,7 +70,7 @@ function changeFor(block: Omit<Block, "change">, changes: CourseChange[]): Block
     : c.kind === "end" ? `ends ${c.end_time ?? ""}`
     : c.note_zh ?? c.note_en ?? "";
   const day = monthDay(`${date}T00:00:00Z`, true);
-  return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}` };
+  return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}`, date };
 }
 
 function blocksOf(data: TimetableResponse): Block[] {
@@ -97,6 +101,9 @@ function blocksOf(data: TimetableResponse): Block[] {
   });
   return out.map((b) => ({ ...b, change: changeFor(b, data.changes) }));
 }
+
+export const changesLink = (term: string | null | undefined) =>
+  term ? `/course-changes?term=${encodeURIComponent(term)}` : "/course-changes";
 
 const periodText = (b: Block) =>
   b.from === b.to ? `P${PERIODS[b.from][0]}` : `P${PERIODS[b.from][0]}–${PERIODS[b.to][0]}`;
@@ -169,6 +176,12 @@ export function Timetable({ studentId }: { studentId: string }) {
             {codes.size} courses · {periods} periods a week
           </span>
         )}
+        <Link
+          to={changesLink(term ?? q.data?.term)}
+          className="ml-auto whitespace-nowrap text-[13px] text-link no-underline hover:text-link-hover"
+        >
+          Course changes
+        </Link>
       </div>
 
       {!data && !q.isError && <Skeleton className="h-[300px] rounded-xl" />}

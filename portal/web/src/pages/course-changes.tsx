@@ -2,7 +2,7 @@
 // notes per course and term, which the apps show in place of the regular class.
 
 import { useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CalendarClock, ChevronDown, MapPin, Plus, Search, Users } from "lucide-react";
@@ -66,7 +66,8 @@ function termMeta(term: Term, today: string): string {
 export function CourseChangesPage() {
   const qc = useQueryClient();
   const today = todayIso();
-  const [picked, setPicked] = useState<string | null>(null);
+  const [params] = useSearchParams();
+  const [picked, setPicked] = useState<string | null>(() => params.get("term"));
   const [selectedNo, setSelectedNo] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<"upcoming" | "past">("upcoming");
