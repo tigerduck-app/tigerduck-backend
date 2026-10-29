@@ -85,6 +85,8 @@ export function Timetable({ user }: { user: UserDetail }) {
   const meetings = all.length;
   const cancelled = all.filter((b) => b.cancelled).map((b) => b.name);
   const moved = all.filter((b) => b.tag).map((b) => `${b.name} ${b.tag}`);
+  // A one-period meeting with a tag gets a row tall enough to show it, since a touch screen cannot hover.
+  const tall = new Set(all.filter((b) => b.from === b.to && (b.tag || b.cancelled)).map((b) => b.from));
 
   return (
     <div className="overflow-x-auto">
@@ -94,7 +96,9 @@ export function Timetable({ user }: { user: UserDetail }) {
         className="grid min-w-[820px] gap-[3px] phone:min-w-[560px] phone:[--tt-col:100px] phone:[--tt-head:32px]"
         style={{
           gridTemplateColumns: `var(--tt-head, 44px) repeat(${dayCount}, minmax(var(--tt-col, 150px), 1fr))`,
-          gridTemplateRows: `22px repeat(${periodCount}, 30px)`,
+          gridTemplateRows: `22px ${PERIODS.slice(0, periodCount)
+            .map((_, p) => (tall.has(p) ? "minmax(30px, auto)" : "30px"))
+            .join(" ")}`,
         }}
       >
         {DAYS.slice(0, dayCount).map((d, i) => (
@@ -135,7 +139,6 @@ export function Timetable({ user }: { user: UserDetail }) {
                 : "bg-badge-info text-ink",
             )}
             style={{ gridColumn: b.day + 1, gridRow: `${b.from + 2} / span ${b.to - b.from + 1}` }}
-            // A one-period block has room for the name only.
             title={[b.name, b.room, b.cancelled ? "Cancelled" : b.tag].filter(Boolean).join(" · ")}
           >
             <span className={cn("shrink-0 truncate text-xs font-semibold", b.cancelled && "line-through")}>
