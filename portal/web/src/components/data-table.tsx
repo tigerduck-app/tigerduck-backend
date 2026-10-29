@@ -92,13 +92,15 @@ export function useTable<R>({
   const [filters, setFilters] = React.useState<Filters>({});
   const [page, setPage] = React.useState(1);
 
-  const filtered = rows.filter(
-    (r) =>
-      columns.every((c) => {
-        const chosen = filters[c.key];
-        return !chosen?.length || !c.filterValue || chosen.includes(c.filterValue(r));
-      }) && (!match || match(r)),
-  );
+  // `except` leaves one column's own filter out, for that column's counts.
+  const passes = (r: R, except?: string) =>
+    columns.every((c) => {
+      const chosen = filters[c.key];
+      return (
+        c.key === except || !chosen?.length || !c.filterValue || chosen.includes(c.filterValue(r))
+      );
+    }) && (!match || match(r));
+  const filtered = rows.filter((r) => passes(r));
   const sortColumn = sort && columns.find((c) => c.key === sort.key);
   const sorted = sortColumn?.sortValue
     ? filtered
@@ -135,11 +137,13 @@ export function useTable<R>({
     options: (column) => {
       const value = column.filterValue;
       if (!value) return [];
+      // Values come from every row, so a chosen one stays listed at a count of 0.
       const values = column.filterOptions ?? [...new Set(rows.map(value))];
+      const pool = rows.filter((r) => passes(r, column.key));
       const chosen = filters[column.key] ?? [];
       return values.map((v) => ({
         value: v,
-        count: rows.filter((r) => value(r) === v).length,
+        count: pool.filter((r) => value(r) === v).length,
         checked: chosen.includes(v),
       }));
     },
