@@ -29,7 +29,7 @@ from server.auth.models import (
     UserDevice,
     UserStatus,
 )
-from server.auth.moodle import MoodleVerifier
+from server.auth.moodle import MoodleVerifier, display_name_from
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.auth.schemas import DeviceInfo
 from server.auth.tokens import (
@@ -187,6 +187,7 @@ async def login(
         )
         session.add(auth_session)
         user.last_login_at = now
+        user.display_name = display_name_from(result.fullname) or user.display_name
         await session.flush()
     except IntegrityError as exc:
         # Two first-logins for the same student racing on the partial

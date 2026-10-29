@@ -44,9 +44,11 @@ LOGIN_BODY = {
 }
 
 
-def allow_moodle(client, username: str = "b11015000") -> None:
+def allow_moodle(
+    client, username: str = "b11015000", fullname: str | None = None
+) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=True, username=username)
+        MoodleVerifyResult(ok=True, username=username, fullname=fullname)
     )
 
 
@@ -383,3 +385,51 @@ async def test_unconfigured_auth_returns_503(client) -> None:
         client.app.state.settings.auth_jwt_secret = (
             "test-jwt-secret-0123456789abcdef0123456789abcdef"
         )
+
+
+async def _stored_display_name(client) -> str | None:
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        return await session.scalar(
+            select(User.display_name).where(User.student_id == "B11015000")
+        )
+
+
+async def test_sign_in_stores_the_moodle_full_name(client) -> None:
+    allow_moodle(client, fullname="  Test Student  ")
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] == "Test Student"
+    assert await _stored_display_name(client) == "Test Student"
+
+    allow_moodle(client, fullname="Renamed Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert await _stored_display_name(client) == "Renamed Student"
+
+
+@pytest.mark.parametrize("fullname", [None, "", "   "])
+async def test_a_blank_or_missing_full_name_keeps_the_stored_one(
+    client, fullname
+) -> None:
+    allow_moodle(client, fullname="Test Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+
+    allow_moodle(client, fullname=fullname)
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] == "Test Student"
+    assert await _stored_display_name(client) == "Test Student"
+
+
+@pytest.mark.parametrize(
+    ("fullname", "stored"),
+    [("名" * 200, "名" * 128), ("a" * 127 + " b", "a" * 127)],
+    ids=["cut", "no-trailing-space-after-cut"],
+)
+async def test_a_long_full_name_is_cut_to_the_column(
+    client, fullname, stored
+) -> None:
+    allow_moodle(client, fullname=fullname)
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert await _stored_display_name(client) == stored

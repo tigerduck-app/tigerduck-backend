@@ -119,3 +119,23 @@ async def test_token_never_logged_in_result() -> None:
 
     result = await make_verifier(handler).verify(token="secret-tok", student_id="b1")
     assert "secret-tok" not in json.dumps(result.__dict__)
+
+
+async def test_the_site_info_full_name_is_carried() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"username": "b1", "userid": 1, "fullname": "Test Student"}
+        )
+
+    result = await make_verifier(handler).verify(token="tok", student_id="b1")
+    assert result.ok is True
+    assert result.fullname == "Test Student"
+
+
+async def test_a_site_info_without_a_full_name_carries_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"username": "b1", "userid": 1})
+
+    result = await make_verifier(handler).verify(token="tok", student_id="b1")
+    assert result.ok is True
+    assert result.fullname is None
