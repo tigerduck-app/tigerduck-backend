@@ -43,7 +43,9 @@ export function AddMembersDialog({
   const matches = term.length >= 2 ? (searchQ.data?.items ?? []) : [];
   const results = matches.filter((d) => !memberIds.has(d.device_id));
   const hidden = matches.length - results.length;
-  const chosen = picked.filter((id) => results.some((d) => d.device_id === id));
+  // Rows kept on screen while a new search loads belong to the old term; none can be added.
+  const stale = searchQ.isPlaceholderData;
+  const chosen = stale ? [] : picked.filter((id) => results.some((d) => d.device_id === id));
   const allOn = results.length > 0 && chosen.length === results.length;
 
   const parts = pasted.split(/[\s,]+/).filter(Boolean);
@@ -117,7 +119,10 @@ export function AddMembersDialog({
                 aria-label="Search devices"
                 placeholder="Device, student ID or name"
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setPicked([]);
+                }}
                 autoFocus
                 className="min-w-0 flex-1 bg-transparent font-mono text-[13px] text-ink outline-none placeholder:text-ink-3"
               />
@@ -149,6 +154,7 @@ export function AddMembersDialog({
                               type="checkbox"
                               aria-label="Select all"
                               checked={allOn}
+                              disabled={stale}
                               onChange={() => setPicked(allOn ? [] : results.map((d) => d.device_id))}
                               className="size-4 align-middle accent-ink"
                             />
@@ -169,6 +175,7 @@ export function AddMembersDialog({
                                   type="checkbox"
                                   aria-label={`Select ${d.device_id.slice(0, 8)}`}
                                   checked={on}
+                                  disabled={stale}
                                   onChange={() => toggle(d.device_id)}
                                   className="size-4 align-middle accent-ink"
                                 />
