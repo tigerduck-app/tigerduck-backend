@@ -12,6 +12,7 @@ substring-matching backend log lines. This keeps the wire format simple
 """
 from __future__ import annotations
 
+import json
 import re
 import struct
 from typing import Any
@@ -136,3 +137,79 @@ APPLE_NEEDLES = ["apns", "apple", "live_activity", "live-activity", "pts"]
 # and the human word so admin POST/PATCH paths surface alongside scraper
 # + dispatcher activity.
 ANNOUNCEMENT_NEEDLES = ["bulletin", "announcement"]
+
+
+# Docker's own receive time leads every line (`timestamps=1` above).
+_DOCKER_TS = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?Z (.*)$")
+# The backend's stdlib loggers (server/logging_setup.py) and uvicorn's.
+_STDLIB = re.compile(r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL):([\w.]+): ?(.*)$")
+_UVICORN = re.compile(r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL):\s+(.*)$")
+# structlog's ConsoleRenderer, which the backend uses in development.
+_CONSOLE = re.compile(r"^\S+ \[(\w+)\s*\] (\S+)\s*(.*)$")
+_CONSOLE_KV = re.compile(r"([\w.-]+)=('[^']*'|\"[^\"]*\"|\S+)")
+_POSTGRES = re.compile(
+    r"^\d{4}-\d\d-\d\d [\d:.]+ \w+ \[\d+\] (DEBUG\d|LOG|INFO|NOTICE|WARNING|ERROR|FATAL|PANIC):\s+(.*)$"
+)
+_LEVELS = {
+    "debug": "debug",
+    "info": "info",
+    "log": "info",
+    "notice": "info",
+    "warn": "warning",
+    "warning": "warning",
+    "error": "error",
+    "exception": "error",
+    "critical": "error",
+    "fatal": "error",
+    "panic": "error",
+}
+
+
+def _level(raw: str) -> str | None:
+    return _LEVELS.get(raw.lower().rstrip("0123456789"))
+
+
+def _json_line(text: str) -> dict[str, Any] | None:
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or "event" not in body:
+        return None
+    kv = [
+        [k, v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)]
+        for k, v in body.items()
+        if k not in ("event", "level", "timestamp", "logger")
+    ]
+    return {
+        "level": _level(str(body.get("level", ""))),
+        "logger": str(body.get("logger") or ""),
+        "event": str(body["event"]),
+        "kv": kv,
+    }
+
+
+def _fields(text: str) -> dict[str, Any]:
+    if text.startswith("{") and (parsed := _json_line(text)):
+        return parsed
+    if m := _STDLIB.match(text):
+        return {"level": _level(m[1]), "logger": m[2], "event": m[3], "kv": []}
+    if m := _UVICORN.match(text):
+        return {"level": _level(m[1]), "logger": "uvicorn", "event": m[2], "kv": []}
+    if m := _POSTGRES.match(text):
+        return {"level": _level(m[1]), "logger": "postgres", "event": m[2], "kv": []}
+    if (m := _CONSOLE.match(text)) and (level := _level(m[1])):
+        kv = [[k, v] for k, v in _CONSOLE_KV.findall(m[3])]
+        return {"level": level, "logger": "", "event": m[2], "kv": kv}
+    return {"level": None, "logger": "", "event": text, "kv": []}
+
+
+def parse_line(line: str) -> dict[str, Any]:
+    """One log line as the Logs table shows it: `ts` in milliseconds,
+    `level` one of error, warning, info and debug, or None."""
+    ts = None
+    text = line
+    if m := _DOCKER_TS.match(line):
+        ts = f"{m[1]}.{(m[2] or '').ljust(3, '0')[:3]}Z"
+        text = m[3]
+    return {"ts": ts, **_fields(text), "raw": text}

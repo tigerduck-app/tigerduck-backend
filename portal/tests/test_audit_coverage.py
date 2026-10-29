@@ -41,6 +41,8 @@ PERSONAL_READS = {
     ("moodle/jobs.py", "list_moodle_jobs"),
     ("moodle/logs.py", "sync_logs"),
     ("moodle/status.py", "moodle_stats"),
+    ("users.py", "get_user"),
+    ("users.py", "list_users"),
 }
 # GETs that return neither.
 OTHER_READS = {
@@ -63,6 +65,7 @@ OTHER_READS = {
     ("status.py", "status_payload"),
     ("status.py", "version_info"),
     ("tls_pins.py", "get_tls_pins"),
+    ("users.py", "user_stats"),
 }
 
 

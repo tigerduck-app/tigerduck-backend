@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "@/components/layout";
 import { StatusPage } from "@/pages/status";
+import { UserDetailPage } from "@/pages/user-detail";
 import { LogsPage } from "@/pages/logs";
 import { BackupPage } from "@/pages/backup";
 import { AnnouncementPage } from "@/pages/announcement";
@@ -20,6 +21,7 @@ export function App() {
     <Routes>
       <Route element={<Layout />}>
         <Route index element={<StatusPage />} />
+        <Route path="users/:id" element={<UserDetailPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="backup" element={<BackupPage />} />
         <Route path="announcement" element={<AnnouncementPage />} />
