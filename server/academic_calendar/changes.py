@@ -10,10 +10,13 @@ work the class days out in the database, with `course_class_days`.
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from datetime import date
 
-from sqlalchemy import Row, String, bindparam, text
+from sqlalchemy import Row, String, bindparam, exists, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from server.academic_calendar.models import CourseChange
 
 # A course's schedule is its latest enrolled row's in the term, a school row
 # first, as the portal's `_LATEST` reads it. A change left no class day is
@@ -40,10 +43,42 @@ ORDER BY start_date, course_no, id
 
 
 async def load_course_changes(
-    session: AsyncSession, terms: Collection[str]
+    session: AsyncSession, terms: Collection[str], *, course_no: str | None = None
 ) -> Sequence[Row]:
-    """The changes of `terms` that cover a class day, by first day."""
+    """The changes of `terms` that cover a class day, by first day; with
+    `course_no`, that course's alone."""
     if not terms:
         return []
-    return (await session.execute(_CHANGES, {"terms": list(terms)})).all()
+    if course_no is not None and not await session.scalar(
+        # The send-time check asks once per push; most courses have no change,
+        # and this index lookup spares them the scan of the term's rows.
+        select(
+            exists().where(
+                CourseChange.term_code.in_(list(terms)),
+                CourseChange.course_no == course_no,
+            )
+        )
+    ):
+        return []
+    rows = (await session.execute(_CHANGES, {"terms": list(terms)})).all()
+    return [row for row in rows if course_no in (None, row.course_no)]
 
+
+def meeting_changes(
+    changes: Sequence[Row], *, term: str, course_no: str, day: date, period: str
+) -> dict[str, Row]:
+    """The changes, by kind, to the meeting of `course_no` that starts in
+    `period` on `day`; notes left out.
+
+    The portal takes one change of a kind per course, day and period, so a
+    kind has at most one here.
+    """
+    return {
+        change.kind: change
+        for change in changes
+        if change.kind != "note"
+        and change.term_code == term
+        and change.course_no == course_no
+        and day in change.class_days
+        and (change.periods is None or period in change.periods)
+    }
