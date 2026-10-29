@@ -166,9 +166,9 @@ export function SelectionBar({
           <DialogHeader>
             <DialogTitle>Deregister {selected.size} device(s)?</DialogTitle>
             <DialogDescription>
-              This will soft-delete the selected devices, sign them out and
-              invalidate all their push tokens. The devices will need to sign
-              in again. This action cannot be easily undone.
+              This will soft-delete the selected devices and sign them out.
+              They keep only signed-out announcements until they sign in
+              again. This action cannot be easily undone.
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end gap-2 pt-2">
