@@ -31,6 +31,8 @@ BACKEND_AUDITED_WRITES = {
 # devices (user.list).
 PERSONAL_READS = {
     ("audit.py", "list_audit"),
+    ("deregister.py", "lookup_students"),
+    ("deregister.py", "preview_student"),
     ("device_lists.py", "list_members"),
     ("devices.py", "list_devices"),
     ("moodle/inspection.py", "list_moodle_students"),

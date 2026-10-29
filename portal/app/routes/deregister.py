@@ -3,12 +3,14 @@
 Looks up the user by `student_id`, collects a deletion report
 (counts + device IDs), then DELETEs everything. The report is
 returned so the frontend can offer it as a downloadable file.
+`lookup` finds the student by id or name and `preview` shows the same
+report before anything is deleted.
 """
 from __future__ import annotations
 
 from datetime import datetime, UTC
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -20,6 +22,84 @@ router = APIRouter(prefix="/api/deregister")
 
 class DeregisterRequest(BaseModel):
     student_id: str
+
+
+def _iso(ts) -> str | None:
+    return ts.isoformat() if ts else None
+
+
+# A student id matches whole and in any case; anything else is part of a name.
+_LOOKUP_SQL = """
+WITH found AS (
+    SELECT id FROM users WHERE lower(student_id) = lower($1)
+), named AS (
+    SELECT id FROM users
+    WHERE NOT EXISTS (SELECT 1 FROM found)
+      AND strpos(lower(display_name), lower($1)) > 0
+)
+SELECT u.student_id, u.display_name, u.created_at,
+       count(d.id) AS devices, max(d.last_seen_at) AS last_active
+FROM users u
+LEFT JOIN user_devices d ON d.user_id = u.id
+WHERE u.id IN (SELECT id FROM found UNION ALL SELECT id FROM named)
+GROUP BY u.id
+ORDER BY max(d.last_seen_at) DESC NULLS LAST, u.student_id
+LIMIT 50
+"""
+
+
+@router.get("/lookup")
+async def lookup_students(
+    request: Request,
+    pool=Depends(get_pool),
+    q: str = Query(min_length=1, max_length=64),
+) -> JSONResponse:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(_LOOKUP_SQL, q.strip())
+        await audit(conn, request, "user.list", count=len(rows))
+    return JSONResponse(
+        content={
+            "students": [
+                {
+                    "student_id": r["student_id"],
+                    "display_name": r["display_name"],
+                    "devices": r["devices"],
+                    "last_active": _iso(r["last_active"]),
+                    "joined": _iso(r["created_at"]),
+                }
+                for r in rows
+            ]
+        }
+    )
+
+
+@router.get("/preview")
+async def preview_student(
+    request: Request,
+    pool=Depends(get_pool),
+    student_id: str = Query(min_length=1, max_length=64),
+) -> JSONResponse:
+    """What `deregister_student` would delete, in its report's shape."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, student_id, display_name, created_at FROM users WHERE student_id = $1",
+            student_id.strip(),
+        )
+        if row is None:
+            return JSONResponse(content={"error": "user_not_found"}, status_code=404)
+        device_list, counts = await _snapshot(conn, row["id"])
+        await audit(conn, request, "user.view", user_id=row["id"])
+    seen = [d["last_seen_at"] for d in device_list if d["last_seen_at"]]
+    return JSONResponse(
+        content={
+            "student_id": row["student_id"],
+            "display_name": row["display_name"],
+            "account_created_at": _iso(row["created_at"]),
+            "last_active": max(seen, default=None),
+            "devices": device_list,
+            "deleted_counts": counts,
+        }
+    )
 
 
 @router.post("")
@@ -45,69 +125,7 @@ async def deregister_student(
             )
         user_id = row["id"]
 
-        devices = await conn.fetch(
-            "SELECT id, client_device_id, platform, app_version, os_version, last_seen_at "
-            "FROM user_devices WHERE user_id = $1",
-            user_id,
-        )
-        device_list = [
-            {
-                "device_id": str(d["id"]),
-                "client_device_id": d["client_device_id"],
-                "platform": d["platform"],
-                "app_version": d["app_version"],
-                "os_version": d["os_version"],
-                "last_seen_at": d["last_seen_at"].isoformat() if d["last_seen_at"] else None,
-            }
-            for d in devices
-        ]
-
-        counts = {}
-        for table in [
-            "user_courses",
-            "user_course_overrides",
-            "user_assignments",
-            "user_assignment_overrides",
-            "user_settings_documents",
-            "user_bulletin_subscriptions",
-            "user_bulletin_states",
-            "user_course_skipped_dates",
-            "auth_sessions",
-            "device_push_tokens",
-            "push_jobs",
-            "sync_jobs",
-            "sync_log_entries",
-            "user_sync_state",
-        ]:
-            try:
-                c = await conn.fetchval(
-                    f"SELECT count(*) FROM {table} WHERE user_id = $1", user_id
-                )
-                counts[table] = c
-            except Exception:
-                counts[table] = "table_not_found"
-
-        token_count = 0
-        for d in devices:
-            c = await conn.fetchval(
-                "SELECT count(*) FROM device_push_tokens WHERE device_id = $1",
-                d["id"],
-            )
-            token_count += c
-        counts["device_push_tokens"] = token_count
-
-        ext_accounts = await conn.fetchval(
-            "SELECT count(*) FROM external_accounts WHERE user_id = $1", user_id
-        )
-        ext_creds = await conn.fetchval(
-            """SELECT count(*) FROM external_account_credentials
-               WHERE external_account_id IN (
-                   SELECT id FROM external_accounts WHERE user_id = $1
-               )""",
-            user_id,
-        )
-        counts["external_accounts"] = ext_accounts
-        counts["external_account_credentials"] = ext_creds
+        device_list, counts = await _snapshot(conn, user_id)
 
         async with conn.transaction():
             await conn.execute(
@@ -122,7 +140,7 @@ async def deregister_student(
             )
             await conn.execute("DELETE FROM users WHERE id = $1", user_id)
             await audit(
-                conn, request, "user.deregister", user_id=user_id, devices=len(devices)
+                conn, request, "user.deregister", user_id=user_id, devices=len(device_list)
             )
 
     report = {
@@ -135,3 +153,71 @@ async def deregister_student(
         "deleted_counts": counts,
     }
     return JSONResponse(content=report)
+
+
+async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
+    """The student's devices and the rows a deregister deletes, per table."""
+    devices = await conn.fetch(
+        "SELECT id, client_device_id, platform, app_version, os_version, last_seen_at "
+        "FROM user_devices WHERE user_id = $1",
+        user_id,
+    )
+    device_list = [
+        {
+            "device_id": str(d["id"]),
+            "client_device_id": d["client_device_id"],
+            "platform": d["platform"],
+            "app_version": d["app_version"],
+            "os_version": d["os_version"],
+            "last_seen_at": d["last_seen_at"].isoformat() if d["last_seen_at"] else None,
+        }
+        for d in devices
+    ]
+
+    counts = {}
+    for table in [
+        "user_courses",
+        "user_course_overrides",
+        "user_assignments",
+        "user_assignment_overrides",
+        "user_settings_documents",
+        "user_bulletin_subscriptions",
+        "user_bulletin_states",
+        "user_course_skipped_dates",
+        "auth_sessions",
+        "device_push_tokens",
+        "push_jobs",
+        "sync_jobs",
+        "sync_log_entries",
+        "user_sync_state",
+    ]:
+        try:
+            c = await conn.fetchval(
+                f"SELECT count(*) FROM {table} WHERE user_id = $1", user_id
+            )
+            counts[table] = c
+        except Exception:
+            counts[table] = "table_not_found"
+
+    token_count = 0
+    for d in devices:
+        c = await conn.fetchval(
+            "SELECT count(*) FROM device_push_tokens WHERE device_id = $1",
+            d["id"],
+        )
+        token_count += c
+    counts["device_push_tokens"] = token_count
+
+    ext_accounts = await conn.fetchval(
+        "SELECT count(*) FROM external_accounts WHERE user_id = $1", user_id
+    )
+    ext_creds = await conn.fetchval(
+        """SELECT count(*) FROM external_account_credentials
+           WHERE external_account_id IN (
+               SELECT id FROM external_accounts WHERE user_id = $1
+           )""",
+        user_id,
+    )
+    counts["external_accounts"] = ext_accounts
+    counts["external_account_credentials"] = ext_creds
+    return device_list, counts
