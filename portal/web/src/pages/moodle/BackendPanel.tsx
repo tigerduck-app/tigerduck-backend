@@ -39,9 +39,10 @@ export function termColumn<R>(termOf: (row: R) => string | null): Column<R> {
   };
 }
 
+/** The platform with the short client ID the topology shows, so two iPhones read apart. */
 export const deviceName = (devices: SyncDevice[], id: string | null) => {
   const d = id ? devices.find((x) => x.id === id) : undefined;
-  return d ? deviceNoun(d.platform) : null;
+  return d ? `${deviceNoun(d.platform)} ${d.client_device_id.slice(0, 8)}` : null;
 };
 
 export function colorOf(c: SyncCourse, data: SyncCoursesResponse): CourseRow["color"] {
