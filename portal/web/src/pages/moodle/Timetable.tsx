@@ -75,33 +75,40 @@ export function changeFor(
   return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}`, date };
 }
 
+const sameChange = (a: Block["change"], b: Block["change"]) =>
+  a === b || (a !== null && b !== null && a.kind === b.kind && a.label === b.label && a.date === b.date);
+
 function blocksOf(data: TimetableResponse): Block[] {
-  const out: Omit<Block, "change">[] = [];
+  const out: Block[] = [];
   data.courses.forEach((c, ci) => {
     c.schedule.forEach((entry, ei) => {
       const day = entry.day;
       if (typeof day !== "number" || day < 1 || day > 7 || !Array.isArray(entry.periods)) return;
+      const code = c.course_no ?? "";
       const rows = [...new Set(entry.periods.map((p) => PERIODS.findIndex(([id]) => id === String(p))))]
         .filter((i) => i >= 0)
         .sort((a, b) => a - b);
       rows.forEach((row, i) => {
+        // Period by period, since a change may reach only some of a meeting's periods.
+        const change = changeFor({ code, day, from: row, to: row }, data.changes);
         const last = out[out.length - 1];
-        if (i > 0 && last.to === row - 1) last.to = row;
+        if (i > 0 && last.to === row - 1 && sameChange(last.change, change)) last.to = row;
         else
           out.push({
             key: `${ci}-${ei}-${row}`,
             name: c.name,
-            code: c.course_no ?? "",
+            code,
             room: c.classroom ?? "",
             color: c.color,
             day,
             from: row,
             to: row,
+            change,
           });
       });
     });
   });
-  return out.map((b) => ({ ...b, change: changeFor(b, data.changes) }));
+  return out;
 }
 
 export const changesLink = (term: string | null | undefined) =>
