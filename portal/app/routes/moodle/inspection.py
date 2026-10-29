@@ -153,7 +153,9 @@ async def student_timetable(
         terms = sorted({r["semester"] for r in held} | ({current} if current else set()), reverse=True)
         chosen = term or current or (terms[0] if terms else None)
         rows = await conn.fetch(
-            "SELECT c.course_no, c.course_name, c.classroom, c.schedule_json, "
+            "SELECT c.course_no, c.course_name, c.classroom, "
+            "(SELECT coalesce(jsonb_agg(jsonb_build_object('day', weekday, 'periods', periods) "
+            "ORDER BY weekday), '[]') FROM course_meetings(c.schedule_json)) AS schedule_json, "
             "o.color_hex "
             "FROM user_courses c "
             "LEFT JOIN user_course_overrides o "

@@ -135,7 +135,7 @@ async def _timetable_fixture(db_session) -> User:
             user_id=user.id, semester="1151", course_key="ntust:1151:CS2001301",
             course_no="CS2001301", classroom="TR-412",
             course_name="115.1【資工系】CS2001301 資料結構 Data Structures",
-            schedule_json=[{"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": [2, 3]}],
+            schedule_json={"4": [2, 3], "2": ["3", "4"]},
         ),
         UserCourse(
             user_id=user.id, semester="1151", course_key="ntust:1151:MA1001703",
@@ -184,7 +184,7 @@ async def test_timetable_opens_on_the_current_term_with_its_upcoming_changes(
     assert courses["CS2001301"]["name"] == "資料結構 Data Structures"
     assert courses["CS2001301"]["classroom"] == "TR-412"
     assert courses["CS2001301"]["schedule"] == [
-        {"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": [2, 3]},
+        {"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": ["2", "3"]},
     ]
     assert courses["MA1001703"]["color"].startswith("#")
     assert [(c["course_no"], c["kind"], c["room"]) for c in current["changes"]] == [
@@ -222,6 +222,23 @@ async def test_timetable_drops_schedule_entries_that_are_not_meetings(db_session
 
     schedules = {c["course_no"]: c["schedule"] for c in current["courses"]}
     assert schedules["X2"] == [{"day": 5, "periods": ["1"]}]
+
+
+async def test_timetable_drops_keys_that_are_not_weekdays(db_session, pool):
+    """The apps' upload keys meetings by ISO weekday; another key, or a
+    value that is not a list, is no meeting."""
+    user = await _timetable_fixture(db_session)
+    db_session.add(UserCourse(
+        user_id=user.id, semester="1151", course_key="client:x3", course_no="X3",
+        course_name="Seminar",
+        schedule_json={"0": ["1"], "8": ["1"], "Mon": ["1"], "3": "4", "6": ["A", None]},
+    ))
+    await db_session.commit()
+
+    current = await student_timetable(_request(), student_id="B99915023", term=None, pool=pool)
+
+    schedules = {c["course_no"]: c["schedule"] for c in current["courses"]}
+    assert schedules["X3"] == [{"day": 6, "periods": ["A"]}]
 
 
 async def test_timetable_changes_name_the_days_the_class_meets(db_session, pool):
