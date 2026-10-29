@@ -25,7 +25,3 @@ export function addedLine(r: AddMembersResponse, listName?: string): string {
     (r.unknown ? ` · ${r.unknown} unknown` : "")
   );
 }
-
-export function formatTs(ts: string): string {
-  return new Date(ts).toLocaleString();
-}

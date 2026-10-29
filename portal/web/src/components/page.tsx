@@ -16,7 +16,7 @@ export function PageHeading({
   actions,
 }: {
   group: string;
-  title: string;
+  title: React.ReactNode;
   meta?: React.ReactNode;
   actions?: React.ReactNode;
 }) {
@@ -271,7 +271,8 @@ export function FormDialog({
   title: React.ReactNode;
   meta?: React.ReactNode;
   width?: number;
-  footer: React.ReactNode;
+  /** Leave out for a dialog whose rows are its actions. */
+  footer?: React.ReactNode;
   /** Leave out for a confirm that is only a question. */
   children?: React.ReactNode;
 }) {
@@ -308,13 +309,15 @@ export function FormDialog({
             </DialogPrimitive.Close>
           </div>
           {children && (
-            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-6 pb-5 max-[720px]:px-4">
+            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-6 pb-5 *:shrink-0 max-[720px]:px-4">
               {children}
             </div>
           )}
-          <div className="flex flex-wrap justify-end gap-2 border-t border-line px-6 py-3.5 max-[720px]:px-4">
-            {footer}
-          </div>
+          {footer && (
+            <div className="flex flex-wrap justify-end gap-2 border-t border-line px-6 py-3.5 max-[720px]:px-4">
+              {footer}
+            </div>
+          )}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
