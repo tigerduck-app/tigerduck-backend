@@ -25,6 +25,9 @@ _ACCOUNT_STATE = """
 CASE
     WHEN ea.id IS NULL THEN NULL
     WHEN ea.credential_status <> 'active' THEN 'needs_sign_in'
+    WHEN NOT EXISTS (
+        SELECT 1 FROM external_account_credentials c WHERE c.external_account_id = ea.id
+    ) THEN 'needs_sign_in'
     WHEN EXISTS (
         SELECT 1 FROM sync_jobs j WHERE j.user_id = ea.user_id AND j.status = 'failed'
     ) THEN 'failing'
