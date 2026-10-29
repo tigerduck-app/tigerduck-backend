@@ -1,35 +1,63 @@
-// Tab definitions, platform labels, and formatting for the device pages.
+// How the device pages name and group a device.
 
-import { ApiError } from "@/lib/api";
+import { Laptop, Smartphone, Tablet, type LucideIcon } from "lucide-react";
+import { CHART, CHART_OTHER } from "@/lib/chart";
+import { familyLabel, platformLabel } from "@/lib/platform";
 import type { DeviceRow } from "@/types/api";
 
-// Sub-tab key → matcher on the device row. v3 reports platform
-// `ios`/`ipados` (mapped to device_class iphone/ipad server-side);
-// Android registers without an apns env so we gate on `platform`.
-export const TABS: Array<{
-  key: string;
-  label: string;
-  match: (d: DeviceRow) => boolean;
-}> = [
-  { key: "iphone", label: "iPhone", match: (d) => d.device_class === "iphone" },
-  { key: "ipad", label: "iPad", match: (d) => d.device_class === "ipad" },
-  { key: "macos", label: "macOS", match: (d) => d.platform === "macos" },
-  { key: "android", label: "Android", match: (d) => d.platform === "android" },
-];
+export const PLATFORMS = ["iPhone", "iPad", "macOS", "Android"] as const;
 
-// Platform naming is shared with the moodle pages — see lib/platform.
-export { PLATFORM_LABELS, platformLabel } from "@/lib/platform";
+const PLATFORM_NAME: Record<string, string> = {
+  ios: "iPhone",
+  ipados: "iPad",
+  macos: "macOS",
+  android: "Android",
+};
 
-export function formatTs(ts: string): string {
-  try {
-    return new Date(ts).toLocaleString();
-  } catch {
-    return ts;
-  }
+export function platformName(platform: string): string {
+  return PLATFORM_NAME[platform] ?? platformLabel(platform);
 }
 
-export function asMessage(e: unknown): string {
-  if (e instanceof ApiError) return `HTTP ${e.status} — ${e.message}`;
-  if (e instanceof Error) return e.message;
-  return String(e);
+export function platformIcon(platform: string): LucideIcon {
+  if (platform === "ipados") return Tablet;
+  if (platform === "macos") return Laptop;
+  return Smartphone;
+}
+
+/** Apple blue, Android orange, anything else grey. */
+export function familyColor(family: string): string {
+  return family === "Apple" ? CHART[0] : family === "Android" ? CHART[1] : CHART_OTHER;
+}
+
+export function osName(d: Pick<DeviceRow, "platform" | "os_version">): string {
+  return d.os_version ? `${platformLabel(d.platform)} ${d.os_version}` : "—";
+}
+
+/** The two apps version independently, so a version is named with its build family. */
+export function appRelease(d: DeviceRow): string {
+  return `${familyLabel(d.platform)} ${d.app_version ?? "—"}`;
+}
+
+export function tokens(d: DeviceRow): string[] {
+  return [
+    d.has_device_token && "apns",
+    d.has_pts_token && "pts",
+    d.has_fcm_token && "fcm",
+  ].filter((t): t is string => !!t);
+}
+
+export function tokensLabel(d: DeviceRow): string {
+  return tokens(d).join(" + ") || "none";
+}
+
+const CLASS_LABEL: Record<string, string> = {
+  iphone: "iPhone",
+  ipad: "iPad",
+  mac: "Mac",
+  android: "Android",
+  android_tablet: "Android tablet",
+};
+
+export function classLabel(deviceClass: string): string {
+  return CLASS_LABEL[deviceClass] ?? (deviceClass || "—");
 }

@@ -29,6 +29,8 @@ export type Column<R> = {
   key: string;
   /** Empty for an actions column. */
   label: string;
+  /** Shown in the header cell in place of the label, e.g. a select-all checkbox. */
+  header?: React.ReactNode;
   cell: (row: R) => React.ReactNode;
   /** Makes the header sort by this value. */
   sortValue?: (row: R) => string | number;
@@ -175,6 +177,7 @@ export function DataTable<R>({
   minWidth = 720,
   empty,
   showPii = false,
+  selected,
 }: {
   table: TableModel<R>;
   rowKey: (row: R) => string;
@@ -183,6 +186,8 @@ export function DataTable<R>({
   /** Shown under the headers when no row matches. */
   empty: React.ReactNode;
   showPii?: boolean;
+  /** Highlights the rows it returns true for. */
+  selected?: (row: R) => boolean;
 }) {
   const active = table.columns.filter((c) => table.filters[c.key]?.length);
   return (
@@ -228,7 +233,13 @@ export function DataTable<R>({
           </thead>
           <tbody>
             {table.rows.map((row) => (
-              <tr key={rowKey(row)} className="border-t border-divider hover:bg-row-hover">
+              <tr
+                key={rowKey(row)}
+                className={cn(
+                  "border-t border-divider",
+                  selected?.(row) ? "bg-selected" : "hover:bg-row-hover",
+                )}
+              >
                 {table.columns.map((c) => (
                   <td
                     key={c.key}
@@ -275,7 +286,7 @@ function HeaderCell<R>({
   const SortIcon = sorted === "asc" ? ArrowUp : sorted === "desc" ? ArrowDown : ChevronsUpDown;
   const content = (
     <div className="inline-flex items-center gap-0.5">
-      {c.sortValue ? (
+      {c.header ?? (c.sortValue ? (
         <button
           type="button"
           onClick={() => table.toggleSort(c.key)}
@@ -286,7 +297,7 @@ function HeaderCell<R>({
         </button>
       ) : (
         <span>{c.label}</span>
-      )}
+      ))}
       {c.filterValue && <FilterMenu table={table} column={c} />}
     </div>
   );

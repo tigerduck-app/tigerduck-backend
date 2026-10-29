@@ -1,131 +1,195 @@
-// Registered-device admin. The page component is the route target; the
-// table, bulk-action bar, and charts are in ./devices/.
+// Registered devices: the table with its selection actions, and a
+// Statistics view. Parts are in ./devices/.
 
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useHashTab } from "@/hooks/use-hash-tab";
-import { Search } from "lucide-react";
+import { List, RefreshCw, Search, TriangleAlert } from "lucide-react";
 import { api } from "@/lib/api";
-import { Card, CardContent } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { PageHeader } from "@/components/ui/section";
+import { cn } from "@/lib/cn";
+import { useHashTab } from "@/hooks/use-hash-tab";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DataTable, PiiToggle, useTable } from "@/components/data-table";
+import { PageHeading, Panel } from "@/components/page";
 import type { DevicesPayload } from "@/types/api";
-import { ListsPage } from "@/pages/lists";
-import { DevicesTable } from "./devices/DevicesTable";
-import { SelectionBar } from "./devices/SelectionBar";
+import { errorText } from "./lists/format";
 import { DeviceStats } from "./devices/charts";
-import { TABS } from "./devices/format";
+import { deviceColumns, selectColumn } from "./devices/DevicesTable";
+import { PLATFORMS, platformName } from "./devices/format";
+import { Segmented } from "./devices/Segmented";
+import { SelectionBar } from "./devices/SelectionBar";
+
+const VIEWS = [
+  ["list", "Devices"],
+  ["stats", "Statistics"],
+] as const;
 
 export function DevicesPage() {
-  const [search, setSearch] = useState("");
+  const [hash, setView] = useHashTab("list");
+  const view = hash === "stats" ? "stats" : "list";
+  const [query, setQuery] = useState("");
+  const [showPii, setShowPii] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [activeTab, setActiveTab] = useHashTab("iphone");
 
   const q = useQuery<DevicesPayload>({
-    // Include the trimmed search in the key so React Query treats it as
-    // a distinct fetch — without that the result would be stuck to the
-    // first query's data and the table wouldn't update as you type.
-    queryKey: ["devices", search.trim()],
-    queryFn: () => {
-      const trimmed = search.trim();
-      const qs = trimmed
-        ? `?limit=500&search=${encodeURIComponent(trimmed)}`
-        : "?limit=500";
-      return api<DevicesPayload>(`/api/devices${qs}`);
-    },
+    queryKey: ["devices"],
+    // shortcut: loads at most the route's 10,000 devices; page on the server past that.
+    queryFn: () => api<DevicesPayload>("/api/devices?limit=10000"),
     refetchInterval: 30_000,
   });
+  const devices = q.data?.items ?? [];
 
-  function toggle(id: string) {
-    const next = new Set(selected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
-  }
+  const term = query.trim().toLowerCase();
+  const table = useTable({
+    rows: devices,
+    columns: deviceColumns(devices),
+    perPage: 12,
+    initialSort: { key: "updated", dir: "desc" },
+    search: term,
+    match: (d, s) =>
+      d.device_id.includes(s) ||
+      !!d.student_id?.toLowerCase().includes(s) ||
+      !!d.display_name?.toLowerCase().includes(s),
+  });
+  const shown = {
+    ...table,
+    columns: [selectColumn(table.rows, selected, setSelected), ...table.columns],
+  };
+  const chosenRows = devices.filter((d) => selected.has(d.device_id));
+  const platformFilter = table.filters.platform ?? [];
+  const activePlatform = platformFilter.length === 1 ? platformFilter[0] : "All";
 
-  function clearSelection() {
-    setSelected(new Set());
-  }
+  const loadError = q.isError && !q.data && (
+    <div role="alert" className="flex flex-col items-center gap-2.5 px-6 py-14 text-center">
+      <div
+        aria-hidden="true"
+        className="flex size-11 items-center justify-center rounded-full bg-badge-danger text-badge-danger-fg"
+      >
+        <TriangleAlert className="h-5 w-5" />
+      </div>
+      <span className="text-[15px] font-semibold">Couldn't load devices</span>
+      <span className="font-mono text-xs text-ink-3">{errorText(q.error)}</span>
+      <Button variant="line" size="bar" className="gap-1.5 font-normal" onClick={() => q.refetch()}>
+        <RefreshCw className="!size-3.5" />
+        Retry
+      </Button>
+    </div>
+  );
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Registered devices"
-        description="Every device in user_devices (v3). Newest activity first."
+    <>
+      <PageHeading
+        group="Devices"
+        title="Devices"
+        meta={
+          q.data && (
+            <span className="font-sans tabular-nums">
+              {q.data.total} devices · refreshes every 30 s
+            </span>
+          )
+        }
+        actions={
+          <>
+            <Button asChild variant="line" size="bar" className="gap-1.5 font-normal">
+              <Link to="/lists">
+                <List className="!size-[15px]" />
+                Device lists
+              </Link>
+            </Button>
+            <Segmented label="View" options={VIEWS} value={view} onChange={setView} />
+          </>
+        }
       />
 
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 max-w-md">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            placeholder="Search by Device ID or Student ID…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-8"
-          />
-        </div>
-        {q.data && (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {q.data.total} match{q.data.total === 1 ? "" : "es"}
-          </span>
-        )}
-      </div>
-
-      {selected.size > 0 && (
-        <SelectionBar
-          selected={selected}
-          onClear={clearSelection}
-          onAdded={clearSelection}
-        />
-      )}
-
-      {q.isLoading && <Skeleton className="h-48" />}
-      {q.isError && (
-        <Card>
-          <CardContent className="text-sm text-destructive">
-            Failed to load devices: {(q.error as Error).message}
-          </CardContent>
-        </Card>
-      )}
-      {q.data && (
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-          <TabsList>
-            {TABS.map((t) => {
-              const count = q.data.items.filter(t.match).length;
-              return (
-                <TabsTrigger key={t.key} value={t.key}>
-                  {t.label}
-                  <span className="ml-1.5 text-xs text-muted-foreground">
-                    {count}
-                  </span>
-                </TabsTrigger>
-              );
-            })}
-            <TabsTrigger value="stats">Statistics</TabsTrigger>
-            <TabsTrigger value="lists">Lists</TabsTrigger>
-          </TabsList>
-          {TABS.map((t) => {
-            const rows = q.data!.items.filter(t.match);
-            return (
-              <TabsContent key={t.key} value={t.key}>
-                <DevicesTable
-                  rows={rows}
-                  selected={selected}
-                  onToggle={toggle}
+      {view === "list" && (
+        <Panel
+          title="Registered devices"
+          aside={
+            <div className="flex flex-wrap items-center gap-2.5 phone:w-full">
+              <div role="group" aria-label="Platform" className="flex flex-wrap gap-1 phone:hidden">
+                {["All", ...PLATFORMS].map((p) => {
+                  const on = p === activePlatform;
+                  const count =
+                    p === "All"
+                      ? devices.length
+                      : devices.filter((d) => platformName(d.platform) === p).length;
+                  return (
+                    <button
+                      key={p}
+                      type="button"
+                      aria-pressed={on}
+                      onClick={() => table.setFilter("platform", p === "All" ? [] : [p])}
+                      className={cn(
+                        "inline-flex min-h-8 items-center gap-1.5 rounded-full border px-2.5 text-[13px]",
+                        on ? "border-ink bg-ink text-on-ink" : "border-field bg-surface text-ink hover:bg-row-hover",
+                      )}
+                    >
+                      {p}
+                      <span className={cn("text-xs tabular-nums", on ? "text-side-ink" : "text-ink-3")}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <PiiToggle shown={showPii} onToggle={() => setShowPii((v) => !v)} />
+              <label className="flex h-9 w-[280px] max-w-full items-center gap-2 rounded-[9px] border border-field px-3 text-ink-3 phone:w-auto phone:min-w-0 phone:flex-1">
+                <Search className="h-[15px] w-[15px] shrink-0" />
+                <input
+                  type="search"
+                  aria-label="Search devices"
+                  placeholder="Device ID, student ID or name"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
                 />
-              </TabsContent>
-            );
-          })}
-          <TabsContent value="stats">
-            <DeviceStats items={q.data.items} />
-          </TabsContent>
-          <TabsContent value="lists">
-            <ListsPage embedded />
-          </TabsContent>
-        </Tabs>
+              </label>
+            </div>
+          }
+        >
+          {chosenRows.length > 0 && (
+            <SelectionBar selected={chosenRows} onClear={() => setSelected(new Set())} />
+          )}
+          {q.isLoading && <Skeleton className="m-6 h-48" />}
+          {loadError}
+          {q.data && (
+            <DataTable
+              table={shown}
+              rowKey={(d) => d.device_id}
+              minWidth={980}
+              showPii={showPii}
+              selected={(d) => selected.has(d.device_id)}
+              empty={
+                <div className="flex flex-col items-center gap-2.5 py-4">
+                  <div
+                    aria-hidden="true"
+                    className="flex size-11 items-center justify-center rounded-full bg-ground text-ink-3"
+                  >
+                    <Search className="h-5 w-5" />
+                  </div>
+                  <span className="text-[15px] font-semibold text-ink">No devices match</span>
+                  <Button
+                    variant="line"
+                    size="bar"
+                    className="font-normal"
+                    onClick={() => {
+                      setQuery("");
+                      table.clearFilters();
+                    }}
+                  >
+                    Clear search and filters
+                  </Button>
+                </div>
+              }
+            />
+          )}
+        </Panel>
       )}
-    </div>
+
+      {view === "stats" && q.data && <DeviceStats items={devices} />}
+      {view === "stats" && loadError && <Panel>{loadError}</Panel>}
+      {view === "stats" && q.isLoading && <Skeleton className="h-64" />}
+    </>
   );
 }

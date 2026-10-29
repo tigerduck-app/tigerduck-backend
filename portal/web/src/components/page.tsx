@@ -229,10 +229,35 @@ export function Switch({
   );
 }
 
+/** The 36px badge some dialogs show before their title. */
+export function DialogIcon({
+  icon: Icon,
+  danger = false,
+  round = false,
+}: {
+  icon: LucideIcon;
+  danger?: boolean;
+  round?: boolean;
+}) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "flex size-9 shrink-0 items-center justify-center",
+        round ? "rounded-full" : "rounded-[10px]",
+        danger ? "bg-badge-danger text-badge-danger-fg" : "bg-ground text-ink-2",
+      )}
+    >
+      <Icon className="h-[18px] w-[18px]" />
+    </span>
+  );
+}
+
 /** The redesign's dialog: title and meta line, a body, and a footer of actions. */
 export function FormDialog({
   open,
   onOpenChange,
+  icon,
   title,
   meta,
   width = 640,
@@ -241,11 +266,14 @@ export function FormDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** A `DialogIcon` before the title. */
+  icon?: React.ReactNode;
   title: React.ReactNode;
   meta?: React.ReactNode;
   width?: number;
   footer: React.ReactNode;
-  children: React.ReactNode;
+  /** Leave out for a confirm that is only a question. */
+  children?: React.ReactNode;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -256,7 +284,13 @@ export function FormDialog({
           style={{ maxWidth: width }}
           className="fixed left-1/2 top-[72px] z-50 flex max-h-[calc(100vh-96px)] w-[calc(100%-48px)] -translate-x-1/2 flex-col overflow-hidden rounded-2xl bg-surface font-sans text-sm leading-[1.45] text-ink shadow-[0_24px_64px_rgba(20,22,26,0.24)] animate-fade-in max-[720px]:top-4 max-[720px]:max-h-[calc(100vh-32px)] max-[720px]:w-[calc(100%-32px)]"
         >
-          <div className="flex items-start gap-3 px-6 pb-4 pt-5 max-[720px]:px-4">
+          <div
+            className={cn(
+              "flex gap-3 px-6 pb-4 pt-5 max-[720px]:px-4",
+              meta ? "items-start" : "items-center",
+            )}
+          >
+            {icon}
             <div className="flex min-w-0 flex-col gap-0.5">
               <DialogPrimitive.Title className="break-words text-lg font-semibold">
                 {title}
@@ -273,9 +307,11 @@ export function FormDialog({
               </Button>
             </DialogPrimitive.Close>
           </div>
-          <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-6 pb-5 max-[720px]:px-4">
-            {children}
-          </div>
+          {children && (
+            <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-6 pb-5 max-[720px]:px-4">
+              {children}
+            </div>
+          )}
           <div className="flex flex-wrap justify-end gap-2 border-t border-line px-6 py-3.5 max-[720px]:px-4">
             {footer}
           </div>

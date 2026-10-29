@@ -35,3 +35,18 @@ export function fileSize(bytes: number): string {
   }
   return `${n.toFixed(1)} ${units[i]}`;
 }
+
+/** "5 min ago", "3 h ago", "12 d ago" */
+export function ago(iso: string): string {
+  const mins = Math.max(1, Math.floor((Date.now() - new Date(iso).getTime()) / 60_000));
+  if (mins < 60) return `${mins} min ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)} h ago`;
+  return `${Math.floor(mins / 1440)} d ago`;
+}
+
+/** "2026-10-29 09:00" */
+export function stamp(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
