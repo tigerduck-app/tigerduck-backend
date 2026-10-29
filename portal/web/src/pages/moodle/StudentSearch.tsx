@@ -46,7 +46,8 @@ export function StudentSearch({
     staleTime: 30_000,
   });
   const matches = matchesQ.data?.students ?? [];
-  const shown = open && value.trim().length > 0 && !!matchesQ.data;
+  // Until the pause in typing, the results are for an older input; Enter there would open the wrong student.
+  const shown = open && value.trim().length > 0 && term === value.trim() && !!matchesQ.data;
 
   const pick = (m: StudentMatch) => {
     setOpen(false);
