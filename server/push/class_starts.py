@@ -25,7 +25,7 @@ async def recheck_class_start(
 ) -> tuple[dict | None, timedelta]:
     """The class start's payload as the school's course changes leave its
     meeting, and how much later than filed it is due; None when the meeting
-    is cancelled.
+    is cancelled or its changed start (in class: end) has passed.
 
     A source id that is not a slot id names no course, as for the portal's
     test starts, and goes out as filed. Raises ValueError for a changed start
@@ -66,6 +66,10 @@ async def recheck_class_start(
     # As the app builds them: classPreparing counts down to the start, inClass
     # runs from the start to the end.
     preparing = payload.get("scenario") == "classPreparing"
+    # A meeting moved so that it has begun, or ended while in class, by now
+    # needs no countdown to it.
+    if (start_at if preparing else end_at) <= datetime.now(tz):
+        return None, timedelta(0)
     filed_start = _to_unix_seconds(
         payload.get("countdownTarget" if preparing else "progressStart")
     )

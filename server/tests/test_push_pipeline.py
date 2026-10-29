@@ -1661,12 +1661,13 @@ def _class_start(user, device, *, scenario, day, period="3", start="10:20", end=
     return job
 
 
-async def _changed_class_start(db_session, *, scenario, changes, period="3"):
-    """A class start for today's periods 3-4 meeting of a course that also
-    meets in period 6, with `changes` (kind, fields) to today."""
+async def _changed_class_start(db_session, *, scenario, changes, period="3", days_ahead=1):
+    """A class start for the periods 3-4 meeting `days_ahead` from today of a
+    course that also meets in period 6, with `changes` (kind, fields) to that
+    day. Tomorrow by default, so its times are still ahead whenever the test runs."""
     user, device, _ = await _setup_user_device_token(db_session)
     db_session.add(_push_to_start_token(device))
-    day = datetime.now(_TAIPEI).date()
+    day = datetime.now(_TAIPEI).date() + timedelta(days=days_ahead)
     db_session.add_all(
         [
             _term(day - timedelta(days=30), day + timedelta(days=30)),
@@ -1800,14 +1801,54 @@ async def test_a_later_start_holds_the_class_start_for_as_long(
     assert job.status == "pending"
     assert job.fire_at == fire_at
     assert job.available_at == fire_at + timedelta(minutes=30)
-    assert job.payload["countdownTarget"] == _at(day, "10:50").isoformat()
+    assert job.payload["countdownTarget"] == _at(day, "10:20").isoformat()
 
+    # Half an hour later, when the job is claimed again.
+    job.fire_at -= timedelta(minutes=30)
     job.available_at = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
     apple = await _tick(db_session, prepared_engine, test_settings, [job])
 
     assert job.status == "sent"
     assert _sent_snapshot(apple)["subtitle"] == "10:50 - 12:10"
+
+
+async def test_a_class_start_moved_again_while_held_waits_for_the_new_start(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(
+        db_session,
+        scenario="classPreparing",
+        changes=[("start", {"start_time": "10:50", "periods": ["3", "4"]})],
+    )
+    fire_at = job.fire_at
+    await _tick(db_session, prepared_engine, test_settings, [job])
+    change = await db_session.scalar(select(CourseChange))
+    change.start_time = "11:20"
+    job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert apple.requests == []
+    assert job.status == "pending"
+    assert job.available_at == fire_at + timedelta(minutes=60)
+
+
+async def test_a_class_start_whose_changed_start_has_passed_is_dropped(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(
+        db_session,
+        scenario="classPreparing",
+        changes=[("start", {"start_time": "00:00", "periods": ["3", "4"]})],
+        days_ahead=0,
+    )
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert apple.requests == []
+    assert (job.status, job.last_error) == ("cancelled", "class_changed")
 
 
 async def test_a_change_to_the_days_other_meeting_leaves_the_start_alone(

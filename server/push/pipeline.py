@@ -782,10 +782,9 @@ async def _held_by_course_changes(
         _settle(job, status=PushJobStatus.cancelled, error="class_changed", now=now)
         logger.info("push.class_changed", job_id=job.id, channel=job.channel)
         return True
-    job.payload = payload
     if job.fire_at + delay > now:
-        # Only `available_at` moves, so the app's re-sync of the same fire
-        # time keeps the job; claimed then, the check finds it due.
+        # Only `available_at` moves and the filed payload stays, so the app's
+        # re-sync keeps the job and a later check measures from the filed start.
         job.status = PushJobStatus.pending.value
         job.available_at = job.fire_at + delay
         job.locked_by = None
@@ -794,6 +793,7 @@ async def _held_by_course_changes(
             "push.class_start_moved", job_id=job.id, until=job.available_at.isoformat()
         )
         return True
+    job.payload = payload
     return False
 
 
