@@ -19,34 +19,38 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server.academic_calendar.models import CourseChange
 
 # A course's schedule is its latest enrolled row's in the term, a school row
-# first, as the portal's `_LATEST` reads it. A change left no class day is
-# left out: the apps and the pushes have nothing to apply it to.
+# first, as the portal's `_LATEST` reads it.
 _CHANGES = text(
     """
 WITH latest AS (
     SELECT DISTINCT ON (semester, course_no) semester, course_no, schedule_json
     FROM user_courses
     WHERE semester = ANY(:terms) AND course_no IS NOT NULL
+      AND (CAST(:course_no AS text) IS NULL OR course_no = :course_no)
       AND enrollment_status = 'enrolled'
     ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
-), resolved AS (
-    SELECT c.*, course_class_days(c.term_code, l.schedule_json, c.start_date,
-                                  c.end_date, c.excluded_weekdays, c.periods) AS class_days
-    FROM course_changes c
-    LEFT JOIN latest l ON l.semester = c.term_code AND l.course_no = c.course_no
-    WHERE c.term_code = ANY(:terms)
 )
-SELECT * FROM resolved WHERE cardinality(class_days) > 0
-ORDER BY start_date, course_no, id
+SELECT c.*, course_class_days(c.term_code, l.schedule_json, c.start_date,
+                              c.end_date, c.excluded_weekdays, c.periods) AS class_days,
+       ARRAY(SELECT m.weekday FROM course_meetings(l.schedule_json) AS m
+             WHERE c.periods IS NULL OR c.periods <@ m.periods) AS meeting_weekdays
+FROM course_changes c
+LEFT JOIN latest l ON l.semester = c.term_code AND l.course_no = c.course_no
+WHERE c.term_code = ANY(:terms)
+  AND (CAST(:course_no AS text) IS NULL OR c.course_no = :course_no)
+ORDER BY c.start_date, c.course_no, c.id
 """
-).bindparams(bindparam("terms", type_=ARRAY(String)))
+).bindparams(
+    bindparam("terms", type_=ARRAY(String)), bindparam("course_no", type_=String)
+)
 
 
 async def load_course_changes(
     session: AsyncSession, terms: Collection[str], *, course_no: str | None = None
 ) -> Sequence[Row]:
-    """The changes of `terms` that cover a class day, by first day; with
-    `course_no`, that course's alone."""
+    """The changes of `terms`, by first day; with `course_no`, that course's
+    alone. A change whose `class_days` are empty stays: a holiday a user put
+    back is a class day for that user."""
     if not terms:
         return []
     if course_no is not None and not await session.scalar(
@@ -60,8 +64,9 @@ async def load_course_changes(
         )
     ):
         return []
-    rows = (await session.execute(_CHANGES, {"terms": list(terms)})).all()
-    return [row for row in rows if course_no in (None, row.course_no)]
+    return (
+        await session.execute(_CHANGES, {"terms": list(terms), "course_no": course_no})
+    ).all()
 
 
 def meeting_changes(
@@ -71,7 +76,9 @@ def meeting_changes(
     `period` on `day`; notes left out.
 
     The portal takes one change of a kind per course, day and period, so a
-    kind has at most one here.
+    kind has at most one here. A change covers the days of its own range the
+    course still meets on in its periods, holidays too, so it reaches a holiday
+    the user put back; a push on any other holiday is stopped before it asks.
     """
     return {
         change.kind: change
@@ -79,6 +86,8 @@ def meeting_changes(
         if change.kind != "note"
         and change.term_code == term
         and change.course_no == course_no
-        and day in change.class_days
+        and change.start_date <= day <= change.end_date
+        and day.isoweekday() not in change.excluded_weekdays
+        and day.isoweekday() in change.meeting_weekdays
         and (change.periods is None or period in change.periods)
     }

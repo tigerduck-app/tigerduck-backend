@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
@@ -224,16 +224,23 @@ def _parse(body: dict, term) -> dict | JSONResponse:
     }
 
 
-async def _class_days(conn, term: str, schedule, columns: dict, wanted) -> list[date]:
+async def _class_days(conn, term: str, schedule, columns: dict) -> list[date]:
     return await conn.fetchval(
-        "SELECT course_class_days($1, $2::jsonb, $3, $4, $5, $6)",
+        "SELECT course_class_days($1, $2::jsonb, $3, $4, $5, NULL)",
         term,
         schedule,
         columns["start_date"],
         columns["end_date"],
         columns["excluded_weekdays"],
-        wanted,
     )
+
+
+def _meeting_days(term_row, meets: dict, first: date, last: date, excluded) -> list[date]:
+    """The term's days from `first` to `last` the course meets on, holidays
+    too: the apps apply a change on a holiday the user put back."""
+    first, last = max(first, term_row["start_date"]), min(last, term_row["end_date"])
+    days = (first + timedelta(days=n) for n in range((last - first).days + 1))
+    return [d for d in days if d.isoweekday() in meets and d.isoweekday() not in excluded]
 
 
 async def _check(
@@ -273,8 +280,7 @@ async def _check(
     columns = _parse(body, term_row)
     if isinstance(columns, JSONResponse):
         return columns
-    days = await _class_days(conn, term, schedule, columns, None)
-    if not days:
+    if not await _class_days(conn, term, schedule, columns):
         first = columns["start_date"]
         if columns["mode"] == "range":
             return _bad("the range covers no class day of the course")
@@ -285,13 +291,13 @@ async def _check(
         ):
             return _bad(f"{first} is a holiday")
         return _bad(f"the course has no class on {first}")
-    if columns["periods"]:
-        met = set(await _class_days(conn, term, schedule, columns, columns["periods"]))
-        for day in days:
-            if day not in met:
-                missing = set(columns["periods"]) - meets[day.isoweekday()]
-                listed = ", ".join(sorted(missing, key=_period_key))
-                return _bad(f"the course has no class in period {listed} on {day}")
+    days = _meeting_days(
+        term_row, meets, columns["start_date"], columns["end_date"], columns["excluded_weekdays"]
+    )
+    for day in days:
+        if missing := set(columns["periods"] or ()) - meets[day.isoweekday()]:
+            listed = ", ".join(sorted(missing, key=_period_key))
+            return _bad(f"the course has no class in period {listed} on {day}")
     # A new start or end is one meeting's, so the apps and pushes know which.
     if columns["kind"] in ("start", "end"):
         for day in days:
@@ -309,15 +315,13 @@ async def _check(
         return columns
     periods = set(columns["periods"] or ())
     others = await conn.fetch(
-        "SELECT periods, course_class_days(term_code, $5::jsonb, start_date, end_date,"
-        " excluded_weekdays, periods) AS days FROM course_changes"
+        "SELECT periods, start_date, end_date, excluded_weekdays FROM course_changes"
         " WHERE term_code = $1 AND course_no = $2 AND kind = $3"
         " AND id IS DISTINCT FROM $4",
         term,
         course_no,
         columns["kind"],
         change_id,
-        schedule,
     )
     # Changes of a kind clash on a shared class day unless both name periods
     # and none in common: a course can meet twice a day.
@@ -325,8 +329,10 @@ async def _check(
         day
         for other in others
         if not (periods and other["periods"] and periods.isdisjoint(other["periods"]))
-        for day in other["days"]
-        if day in days
+        for day in _meeting_days(
+            term_row, meets, other["start_date"], other["end_date"], other["excluded_weekdays"]
+        )
+        if day in days and set(other["periods"] or ()) <= meets[day.isoweekday()]
     ]
     if clashes:
         day = min(clashes).isoformat()

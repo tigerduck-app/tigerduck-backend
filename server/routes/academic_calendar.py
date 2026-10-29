@@ -139,7 +139,8 @@ async def get_course_changes(
     code = term or await current_term_code(session, datetime.now(UTC))
     if code is None or await session.get(SemesterTerm, code) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="term_not_found")
-    rows = await load_course_changes(session, [code])
+    # A change left no class day has nothing for the apps to apply.
+    rows = [row for row in await load_course_changes(session, [code]) if row.class_days]
 
     digest = hashlib.sha256(code.encode())
     for row in rows:

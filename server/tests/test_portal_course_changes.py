@@ -367,6 +367,30 @@ async def test_a_change_of_a_kind_clashes_only_where_its_periods_meet(term, pool
     assert (await _create(pool, course_no="EE2005701", day="2026-11-02", periods=["6"]))[0] == 409
 
 
+async def test_changes_of_a_kind_clash_on_a_holiday_a_user_may_put_back(term, pool) -> None:
+    assert (await _create(pool, **_range("2026-11-10", "2026-11-12")))[0] == 200
+
+    status, body = await _create(pool, **_range("2026-11-12", "2026-11-17", room="T4-202"))
+
+    assert (status, body["day"]) == (409, "2026-11-12")
+
+
+async def test_a_start_change_names_one_meeting_on_a_holiday_too(term, pool, db_session) -> None:
+    student = await _user(db_session, "b4")
+    db_session.add(
+        _course(student, "PE1001301", course_name="體育", schedule_json={"2": ["3"], "4": ["2", "6"]})
+    )
+    await db_session.commit()
+
+    status, body = await _create(
+        pool, course_no="PE1001301", kind="start", start="13:40",
+        mode="range", **{"from": "2026-11-10", "to": "2026-11-12"},
+    )
+
+    assert status == 400
+    assert "2026-11-12" in body["detail"]
+
+
 @pytest.mark.parametrize("kind", ["start", "end"])
 @pytest.mark.parametrize(
     ("fields", "status"),
