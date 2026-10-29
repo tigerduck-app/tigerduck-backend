@@ -358,7 +358,7 @@ async def test_an_edit_keeps_the_change_and_its_author(term, pool) -> None:
 
     response = await update_change(
         first["id"], _OTHER, pool=pool,
-        body={"course_no": "EE2005701", "kind": "end", "mode": "day", "day": "2026-11-05", "end": "11:40"},
+        body={"course_no": "CS2001301", "kind": "end", "mode": "day", "day": "2026-11-05", "end": "11:40"},
     )
 
     assert response.status_code == 200
@@ -433,3 +433,17 @@ async def test_a_term_with_changes_is_kept(term, pool) -> None:
 
     assert response.status_code == 409
     assert await pool.fetchval("SELECT count(*) FROM semester_terms WHERE code = '1151'") == 1
+
+
+async def test_an_edit_cannot_move_a_change_to_another_course(term, pool) -> None:
+    _, change = await _create(pool, day="2026-11-05")
+
+    response = await update_change(
+        change["id"], _OTHER, pool=pool,
+        body={"course_no": "EE2005701", "kind": "cancelled", "mode": "day", "day": "2026-11-02"},
+    )
+
+    assert response.status_code == 400
+    assert "CS2001301" in _body(response)["detail"]
+    (stored,) = _body(await list_changes("1151", pool=pool))["changes"]
+    assert (stored["course_no"], stored["day"]) == ("CS2001301", "2026-11-05")

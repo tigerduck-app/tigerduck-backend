@@ -388,6 +388,8 @@ async def update_change(
         current = await conn.fetchrow(_CHANGE + " WHERE id = $1 FOR UPDATE", change_id)
         if current is None:
             return _bad("change not found", 404)
+        if "course_no" in body and _text(body["course_no"]) != current["course_no"]:
+            return _bad(f"the change belongs to {current['course_no']}; add one to the other course")
         parsed = await _check(
             conn, current["term_code"], current["course_no"], body, change_id
         )
