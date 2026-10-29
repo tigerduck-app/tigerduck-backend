@@ -40,7 +40,7 @@ WITH found AS (
 SELECT u.student_id, u.display_name, u.created_at,
        count(d.id) AS devices, max(d.last_seen_at) AS last_active
 FROM users u
-LEFT JOIN user_devices d ON d.user_id = u.id
+LEFT JOIN user_devices d ON d.user_id = u.id AND d.deleted_at IS NULL
 WHERE u.id IN (SELECT id FROM found UNION ALL SELECT id FROM named)
 GROUP BY u.id
 ORDER BY max(d.last_seen_at) DESC NULLS LAST, u.student_id
@@ -159,10 +159,10 @@ async def deregister_student(
 
 
 async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
-    """The student's devices and the rows a deregister deletes, per table."""
+    """The student's registered devices and the rows a deregister deletes, per table."""
     devices = await conn.fetch(
         "SELECT id, client_device_id, platform, app_version, os_version, last_seen_at "
-        "FROM user_devices WHERE user_id = $1",
+        "FROM user_devices WHERE user_id = $1 AND deleted_at IS NULL",
         user_id,
     )
     device_list = [

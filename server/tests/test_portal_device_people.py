@@ -223,3 +223,16 @@ async def test_a_blank_lookup_lists_no_one(pool):
     await _person(pool, "B99900001", "王小明", ("ios", "iphone"))
 
     assert _body(await lookup_students(_request(), pool=pool, q="   "))["students"] == []
+
+
+async def test_lookup_and_preview_leave_out_deregistered_devices(pool):
+    _, (phone, tablet) = await _person(
+        pool, "B99900001", "王小明", ("ios", "iphone"), ("ipados", "ipad")
+    )
+    await pool.execute("UPDATE user_devices SET deleted_at = now() WHERE id = $1", tablet)
+
+    (student,) = _body(await lookup_students(_request(), pool=pool, q="B99900001"))["students"]
+    preview = _body(await preview_student(_request(), pool=pool, student_id="B99900001"))
+
+    assert student["devices"] == 1
+    assert [d["device_id"] for d in preview["devices"]] == [str(phone)]
