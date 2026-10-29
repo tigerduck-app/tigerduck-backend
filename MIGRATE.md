@@ -32,6 +32,16 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.8.2
+
+- **Names spelled name first.** Some users' Moodle spells the full name
+  "name student ID@", with nothing after the `@`, which 3.8.1 stored whole.
+  `users.display_name` now holds the name before the ID for it, as the iOS
+  app reads it. The stored names change at each user's next sign-in or
+  sync.
+- **No migration and no `.env` change.** Rollback: check out 3.8.1 and run
+  `./start.sh`.
+
 ## Upgrading to 3.8.1
 
 - **Class reminders are sent.** The scan now reads the weekday-keyed
