@@ -449,6 +449,7 @@ async def test_a_name_the_database_refuses_still_signs_in(
     with capture_logs() as logs:
         response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] is None
 
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:

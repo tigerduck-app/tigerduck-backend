@@ -614,9 +614,9 @@ async def try_store_display_name(
     factory: async_sessionmaker[AsyncSession],
     user_id: uuid.UUID,
     fullname: str | None,
-) -> None:
+) -> bool:
     """`store_display_name` in a transaction of its own, after the caller's
-    work committed, so a failure costs only the name."""
+    work committed, so a failure costs only the name. False when it failed."""
     try:
         async with session_scope(factory) as session:
             await store_display_name(session, user_id, fullname)
@@ -627,6 +627,8 @@ async def try_store_display_name(
             user_id=str(user_id),
             error=type(exc).__name__,
         )
+        return False
+    return True
 
 
 async def lock_accounts(session: AsyncSession, *user_ids: uuid.UUID) -> None:

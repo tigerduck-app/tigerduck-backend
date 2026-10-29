@@ -74,7 +74,7 @@ async def login(
     )
     # The sign-in is stored first, so a failed name write cannot cost it.
     await session.commit()
-    await service.try_store_display_name(
+    stored = await service.try_store_display_name(
         state.session_factory, result.user.id, result.fullname
     )
     return LoginResponse(
@@ -85,7 +85,8 @@ async def login(
             id=str(result.user.id),
             student_id=result.user.student_id,
             display_name=(
-                display_name_from(result.fullname) or result.user.display_name
+                (stored and display_name_from(result.fullname))
+                or result.user.display_name
             ),
         ),
         device_id=str(result.device.id),
