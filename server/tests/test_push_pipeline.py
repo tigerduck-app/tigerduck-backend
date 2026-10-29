@@ -1800,7 +1800,7 @@ async def test_a_later_start_holds_the_class_start_for_as_long(
     assert apple.requests == []
     assert job.status == "pending"
     assert job.fire_at == fire_at
-    assert job.available_at == fire_at + timedelta(minutes=30)
+    assert datetime.now(UTC) < job.available_at <= datetime.now(UTC) + timedelta(minutes=5)
     assert job.payload["countdownTarget"] == _at(day, "10:20").isoformat()
 
     # Half an hour later, when the job is claimed again.
@@ -1821,10 +1821,11 @@ async def test_a_class_start_moved_again_while_held_waits_for_the_new_start(
         scenario="classPreparing",
         changes=[("start", {"start_time": "10:50", "periods": ["3", "4"]})],
     )
-    fire_at = job.fire_at
     await _tick(db_session, prepared_engine, test_settings, [job])
     change = await db_session.scalar(select(CourseChange))
     change.start_time = "11:20"
+    # Half an hour later: the first move is due, the second one is not.
+    job.fire_at -= timedelta(minutes=30)
     job.available_at = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
 
@@ -1832,7 +1833,26 @@ async def test_a_class_start_moved_again_while_held_waits_for_the_new_start(
 
     assert apple.requests == []
     assert job.status == "pending"
-    assert job.available_at == fire_at + timedelta(minutes=60)
+
+
+async def test_a_held_class_start_goes_out_as_filed_once_its_change_is_removed(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(
+        db_session,
+        scenario="classPreparing",
+        changes=[("start", {"start_time": "10:50", "periods": ["3", "4"]})],
+    )
+    await _tick(db_session, prepared_engine, test_settings, [job])
+    await db_session.delete(await db_session.scalar(select(CourseChange)))
+    # The recheck a few minutes later.
+    job.available_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert job.status == "sent"
+    assert _sent_snapshot(apple)["subtitle"] == "10:20 - 12:10"
 
 
 async def test_a_class_start_whose_changed_start_has_passed_is_dropped(

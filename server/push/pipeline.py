@@ -742,6 +742,11 @@ async def _materialize(
     return True
 
 
+# A held class start is checked again at least this often, so an edit that
+# shortens or removes its change wakes it in time.
+_HELD_START_RECHECK = timedelta(minutes=5)
+
+
 async def _held_by_course_changes(
     session: AsyncSession,
     job: PushJob,
@@ -786,7 +791,7 @@ async def _held_by_course_changes(
         # Only `available_at` moves and the filed payload stays, so the app's
         # re-sync keeps the job and a later check measures from the filed start.
         job.status = PushJobStatus.pending.value
-        job.available_at = job.fire_at + delay
+        job.available_at = min(job.fire_at + delay, now + _HELD_START_RECHECK)
         job.locked_by = None
         job.locked_at = None
         logger.info(
