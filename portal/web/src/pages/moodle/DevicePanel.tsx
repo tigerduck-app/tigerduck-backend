@@ -12,7 +12,7 @@ import { copyText } from "@/lib/copy";
 import { cn } from "@/lib/cn";
 import { monthDay, monthDayTime } from "@/lib/format";
 import { platformLabel } from "@/lib/platform";
-import { assignmentColumns, colorOf, deviceName, Swatches } from "./BackendPanel";
+import { assignmentColumns, colorOf, deviceName, Swatches, termColumn } from "./BackendPanel";
 import { Chips, Segmented, TabBar } from "./controls";
 import { ago, clock, deviceNoun, errorText, post, pushLabel, StatusPill, until } from "./format";
 import { DeviceIcon, deviceBadges, isOnline, queuedFor, takesPush } from "./Topology";
@@ -295,6 +295,7 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
         },
         { key: "code", label: "Code", sortValue: (c) => c.client_course_no, className: "font-mono text-[13px]", cell: (c) => c.client_course_no },
         { key: "name", label: "Name", sortValue: (c) => c.course_name, cell: (c) => <div title={c.course_name} className="max-w-[240px] truncate phone:max-w-[100px]">{c.course_name}</div> },
+        termColumn((c) => c.semester),
       ] satisfies Column<SyncCoursesResponse["courses"][number]>[],
     }),
     names: useTable({
@@ -304,6 +305,7 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
         { key: "code", label: "Code", sortValue: (c) => c.client_course_no, className: "font-mono text-[13px]", cell: (c) => c.client_course_no },
         { key: "zh", label: "Chinese", sortValue: (c) => c.custom_names?.zh ?? "", cell: (c) => dash(c.custom_names?.zh) },
         { key: "en", label: "English", sortValue: (c) => c.custom_names?.en ?? "", cell: (c) => dash(c.custom_names?.en) },
+        termColumn((c) => c.semester),
       ] satisfies Column<SyncCoursesResponse["courses"][number]>[],
     }),
     assignments: useTable({

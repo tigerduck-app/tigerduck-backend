@@ -250,6 +250,8 @@ export type SyncAssignment = {
   title: string;
   due_at: string | null;
   provider_is_submitted: boolean;
+  /** Read from the Moodle course name; null when it carries no term. */
+  semester: string | null;
 };
 
 export type SyncCoursesResponse = {

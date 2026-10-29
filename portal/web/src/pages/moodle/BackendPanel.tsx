@@ -26,6 +26,19 @@ type CourseRow = {
   device: string | null;
 };
 
+/** A term column for rows synced under every term; a Moodle mirror row's empty term reads as a dash. */
+export function termColumn<R>(termOf: (row: R) => string | null): Column<R> {
+  return {
+    key: "term",
+    label: "Term",
+    hide: "phone",
+    sortValue: (r) => termOf(r) ?? "",
+    filterValue: (r) => termOf(r) || "—",
+    className: "font-mono text-[13px]",
+    cell: (r) => termOf(r) || "—",
+  };
+}
+
 export const deviceName = (devices: SyncDevice[], id: string | null) => {
   const d = id ? devices.find((x) => x.id === id) : undefined;
   return d ? deviceNoun(d.platform) : null;
@@ -97,6 +110,7 @@ export function assignmentColumns(overrides: SyncOverride[]): Column<SyncAssignm
       className: "whitespace-nowrap font-mono text-[13px]",
       cell: (a) => a.client_course_no || a.course_no || "—",
     },
+    termColumn((a) => a.semester),
     {
       key: "due",
       label: "Due",
