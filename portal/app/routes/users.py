@@ -144,13 +144,20 @@ WHERE ea.provider = 'ntust_sso'
 GROUP BY 1
 """
 
-# Push jobs are pruned after 7 days (server/push/retention.py). Anonymous
-# devices take bulletins without a push job.
+# Push jobs are pruned after 7 days (server/push/retention.py). A job that found
+# no device fails without a delivery; anonymous devices take bulletins without a job.
 _OUTCOMES = """
 WITH outcomes AS (
     SELECT j.channel, pd.status, COALESCE(pd.sent_at, pd.updated_at) AS at
     FROM push_deliveries pd JOIN push_jobs j ON j.id = pd.push_job_id
     WHERE pd.status IN ('sent', 'failed')
+    UNION ALL
+    SELECT j.channel, j.status, j.updated_at
+    FROM push_jobs j
+    WHERE j.status = 'failed' AND NOT EXISTS (
+        SELECT 1 FROM push_deliveries pd
+        WHERE pd.push_job_id = j.id AND pd.status IN ('sent', 'failed')
+    )
     UNION ALL
     SELECT 'bulletin', status, COALESCE(sent_at, updated_at)
     FROM bulletin_dispatches

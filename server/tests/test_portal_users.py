@@ -569,3 +569,19 @@ async def test_user_page_titles_a_class_reminder_with_its_course(db_session, por
     page = await get_user(_REQUEST, user.id, pool=portal_pool)
 
     assert [p["title"] for p in page["pushes"]] == ["資料結構"]
+
+
+async def test_pushes_count_a_job_that_failed_before_any_delivery_once(db_session, portal_pool):
+    user = await _user(db_session, "f1")
+    no_device = _job(user, "assignment", status="failed")
+    every_device = _job(user, "course", status="failed")
+    db_session.add_all([no_device, every_device])
+    await db_session.flush()
+    db_session.add(_delivery(every_device, "failed"))
+    await db_session.commit()
+
+    stats = await user_stats(pool=portal_pool)
+
+    channels = {c["channel"]: (c["sent"], c["failed"]) for c in stats["pushes"]["channels"]}
+    assert channels == {"assignment": (0, 1), "course": (0, 1)}
+    assert stats["pushes"]["daily"][-1]["failed"] == 2
