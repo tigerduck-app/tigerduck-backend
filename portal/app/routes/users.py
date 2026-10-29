@@ -298,12 +298,14 @@ GROUP BY c.id
 ORDER BY c.course_name, c.id
 """
 
-# One row per delivery that settled, or per job that ended without one.
-_PUSH_OUTCOMES = """
+_PUSH_AT = "COALESCE(pd.sent_at, pd.updated_at, j.cancelled_at, j.updated_at)"
+# One row per delivery that settled, or per job that ended without one. Reminders
+# are filed ahead of time, so the window follows when a push went out.
+_PUSH_OUTCOMES = f"""
 FROM push_jobs j
 LEFT JOIN push_deliveries pd ON pd.push_job_id = j.id AND pd.status IN ('sent', 'failed')
 WHERE j.user_id = $1
-  AND j.created_at > now() - interval '7 days'
+  AND {_PUSH_AT} > now() - interval '7 days'
   AND (pd.id IS NOT NULL OR j.status IN ('failed', 'cancelled'))
 """
 
@@ -311,7 +313,7 @@ _PUSHES_SQL = f"""
 SELECT j.id AS job_id, pd.id AS delivery_id, j.channel, j.scenario, j.payload,
        COALESCE(pd.device_id, j.device_id) AS device_id,
        COALESCE(pd.status, j.status) AS status,
-       COALESCE(pd.sent_at, pd.updated_at, j.cancelled_at, j.updated_at) AS at
+       {_PUSH_AT} AS at
 {_PUSH_OUTCOMES}
 ORDER BY at DESC, j.id DESC
 LIMIT $2

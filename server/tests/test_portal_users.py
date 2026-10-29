@@ -507,3 +507,21 @@ async def test_user_page_drops_schedule_entries_that_are_not_objects(db_session,
     page = await get_user(_REQUEST, user.id, pool=portal_pool)
 
     assert page["courses"][0]["schedule"] == [{"day": 2, "periods": ["3"]}]
+
+
+async def test_user_page_lists_pushes_by_when_they_went_out(db_session, portal_pool):
+    now = datetime.now(UTC)
+    user = await _user(db_session, "w1")
+    filed_early = _job(user, "assignment", created_at=now - timedelta(days=10))
+    went_out_long_ago = _job(user, "course", created_at=now - timedelta(days=10))
+    db_session.add_all([filed_early, went_out_long_ago])
+    await db_session.flush()
+    old = _delivery(went_out_long_ago, "sent")
+    old.sent_at = now - timedelta(days=8)
+    db_session.add_all([_delivery(filed_early, "sent"), old])
+    await db_session.commit()
+
+    page = await get_user(_REQUEST, user.id, pool=portal_pool)
+
+    assert [p["channel"] for p in page["pushes"]] == ["assignment"]
+    assert page["push_counts"]["sent"] == 1
