@@ -1,7 +1,7 @@
 // Moodle › Data inspection: one student's synced data, devices, queue and
 // sync log. The student rides in the URL (?student=) so a link opens them.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -32,14 +32,13 @@ export function DataInspectionPage() {
   const [params, setParams] = useSearchParams();
   const studentId = params.get("student") ?? "";
   const [query, setQuery] = useState(studentId);
+  // Back and Forward change the student too; the box names whoever the page shows.
+  useEffect(() => setQuery(studentId), [studentId]);
   const pick = (id: string) => {
     setQuery(id);
     setParams({ student: id });
   };
-  const stop = () => {
-    setQuery("");
-    setParams({});
-  };
+  const stop = () => setParams({});
 
   return (
     <>
