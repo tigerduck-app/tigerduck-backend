@@ -139,3 +139,25 @@ async def test_a_site_info_without_a_full_name_carries_none() -> None:
     result = await make_verifier(handler).verify(token="tok", student_id="b1")
     assert result.ok is True
     assert result.fullname is None
+
+
+async def test_the_result_repr_leaves_the_full_name_out() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"username": "b1", "userid": 1, "fullname": "Test Student"}
+        )
+
+    result = await make_verifier(handler).verify(token="tok", student_id="b1")
+    assert result.fullname == "Test Student"
+    assert "Test Student" not in repr(result)
+
+
+async def test_a_username_mismatch_carries_no_full_name() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"username": "someoneelse", "fullname": "Test Student"}
+        )
+
+    result = await make_verifier(handler).verify(token="tok", student_id="b1")
+    assert result.error == "username_mismatch"
+    assert result.fullname is None

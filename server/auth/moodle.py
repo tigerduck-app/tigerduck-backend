@@ -11,7 +11,7 @@ token works and belongs to the claimed student id.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import httpx
@@ -41,7 +41,7 @@ class MoodleVerifyResult:
     username: str | None = None
     # "invalid_token" | "username_mismatch" | "unreachable"
     error: str | None = None
-    fullname: str | None = None
+    fullname: str | None = field(default=None, repr=False)
 
 
 class MoodleVerifier(Protocol):
