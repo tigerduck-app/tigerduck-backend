@@ -91,10 +91,11 @@ async def require_user(
 async def _bring_back(
     session: AsyncSession, user_id: uuid.UUID, device_id: uuid.UUID
 ) -> None:
-    """Undelete the calling device: an operator's deregister leaves its
-    session live. Under the account lock, taken before the device row as on
-    every sign-in and sign-out (`lock_accounts`); the update reads the row
-    again, since a sign-in may have brought it back meanwhile."""
+    """Undelete the calling device: one the portal deregistered before
+    tigerduck-backend#96 kept its sessions live. Under the account lock,
+    taken before the device row as on every sign-in and sign-out
+    (`lock_accounts`); the update reads the row again, since a sign-in may
+    have brought it back meanwhile."""
     deleted_at = await session.scalar(
         select(UserDevice.deleted_at).where(UserDevice.id == device_id)
     )

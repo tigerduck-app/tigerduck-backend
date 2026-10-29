@@ -266,10 +266,10 @@ async def test_two_students_swapping_devices_do_not_deadlock(
 async def test_a_sign_out_from_a_deregistered_device_and_a_sign_in_do_not_deadlock(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
-    """An operator's deregister leaves the device's session live. The
-    sign-out's request brought the device back, writing its row, before its
-    route locked the account, which a sign-in held while it waited for that
-    row."""
+    """The portal's deregister left the device's session live before
+    tigerduck-backend#96. The sign-out's request brought the device back,
+    writing its row, before its route locked the account, which a sign-in
+    held while it waited for that row."""
     await _student(db_session, [])
     factory = build_session_factory(prepared_engine)
     async with factory() as setup:
