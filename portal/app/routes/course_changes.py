@@ -394,8 +394,11 @@ async def update_change(
 ) -> JSONResponse:
     """Replaces the change; its term and course stay."""
     async with pool.acquire() as conn, conn.transaction():
+        # NO KEY UPDATE, since the id stays: a term delete's foreign key check
+        # then still reads this row, and cannot deadlock with the term lock below.
         current = await conn.fetchrow(
-            "SELECT term_code, course_no FROM course_changes WHERE id = $1 FOR UPDATE",
+            "SELECT term_code, course_no FROM course_changes WHERE id = $1"
+            " FOR NO KEY UPDATE",
             change_id,
         )
         if current is None:
