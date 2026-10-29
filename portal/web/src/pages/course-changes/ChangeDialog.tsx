@@ -106,7 +106,9 @@ export function ChangeDialog({
   const meeting = days[0] ? meetingOn(course, days[0]) : undefined;
   const dayPeriods = !isRange && meeting ? meeting.periods : [];
   const showChips = !isRange && meeting !== undefined && (periodRuns(dayPeriods).length > 1 || chosen !== null);
-  const periods = showChips && chosen ? chosen : (meeting?.periods ?? []);
+  // A range shows no chips, so an edited range keeps the periods it has.
+  const keptPeriods = isRange && change?.mode === "range" ? change.periods : null;
+  const periods = keptPeriods ?? (showChips && chosen ? chosen : (meeting?.periods ?? []));
   const span = periodSpan(periods);
   const regStart = span?.[0] ?? "";
   const regEnd = span?.[1] ?? "";
@@ -153,7 +155,7 @@ export function ChangeDialog({
       mode,
       ...(isRange ? { from: from!, to: to!, excluded_weekdays: off } : { day: day! }),
       // No periods means the whole day.
-      ...(showChips && chosen ? { periods: chosen } : {}),
+      ...(keptPeriods ? { periods: keptPeriods } : showChips && chosen ? { periods: chosen } : {}),
       room: room.trim(),
       start: startNew,
       end: endNew,
