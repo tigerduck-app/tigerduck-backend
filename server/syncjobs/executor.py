@@ -60,8 +60,10 @@ from server.auth.models import (
     ExternalAccountCredential,
     PushTokenKind,
     PushTokenStatus,
+    User,
     UserDevice,
 )
+from server.auth.moodle import display_name_from
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -366,10 +368,14 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         now = datetime.now(UTC)
         probe_submissions = job_type != SyncJobType.ntust_courses.value
         if not probe_submissions:
+            names: list[str] = []
             try:
-                fetched = await worker.course_fetcher.fetch_courses(token=token)
+                fetched = await worker.course_fetcher.fetch_courses(
+                    token=token, on_fullname=names.append
+                )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
+            await _store_display_name(worker, user_id=user_id, fullnames=names)
         else:
             try:
                 fetched = await worker.fetcher.fetch_assignments(token=token)
@@ -739,11 +745,13 @@ async def _refresh_submission_status(
             )
         if not assignment_ids:
             return
+        names: list[str] = []
         try:
             fetched = await worker.fetcher.fetch_submission_status(
                 token=token,
                 assignment_ids=assignment_ids,
                 max_concurrency=settings.submission_status_max_concurrency,
+                on_fullname=names.append,
             )
         except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
             raise
@@ -763,6 +771,7 @@ async def _refresh_submission_status(
                 exc_info=_without_token(exc, token),
             )
             return
+        await _store_display_name(worker, user_id=user_id, fullnames=names)
         async with session_scope(worker.session_factory) as session:
             changed_ids = await apply_submission_status(
                 session, user_id=user_id, fetched=fetched, now=now
@@ -784,6 +793,23 @@ async def _refresh_submission_status(
     except Exception as exc:
         logger.error("syncjobs.submissions.refresh_db_error", exc_info=True)
         raise SubmissionStatusDbError from exc
+
+
+async def _store_display_name(
+    worker: SyncWorker, *, user_id, fullnames: list[str]
+) -> None:
+    """Refresh the user's name from the site-info answer a fetch already got,
+    so a user who does not sign in again still gets one. Its own
+    transaction, so the users row is never locked behind the job's locks."""
+    name = display_name_from(fullnames[-1]) if fullnames else None
+    if name is None:
+        return
+    async with session_scope(worker.session_factory) as session:
+        await session.execute(
+            update(User)
+            .where(User.id == user_id, User.display_name.is_distinct_from(name))
+            .values(display_name=name)
+        )
 
 
 async def _handle_moodle_failure(
