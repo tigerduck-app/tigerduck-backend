@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable, useTable, type Column, type TableModel } from "@/components/data-table";
-import { Pill } from "@/components/page";
+import { FormDialog, Pill } from "@/components/page";
 import { copyText } from "@/lib/copy";
 import { cn } from "@/lib/cn";
 import { monthDay, monthDayTime } from "@/lib/format";
@@ -273,6 +273,7 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
   const named = courses.courses.filter((c) => Object.keys(c.custom_names ?? {}).length > 0);
   const subs = courses.bulletin_subscriptions?.filter((s) => s.device_id === device.id) ?? [];
   const by = (id: string | null) => deviceName(devices, id);
+  const [doc, setDoc] = useState<SettingsDoc | null>(null);
 
   const tables = {
     courses: useTable({
@@ -343,7 +344,17 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
       rows: courses.settings_documents ?? [],
       initialSort: { key: "ns", dir: "asc" },
       columns: [
-        { key: "ns", label: "Namespace", sortValue: (d) => d.namespace, className: "font-mono text-[13px]", cell: (d) => d.namespace },
+        {
+          key: "ns",
+          label: "Namespace",
+          sortValue: (d) => d.namespace,
+          className: "font-mono text-[13px]",
+          cell: (d) => (
+            <button type="button" onClick={() => setDoc(d)} className="text-link hover:text-link-hover hover:underline">
+              {d.namespace}
+            </button>
+          ),
+        },
         { key: "rev", label: "Revision", align: "right", sortValue: (d) => d.revision, className: "font-mono text-[13px]", cell: (d) => d.revision },
         { key: "schema", label: "Schema", hide: "phone", className: "text-[13px] text-ink-3", cell: (d) => `v${d.schema_version}` },
         { key: "updated", label: "Updated", sortValue: (d) => d.updated_at ?? "", className: "whitespace-nowrap text-[13px] text-ink-3", cell: (d) => ago(d.updated_at) },
@@ -403,7 +414,50 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
         minWidth={560}
         empty={`No ${labels[sub].toLowerCase()}`}
       />
+      {sub === "bulletins" && <BulletinStates courses={courses} />}
+      {doc && (
+        <FormDialog
+          open
+          onOpenChange={(open) => !open && setDoc(null)}
+          title={<span className="font-mono">{doc.namespace}</span>}
+          meta={`Revision ${doc.revision} · v${doc.schema_version} · ${ago(doc.updated_at)}`}
+          width={640}
+        >
+          <pre className="overflow-x-auto rounded-xl bg-row-hover p-4 font-mono text-xs leading-5">{JSON.stringify(doc.document, null, 2)}</pre>
+        </FormDialog>
+      )}
     </>
+  );
+}
+
+type SettingsDoc = NonNullable<SyncCoursesResponse["settings_documents"]>[number];
+
+/** The account's read, starred and hidden bulletins; synced to every device, unlike the subscriptions above. */
+function BulletinStates({ courses }: { courses: SyncCoursesResponse }) {
+  const counts = courses.bulletin_state_counts;
+  const marked = courses.bulletin_states ?? [];
+  if (!counts) return null;
+  return (
+    <div className="flex flex-col gap-2.5 border-t border-divider px-6 py-4 phone:px-4">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[13px] text-ink-2 tabular-nums">
+        <span>{counts.read} read</span>
+        <span>{counts.starred} starred</span>
+        <span>{counts.hidden} hidden</span>
+      </div>
+      {marked.length > 0 && (
+        <ul className="flex max-h-64 flex-col overflow-y-auto rounded-xl border border-line">
+          {marked.map((b) => (
+            <li key={b.bulletin_id} className="flex min-w-0 items-center gap-2 border-b border-divider px-3.5 py-2 last:border-b-0">
+              <span title={b.title} className="min-w-0 flex-1 truncate text-[13px]">
+                {b.title}
+              </span>
+              {b.is_starred && <Pill tone="warning">Starred</Pill>}
+              {b.is_hidden && <Pill>Hidden</Pill>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

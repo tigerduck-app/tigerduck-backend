@@ -287,6 +287,16 @@ export type SyncCoursesResponse = {
     enabled: boolean;
     updated_at: string | null;
   }[];
+  bulletin_state_counts?: { total: number; read: number; starred: number; hidden: number };
+  /** Starred or hidden bulletins, newest change first, at most 200. */
+  bulletin_states?: {
+    bulletin_id: number;
+    title: string;
+    is_read: boolean;
+    is_starred: boolean;
+    is_hidden: boolean;
+    updated_at: string | null;
+  }[];
   course_skipped_dates?: {
     id: number;
     skipped_on: string;
