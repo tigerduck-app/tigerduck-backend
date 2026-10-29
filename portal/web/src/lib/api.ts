@@ -50,3 +50,13 @@ export async function api<T = unknown>(
   }
   return body as T;
 }
+
+/** "HTTP 422 · detail", joining FastAPI's list of validation errors. */
+export function errorText(e: unknown): string {
+  if (!(e instanceof ApiError)) return e instanceof Error ? e.message : String(e);
+  const detail = (e.body as { detail?: unknown } | null)?.detail;
+  const text = Array.isArray(detail)
+    ? detail.map((d: { loc?: unknown[]; msg?: string }) => [d.loc?.slice(1).join("."), d.msg].filter(Boolean).join(": ")).join("; ")
+    : e.message;
+  return `HTTP ${e.status} · ${text}`;
+}

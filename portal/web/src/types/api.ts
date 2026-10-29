@@ -201,6 +201,7 @@ export type CustomPushTargetFilter = {
   user_id?: string;
   device_id?: string;
   list_id?: number;
+  course_code?: string;
 };
 
 export type DeviceList = {
@@ -233,8 +234,16 @@ export type AddMembersResponse = {
   unknown: number;
 };
 
+export type CustomPushCourse = { code: string; name: string; students: number };
+
 export type CustomPushPreviewResponse = {
   matched: Record<string, number>;
+  /** The part of `matched` that no account is signed in on. */
+  anonymous: Record<string, number>;
+  /** The current term's code, null while none is published. */
+  term: string | null;
+  /** The filter's course in `term`; null when nobody takes it or none was given. */
+  course: CustomPushCourse | null;
 };
 
 export type CustomPushRequest = CustomPushTargetFilter & {

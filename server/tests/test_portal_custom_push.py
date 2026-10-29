@@ -10,28 +10,36 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import asyncpg
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from portal.app.db import _asyncpg_dsn  # noqa: E402
 from portal.app.routes.custom_push import (  # noqa: E402
     _PreviewRequest,
+    _SendRequest,
     build_custom_push_payload,
     preview,
+    send,
 )
+from server.academic_calendar.models import SemesterTerm  # noqa: E402
+from server.academic_calendar.terms import current_term_code  # noqa: E402
 from server.auth.models import DevicePushToken, User, UserDevice  # noqa: E402
 from server.models import DeviceRegistration  # noqa: E402
 from server.push.custom_push_targeting import TargetFilter, count_by_class  # noqa: E402
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job  # noqa: E402
+from server.sync.models.courses import UserCourse  # noqa: E402
 
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=UTC)
 _NOTIFICATION_ID = "ecc66bcb4a75f302"
+_REQUEST = SimpleNamespace(state=SimpleNamespace(actor="ops@example.com"))
 
 
 def _popup(*, force_ring: bool = False) -> dict:
@@ -228,3 +236,209 @@ async def test_the_anonymous_count_agrees_with_the_dispatcher(
     anonymous = {key: count - popup.get(key, 0) for key, count in record.items()}
 
     assert anonymous == await count_by_class(db_session, TargetFilter(**filt))
+
+
+async def _iphone(db_session, student_id: str) -> UserDevice:
+    """A signed-in iPhone with an active token."""
+    user = User(student_id=student_id)
+    db_session.add(user)
+    await db_session.flush()
+    phone = UserDevice(
+        user_id=user.id,
+        client_device_id=f"iphone-{student_id}",
+        platform="ios",
+        device_class="iphone",
+    )
+    db_session.add(phone)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=phone.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash=f"iphone-{student_id}",
+            token_value="tok",
+            status="active",
+        )
+    )
+    return phone
+
+
+async def _course_takers(db_session) -> list[UserDevice]:
+    """Three published terms, the middle one current, and four students
+    with an iPhone each: two take CS2001301 this term, one dropped it and
+    one took it last term. The anonymous iPhones from `_recipients` take
+    nothing."""
+    await _recipients(db_session)
+    today = date.today()
+    db_session.add_all(
+        [
+            SemesterTerm(
+                code="1142",
+                start_date=today - timedelta(days=200),
+                end_date=today - timedelta(days=100),
+            ),
+            SemesterTerm(
+                code="1151",
+                start_date=today - timedelta(days=30),
+                end_date=today + timedelta(days=60),
+            ),
+            SemesterTerm(
+                code="1152",
+                start_date=today + timedelta(days=90),
+                end_date=today + timedelta(days=180),
+            ),
+        ]
+    )
+    phones = []
+    for student, term, status in (
+        ("s1", "1151", "enrolled"),
+        ("s2", "1151", "enrolled"),
+        ("s3", "1151", "dropped"),
+        ("s4", "1142", "enrolled"),
+    ):
+        phone = await _iphone(db_session, student)
+        db_session.add(
+            UserCourse(
+                user_id=phone.user_id,
+                semester=term,
+                course_key="CS2001301",
+                course_no="CS2001301",
+                course_name="資料結構",
+                enrollment_status=status,
+            )
+        )
+        phones.append(phone)
+    await db_session.commit()
+    return phones
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_code_finds_its_takers_in_the_current_term(
+    db_session, portal_pool
+):
+    await _course_takers(db_session)
+
+    response = await preview(
+        _PreviewRequest(
+            target_classes=["iphone"], keeps_record=True, course_code=" cs2001301 "
+        ),
+        pool=portal_pool,
+    )
+    body = json.loads(response.body)
+
+    assert body["term"] == await current_term_code(db_session, datetime.now(UTC))
+    assert body["term"] == "1151"
+    assert body["course"] == {"code": "CS2001301", "name": "資料結構", "students": 2}
+    # The two takers' iPhones; anonymous devices take no course.
+    assert body["matched"] == {"iphone": 2, "total": 2}
+    assert body["anonymous"] == {"iphone": 0, "total": 0}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_nobody_takes_this_term_is_a_miss(db_session, portal_pool):
+    await _course_takers(db_session)
+
+    response = await preview(
+        _PreviewRequest(target_classes=["iphone"], course_code="CS9999301"),
+        pool=portal_pool,
+    )
+    body = json.loads(response.body)
+
+    assert body["course"] is None
+    assert body["matched"]["total"] == 0
+    with pytest.raises(HTTPException) as refused:
+        await send(
+            _SendRequest(
+                target_classes=["iphone"],
+                course_code="CS9999301",
+                title="停課通知",
+                body="明天停課",
+                keeps_record=False,
+                force_ring=False,
+            ),
+            _REQUEST,
+            pool=portal_pool,
+        )
+    assert refused.value.status_code == 422
+    assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_push_goes_to_its_takers_devices_only(db_session, portal_pool):
+    phones = await _course_takers(db_session)
+
+    response = await send(
+        _SendRequest(
+            target_classes=["iphone", "android"],
+            course_code="CS2001301",
+            title="停課通知",
+            body="明天停課",
+            keeps_record=False,
+            force_ring=False,
+        ),
+        _REQUEST,
+        pool=portal_pool,
+    )
+
+    assert json.loads(response.body)["matched"] == 2
+    jobs = await portal_pool.fetch("SELECT device_id FROM push_jobs")
+    assert {row["device_id"] for row in jobs} == {phones[0].id, phones[1].id}
+    assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_push_cannot_keep_a_record(db_session, portal_pool):
+    """A recorded push becomes a bulletin every user's feed lists, which a
+    push meant for one course's students must not."""
+    await _course_takers(db_session)
+
+    with pytest.raises(HTTPException) as refused:
+        await send(
+            _SendRequest(
+                target_classes=["iphone"],
+                course_code="CS2001301",
+                title="停課通知",
+                body="明天停課",
+                keeps_record=True,
+                force_ring=False,
+            ),
+            _REQUEST,
+            pool=portal_pool,
+        )
+
+    assert refused.value.status_code == 422
+    assert refused.value.detail == "a course push cannot keep a record"
+    assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM push_jobs") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_push_is_audited_with_its_course_and_term(
+    db_session, portal_pool
+):
+    await _course_takers(db_session)
+
+    await send(
+        _SendRequest(
+            target_classes=["iphone"],
+            course_code="CS2001301",
+            title="停課通知",
+            body="明天停課",
+            keeps_record=False,
+            force_ring=True,
+        ),
+        _REQUEST,
+        pool=portal_pool,
+    )
+
+    row = await portal_pool.fetchrow(
+        "SELECT actor, action, target_user_id, detail FROM admin_audit_log"
+    )
+    detail = json.loads(row["detail"])
+    assert (row["actor"], row["action"]) == ("ops@example.com", "push.custom.send")
+    assert row["target_user_id"] is None
+    assert detail["course_code"] == "CS2001301"
+    assert detail["term"] == "1151"
+    assert detail["matched"] == 2
