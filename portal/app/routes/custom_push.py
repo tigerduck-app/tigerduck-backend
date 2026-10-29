@@ -316,6 +316,16 @@ async def send(
                 *params,
             )
             matched = len(targets)
+            # The bulletin dispatcher also sends a recorded push to the anonymous
+            # devices the preview counts, so they belong in the devices reached.
+            reached = matched
+            anonymous = _anonymous_where(body) if body.keeps_record else None
+            if anonymous is not None:
+                anon_where, anon_params = anonymous
+                reached += await conn.fetchval(
+                    f"SELECT count(*) FROM device_registrations r WHERE {anon_where}",
+                    *anon_params,
+                )
 
             await conn.execute(
                 """
@@ -327,7 +337,7 @@ async def send(
                 body.title,
                 kind,
                 target_classes,
-                matched,
+                reached,
             )
 
             if body.keeps_record:
