@@ -43,6 +43,7 @@ const NOTE_PRESETS: [string, string][] = [
   ["小考", "Quiz"],
   ["補課", "Make-up class"],
 ];
+const NO_HOLIDAYS: ReadonlyMap<string, string> = new Map();
 const HHMM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 const mins = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
 
@@ -108,8 +109,10 @@ export function ChangeDialog({
   const days = isRange ? (from && to ? classDays(course, term, holidays, from, to, off) : []) : day ? [day] : [];
   const meeting = days[0] ? meetingOn(course, days[0]) : undefined;
   const timeKind = kind === "start" || kind === "end";
-  // A range's start or end names one meeting too, so its chips offer the meetings every covered day has.
-  const dayRuns = days.map((d) => periodRuns(meetingOn(course, d)?.periods ?? []));
+  // A range's start or end names one meeting too, so its chips offer the meetings every covered day has;
+  // holidays count, as the server checks them for a user who puts one back.
+  const meetingDays = isRange && from && to ? classDays(course, term, NO_HOLIDAYS, from, to, off) : days;
+  const dayRuns = meetingDays.map((d) => periodRuns(meetingOn(course, d)?.periods ?? []));
   const rangePicks = isRange && timeKind && dayRuns.some((r) => r.length > 1);
   const runs = rangePicks
     ? dayRuns[0].filter((r) => dayRuns.every((rs) => rs.some((x) => x.join() === r.join())))
