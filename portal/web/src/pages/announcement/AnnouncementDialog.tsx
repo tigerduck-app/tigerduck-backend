@@ -119,6 +119,22 @@ export function AnnouncementDialog({
       {tagLabel(t)}
     </span>
   ));
+  const inApp = (
+    <div className="flex flex-col gap-2 rounded-[14px] border border-line bg-surface p-3.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Pill tone="info">{orgLabel}</Pill>
+        <Pill tone={imp.tone} className={imp.className}>
+          {imp.label}
+        </Pill>
+        <span className="ml-auto text-xs text-ink-3">
+          {isEdit && bulletin.posted_at ? monthDay(bulletin.posted_at) : "Today"}
+        </span>
+      </div>
+      <span className="break-words text-[15px] font-semibold">{push.title}</span>
+      {d.summary.trim() && <span className="break-words text-[13px] text-ink-2">{d.summary}</span>}
+      {chosenTags.length > 0 && <div className="flex flex-wrap gap-1">{chosenTags}</div>}
+    </div>
+  );
 
   if (step === "confirm") {
     return (
@@ -146,10 +162,15 @@ export function AnnouncementDialog({
           </>
         }
       >
-        <PushCard title={push.title} body={push.body}>
-          <Pill tone="info">{orgLabel}</Pill>
-          {chosenTags}
-        </PushCard>
+        {/* An edit is saved without a push, so it shows the bulletin as the app lists it. */}
+        {isEdit ? (
+          inApp
+        ) : (
+          <PushCard title={push.title} body={push.body}>
+            <Pill tone="info">{orgLabel}</Pill>
+            {chosenTags}
+          </PushCard>
+        )}
       </FormDialog>
     );
   }
@@ -339,20 +360,7 @@ export function AnnouncementDialog({
           <AndroidPreview title={push.title} body={push.body} className="max-[720px]:hidden" />
           <div className="flex flex-col gap-1.5">
             <span className="text-xs text-ink-3">In the app</span>
-            <div className="flex flex-col gap-2 rounded-[14px] border border-line bg-surface p-3.5">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Pill tone="info">{orgLabel}</Pill>
-                <Pill tone={imp.tone} className={imp.className}>
-                  {imp.label}
-                </Pill>
-                <span className="ml-auto text-xs text-ink-3">
-                  {isEdit && bulletin.posted_at ? monthDay(bulletin.posted_at) : "Today"}
-                </span>
-              </div>
-              <span className="break-words text-[15px] font-semibold">{push.title}</span>
-              {d.summary.trim() && <span className="break-words text-[13px] text-ink-2">{d.summary}</span>}
-              {chosenTags.length > 0 && <div className="flex flex-wrap gap-1">{chosenTags}</div>}
-            </div>
+            {inApp}
           </div>
         </aside>
       </div>
