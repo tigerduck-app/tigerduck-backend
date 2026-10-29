@@ -22,6 +22,9 @@ export type Draft = {
 
 const MAX_TAGS = 8;
 
+// A scraped or typed URL may carry any scheme; only these open as links.
+const isHttpUrl = (url: string) => /^https?:\/\//i.test(url.trim());
+
 export const IMPORTANCE: Record<Importance, { label: string; icon: LucideIcon; tone: Tone; className?: string }> = {
   low: { label: "Low", icon: ArrowDown, tone: "neutral", className: "bg-ground text-ink-3" },
   normal: { label: "Normal", icon: Minus, tone: "neutral" },
@@ -327,15 +330,19 @@ export function AnnouncementDialog({
           {isEdit ? (
             <div className="flex flex-col gap-1.5 text-[13px]">
               <span className="font-medium">Source URL</span>
-              <a
-                href={d.source_url}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex min-w-0 items-center gap-1.5 font-mono text-link hover:text-link-hover"
-              >
-                <span className="truncate">{d.source_url}</span>
-                <ExternalLink aria-hidden="true" className="size-3.5 shrink-0" />
-              </a>
+              {isHttpUrl(d.source_url) ? (
+                <a
+                  href={d.source_url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="inline-flex min-w-0 items-center gap-1.5 font-mono text-link hover:text-link-hover"
+                >
+                  <span className="truncate">{d.source_url}</span>
+                  <ExternalLink aria-hidden="true" className="size-3.5 shrink-0" />
+                </a>
+              ) : (
+                <span className="break-all font-mono text-ink-2">{d.source_url || "—"}</span>
+              )}
             </div>
           ) : (
             <label className="flex flex-col gap-1.5 text-[13px] font-medium">
