@@ -66,6 +66,8 @@ export function LiveLog({ studentId }: { studentId: string }) {
       alive = false;
       window.clearInterval(id);
       timers.forEach(clearTimeout);
+      // The cleared timers would have dropped these highlights.
+      setFresh(new Set());
     };
   }, [studentId, paused]);
 
