@@ -8,15 +8,26 @@ test_calendar_gaps.py gives: the portal has no test runner of its own.
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import asyncpg
 import pytest
+import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from portal.app.routes.custom_push import build_custom_push_payload  # noqa: E402
+from portal.app.db import _asyncpg_dsn  # noqa: E402
+from portal.app.routes.custom_push import (  # noqa: E402
+    _PreviewRequest,
+    build_custom_push_payload,
+    preview,
+)
+from server.auth.models import DevicePushToken, User, UserDevice  # noqa: E402
+from server.models import DeviceRegistration  # noqa: E402
+from server.push.custom_push_targeting import TargetFilter, count_by_class  # noqa: E402
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job  # noqa: E402
 
 _NOW = datetime(2026, 10, 4, 2, 0, tzinfo=UTC)
@@ -108,3 +119,112 @@ def test_android_is_told_to_ring_only_when_the_operator_asked(build, force_ring)
     assert data["android_channel_id"] == (
         "bulletins_sound" if force_ring else "bulletins_silent"
     )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def portal_pool(test_settings, db_session):
+    pool = await asyncpg.create_pool(
+        _asyncpg_dsn(test_settings.database_url), min_size=1, max_size=2
+    )
+    yield pool
+    await pool.close()
+
+
+async def _recipients(db_session) -> None:
+    """A signed-in iPhone, and anonymous devices a recorded push's filter
+    takes (an iPhone, an Apple row from before device_class, a Pixel) or
+    leaves out (one linked to the student, one without a token)."""
+    user = User(student_id="b1")
+    db_session.add(user)
+    await db_session.flush()
+    phone = UserDevice(
+        user_id=user.id, client_device_id="iphone-1", platform="ios", device_class="iphone"
+    )
+    db_session.add(phone)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=phone.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="iphone-1",
+            token_value="tok",
+            status="active",
+        )
+    )
+    for device_id, platform, device_class, token, linked in (
+        ("anon-iphone", "apple", "iphone", "ab", None),
+        ("anon-legacy", "apple", "", "ab", None),
+        ("anon-pixel", "android", "android", "fcm", None),
+        ("iphone-1", "apple", "iphone", "ab", user.id),
+        ("anon-no-token", "apple", "iphone", None, None),
+    ):
+        apple = platform == "apple"
+        db_session.add(
+            DeviceRegistration(
+                device_id=device_id,
+                user_id=f"u-{device_id}",
+                platform=platform,
+                device_class=device_class,
+                pts_token_hex="" if apple else token,
+                device_token_hex=token if apple else None,
+                bundle_id="",
+                attrs_type="",
+                apns_env="",
+                linked_user_id=linked,
+            )
+        )
+    await db_session.commit()
+
+
+async def _preview(pool, *, keeps_record: bool, **filt) -> dict:
+    response = await preview(_PreviewRequest(keeps_record=keeps_record, **filt), pool=pool)
+    return json.loads(response.body)["matched"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_preview_counts_the_anonymous_devices_only_a_recorded_push_reaches(
+    db_session, portal_pool
+):
+    """tigerduck-backend#96: the bulletin dispatcher also sends a recorded
+    push to the anonymous devices its filter matches; a popup goes to
+    signed-in devices only."""
+    await _recipients(db_session)
+    classes = {"target_classes": ["iphone", "android"]}
+
+    assert await _preview(portal_pool, keeps_record=True, **classes) == {
+        "iphone": 3,
+        "android": 1,
+        "total": 4,
+    }
+    assert await _preview(portal_pool, keeps_record=False, **classes) == {
+        "iphone": 1,
+        "android": 0,
+        "total": 1,
+    }
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize(
+    "filt",
+    [
+        {"target_classes": ["iphone", "ipad", "mac", "android", "android_tablet"]},
+        {"target_classes": ["ipad"]},
+        {"target_classes": ["iphone"], "device_id": "anon-iphone"},
+        {"target_classes": ["iphone", "android"], "user_id": "u-anon-pixel"},
+    ],
+    ids=["all", "ipad", "device", "user"],
+)
+async def test_the_anonymous_count_agrees_with_the_dispatcher(
+    db_session, portal_pool, filt
+):
+    """The portal cannot import `server.push.custom_push_targeting`, which
+    resolves the anonymous half of a recorded push, so it repeats its
+    filter."""
+    await _recipients(db_session)
+    record = await _preview(portal_pool, keeps_record=True, **filt)
+    popup = await _preview(portal_pool, keeps_record=False, **filt)
+
+    anonymous = {key: count - popup.get(key, 0) for key, count in record.items()}
+
+    assert anonymous == await count_by_class(db_session, TargetFilter(**filt))

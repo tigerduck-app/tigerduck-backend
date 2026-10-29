@@ -38,6 +38,15 @@ _CLASS_TO_PLATFORM = {
     "android": "android",
     "android_tablet": "android",
 }
+# The platform an anonymous registration (`device_registrations`) of each
+# class carries.
+_CLASS_TO_ANONYMOUS_PLATFORM = {
+    "iphone": "apple",
+    "ipad": "apple",
+    "mac": "apple",
+    "android": "android",
+    "android_tablet": "android",
+}
 
 
 class _TargetFilter(BaseModel):
@@ -47,6 +56,10 @@ class _TargetFilter(BaseModel):
     user_id: str | None = Field(default=None, max_length=64)
     device_id: str | None = Field(default=None, max_length=128)
     list_id: int | None = Field(default=None, ge=1)
+
+
+class _PreviewRequest(_TargetFilter):
+    keeps_record: bool = False
 
 
 class _SendRequest(_TargetFilter):
@@ -127,8 +140,39 @@ def _targeting_where(filt: _TargetFilter) -> tuple[str, list]:
     return " AND ".join(clauses), params
 
 
+def _anonymous_where(filt: _TargetFilter) -> tuple[str, list] | None:
+    """The WHERE clause + params for the anonymous devices a recorded push
+    also reaches, repeating `server.push.custom_push_targeting`, which the
+    bulletin dispatcher resolves them with. None for a device list: it holds
+    signed-in devices only."""
+    if filt.list_id is not None:
+        return None
+    classes = list(filt.target_classes)
+    platforms = sorted({_CLASS_TO_ANONYMOUS_PLATFORM[c] for c in classes})
+    params: list = [classes, platforms]
+    clauses = [
+        "r.server_push_enabled = true",
+        "r.linked_user_id IS NULL",
+        (
+            "((r.platform = 'apple' AND coalesce(r.device_token_hex, '') <> '') "
+            "OR (r.platform = 'android' AND coalesce(r.pts_token_hex, '') <> ''))"
+        ),
+        (
+            "(r.device_class = ANY($1::text[]) "
+            "OR (r.device_class = '' AND r.platform = ANY($2::text[])))"
+        ),
+    ]
+    if filt.user_id is not None:
+        params.append(filt.user_id)
+        clauses.append(f"r.user_id = ${len(params)}")
+    if filt.device_id is not None:
+        params.append(filt.device_id)
+        clauses.append(f"r.device_id = ${len(params)}")
+    return " AND ".join(clauses), params
+
+
 @router.post("/preview")
-async def preview(filt: _TargetFilter, pool=Depends(get_pool)) -> JSONResponse:
+async def preview(filt: _PreviewRequest, pool=Depends(get_pool)) -> JSONResponse:
     where, params = _targeting_where(filt)
     sql = (
         f"SELECT coalesce(ud.device_class, '') AS device_class, "
@@ -136,8 +180,16 @@ async def preview(filt: _TargetFilter, pool=Depends(get_pool)) -> JSONResponse:
         f"FROM user_devices ud JOIN users u ON u.id = ud.user_id "
         f"WHERE {where} GROUP BY 1, 2"
     )
+    anonymous = _anonymous_where(filt) if filt.keeps_record else None
     async with pool.acquire() as conn:
-        rows = await conn.fetch(sql, *params)
+        rows = list(await conn.fetch(sql, *params))
+        if anonymous is not None:
+            where, params = anonymous
+            rows += await conn.fetch(
+                f"SELECT r.device_class, r.platform, count(*) AS n "
+                f"FROM device_registrations r WHERE {where} GROUP BY 1, 2",
+                *params,
+            )
     matched = {c: 0 for c in filt.target_classes}
     for r in rows:
         n = int(r["n"])
@@ -150,14 +202,19 @@ async def preview(filt: _TargetFilter, pool=Depends(get_pool)) -> JSONResponse:
         # leaves no ambiguity; otherwise show it as its own line rather
         # than inflating whichever class happens to sort first.
         candidates = [
-            c for c in matched if _CLASS_TO_PLATFORM.get(c) == r["platform"]
+            c
+            for c in matched
+            if r["platform"]
+            in (_CLASS_TO_PLATFORM.get(c), _CLASS_TO_ANONYMOUS_PLATFORM.get(c))
         ]
         if len(candidates) == 1:
             matched[candidates[0]] += n
         elif candidates:
             key = f"{r['platform']} (unspecified)"
             matched[key] = matched.get(key, 0) + n
-    return JSONResponse(content={"matched": matched})
+    return JSONResponse(
+        content={"matched": {**matched, "total": sum(matched.values())}}
+    )
 
 
 @router.post("")
