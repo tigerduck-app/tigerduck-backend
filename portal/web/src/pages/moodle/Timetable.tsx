@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { monthDay } from "@/lib/format";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Segmented } from "./controls";
+import { LoadError, Segmented } from "./controls";
 import { errorText, termLabel } from "./format";
 import type { CourseChange, TimetableResponse } from "./types";
 
@@ -138,7 +138,9 @@ export function Timetable({ studentId }: { studentId: string }) {
       ),
     placeholderData: (prev) => prev,
   });
-  const data = q.data;
+  // The last answer keeps the term toggle up; only the chosen term's own answer draws the grid.
+  const latest = q.data;
+  const data = q.isPlaceholderData || q.isError ? undefined : q.data;
   const today = taipeiToday();
   const current = !!data && data.term === data.current_term;
   const todayDay = current ? isoDay(today) : -1;
@@ -161,15 +163,15 @@ export function Timetable({ studentId }: { studentId: string }) {
         <h2 id="tt-h" className="text-[15px] font-semibold">
           Timetable
         </h2>
-        {data && data.terms.length > 0 && (
+        {latest && latest.terms.length > 0 && (
           <Segmented
             label="Term"
-            value={data.term ?? ""}
+            value={term ?? latest.term ?? ""}
             onChange={(t) => {
               setTerm(t);
               setPickedDay(null);
             }}
-            options={data.terms.map((t) => ({ value: t, label: termLabel(t) }))}
+            options={latest.terms.map((t) => ({ value: t, label: termLabel(t) }))}
             className="max-w-full overflow-x-auto"
             itemClassName="font-mono"
           />
@@ -182,7 +184,9 @@ export function Timetable({ studentId }: { studentId: string }) {
       </div>
 
       {!data && !q.isError && <Skeleton className="h-[300px] rounded-xl" />}
-      {q.isError && !data && <div className="text-[13px] text-badge-danger-fg">{errorText(q.error)}</div>}
+      {q.isError && (
+        <LoadError title="Couldn’t load the timetable" detail={errorText(q.error)} onRetry={() => void q.refetch()} />
+      )}
       {data && blocks.length === 0 && (
         <div className="flex flex-col items-center gap-2.5 rounded-xl bg-row-hover px-6 py-12">
           <div aria-hidden="true" className="flex size-11 items-center justify-center rounded-full bg-surface text-ink-3">
