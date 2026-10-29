@@ -290,6 +290,9 @@ async def preview(filt: _PreviewRequest, pool=Depends(get_pool)) -> JSONResponse
 async def send(
     body: _SendRequest, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
+    if body.course_code is not None and body.keeps_record:
+        # A record is a bulletin every user's feed lists, not only the course's.
+        raise HTTPException(status_code=422, detail="a course push cannot keep a record")
     request_id = secrets.token_hex(8)  # 16 chars
     kind = "record" if body.keeps_record else "popup"
     target_classes = ",".join(body.target_classes)
@@ -329,21 +332,18 @@ async def send(
 
             if body.keeps_record:
                 # Stored for in-app history; the match-run row stops the
-                # subscription dispatcher from re-sending it, and for a course
-                # `notified_at` stops the anonymous one, which has no courses.
+                # subscription dispatcher from re-sending it.
                 bulletin_id = await conn.fetchval(
                     """
                     INSERT INTO bulletins (
                         source, external_id, source_url, title, title_clean,
                         summary, body_clean, canonical_org, content_tags,
                         importance, posted_at, processing_state,
-                        processing_attempts, is_deleted, dispatch_filter_json,
-                        notified_at
+                        processing_attempts, is_deleted, dispatch_filter_json
                     ) VALUES (
                         'custom_push', $1, '', $2, $2, $3, $3, 'server',
                         '{server_notification}'::varchar[], 'normal', now(),
-                        'processed', 0, false, $4::jsonb,
-                        CASE WHEN $5::bool THEN now() END
+                        'processed', 0, false, $4::jsonb
                     )
                     RETURNING id
                     """,
@@ -356,12 +356,9 @@ async def send(
                             "user_id": body.user_id,
                             "device_id": body.device_id,
                             "list_id": body.list_id,
-                            "course_code": body.course_code,
-                            "term": term if course else None,
                             "force_ring": body.force_ring,
                         }
                     ),
-                    course is not None,
                 )
                 await conn.execute(
                     "INSERT INTO bulletin_user_match_runs (bulletin_id) "

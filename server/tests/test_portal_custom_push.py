@@ -354,7 +354,7 @@ async def test_a_course_nobody_takes_this_term_is_a_miss(db_session, portal_pool
                 course_code="CS9999301",
                 title="停課通知",
                 body="明天停課",
-                keeps_record=True,
+                keeps_record=False,
                 force_ring=False,
             ),
             _REQUEST,
@@ -374,7 +374,7 @@ async def test_a_course_push_goes_to_its_takers_devices_only(db_session, portal_
             course_code="CS2001301",
             title="停課通知",
             body="明天停課",
-            keeps_record=True,
+            keeps_record=False,
             force_ring=False,
         ),
         _REQUEST,
@@ -384,12 +384,34 @@ async def test_a_course_push_goes_to_its_takers_devices_only(db_session, portal_
     assert json.loads(response.body)["matched"] == 2
     jobs = await portal_pool.fetch("SELECT device_id FROM push_jobs")
     assert {row["device_id"] for row in jobs} == {phones[0].id, phones[1].id}
-    # Stamped as notified, so the anonymous bulletin dispatcher skips it.
-    bulletin = await portal_pool.fetchrow(
-        "SELECT notified_at, dispatch_filter_json FROM bulletins"
-    )
-    assert bulletin["notified_at"] is not None
-    assert json.loads(bulletin["dispatch_filter_json"])["course_code"] == "CS2001301"
+    assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_course_push_cannot_keep_a_record(db_session, portal_pool):
+    """A recorded push becomes a bulletin every user's feed lists, which a
+    push meant for one course's students must not."""
+    await _course_takers(db_session)
+
+    with pytest.raises(HTTPException) as refused:
+        await send(
+            _SendRequest(
+                target_classes=["iphone"],
+                course_code="CS2001301",
+                title="停課通知",
+                body="明天停課",
+                keeps_record=True,
+                force_ring=False,
+            ),
+            _REQUEST,
+            pool=portal_pool,
+        )
+
+    assert refused.value.status_code == 422
+    assert refused.value.detail == "a course push cannot keep a record"
+    assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM push_jobs") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")

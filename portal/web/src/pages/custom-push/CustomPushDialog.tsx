@@ -113,7 +113,7 @@ export function CustomPushDialog({
 }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const [kind, setKind] = useState<Kind>("record");
+  const [chosenKind, setKind] = useState<Kind>("record");
   const [sound, setSound] = useState(true);
   const [classes, setClasses] = useState<CustomPushTargetClass[]>(ALL_CLASSES);
   const [listId, setListId] = useState("");
@@ -130,10 +130,13 @@ export function CustomPushDialog({
     queryFn: () => api<DeviceList[]>("/api/device-lists"),
   });
 
+  const code = courseCode.trim().toUpperCase() || undefined;
+  // A course push cannot keep a record: it would land in every user's feed.
+  const kind: Kind = code ? "popup" : chosenKind;
   const filter = {
     keeps_record: kind === "record",
     list_id: listId ? Number(listId) : undefined,
-    course_code: courseCode.trim().toUpperCase() || undefined,
+    course_code: code,
     user_id: userId.trim() || undefined,
     device_id: deviceId.trim() || undefined,
   };
@@ -300,15 +303,17 @@ export function CustomPushDialog({
               {(Object.keys(KINDS) as Kind[]).map((k) => {
                 const { label, note, icon: Icon } = KINDS[k];
                 const on = kind === k;
+                const locked = k === "record" && !!code;
                 return (
                   <button
                     key={k}
                     type="button"
                     role="radio"
                     aria-checked={on}
+                    disabled={locked}
                     onClick={() => setKind(k)}
                     className={cn(
-                      "flex min-h-[60px] flex-[1_1_220px] items-center gap-3 rounded-xl border-2 px-3.5 py-2.5 text-left",
+                      "flex min-h-[60px] flex-[1_1_220px] items-center gap-3 rounded-xl border-2 px-3.5 py-2.5 text-left disabled:cursor-not-allowed disabled:opacity-50",
                       !on && "border-line bg-surface",
                       on && k === "record" && "border-badge-info-fg bg-badge-info",
                       on && k === "popup" && "border-badge-violet-fg bg-badge-violet",
