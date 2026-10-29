@@ -217,3 +217,9 @@ async def test_lookup_and_preview_are_audited_without_the_student_id(pool):
         "B99900001" not in (r["detail"] or "") and "小明" not in (r["detail"] or "")
         for r in rows
     )
+
+
+async def test_a_blank_lookup_lists_no_one(pool):
+    await _person(pool, "B99900001", "王小明", ("ios", "iphone"))
+
+    assert _body(await lookup_students(_request(), pool=pool, q="   "))["students"] == []

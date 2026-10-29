@@ -54,6 +54,9 @@ async def lookup_students(
     pool=Depends(get_pool),
     q: str = Query(min_length=1, max_length=64),
 ) -> JSONResponse:
+    # A blank term is part of every name.
+    if not q.strip():
+        return JSONResponse(content={"students": []})
     async with pool.acquire() as conn:
         rows = await conn.fetch(_LOOKUP_SQL, q.strip())
         await audit(conn, request, "user.list", count=len(rows))
