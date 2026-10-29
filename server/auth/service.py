@@ -15,7 +15,7 @@ import structlog
 from fastapi import HTTPException, status
 from sqlalchemy import delete, exists, func, select, true, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
@@ -38,7 +38,7 @@ from server.auth.tokens import (
     issue_access_token,
 )
 from server.config import Settings
-from server.db import in_array
+from server.db import in_array, session_scope
 from server.syncjobs.provisioning import ensure_sync_jobs
 
 logger = structlog.get_logger(__name__)
@@ -605,6 +605,25 @@ async def store_display_name(
             update(User)
             .where(User.id == user_id, User.display_name.is_distinct_from(name))
             .values(display_name=name)
+        )
+
+
+async def try_store_display_name(
+    factory: async_sessionmaker[AsyncSession],
+    user_id: uuid.UUID,
+    fullname: str | None,
+) -> None:
+    """`store_display_name` in a transaction of its own, after the caller's
+    work committed, so a failure costs only the name."""
+    try:
+        async with session_scope(factory) as session:
+            await store_display_name(session, user_id, fullname)
+    except Exception as exc:
+        # Only the type: the error renders the statement's parameters, the name too.
+        logger.warning(
+            "auth.display_name.not_stored",
+            user_id=str(user_id),
+            error=type(exc).__name__,
         )
 
 

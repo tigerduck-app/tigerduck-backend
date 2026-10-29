@@ -27,12 +27,19 @@ from server.db import build_session_factory
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key, scan_assignment_reminders
 from server.logging_setup import configure
-from server.sync.models import UserAssignment, UserChangeLog, UserSyncState
+from server.auth import service as auth_service
+from server.sync.models import (
+    UserAssignment,
+    UserChangeLog,
+    UserCourse,
+    UserSyncState,
+)
 from server.syncjobs import executor as executor_module
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
+    FetchedCourse,
     FetchedSubmission,
     HttpAssignmentFetcher,
     MoodleRateLimited,
@@ -1999,3 +2006,75 @@ async def test_the_submission_probe_fills_in_a_missing_name(
     await run_sync_tick(worker)
 
     assert await _display_name(db_session, user) == "Test Student"
+
+
+# Postgres refuses a NUL in text, so the name write fails for real.
+_REFUSED_NAME = "Test\x00Student"
+
+
+async def test_a_name_the_database_refuses_keeps_the_course_sync(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    user = await _setup_course_job(db_session)
+    user_id = user.id
+    course = FetchedCourse(
+        moodle_course_id=7001,
+        short_name="DS",
+        full_name="Data Structures",
+        category_id=None,
+        enrolled_user_count=None,
+    )
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(results=[course], fullname=_REFUSED_NAME),
+    )
+    monkeypatch.setattr(
+        auth_service, "logger", structlog.get_logger(auth_service.__name__)
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        assert await run_sync_tick(worker) == 1
+
+    assert await _display_name(db_session, user) is None
+    courses = await db_session.scalars(
+        select(UserCourse).where(UserCourse.user_id == user_id)
+    )
+    assert len(courses.all()) == 1
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "succeeded"
+    assert any(e["event"] == "auth.display_name.not_stored" for e in logs)
+    assert "Student" not in repr(logs)
+
+
+async def test_a_name_the_database_refuses_keeps_the_probe_result(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    user, _, _ = await _setup_user_job(db_session)
+    user_id = user.id
+
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+        on_fullname(_REFUSED_NAME)
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=True,
+                submitted_at=datetime.now(UTC),
+            )
+        }
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert await _display_name(db_session, user) is None
+    assignment = await db_session.scalar(
+        select(UserAssignment).where(UserAssignment.user_id == user_id)
+    )
+    assert assignment.provider_is_submitted is True
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "succeeded"

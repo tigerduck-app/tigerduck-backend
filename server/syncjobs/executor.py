@@ -45,6 +45,7 @@ import asyncio
 import os
 import socket
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -62,7 +63,7 @@ from server.auth.models import (
     PushTokenStatus,
     UserDevice,
 )
-from server.auth.service import store_display_name
+from server.auth.service import try_store_display_name
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
@@ -365,16 +366,15 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             return
         job_type, user_id, token, credential_nonce = started
         now = datetime.now(UTC)
+        names: list[str] = []
         probe_submissions = job_type != SyncJobType.ntust_courses.value
         if not probe_submissions:
-            names: list[str] = []
             try:
                 fetched = await worker.course_fetcher.fetch_courses(
                     token=token, on_fullname=names.append
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
-            await _store_display_name(worker, user_id=user_id, fullnames=names)
         else:
             try:
                 fetched = await worker.fetcher.fetch_assignments(token=token)
@@ -450,12 +450,18 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     now=now,
                     listed={a.moodle_assignment_id: a for a in fetched},
                     recheck_ids=stats.recheck_ids,
+                    on_fullname=names.append,
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
             await _finish_after_probe(
                 worker, job_id=job_id, run_id=run_id, stats=stats, now=now
             )
+        # Last, once the fetched data is stored: a user who does not sign in
+        # again still gets a name, and a failed write costs nothing else.
+        await try_store_display_name(
+            worker.session_factory, user_id, names[-1] if names else None
+        )
     except CredentialInvalid as exc:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
@@ -681,6 +687,7 @@ async def _refresh_submission_status(
     now: datetime,
     listed: dict[int, FetchedAssignment],
     recheck_ids: frozenset[int],
+    on_fullname: Callable[[str], None],
 ) -> None:
     """Best-effort probe of assignments near their due date, or with an
     extension, and of those whose due date the list sync just moved back
@@ -744,13 +751,12 @@ async def _refresh_submission_status(
             )
         if not assignment_ids:
             return
-        names: list[str] = []
         try:
             fetched = await worker.fetcher.fetch_submission_status(
                 token=token,
                 assignment_ids=assignment_ids,
                 max_concurrency=settings.submission_status_max_concurrency,
-                on_fullname=names.append,
+                on_fullname=on_fullname,
             )
         except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
             raise
@@ -770,7 +776,6 @@ async def _refresh_submission_status(
                 exc_info=_without_token(exc, token),
             )
             return
-        await _store_display_name(worker, user_id=user_id, fullnames=names)
         async with session_scope(worker.session_factory) as session:
             changed_ids = await apply_submission_status(
                 session, user_id=user_id, fetched=fetched, now=now
@@ -792,17 +797,6 @@ async def _refresh_submission_status(
     except Exception as exc:
         logger.error("syncjobs.submissions.refresh_db_error", exc_info=True)
         raise SubmissionStatusDbError from exc
-
-
-async def _store_display_name(
-    worker: SyncWorker, *, user_id, fullnames: list[str]
-) -> None:
-    """Refresh the user's name from the site-info answer a fetch already got,
-    so a user who does not sign in again still gets one. Its own
-    transaction, so the users row is never locked behind the job's locks."""
-    if fullnames:
-        async with session_scope(worker.session_factory) as session:
-            await store_display_name(session, user_id, fullnames[-1])
 
 
 async def _handle_moodle_failure(
