@@ -49,6 +49,7 @@ export function DevicesPage() {
     search: term,
     match: (d, s) =>
       d.device_id.includes(s) ||
+      d.client_device_id.toLowerCase().includes(s) ||
       !!d.student_id?.toLowerCase().includes(s) ||
       !!d.display_name?.toLowerCase().includes(s),
   });

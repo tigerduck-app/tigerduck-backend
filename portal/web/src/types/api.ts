@@ -126,6 +126,7 @@ export type DeviceInfo = {
 export type DeviceRow = {
   device_id: string;
   user_id: string;
+  client_device_id: string;
   student_id: string | null;
   display_name: string | null;
   platform: string;

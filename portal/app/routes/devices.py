@@ -115,6 +115,7 @@ def _row_to_device(r) -> dict:
     return {
         "device_id": r["device_id"],
         "user_id": r["user_id"],
+        "client_device_id": r["client_device_id"],
         "student_id": r["student_id"],
         "display_name": r["display_name"],
         "platform": r["platform"],
