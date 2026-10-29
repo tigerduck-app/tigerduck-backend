@@ -42,7 +42,7 @@ function patchBody(d: Draft, b: BulletinDetail): Record<string, unknown> {
   for (const key of ["title_clean", "summary", "body_clean", "body_md"] as const) {
     if (d[key] !== (b[key] ?? "")) body[key] = optional(d[key]) ?? null;
   }
-  if (d.canonical_org !== b.canonical_org) body.canonical_org = d.canonical_org;
+  if (d.canonical_org !== (b.canonical_org ?? "")) body.canonical_org = d.canonical_org;
   if (d.importance !== b.importance) body.importance = d.importance;
   return body;
 }
