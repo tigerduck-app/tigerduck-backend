@@ -32,8 +32,11 @@ export type Column<R> = {
   cell: (row: R) => React.ReactNode;
   /** Makes the header sort by this value. */
   sortValue?: (row: R) => string | number;
-  /** Adds a filter menu listing these values with their counts. */
-  filterValue?: (row: R) => string;
+  /**
+   * Adds a filter menu listing these values with their counts. A row whose
+   * value is null is left out of the menu and hidden while the column filters.
+   */
+  filterValue?: (row: R) => string | null;
   /** The filter menu's values in this order; otherwise as they first appear. */
   filterOptions?: readonly string[];
   align?: "right";
@@ -104,9 +107,9 @@ export function useTable<R>({
   const passes = (r: R, except?: string) =>
     columns.every((c) => {
       const chosen = filters[c.key];
-      return (
-        c.key === except || !chosen?.length || !c.filterValue || chosen.includes(c.filterValue(r))
-      );
+      if (c.key === except || !chosen?.length || !c.filterValue) return true;
+      const v = c.filterValue(r);
+      return v !== null && chosen.includes(v);
     }) && (!search || !match || match(r, search));
   const filtered = rows.filter((r) => passes(r));
   const sortColumn = sort && columns.find((c) => c.key === sort.key);
@@ -146,7 +149,9 @@ export function useTable<R>({
       const value = column.filterValue;
       if (!value) return [];
       // Values come from every row, so a chosen one stays listed at a count of 0.
-      const values = column.filterOptions ?? [...new Set(rows.map(value))];
+      const values =
+        column.filterOptions ??
+        [...new Set(rows.map(value))].filter((v): v is string => v !== null);
       const pool = rows.filter((r) => passes(r, column.key));
       const chosen = filters[column.key] ?? [];
       return values.map((v) => ({

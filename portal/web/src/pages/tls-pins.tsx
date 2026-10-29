@@ -467,7 +467,7 @@ function PinSetSection({
       key: "result",
       label: "Result",
       sortValue: (h) => h.result?.status ?? "",
-      filterValue: (h) => h.result?.status ?? "",
+      filterValue: (h) => h.result?.status ?? null,
       filterOptions: ["trusted", "untrusted", "error"],
       className: "min-w-[180px]",
       cell: ({ result: r }) =>
