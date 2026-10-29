@@ -52,6 +52,12 @@ async def env_info(request: Request) -> JSONResponse:
     )
 
 
+@router.get("/version")
+async def version_info() -> JSONResponse:
+    """The backend's version for the nav, without the checks /api/status runs."""
+    return JSONResponse(await backend_version())
+
+
 @router.get("/status")
 async def status_payload(request: Request) -> JSONResponse:
     settings = request.app.state.settings

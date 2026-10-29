@@ -57,6 +57,7 @@ OTHER_READS = {
     ("status.py", "health"),
     ("status.py", "ready"),
     ("status.py", "status_payload"),
+    ("status.py", "version_info"),
     ("tls_pins.py", "get_tls_pins"),
 }
 

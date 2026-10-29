@@ -1,342 +1,272 @@
 import * as React from "react";
 import { NavLink, Outlet } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
-  CalendarDays,
+  Calendar,
+  FileText,
   GraduationCap,
   HardDrive,
-  Link2,
-  LockKeyhole,
+  Link,
+  List,
+  Lock,
   LogOut,
-  Menu,
   Megaphone,
-  Monitor,
-  ScrollText,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Send,
+  Smartphone,
   UserMinus,
-  X,
+  type LucideIcon,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { useEnv } from "@/hooks/use-env";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import type { AccessSession, ApnsConfig, FcmConfig } from "@/types/api";
+import type { AccessSession, BackendVersion, EnvInfo } from "@/types/api";
 
-type NavItem = {
-  to: string;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  devOnly?: boolean;
-};
+type NavItem = { to: string; label: string; icon: LucideIcon };
 
-const NAV: NavItem[] = [
-  { to: "/", label: "Status", icon: Activity },
-  { to: "/logs", label: "Logs", icon: ScrollText },
-  { to: "/announcement", label: "Announcement", icon: Megaphone },
-  { to: "/custom-push", label: "Custom push", icon: Send },
-  { to: "/devices", label: "Devices", icon: Monitor },
-  { to: "/moodle", label: "Moodle", icon: GraduationCap },
-  { to: "/inspect", label: "Data Inspection", icon: Search },
-  { to: "/semester-dates", label: "Semester dates", icon: CalendarDays },
-  { to: "/links", label: "Links", icon: Link2 },
-  { to: "/tls-pins", label: "TLS pins", icon: LockKeyhole },
-];
-
-const NAV_BOTTOM: NavItem[] = [
-  { to: "/backup", label: "Backup", icon: HardDrive },
-  { to: "/deregister", label: "Deregister", icon: UserMinus },
+// Course changes joins Academic once its page exists.
+const NAV: { group: string; items: NavItem[] }[] = [
+  {
+    group: "Overview",
+    items: [
+      { to: "/", label: "Status", icon: Activity },
+      { to: "/logs", label: "Logs", icon: FileText },
+    ],
+  },
+  {
+    group: "Push",
+    items: [
+      { to: "/announcement", label: "Announcement", icon: Megaphone },
+      { to: "/custom-push", label: "Custom push", icon: Send },
+      { to: "/lists", label: "Device lists", icon: List },
+    ],
+  },
+  {
+    group: "Devices",
+    items: [
+      { to: "/devices", label: "Devices", icon: Smartphone },
+      { to: "/deregister", label: "Deregister", icon: UserMinus },
+    ],
+  },
+  {
+    group: "Academic",
+    items: [{ to: "/semester-dates", label: "Semester dates", icon: Calendar }],
+  },
+  {
+    group: "Moodle",
+    items: [
+      { to: "/moodle", label: "Sync", icon: GraduationCap },
+      { to: "/inspect", label: "Data inspection", icon: Search },
+    ],
+  },
+  {
+    group: "System",
+    items: [
+      { to: "/links", label: "Links", icon: Link },
+      { to: "/tls-pins", label: "TLS pins", icon: Lock },
+      { to: "/backup", label: "Backup", icon: HardDrive },
+    ],
+  },
 ];
 
 export function Layout() {
   const env = useEnv();
-  const isDev = env.data?.env === "development";
-  const items = NAV.filter((n) => !n.devOnly || isDev);
-  const bottomItems = NAV_BOTTOM.filter((n) => !n.devOnly || isDev);
-  const access = env.data?.access ?? null;
-  const [sidebarCollapsed, setSidebarCollapsed] = React.useState(() => {
+  const [collapsed, setCollapsed] = React.useState(() => {
     try { return localStorage.getItem("sidebar-collapsed") === "true"; } catch { return false; }
   });
   React.useEffect(() => {
-    try { localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed)); } catch {}
-  }, [sidebarCollapsed]);
+    try { localStorage.setItem("sidebar-collapsed", String(collapsed)); } catch {}
+  }, [collapsed]);
 
   return (
-    <div className="flex min-h-screen bg-background">
-      <aside className={`sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-card/30 lg:flex transition-all duration-200 ${sidebarCollapsed ? "w-14" : "w-60"}`}>
-        <div className={`flex items-center gap-2.5 pb-3 pt-5 ${sidebarCollapsed ? "justify-center px-2" : "px-5"}`}>
-          {sidebarCollapsed ? (
-            // Stacked rather than side by side: 56px minus padding leaves 40px,
-            // which the 28px logo and a tap target cannot share.
-            <div className="flex flex-col items-center gap-4">
-              <img
-                src="/static/tigerduck-logo.png"
-                alt=""
-                className="h-7 w-7 rounded"
-              />
-              <button
-                onClick={() => setSidebarCollapsed(false)}
-                className="rounded-md p-1.5 hover:bg-accent text-muted-foreground"
-                title="Expand sidebar"
-              >
-                <Menu className="h-4 w-4" />
-              </button>
-            </div>
-          ) : (
-            <>
-              <img
-                src="/static/tigerduck-logo.png"
-                alt=""
-                className="h-7 w-7 rounded shrink-0"
-              />
-              <div className="leading-tight">
-                <div className="text-sm font-semibold">TigerDuck</div>
-                <div className="text-xs text-muted-foreground">Backend Portal</div>
-              </div>
-              <button
-                onClick={() => setSidebarCollapsed(true)}
-                className="ml-auto rounded-md p-2.5 -m-1.5 hover:bg-accent text-muted-foreground"
-                title="Collapse sidebar"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </>
-          )}
-        </div>
-        <nav className={`flex flex-col gap-0.5 py-3 ${sidebarCollapsed ? "px-1" : "px-2"}`}>
-          {items.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              title={sidebarCollapsed ? item.label : undefined}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center rounded-md text-sm font-medium transition-colors",
-                  sidebarCollapsed ? "justify-center px-2 py-2" : "gap-2.5 px-3 py-2",
-                  "text-muted-foreground hover:bg-accent hover:text-foreground",
-                  isActive && "bg-accent text-foreground",
-                )
-              }
+    <div className="@container/app flex min-h-screen flex-wrap content-start bg-ground font-sans text-sm leading-[1.45] text-ink">
+      <nav
+        aria-label="Portal"
+        data-rail={collapsed}
+        className="flex-[1_1_248px] bg-side text-side-ink rail:flex-[0_0_68px] phone:flex-[1_1_100%]"
+      >
+        <div className="sticky top-0 flex h-screen flex-col gap-5 overflow-y-auto px-3.5 py-5 [scrollbar-width:none] rail:items-center rail:gap-3.5 rail:px-2.5 rail:py-4 phone:static phone:h-auto phone:flex-row phone:gap-1 phone:overflow-x-auto phone:overflow-y-visible phone:px-3 phone:py-2">
+          <Brand collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+          {env.data && <EnvCard env={env.data} />}
+          {NAV.map((g) => (
+            <div
+              key={g.group}
+              className="flex flex-col gap-0.5 rail:items-center phone:flex-row"
             >
-              <item.icon className="h-4 w-4 shrink-0" />
-              {!sidebarCollapsed && item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <nav className={`mt-auto flex flex-col gap-0.5 border-t border-border py-3 ${sidebarCollapsed ? "px-1" : "px-2"}`}>
-          {bottomItems.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              title={sidebarCollapsed ? item.label : undefined}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center rounded-md text-sm font-medium transition-colors",
-                  sidebarCollapsed ? "justify-center px-2 py-2" : "gap-2.5 px-3 py-2",
-                  "text-muted-foreground hover:bg-accent hover:text-foreground",
-                  isActive && "bg-accent text-foreground",
-                )
-              }
-            >
-              <item.icon className="h-4 w-4 shrink-0" />
-              {!sidebarCollapsed && item.label}
-            </NavLink>
-          ))}
-        </nav>
-        <div className={`border-t border-border py-4 ${sidebarCollapsed ? "px-1" : "px-3"}`}>
-          {!sidebarCollapsed && (
-            <div className="space-y-1.5 px-2 text-xs text-foreground/80 mb-3">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">Mode</span>
-                <EnvBadge env={env.data?.env} />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-medium">APNs</span>
-                <ApnsBadge apns={env.data?.apns_config} />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-medium">FCM</span>
-                <FcmBadge fcm={env.data?.fcm_config} />
-              </div>
-              {access && (
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="font-medium">User</span>
-                  <span className="min-w-0 truncate" title={access.email}>
-                    {access.email}
-                  </span>
-                </div>
-              )}
+              <span className="px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-side-muted rail:hidden">
+                {g.group}
+              </span>
+              {g.items.map((item) => (
+                <NavItemLink key={item.to} item={item} />
+              ))}
             </div>
-          )}
-          <div className="flex flex-col gap-0.5">
-            <ThemeToggle iconOnly={sidebarCollapsed} />
-            {access && (
-              <SignOutLink access={access} iconOnly={sidebarCollapsed} />
-            )}
-          </div>
+          ))}
+          <UserRow access={env.data?.access ?? null} />
         </div>
-      </aside>
+      </nav>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <MobileNav items={[...items, ...bottomItems]} access={access} />
-        <main className="flex-1 px-2 py-4 sm:px-4 sm:py-6" style={{ overflowAnchor: "none" }}>
-          <div className="mx-auto w-full space-y-6">
-            <Outlet />
-          </div>
-        </main>
-      </div>
+      <main
+        className="min-w-0 flex-[999_1_560px] px-10 pb-16 pt-8 tablet:px-7 tablet:pb-14 tablet:pt-7 phone:px-4 phone:pb-12 phone:pt-5"
+        style={{ overflowAnchor: "none" }}
+      >
+        <div className="flex w-full max-w-[1180px] flex-col gap-6">
+          <Outlet />
+        </div>
+      </main>
     </div>
   );
 }
 
-function EnvBadge({ env }: { env: string | undefined }) {
-  if (!env) return <Badge variant="muted">unknown</Badge>;
-  if (env === "production") return <Badge variant="warning">prod</Badge>;
-  if (env === "development") return <Badge variant="success">dev</Badge>;
-  return <Badge variant="muted">{env}</Badge>;
-}
-
-// Mirrors the FCM SummaryCard on the status page: project_id when env +
-// JSON agree, "mismatch" when both present but differ, "disabled" when
-// anything is missing or nothing is configured at all.
-function FcmBadge({ fcm }: { fcm: FcmConfig | undefined }) {
-  if (!fcm) return <Badge variant="muted">unknown</Badge>;
-  if (fcm.state === "ok") {
-    return <Badge variant="default">{fcm.project_id}</Badge>;
-  }
-  if (fcm.state === "mismatch") {
-    return (
-      <Badge variant="warning" title={fcm.detail}>
-        mismatch
-      </Badge>
-    );
-  }
+function Brand({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  const version = useQuery<BackendVersion>({
+    queryKey: ["version"],
+    queryFn: () => api<BackendVersion>("/api/version"),
+    staleTime: Infinity,
+  });
+  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  const Icon = collapsed ? PanelLeftOpen : PanelLeftClose;
   return (
-    <Badge variant="muted" title={fcm.detail}>
-      disabled
-    </Badge>
+    <div className="flex items-center gap-2.5 px-1.5 rail:flex-col rail:px-0 phone:flex-row">
+      <div
+        aria-hidden="true"
+        className="flex size-[30px] shrink-0 items-center justify-center rounded-lg bg-brand text-[15px] font-bold text-side"
+      >
+        T
+      </div>
+      <div className="flex min-w-0 flex-col rail:hidden">
+        <div className="flex items-center gap-1.5">
+          <span className="text-sm font-semibold text-white">TigerDuck</span>
+          {version.data?.ok && version.data.version && (
+            <span
+              title="Backend version"
+              className="rounded-md bg-side-chip px-1.5 font-mono text-[11px] leading-4 text-side-ink"
+            >
+              {version.data.version}
+            </span>
+          )}
+        </div>
+        <span className="text-xs text-side-muted">Backend portal</span>
+      </div>
+      <button
+        type="button"
+        aria-label={label}
+        title={label}
+        onClick={onToggle}
+        className="ml-auto flex size-8 shrink-0 items-center justify-center rounded-lg text-side-muted hover:bg-side-hover hover:text-white rail:ml-0 tablet:hidden"
+      >
+        <Icon className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
 
-// APNs has no "mismatch" — the .p8 file is just a private key. When all
-// three (team id, key id, file) are present we surface the apns_env;
-// otherwise the badge says disabled and the dashboard explains why.
-function ApnsBadge({ apns }: { apns: ApnsConfig | undefined }) {
-  if (!apns) return <Badge variant="muted">unknown</Badge>;
-  if (apns.state !== "ok") {
-    return (
-      <Badge variant="muted" title={apns.detail}>
-        disabled
-      </Badge>
-    );
-  }
-  return <EnvBadge env={apns.apns_env} />;
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function EnvCard({ env }: { env: EnvInfo }) {
+  const { apns_config: apns, fcm_config: fcm } = env;
+  const dot =
+    env.env === "production" ? "bg-brand" : env.env === "development" ? "bg-dot-ok" : "bg-dot-off";
+  // Same values as the Status page's summary cards.
+  const apnsValue = apns.state === "ok" ? apns.apns_env : "disabled";
+  const fcmValue =
+    fcm.state === "ok" ? fcm.project_id : fcm.state === "mismatch" ? "mismatch" : "disabled";
+  return (
+    <div className="flex flex-col gap-1.5 rounded-[10px] bg-side-raised px-3 py-2.5 text-xs rail:hidden">
+      <div className="flex items-center gap-2 font-medium text-white">
+        <span aria-hidden="true" className={cn("size-2 rounded-full", dot)} />
+        {capitalize(env.env || "unknown")}
+      </div>
+      <EnvRow label="APNs" value={apnsValue} detail={apns.state === "ok" ? undefined : apns.detail} />
+      <EnvRow label="FCM" value={fcmValue} detail={fcm.state === "ok" ? undefined : fcm.detail} />
+    </div>
+  );
+}
+
+function EnvRow({ label, value, detail }: { label: string; value?: string; detail?: string }) {
+  return (
+    <div className="flex justify-between gap-3 text-side-muted">
+      <span>{label}</span>
+      <span title={detail} className="min-w-0 truncate text-side-ink">
+        {value || "?"}
+      </span>
+    </div>
+  );
+}
+
+function NavItemLink({ item }: { item: NavItem }) {
+  const Icon = item.icon;
+  return (
+    <NavLink
+      to={item.to}
+      end={item.to === "/"}
+      title={item.label}
+      aria-label={item.label}
+      className={({ isActive }) =>
+        cn(
+          "flex min-h-9 shrink-0 items-center gap-2.5 rounded-lg px-2.5 text-sm no-underline",
+          "rail:h-10 rail:w-11 rail:justify-center rail:p-0",
+          isActive
+            ? "bg-side-active font-medium text-white phone:w-auto phone:px-3"
+            : "text-side-ink hover:bg-side-hover hover:text-white",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <Icon className={cn("h-4 w-4 shrink-0", isActive && "text-brand")} />
+          <span className={cn("rail:hidden", isActive && "phone:inline")}>{item.label}</span>
+        </>
+      )}
+    </NavLink>
+  );
+}
+
+function UserRow({ access }: { access: AccessSession | null }) {
+  return (
+    <div className="mt-auto flex items-center gap-2.5 border-t border-side-chip px-1.5 pt-3.5 rail:flex-col rail:gap-1.5 rail:px-0 rail:pt-3 phone:ml-auto phone:mt-0 phone:flex-row phone:border-t-0 phone:pl-2 phone:pt-0">
+      {access && (
+        <>
+          <div
+            aria-hidden="true"
+            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-side-active text-[13px] font-semibold text-white phone:hidden"
+          >
+            {access.email.charAt(0).toUpperCase()}
+          </div>
+          <div className="flex min-w-0 flex-col rail:hidden">
+            <span title={access.email} className="truncate text-[13px] text-white">
+              {access.email}
+            </span>
+            <span className="text-xs text-side-muted">Cloudflare Access</span>
+          </div>
+        </>
+      )}
+      <ThemeToggle
+        iconOnly
+        className="ml-auto size-9 shrink-0 rounded-lg text-side-ink hover:bg-side-hover hover:text-white rail:ml-0"
+      />
+      {access && <SignOutLink access={access} />}
+    </div>
+  );
 }
 
 // Cloudflare answers the logout path at its edge, so this must be a full
 // page load. A react-router link would resolve it inside the SPA instead,
-// and the request would never reach Cloudflare. Both the sidebar and the
-// mobile menu render this one component so that rule lives in one place.
-function SignOutLink({
-  access,
-  iconOnly = false,
-  className,
-}: {
-  access: AccessSession;
-  iconOnly?: boolean;
-  className?: string;
-}) {
+// and the request would never reach Cloudflare.
+function SignOutLink({ access }: { access: AccessSession }) {
   return (
-    <Button
-      asChild
-      variant="ghost"
-      size="sm"
-      className={cn(
-        iconOnly
-          ? "w-full justify-center px-0 text-muted-foreground"
-          : "w-full justify-start gap-2 px-2 text-muted-foreground",
-        className,
-      )}
+    <a
+      href={access.logout_url}
+      aria-label="Sign out"
+      title={`Sign ${access.email} out of Cloudflare Access`}
+      className="flex size-9 shrink-0 items-center justify-center rounded-lg text-side-ink hover:bg-side-hover hover:text-white"
     >
-      <a
-        href={access.logout_url}
-        title={`Sign ${access.email} out of Cloudflare Access`}
-      >
-        <LogOut className="h-4 w-4" />
-        {!iconOnly && <span className="flex-1 text-left">Sign out</span>}
-      </a>
-    </Button>
-  );
-}
-
-function MobileNav({
-  items,
-  access,
-}: {
-  items: NavItem[];
-  access: AccessSession | null;
-}) {
-  const [open, setOpen] = React.useState(false);
-
-  return (
-    <>
-      <header className="flex items-center gap-3 border-b border-border bg-card/30 px-4 py-3 lg:hidden">
-        <button
-          onClick={() => setOpen(!open)}
-          className="rounded-md p-1.5 hover:bg-accent"
-          aria-label="Toggle menu"
-        >
-          {open ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
-        </button>
-        <img
-          src="/static/tigerduck-logo.png"
-          alt=""
-          className="h-7 w-7 rounded"
-        />
-        <div className="flex-1 leading-tight">
-          <div className="text-sm font-semibold">TigerDuck Backend Portal</div>
-        </div>
-        <ThemeToggle />
-      </header>
-      {open && (
-        <nav className="border-b border-border bg-card/30 px-2 py-2 lg:hidden">
-          {items.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === "/"}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors",
-                  "text-muted-foreground hover:bg-accent hover:text-foreground",
-                  isActive && "bg-accent text-foreground",
-                )
-              }
-            >
-              <item.icon className="h-4 w-4" />
-              {item.label}
-            </NavLink>
-          ))}
-          {access && (
-            <div className="mt-2 border-t border-border pt-2">
-              <div
-                className="truncate px-3 py-1 text-xs text-muted-foreground"
-                title={access.email}
-              >
-                {access.email}
-              </div>
-              {/* Sized like the nav items above it. */}
-              <SignOutLink
-                access={access}
-                className="h-auto gap-2.5 px-3 py-2 text-sm"
-              />
-            </div>
-          )}
-        </nav>
-      )}
-    </>
+      <LogOut className="h-4 w-4" />
+    </a>
   );
 }
