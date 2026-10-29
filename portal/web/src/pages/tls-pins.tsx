@@ -267,7 +267,7 @@ export function TlsPinsPage() {
           kind={dialog.kind}
           setId={dialog.set.id}
           hosts={dialog.set.monitored_hosts}
-          expires={day(dialog.set.expires_at)}
+          expiresAt={dialog.set.expires_at}
           pin={dialog.pin}
           pending={action.isPending}
           onClose={() => setDialog(null)}

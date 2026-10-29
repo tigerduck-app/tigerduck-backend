@@ -20,15 +20,20 @@ const HOST = /^([a-z0-9-]+\.)+[a-z0-9-]+(:\d{1,5})?$/i;
 const TITLE = { pin: "Add pin", hosts: "Monitored hosts", expiry: "Extend expiry", remove: "Remove pin?" };
 const ACTION = { pin: "Add and publish", hosts: "Save", expiry: "Save and publish", remove: "Remove and publish" };
 
+// The expiry the page sends for a picked day: that day at 00:00 UTC.
+function instant(day: string): number {
+  return Date.parse(`${day}T00:00:00Z`);
+}
+
 function daysFromNow(day: string): number {
-  return Math.round((Date.parse(`${day}T00:00:00Z`) - Date.now()) / 86_400_000);
+  return Math.round((instant(day) - Date.now()) / 86_400_000);
 }
 
 export function TlsPinDialog({
   kind,
   setId,
   hosts: initialHosts,
-  expires,
+  expiresAt,
   pin,
   pending,
   onClose,
@@ -37,8 +42,8 @@ export function TlsPinDialog({
   kind: PinDialogKind;
   setId: string;
   hosts: string[];
-  /** The set's expiry day, YYYY-MM-DD. */
-  expires: string;
+  /** The set's current expiry, ISO 8601. */
+  expiresAt: string;
   pin?: { label: string; spki: string };
   pending: boolean;
   onClose: () => void;
@@ -47,6 +52,7 @@ export function TlsPinDialog({
   const [spki, setSpki] = useState("");
   const [label, setLabel] = useState("");
   const [hosts, setHosts] = useState(initialHosts.join("\n"));
+  const expires = expiresAt.slice(0, 10);
   const [date, setDate] = useState(expires);
 
   const key = spki.trim();
@@ -59,7 +65,8 @@ export function TlsPinDialog({
       : kind === "hosts"
         ? badHosts > 0
         : kind === "expiry"
-          ? !date || daysFromNow(date) <= 0
+          ? // The backend takes only an expiry later than the current one.
+            !(instant(date) > Date.now() && instant(date) > Date.parse(expiresAt))
           : false;
 
   const save = () => {
