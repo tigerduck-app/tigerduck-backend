@@ -52,9 +52,11 @@ def allow_moodle(
     )
 
 
-def deny_moodle(client, error: str = "invalid_token") -> None:
+def deny_moodle(
+    client, error: str = "invalid_token", fullname: str | None = None
+) -> None:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
-        MoodleVerifyResult(ok=False, error=error)
+        MoodleVerifyResult(ok=False, error=error, fullname=fullname)
     )
 
 
@@ -433,3 +435,37 @@ async def test_a_long_full_name_is_cut_to_the_column(
     response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 200, response.text
     assert await _stored_display_name(client) == stored
+
+
+# Postgres refuses a NUL in text, so the name write fails for real.
+_REFUSED_NAME = "Test\x00Student"
+
+
+async def test_a_name_the_database_refuses_still_signs_in(
+    client, monkeypatch
+) -> None:
+    allow_moodle(client, fullname=_REFUSED_NAME)
+    monkeypatch.setattr(service, "logger", structlog.get_logger(service.__name__))
+    with capture_logs() as logs:
+        response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        user = (await session.execute(select(User))).scalar_one()
+        assert user.display_name is None
+        assert user.last_login_at is not None
+        assert (await session.execute(select(AuthSession))).scalars().all()
+    assert any(e["event"] == "auth.display_name.not_stored" for e in logs)
+    assert "Student" not in repr(logs)
+
+
+@pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
+async def test_a_refused_sign_in_stores_no_name(client, error) -> None:
+    allow_moodle(client, fullname="Test Student")
+    await client.post("/v3/auth/login", json=LOGIN_BODY)
+
+    deny_moodle(client, error=error, fullname="Other Student")
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 401
+    assert await _stored_display_name(client) == "Test Student"

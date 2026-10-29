@@ -7,7 +7,7 @@ pragmatic); the route layer is a thin adapter.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import uuid
 
@@ -58,6 +58,8 @@ class LoginResult:
     expires_in: int
     user: User
     device: UserDevice
+    # Moodle's, for the caller to store once the sign-in has committed.
+    fullname: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -187,7 +189,6 @@ async def login(
         )
         session.add(auth_session)
         user.last_login_at = now
-        user.display_name = display_name_from(result.fullname) or user.display_name
         await session.flush()
     except IntegrityError as exc:
         # Two first-logins for the same student racing on the partial
@@ -222,6 +223,7 @@ async def login(
         expires_in=settings.auth_access_token_ttl_seconds,
         user=user,
         device=device,
+        fullname=result.fullname,
     )
 
 
