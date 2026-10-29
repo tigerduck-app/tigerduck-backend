@@ -99,6 +99,16 @@ async def test_device_rows_carry_the_client_device_id_the_browser_search_matches
     assert row["client_device_id"] == "B99900001-0"
 
 
+async def test_device_rows_carry_the_owner_id_the_user_page_opens(pool):
+    user_id, _ = await _person(pool, "B99900001", "王小明", ("ios", "iphone"))
+
+    (row,) = _body(
+        await list_devices(_request("/api/devices"), pool=pool, limit=50, offset=0, search=None)
+    )["items"]
+
+    assert row["user_uuid"] == str(user_id)
+
+
 async def test_the_device_search_matches_a_name(pool):
     await _person(pool, "B99900001", "王小明", ("ios", "iphone"))
     await _person(pool, "B99900002", "陳小華", ("ios", "iphone"))
