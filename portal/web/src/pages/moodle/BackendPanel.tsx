@@ -87,7 +87,7 @@ function due(a: SyncAssignment, status: string): [string, boolean] {
 export function assignmentColumns(overrides: SyncOverride[]): Column<SyncAssignment>[] {
   const status = (a: SyncAssignment) => assignmentStatus(a, overrides);
   return [
-    { key: "title", label: "Title", sortValue: (a) => a.title, className: "max-w-[280px]", cell: (a) => <div title={a.title} className="truncate">{a.title}</div> },
+    { key: "title", label: "Title", sortValue: (a) => a.title, cell: (a) => <div title={a.title} className="max-w-[280px] truncate">{a.title}</div> },
     {
       key: "course",
       label: "Course",
@@ -189,14 +189,13 @@ export function BackendPanel({
         key: "name",
         label: "Name",
         sortValue: (r) => r.name,
-        className: "max-w-[220px]",
         cell: (r) => (
-          <div title={r.name} className={cn("truncate", r.deleted && "text-ink-3 line-through")}>
+          <div title={r.name} className={cn("max-w-[220px] truncate phone:max-w-[130px]", r.deleted && "text-ink-3 line-through")}>
             {r.name || "—"}
           </div>
         ),
       },
-      { key: "custom", label: "Custom name", hide: "tablet", className: "max-w-[200px] truncate", cell: (r) => muted(r.custom) },
+      { key: "custom", label: "Custom name", hide: "tablet", cell: (r) => <div className="max-w-[200px] truncate">{muted(r.custom)}</div> },
       {
         key: "term",
         label: "Term",
@@ -238,7 +237,7 @@ export function BackendPanel({
     initialSort: { key: "updated", dir: "desc" },
     columns: [
       { key: "mid", label: "Moodle ID", hide: "phone", sortValue: (o) => o.moodle_assignment_id, className: "font-mono text-[13px]", cell: (o) => o.moodle_assignment_id },
-      { key: "title", label: "Title", sortValue: (o) => o.title ?? "", className: "max-w-[300px]", cell: (o) => <div className="truncate">{o.title ?? "—"}</div> },
+      { key: "title", label: "Title", sortValue: (o) => o.title ?? "", cell: (o) => <div className="max-w-[300px] truncate">{o.title ?? "—"}</div> },
       {
         key: "status",
         label: "Status",

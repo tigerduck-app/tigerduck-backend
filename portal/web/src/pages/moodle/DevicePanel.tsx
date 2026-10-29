@@ -288,7 +288,7 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
           },
         },
         { key: "code", label: "Code", sortValue: (c) => c.client_course_no, className: "font-mono text-[13px]", cell: (c) => c.client_course_no },
-        { key: "name", label: "Name", sortValue: (c) => c.course_name, className: "max-w-[240px] truncate", cell: (c) => c.course_name },
+        { key: "name", label: "Name", sortValue: (c) => c.course_name, cell: (c) => <div title={c.course_name} className="max-w-[240px] truncate phone:max-w-[100px]">{c.course_name}</div> },
       ] satisfies Column<SyncCoursesResponse["courses"][number]>[],
     }),
     names: useTable({
@@ -330,7 +330,7 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
       columns: [
         { key: "date", label: "Date", sortValue: (s) => s.skipped_on, className: "whitespace-nowrap", cell: (s) => monthDay(`${s.skipped_on}T00:00:00Z`, true) },
         { key: "course", label: "Course", sortValue: (s) => s.course_no ?? "", filterValue: (s) => s.course_no, className: "font-mono text-[13px]", cell: (s) => s.course_no ?? "—" },
-        { key: "reason", label: "Reason", className: "max-w-[240px] truncate", cell: (s) => dash(s.reason) },
+        { key: "reason", label: "Reason", cell: (s) => <div className="max-w-[240px] truncate">{dash(s.reason)}</div> },
         { key: "by", label: "Set by", hide: "phone", filterValue: (s) => by(s.created_by_device_id), className: "text-[13px] text-ink-3", cell: (s) => by(s.created_by_device_id) ?? "—" },
       ] satisfies Column<NonNullable<SyncCoursesResponse["course_skipped_dates"]>[number]>[],
     }),
@@ -350,8 +350,8 @@ function DataTabs({ device, events, courses }: { device: SyncDevice; events: Syn
       initialSort: { key: "name", dir: "asc" },
       columns: [
         { key: "name", label: "Subscription", sortValue: (s) => s.name ?? "", cell: (s) => s.name ?? `#${s.id}` },
-        { key: "orgs", label: "Orgs", hide: "phone", className: "max-w-[180px] truncate", cell: (s) => dash(s.orgs.join(", ")) },
-        { key: "tags", label: "Tags", hide: "phone", className: "max-w-[180px] truncate", cell: (s) => dash(s.tags.join(", ")) },
+        { key: "orgs", label: "Orgs", hide: "phone", cell: (s) => <div className="max-w-[180px] truncate">{dash(s.orgs.join(", "))}</div> },
+        { key: "tags", label: "Tags", hide: "phone", cell: (s) => <div className="max-w-[180px] truncate">{dash(s.tags.join(", "))}</div> },
         {
           key: "mode",
           label: "Mode",
@@ -411,7 +411,7 @@ const providerLabel = (p: string) => (p === "apns" ? "APNs" : p === "fcm" ? "FCM
 function PushTable({ device, deliveries }: { device: SyncDevice; deliveries: PushDeliveryRow[] }) {
   const columns: Column<PushDeliveryRow>[] = [
     { key: "job", label: "Job", hide: "phone", sortValue: (d) => d.push_job_id, className: "font-mono text-[13px]", cell: (d) => `#${d.push_job_id}` },
-    { key: "what", label: "What", sortValue: pushLabel, filterValue: pushLabel, className: "max-w-[220px] truncate", cell: pushLabel },
+    { key: "what", label: "What", sortValue: pushLabel, filterValue: pushLabel, cell: (d) => <div className="max-w-[220px] truncate phone:max-w-[130px]">{pushLabel(d)}</div> },
     { key: "provider", label: "Provider", hide: "tablet", filterValue: (d) => providerLabel(d.provider), className: "text-[13px] text-ink-3", cell: (d) => providerLabel(d.provider) },
     {
       key: "status",

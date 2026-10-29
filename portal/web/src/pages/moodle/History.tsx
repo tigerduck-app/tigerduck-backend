@@ -70,7 +70,7 @@ const COLUMNS: Column<SyncRun>[] = [
     sortValue: (r) => jobType(r.job_type),
     filterValue: (r) => jobType(r.job_type),
     filterOptions: JOB_TYPES,
-    className: "whitespace-nowrap text-[13px]",
+    className: "text-[13px]",
     cell: (r) => jobType(r.job_type),
   },
   {
@@ -86,7 +86,7 @@ const COLUMNS: Column<SyncRun>[] = [
     align: "right",
     hide: "phone",
     sortValue: (r) => duration(r.started_at, r.finished_at) ?? -1,
-    cell: (r) => <DurationBar seconds={duration(r.started_at, r.finished_at)} />,
+    cell: (r) => <DurationBar seconds={duration(r.started_at, r.finished_at)} barWidth={52} />,
   },
   {
     key: "fc",
@@ -100,10 +100,10 @@ const COLUMNS: Column<SyncRun>[] = [
     key: "error",
     label: "Error",
     hide: "tablet",
-    className: "max-w-[220px] text-[13px]",
+    className: "text-[13px]",
     cell: (r) =>
       r.error ? (
-        <div title={r.error} className="truncate text-badge-danger-fg">
+        <div title={r.error} className="max-w-[150px] truncate text-badge-danger-fg">
           {r.error}
         </div>
       ) : (

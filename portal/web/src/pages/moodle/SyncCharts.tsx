@@ -114,7 +114,7 @@ export function Kpis({ summary }: { summary: SyncStatsData["summary"] }) {
     ["Items fetched", summary.total_fetched.toLocaleString("en-US"), "succeeded runs"],
   ];
   return (
-    <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3 phone:grid-cols-2">
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-3 tablet:grid-cols-3 phone:grid-cols-2">
       {kpis.map(([label, value, note]) => (
         <div key={label} className="flex flex-col gap-1 rounded-[14px] border border-line bg-surface px-4 py-3.5">
           <span className="text-xs font-medium text-ink-3">{label}</span>

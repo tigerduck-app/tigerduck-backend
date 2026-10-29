@@ -138,11 +138,11 @@ export function duration(started: string | null, finished: string | null): numbe
 }
 
 /** "3.2 s" with a bar against 12 s, the scale the design draws. */
-export function DurationBar({ seconds }: { seconds: number | null }) {
+export function DurationBar({ seconds, barWidth = 60 }: { seconds: number | null; barWidth?: number }) {
   return (
     <div className="flex items-center justify-end gap-2">
-      <span className="font-mono text-[13px]">{seconds === null ? "—" : `${seconds.toFixed(1)} s`}</span>
-      <span aria-hidden="true" className="block h-1.5 w-[60px] rounded-full bg-divider">
+      <span className="whitespace-nowrap font-mono text-[13px]">{seconds === null ? "—" : `${seconds.toFixed(1)} s`}</span>
+      <span aria-hidden="true" className="block h-1.5 rounded-full bg-divider" style={{ width: barWidth }}>
         <span
           className="block h-1.5 rounded-full bg-chart-1"
           style={{ width: `${Math.min(100, ((seconds ?? 0) / 12) * 100)}%` }}

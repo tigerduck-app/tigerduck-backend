@@ -108,7 +108,7 @@ export function Topology({
                   type="button"
                   aria-pressed={selected === d.id}
                   onClick={() => onSelect(d.id)}
-                  className={cn(node(selected === d.id), "flex-[1_1_180px]")}
+                  className={cn(node(selected === d.id), "flex-[1_1_180px] phone:basis-auto")}
                 >
                   <span className="flex w-full min-w-0 items-center gap-2">
                     <DeviceIcon platform={d.platform} className="h-4 w-4 shrink-0" />

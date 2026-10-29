@@ -83,10 +83,10 @@ const JOB_COLUMNS: Column<GlobalSyncJob>[] = [
     key: "error",
     label: "Error",
     hide: "tablet",
-    className: "max-w-[220px] text-[13px]",
+    className: "text-[13px]",
     cell: (j) =>
       j.last_error ? (
-        <div title={j.last_error} className="truncate text-badge-danger-fg">
+        <div title={j.last_error} className="max-w-[220px] truncate text-badge-danger-fg">
           {j.last_error}
         </div>
       ) : (
