@@ -1,7 +1,7 @@
 // A student's week of classes in one term, with the school's coming changes
 // to them tagged on each meeting. Phones get one day at a time.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CalendarX } from "lucide-react";
 import { api } from "@/lib/api";
@@ -138,8 +138,9 @@ export function Timetable({ studentId }: { studentId: string }) {
       ),
     placeholderData: (prev) => prev,
   });
-  // The last answer keeps the term toggle up; only the chosen term's own answer draws the grid.
-  const latest = q.data;
+  // The terms last answered keep the toggle up, so a failed term can be left; only the chosen term's own answer draws the grid.
+  const terms = useRef<string[]>([]);
+  if (q.data) terms.current = q.data.terms;
   const data = q.isPlaceholderData || q.isError ? undefined : q.data;
   const today = taipeiToday();
   const current = !!data && data.term === data.current_term;
@@ -163,15 +164,15 @@ export function Timetable({ studentId }: { studentId: string }) {
         <h2 id="tt-h" className="text-[15px] font-semibold">
           Timetable
         </h2>
-        {latest && latest.terms.length > 0 && (
+        {terms.current.length > 0 && (
           <Segmented
             label="Term"
-            value={term ?? latest.term ?? ""}
+            value={term ?? q.data?.term ?? ""}
             onChange={(t) => {
               setTerm(t);
               setPickedDay(null);
             }}
-            options={latest.terms.map((t) => ({ value: t, label: termLabel(t) }))}
+            options={terms.current.map((t) => ({ value: t, label: termLabel(t) }))}
             className="max-w-full overflow-x-auto"
             itemClassName="font-mono"
           />
