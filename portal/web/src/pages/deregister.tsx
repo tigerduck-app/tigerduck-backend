@@ -1,219 +1,325 @@
+// Deregister: find a student by id or name, see what goes with the account,
+// then delete it. The delete itself is by student id.
+
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, Download, UserMinus } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
+import { Check, ChevronRight, Download, TriangleAlert, UserMinus } from "lucide-react";
+import { api } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { ago, stamp } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { PageHeader } from "@/components/ui/section";
+import { Skeleton } from "@/components/ui/skeleton";
+import { DialogIcon, ErrorAlert, FormDialog, PageHeading, fieldClass } from "@/components/page";
+import { errorText } from "./lists/format";
+import { Initial, StudentCard, fmt, totalRows, type Snapshot } from "./deregister/StudentCard";
 
-type DeregisterReport = {
-  deleted: boolean;
-  timestamp: string;
+type Candidate = {
   student_id: string;
-  user_id: string;
-  account_created_at: string | null;
-  devices: {
-    device_id: string;
-    client_device_id: string;
-    platform: string;
-    app_version: string | null;
-    os_version: string | null;
-    last_seen_at: string | null;
-  }[];
-  deleted_counts: Record<string, number | string>;
+  display_name: string | null;
+  devices: number;
+  last_active: string | null;
+  joined: string | null;
 };
+type Preview = Snapshot & { display_name: string | null; last_active: string | null };
+type Report = Snapshot & { deleted: boolean; timestamp: string; user_id: string };
 
-function downloadReport(report: DeregisterReport) {
-  const blob = new Blob([JSON.stringify(report, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
+function download(report: Report) {
+  const name = `deregister-${report.student_id}-${new Date().toISOString().slice(0, 10)}.json`;
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }),
+  );
   const a = document.createElement("a");
   a.href = url;
-  a.download = `deregister-${report.student_id}-${new Date().toISOString().slice(0, 10)}.json`;
+  a.download = name;
   a.click();
   URL.revokeObjectURL(url);
+  toast.success(`Saved ${name}`);
 }
 
-export function DeregisterPage() {
-  const [studentId, setStudentId] = useState("");
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [lastReport, setLastReport] = useState<DeregisterReport | null>(null);
+const devicesLabel = (n: number) => `${n} ${n === 1 ? "device" : "devices"}`;
 
-  const mutation = useMutation({
-    mutationFn: () =>
-      api<DeregisterReport>("/api/deregister", {
-        method: "POST",
-        json: { student_id: studentId.trim() },
-      }),
-    onSuccess: (r) => {
-      toast.success(
-        `Deregistered student ${r.student_id} (user ${r.user_id})`,
-      );
-      setLastReport(r);
-      setStudentId("");
-      setConfirmOpen(false);
+export function DeregisterPage() {
+  const [query, setQuery] = useState("");
+  const [missed, setMissed] = useState<string | null>(null);
+  const [candidates, setCandidates] = useState<Candidate[] | null>(null);
+  const [studentId, setStudentId] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [done, setDone] = useState<{ report: Report; person: Preview } | null>(null);
+
+  const lookup = useMutation({
+    mutationFn: (q: string) =>
+      api<{ students: Candidate[] }>(`/api/deregister/lookup?q=${encodeURIComponent(q)}`),
+    onSuccess: ({ students }, q) => {
+      if (students.length === 0) setMissed(q);
+      else if (students.length === 1) choose(students[0]);
+      else setCandidates(students);
     },
-    onError: (e) => {
-      const msg =
-        e instanceof ApiError
-          ? e.status === 404
-            ? "Student not found"
-            : `HTTP ${e.status} — ${e.message}`
-          : (e as Error).message;
-      toast.error(msg);
-      setConfirmOpen(false);
+  });
+  const previewQ = useQuery<Preview>({
+    queryKey: ["deregister-preview", studentId],
+    queryFn: () =>
+      api<Preview>(`/api/deregister/preview?student_id=${encodeURIComponent(studentId!)}`),
+    enabled: studentId !== null && done === null,
+    gcTime: 0,
+  });
+  const deregister = useMutation({
+    mutationFn: (id: string) =>
+      api<Report>("/api/deregister", { method: "POST", json: { student_id: id } }),
+    onSuccess: (report) => {
+      setDone({ report, person: previewQ.data! });
+      setConfirming(false);
+      toast.success(`Deregistered ${report.student_id}`);
     },
   });
 
-  const trimmed = studentId.trim();
+  function choose(c: Candidate) {
+    setCandidates(null);
+    setQuery(c.student_id);
+    setStudentId(c.student_id);
+  }
+  function reset() {
+    setQuery("");
+    setMissed(null);
+    setStudentId(null);
+    setDone(null);
+    lookup.reset();
+  }
+  const term = query.trim();
+  const preview = previewQ.data;
+  const person = done?.person ?? preview;
+  const rows = done ? totalRows(done.report) : preview ? totalRows(preview) : 0;
 
   return (
-    <div className="space-y-6">
-      <PageHeader
+    <>
+      <PageHeading
+        group="Devices"
         title="Deregister student"
-        description="Permanently delete a student and all associated data (devices, sessions, credentials, sync state, push jobs, etc.). This cannot be undone."
+        meta={
+          <span className="font-sans">
+            Permanent · account, devices, sessions, credentials, sync state and push jobs
+          </span>
+        }
       />
 
-      <Card>
-        <CardContent className="space-y-4">
-          <div className="grid max-w-sm gap-1.5">
-            <Label htmlFor="student-id">School ID</Label>
-            <Input
-              id="student-id"
-              placeholder="B10000000"
-              value={studentId}
-              onChange={(e) => setStudentId(e.target.value)}
-              maxLength={32}
-              autoFocus
-            />
-          </div>
-          <Button
-            variant="destructive"
-            disabled={!trimmed}
-            onClick={() => setConfirmOpen(true)}
+      {done && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-3 rounded-[14px] border border-badge-success-fg/25 bg-badge-success px-[18px] py-3.5 text-badge-success-fg"
+        >
+          <span
+            aria-hidden="true"
+            className="flex size-8 items-center justify-center rounded-full bg-badge-success-fg text-badge-success"
           >
-            <UserMinus className="mr-2 h-4 w-4" />
-            Deregister
-          </Button>
-        </CardContent>
-      </Card>
-
-      {lastReport && (
-        <Card>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="text-sm font-semibold">Deletion report</h3>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => downloadReport(lastReport)}
-              >
-                <Download className="mr-2 h-4 w-4" />
-                Download JSON
-              </Button>
-            </div>
-
-            <div className="rounded-md border bg-muted/50 p-4 text-sm space-y-3">
-              <div className="grid grid-cols-2 gap-x-8 gap-y-1">
-                <span className="text-muted-foreground">Student ID</span>
-                <span className="font-mono">{lastReport.student_id}</span>
-                <span className="text-muted-foreground">User ID</span>
-                <span className="font-mono text-xs">{lastReport.user_id}</span>
-                <span className="text-muted-foreground">Account created</span>
-                <span>{lastReport.account_created_at ? new Date(lastReport.account_created_at).toLocaleString() : "—"}</span>
-                <span className="text-muted-foreground">Deleted at</span>
-                <span>{new Date(lastReport.timestamp).toLocaleString()}</span>
-              </div>
-
-              {lastReport.devices.length > 0 && (
-                <div>
-                  <h4 className="font-medium mb-1">Devices ({lastReport.devices.length})</h4>
-                  <div className="space-y-1">
-                    {lastReport.devices.map((d) => (
-                      <div
-                        key={d.device_id}
-                        className="flex items-center gap-3 rounded bg-background px-2 py-1 text-xs"
-                      >
-                        <span className="font-mono text-muted-foreground shrink-0">
-                          {d.platform}{d.os_version ? ` ${d.os_version}` : ""}
-                        </span>
-                        <span className="truncate">
-                          {d.client_device_id}
-                        </span>
-                        <span className="ml-auto text-muted-foreground shrink-0">
-                          {d.last_seen_at ? new Date(d.last_seen_at).toLocaleDateString() : "never"}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <h4 className="font-medium mb-1">Deleted rows</h4>
-                <div className="grid grid-cols-2 gap-x-8 gap-y-0.5 text-xs">
-                  {Object.entries(lastReport.deleted_counts)
-                    .filter(([, v]) => v !== 0 && v !== "table_not_found")
-                    .map(([table, count]) => (
-                      <div key={table} className="contents">
-                        <span className="text-muted-foreground">{table}</span>
-                        <span className="font-mono">{count}</span>
-                      </div>
-                    ))}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+            <Check className="h-4 w-4" strokeWidth={2.6} />
+          </span>
+          <div className="flex flex-col">
+            <span className="font-semibold">Deregistered {done.report.student_id}</span>
+            <span className="text-[13px] tabular-nums">
+              {stamp(done.report.timestamp)} · {fmt(rows)} rows · {devicesLabel(done.report.devices.length)}
+            </span>
+          </div>
+          <div className="ml-auto flex flex-wrap gap-2">
+            <Button
+              variant="line"
+              size="bar"
+              className="gap-1.5 border-badge-success-fg/25 font-normal"
+              onClick={() => download(done.report)}
+            >
+              <Download className="!size-[15px]" />
+              Download JSON
+            </Button>
+            <Button variant="ink" size="bar" className="font-normal" onClick={reset}>
+              Deregister another
+            </Button>
+          </div>
+        </div>
       )}
 
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-destructive" />
-              Confirm deregistration
-            </DialogTitle>
-            <DialogDescription>
-              Are you sure you want to deregister student{" "}
-              <span className="font-mono font-semibold text-foreground">
-                {trimmed}
+      {!done && (
+        <section
+          aria-labelledby="find-h"
+          className="flex flex-col gap-3 rounded-[14px] border border-line bg-surface px-6 pb-5 pt-[18px] phone:px-4"
+        >
+          <h2 id="find-h" className="text-[15px] font-semibold">
+            Find student
+          </h2>
+          <form
+            className="flex flex-wrap items-end gap-2.5"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!term) return;
+              setMissed(null);
+              setStudentId(null);
+              lookup.mutate(term);
+            }}
+          >
+            <label className="flex flex-[0_1_320px] flex-col gap-1.5 text-[13px] font-medium phone:flex-[1_1_100%]">
+              Student ID or name
+              <input
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setMissed(null);
+                }}
+                maxLength={32}
+                placeholder="B99900000 or 王小明"
+                aria-invalid={missed !== null}
+                aria-describedby={missed !== null ? "find-err" : undefined}
+                autoFocus
+                className={cn(fieldClass, "font-mono font-normal", missed !== null && "border-dot-bad")}
+              />
+            </label>
+            <Button type="submit" variant="ink" size="form" disabled={!term || lookup.isPending}>
+              Look up
+            </Button>
+          </form>
+          {missed !== null && (
+            <span id="find-err" role="alert" className="flex items-center gap-1.5 text-[13px] text-badge-danger-fg">
+              <TriangleAlert className="h-[15px] w-[15px]" />
+              No student matches {missed}
+            </span>
+          )}
+          {lookup.isError && <ErrorAlert>{errorText(lookup.error)}</ErrorAlert>}
+        </section>
+      )}
+
+      {!done && previewQ.isLoading && <Skeleton className="h-72" />}
+      {!done && previewQ.isError && (
+        <ErrorAlert className="items-center" onRetry={() => previewQ.refetch()}>
+          {errorText(previewQ.error)}
+        </ErrorAlert>
+      )}
+      {person && (
+        <StudentCard
+          snapshot={done?.report ?? person}
+          name={person.display_name}
+          lastActive={person.last_active}
+          report={!!done}
+          footer={
+            !done && (
+              <>
+                <Button variant="line" size="form" onClick={reset}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="danger"
+                  size="form"
+                  className="gap-2"
+                  onClick={() => {
+                    deregister.reset();
+                    setTyped("");
+                    setConfirming(true);
+                  }}
+                >
+                  <UserMinus className="!size-[15px]" />
+                  Deregister {person.student_id}
+                </Button>
+              </>
+            )
+          }
+        />
+      )}
+
+      <FormDialog
+        open={candidates !== null}
+        onOpenChange={(o) => !o && setCandidates(null)}
+        width={560}
+        title="Pick a student"
+        meta={candidates && `${candidates.length} matches`}
+      >
+        <div className="flex flex-col gap-1.5">
+          {candidates?.map((c) => (
+            <button
+              key={c.student_id}
+              type="button"
+              onClick={() => choose(c)}
+              className="flex min-h-[60px] w-full items-center gap-3 rounded-xl border border-line bg-surface px-3 py-2.5 text-left hover:bg-row-hover"
+            >
+              <Initial name={c.display_name} id={c.student_id} className="size-9 bg-soft" />
+              <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <span className="flex flex-wrap items-baseline gap-x-2.5">
+                  <span className="font-mono text-[15px] font-medium">{c.student_id}</span>
+                  {c.display_name && <span className="font-medium">{c.display_name}</span>}
+                </span>
+                <span className="text-xs tabular-nums text-ink-3">
+                  {[
+                    devicesLabel(c.devices),
+                    c.last_active && `last active ${ago(c.last_active)}`,
+                    c.joined && `joined ${stamp(c.joined).slice(0, 10)}`,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
               </span>
-              ? This will permanently delete all data.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setConfirmOpen(false)}
-              disabled={mutation.isPending}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={mutation.isPending}
-              onClick={() => mutation.mutate()}
-            >
-              {mutation.isPending
-                ? "Deregistering…"
-                : "Yes, permanently delete"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
+              <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0 text-side-muted" />
+            </button>
+          ))}
+        </div>
+      </FormDialog>
+
+      {preview && (
+        <FormDialog
+          open={confirming}
+          onOpenChange={(o) => !o && !deregister.isPending && setConfirming(false)}
+          width={560}
+          icon={<DialogIcon icon={TriangleAlert} danger round />}
+          title="Delete this student permanently?"
+          meta="Cannot be undone"
+          footer={
+            <>
+              <Button
+                variant="line"
+                size="form"
+                disabled={deregister.isPending}
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                size="form"
+                disabled={typed.trim().toUpperCase() !== preview.student_id.toUpperCase() || deregister.isPending}
+                onClick={() => deregister.mutate(preview.student_id)}
+              >
+                {deregister.isPending ? "Deleting…" : "Delete permanently"}
+              </Button>
+            </>
+          }
+        >
+          <div className="flex items-center gap-3 rounded-xl bg-ground px-3.5 py-3">
+            <Initial name={preview.display_name} id={preview.student_id} className="size-9 bg-line" />
+            <div className="flex min-w-0 flex-col">
+              <span className="font-mono text-[15px] font-medium">{preview.student_id}</span>
+              {preview.display_name && <span className="text-[13px] text-ink-2">{preview.display_name}</span>}
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-badge-danger-fg">
+            {[
+              ["Devices", String(preview.devices.length)],
+              ["Rows", fmt(rows)],
+              ["School sign-in", "Removed"],
+            ].map(([label, value]) => (
+              <div key={label} className="flex min-w-0 flex-col rounded-[10px] bg-badge-danger px-3 py-2.5">
+                <span className="text-xs">{label}</span>
+                <span className="text-lg font-semibold tabular-nums">{value}</span>
+              </div>
+            ))}
+          </div>
+          <label className="flex flex-col gap-1.5 text-[13px] font-medium">
+            Type {preview.student_id} to confirm
+            <input
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+              autoComplete="off"
+              placeholder={preview.student_id}
+              className={cn(fieldClass, "font-mono font-normal")}
+            />
+          </label>
+          {deregister.isError && <ErrorAlert>{errorText(deregister.error)}</ErrorAlert>}
+        </FormDialog>
+      )}
+    </>
   );
 }
