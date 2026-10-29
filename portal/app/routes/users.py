@@ -269,14 +269,18 @@ ORDER BY ud.last_seen_at DESC NULLS LAST, ud.created_at
 """
 
 # The term the apps take as current (server/academic_calendar/terms.py), or
-# the user's latest term while none is published.
+# while none is published the semester server/push/course_reminders.py falls back on.
 _TERM_SQL = f"""
 SELECT COALESCE(
     (SELECT code FROM semester_terms WHERE start_date <= {_TODAY}
      ORDER BY start_date DESC, code DESC LIMIT 1),
     (SELECT code FROM semester_terms ORDER BY start_date, code DESC LIMIT 1),
-    (SELECT max(semester) FROM user_courses
-     WHERE user_id = $1 AND semester ~ '^[0-9]{{3}}[12H]$')
+    (SELECT semester FROM user_courses
+     WHERE user_id = $1 AND enrollment_status = 'enrolled'
+       AND schedule_json NOT IN ('{{}}'::jsonb, '[]'::jsonb)
+     ORDER BY (source = 'ntust_portal' OR semester ~ '^[0-9]{{3}}[12H]$') DESC,
+              semester COLLATE "C" DESC
+     LIMIT 1)
 )
 """
 

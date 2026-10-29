@@ -525,3 +525,34 @@ async def test_user_page_lists_pushes_by_when_they_went_out(db_session, portal_p
 
     assert [p["channel"] for p in page["pushes"]] == ["assignment"]
     assert page["push_counts"]["sent"] == 1
+
+
+async def test_user_page_falls_back_to_a_free_form_semester_while_no_term_is_published(
+    db_session, portal_pool
+):
+    meets = [{"day": 2, "periods": ["3"]}]
+    only_free = await _user(db_session, "t1")
+    mixed = await _user(db_session, "t2")
+    db_session.add_all(
+        [
+            UserCourse(
+                user_id=only_free.id, semester="fall", course_key="a", course_name="a",
+                source="user_added", schedule_json=meets,
+            ),
+            UserCourse(
+                user_id=mixed.id, semester="zzz", course_key="b", course_name="b",
+                source="user_added", schedule_json=meets,
+            ),
+            UserCourse(
+                user_id=mixed.id, semester="1142", course_key="c", course_name="c",
+                source="user_added", schedule_json=meets,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    free_page = await get_user(_REQUEST, only_free.id, pool=portal_pool)
+    mixed_page = await get_user(_REQUEST, mixed.id, pool=portal_pool)
+
+    assert (free_page["term"], len(free_page["courses"])) == ("fall", 1)
+    assert mixed_page["term"] == "1142"
