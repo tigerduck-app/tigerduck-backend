@@ -1,6 +1,7 @@
 """Phase 4b: generate course start reminder push_jobs.
 
-`user_courses.schedule_json` is a client-uploaded list of
+`user_courses.schedule_json` is what the apps upload,
+`{"<ISO weekday 1-7>": [<NTUST period>, ...]}`, or the older list of
 `{"day": <ISO weekday 1-7>, "periods": [<NTUST period>, ...]}` entries.
 The server projects each entry onto concrete dates inside the scan
 window using the configured period→start-time table (Asia/Taipei by
@@ -51,6 +52,12 @@ from server.sync.models import (
 logger = structlog.get_logger(__name__)
 
 _ISO_WEEKDAYS = range(1, 8)
+_WEEKDAY_KEYS = {str(day) for day in _ISO_WEEKDAYS}
+# NTUST's period order; periods next to each other in it make one meeting, as in the apps.
+_PERIOD_RANK = {
+    period: rank
+    for rank, period in enumerate((*(str(n) for n in range(1, 11)), "A", "B", "C", "D"))
+}
 
 CHANNEL = "course"
 
@@ -90,8 +97,31 @@ def _entry_start_time(
     return day, *min(starts)
 
 
+def _schedule_entries(schedule_json: object) -> list:
+    """The schedule as list entries. A weekday's periods in the object form
+    are one entry per run of consecutive periods, the meetings the portal
+    shows; periods NTUST does not have are left out."""
+    if isinstance(schedule_json, list):
+        return schedule_json
+    if not isinstance(schedule_json, dict):
+        return []
+    entries: list[dict] = []
+    for day, periods in schedule_json.items():
+        if day not in _WEEKDAY_KEYS or not isinstance(periods, list):
+            continue
+        run: list[str] = []
+        for period in sorted({str(p) for p in periods if str(p) in _PERIOD_RANK}, key=_PERIOD_RANK.get):
+            if run and _PERIOD_RANK[period] != _PERIOD_RANK[run[-1]] + 1:
+                entries.append({"day": int(day), "periods": run})
+                run = []
+            run.append(period)
+        if run:
+            entries.append({"day": int(day), "periods": run})
+    return entries
+
+
 def course_occurrences(
-    schedule_json: list,
+    schedule_json: list | dict,
     *,
     window_start: datetime,
     window_end: datetime,
@@ -117,7 +147,7 @@ def course_occurrences(
 
 
 def class_meetings(
-    schedule_json: list,
+    schedule_json: list | dict,
     *,
     window_start: datetime,
     window_end: datetime,
@@ -127,7 +157,7 @@ def class_meetings(
     """`course_occurrences`, each with the period it starts in."""
     slots = [
         slot
-        for entry in schedule_json
+        for entry in _schedule_entries(schedule_json)
         if (slot := _entry_start_time(entry, period_times)) is not None
     ]
     if not slots:

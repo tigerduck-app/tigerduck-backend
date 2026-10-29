@@ -136,6 +136,22 @@ async def test_creates_job_for_default_offset(
     assert await scan_course_reminders(factory, settings) == 0
 
 
+async def test_creates_job_for_a_schedule_in_the_form_the_apps_upload(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    local, _ = _occurrence_in(26)
+    db_session.add(_course(user, schedule_json={str(local.isoweekday()): ["1"]}))
+    await db_session.commit()
+
+    settings = _scan_settings(test_settings, local)
+    created = await scan_course_reminders(build_session_factory(prepared_engine), settings)
+
+    assert created == 1
+    [job] = await _jobs(db_session, user.id)
+    assert job.payload["body"] == f"{local:%H:%M} · TR-212"
+
+
 async def test_no_job_for_an_account_with_only_android_devices(
     db_session, prepared_engine, test_settings
 ):
