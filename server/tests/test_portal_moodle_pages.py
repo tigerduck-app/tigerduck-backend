@@ -192,6 +192,22 @@ async def test_timetable_opens_on_the_current_term_with_its_upcoming_changes(
     ]
 
 
+async def test_timetable_takes_the_earliest_term_before_any_has_begun(db_session, pool):
+    """The apps' rule (server/academic_calendar/terms.py current_term_code):
+    while every published term starts later, the earliest one is current."""
+    today = date.today()
+    db_session.add_all([
+        SemesterTerm(code="1152", start_date=today + timedelta(days=120), end_date=today + timedelta(days=240)),
+        SemesterTerm(code="1151", start_date=today + timedelta(days=10), end_date=today + timedelta(days=100)),
+    ])
+    await _user(db_session, "B99915023")
+    await db_session.commit()
+
+    current = await student_timetable(_request(), student_id="B99915023", term=None, pool=pool)
+
+    assert (current["term"], current["current_term"], current["terms"]) == ("1151", "1151", ["1151"])
+
+
 async def test_timetable_offers_only_term_codes_as_terms(db_session, pool):
     """Moodle mirror rows are filed under an empty semester and a hand-added
     course may carry any string; neither is a term to toggle to."""

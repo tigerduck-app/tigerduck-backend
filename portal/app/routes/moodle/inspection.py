@@ -97,10 +97,14 @@ async def search_students(
 
 _TODAY = "(now() AT TIME ZONE 'Asia/Taipei')::date"
 
-# The term the apps take as current (server/academic_calendar/terms.py).
+# The term the apps take as current (server/academic_calendar/terms.py
+# current_term_code): the one begun last, or the earliest before any begins.
 _CURRENT_TERM_SQL = f"""
-SELECT code FROM semester_terms WHERE start_date <= {_TODAY}
-ORDER BY start_date DESC, code DESC LIMIT 1
+SELECT coalesce(
+    (SELECT code FROM semester_terms WHERE start_date <= {_TODAY}
+     ORDER BY start_date DESC, code DESC LIMIT 1),
+    (SELECT code FROM semester_terms ORDER BY start_date, code DESC LIMIT 1)
+)
 """
 
 # Changes from today on; one already over has nothing left to show.
