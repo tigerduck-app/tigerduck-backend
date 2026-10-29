@@ -69,6 +69,7 @@ from server.bulletins.user_dispatch import CHANNEL as BULLETIN_CHANNEL
 from server.config import Settings
 from server.db import lift_timeouts, session_scope
 from server.push.apns_client import SendResult
+from server.push.class_starts import recheck_class_start
 from server.push.client_versions import schedules_reminders_locally
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.course_reminders import recheck_class_reminder
@@ -529,6 +530,14 @@ async def _materialize(
                 reason=quiet,
             )
             return False
+        elif (
+            job.scenario in _CLASS_SCENARIOS
+            and not await _has_deliveries(session, job)
+            and await _held_by_course_changes(
+                session, job, school_tz=school_tz, period_times=period_times
+            )
+        ):
+            return False
         elif not await _has_deliveries(session, job) and (
             await _activity_already_registered(
                 session, job=job, activity_id=activity_id, now=now
@@ -740,32 +749,51 @@ async def _held_by_course_changes(
     school_tz: str,
     period_times: dict[str, str],
 ) -> bool:
-    """Applies the school's course changes to a class reminder right before
-    its first delivery; True when that settled the job.
+    """Applies the school's course changes to a class reminder or class Live
+    Activity start right before its first delivery; True when that settled
+    the job or put it back.
 
-    Fails closed: a reminder whose class the check cannot confirm is
-    cancelled (`unverified_before_send`), one whose class was cancelled or
-    moved since it was filed too (`class_changed`).
+    Fails closed: a push whose class the check cannot confirm is cancelled
+    (`unverified_before_send`), and so is a reminder whose class was
+    cancelled or moved and a start whose class was cancelled
+    (`class_changed`). A start whose class begins later waits as long.
     """
     now = datetime.now(UTC)
+    delay = timedelta(0)
     try:
         # A savepoint, so a failed query leaves the job's transaction usable.
         async with session.begin_nested():
-            payload = await recheck_class_reminder(
-                session,
-                job.payload or {},
-                tz=ZoneInfo(school_tz),
-                period_times=period_times,
-            )
+            tz = ZoneInfo(school_tz)
+            if job.channel == COURSE_CHANNEL:
+                payload = await recheck_class_reminder(
+                    session, job.payload or {}, tz=tz, period_times=period_times
+                )
+            else:
+                payload, delay = await recheck_class_start(
+                    session, job.payload or {}, tz=tz
+                )
     except Exception:
         logger.exception("push.course_changes_check_failed", job_id=job.id)
-        _settle(job, status=PushJobStatus.cancelled, error="unverified_before_send", now=now)
+        _settle(
+            job, status=PushJobStatus.cancelled, error="unverified_before_send", now=now
+        )
         return True
     if payload is None:
         _settle(job, status=PushJobStatus.cancelled, error="class_changed", now=now)
         logger.info("push.class_changed", job_id=job.id, channel=job.channel)
         return True
     job.payload = payload
+    if job.fire_at + delay > now:
+        # Only `available_at` moves, so the app's re-sync of the same fire
+        # time keeps the job; claimed then, the check finds it due.
+        job.status = PushJobStatus.pending.value
+        job.available_at = job.fire_at + delay
+        job.locked_by = None
+        job.locked_at = None
+        logger.info(
+            "push.class_start_moved", job_id=job.id, until=job.available_at.isoformat()
+        )
+        return True
     return False
 
 
