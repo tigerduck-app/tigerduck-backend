@@ -23,6 +23,7 @@ import { fileSize, monthDayTime } from "@/lib/format";
 
 const RESTART = "./stop.sh && ./start.sh";
 const STEPS = ["Dump the live database", "Restore the file", "Restart the stack"];
+const ACCEPTED = /\.(tar\.gz|tgz|dump)$/i;
 type StepState = "todo" | "doing" | "done";
 
 function fileMeta(f: File): string {
@@ -35,6 +36,7 @@ export function BackupPage() {
   const [file, setFile] = useState<File | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [restoredAt, setRestoredAt] = useState<string | null>(null);
+  const [wrongFile, setWrongFile] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const exportMut = useMutation({
@@ -91,16 +93,19 @@ export function BackupPage() {
     },
   });
 
-  const pick = (f: File | undefined) => {
-    if (!f) return;
-    importMut.reset();
-    setRestoredAt(null);
-    setFile(f);
-  };
   const clearFile = () => {
     importMut.reset();
+    setWrongFile(false);
     setFile(null);
     if (fileRef.current) fileRef.current.value = "";
+  };
+  // A drop, or the picker's "All files", gets past the input's accept list.
+  const pick = (f: File | undefined) => {
+    if (!f) return;
+    clearFile();
+    setRestoredAt(null);
+    if (ACCEPTED.test(f.name)) setFile(f);
+    else setWrongFile(true);
   };
 
   const restoring = importMut.isPending;
@@ -190,6 +195,7 @@ export function BackupPage() {
         </Card>
 
         <Card icon={Upload} title="Restore">
+          {wrongFile && <ErrorAlert>Choose a .tar.gz, .tgz or .dump file</ErrorAlert>}
           {importMut.isError && (
             <ErrorAlert>
               <div className="flex flex-col gap-0.5">
