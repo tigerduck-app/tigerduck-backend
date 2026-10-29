@@ -107,14 +107,20 @@ export function ChangeDialog({
   const hasDates = isRange ? Boolean(from && to) : Boolean(day);
   const days = isRange ? (from && to ? classDays(course, term, holidays, from, to, off) : []) : day ? [day] : [];
   const meeting = days[0] ? meetingOn(course, days[0]) : undefined;
-  const dayPeriods = !isRange && meeting ? meeting.periods : [];
-  const runs = periodRuns(dayPeriods);
-  const showChips = !isRange && meeting !== undefined && (runs.length > 1 || chosen !== null);
+  const timeKind = kind === "start" || kind === "end";
+  // A range's start or end names one meeting too, so its chips offer the meetings every covered day has.
+  const dayRuns = days.map((d) => periodRuns(meetingOn(course, d)?.periods ?? []));
+  const rangePicks = isRange && timeKind && dayRuns.some((r) => r.length > 1);
+  const runs = rangePicks
+    ? dayRuns[0].filter((r) => dayRuns.every((rs) => rs.some((x) => x.join() === r.join())))
+    : periodRuns(!isRange && meeting ? meeting.periods : []);
+  const dayPeriods = rangePicks ? runs.flat() : !isRange && meeting ? meeting.periods : [];
+  const showChips = rangePicks || (!isRange && meeting !== undefined && (runs.length > 1 || chosen !== null));
   // A new start or end belongs to one meeting, so the chips pick a meeting, none at first.
-  const oneMeeting = (kind === "start" || kind === "end") && runs.length > 1;
+  const oneMeeting = timeKind && (rangePicks || runs.length > 1);
   const pickedRun = runs.find((r) => r.length === chosen?.length && r.every((p) => chosen.includes(p)));
-  // A range shows no chips, so an edited range keeps the periods it has.
-  const keptPeriods = isRange && change?.mode === "range" ? change.periods : null;
+  // Any other range shows no chips, so an edited range keeps the periods it has.
+  const keptPeriods = isRange && !rangePicks && change?.mode === "range" ? change.periods : null;
   const sentPeriods = keptPeriods ?? (oneMeeting ? (pickedRun ?? []) : showChips ? chosen : null);
   const periods = sentPeriods ?? meeting?.periods ?? [];
   const span = periodSpan(periods);
