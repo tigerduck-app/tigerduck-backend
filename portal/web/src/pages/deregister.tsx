@@ -1,7 +1,7 @@
 // Deregister: find a student by id or name, see what goes with the account,
 // then delete it. The delete itself is by student id.
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Check, ChevronRight, Download, TriangleAlert, UserMinus } from "lucide-react";
@@ -47,11 +47,15 @@ export function DeregisterPage() {
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState("");
   const [done, setDone] = useState<{ report: Report; person: Preview } | null>(null);
+  // The term of the lookup in flight; a reset or an edit drops its answer.
+  const asked = useRef<string | null>(null);
 
   const lookup = useMutation({
     mutationFn: (q: string) =>
       api<{ students: Candidate[] }>(`/api/deregister/lookup?q=${encodeURIComponent(q)}`),
     onSuccess: ({ students }, q) => {
+      if (asked.current !== q) return;
+      asked.current = null;
       if (students.length === 0) setMissed(q);
       else if (students.length === 1) choose(students[0]);
       else setCandidates(students);
@@ -80,6 +84,7 @@ export function DeregisterPage() {
     setStudentId(c.student_id);
   }
   function reset() {
+    asked.current = null;
     setQuery("");
     setMissed(null);
     setStudentId(null);
@@ -152,6 +157,7 @@ export function DeregisterPage() {
               if (!term) return;
               setMissed(null);
               setStudentId(null);
+              asked.current = term;
               lookup.mutate(term);
             }}
           >
@@ -160,6 +166,7 @@ export function DeregisterPage() {
               <input
                 value={query}
                 onChange={(e) => {
+                  asked.current = null;
                   setQuery(e.target.value);
                   setMissed(null);
                 }}
