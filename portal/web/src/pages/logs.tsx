@@ -25,7 +25,7 @@ import { EmptyState, ErrorAlert, PageHeading } from "@/components/page";
 import type { LogLevel, LogLine, LogsPayload, LogsTab } from "@/types/api";
 
 type TabsPayload = { tabs: LogsTab[]; default_tail: number; max_tail: number };
-type Row = LogLine & { key: string; ms: number | null };
+type Row = LogLine & { key: string; ms: number | null; group: LogLine["level"] };
 
 const POLL_MS = 2000;
 const LIVE_STORAGE = "tigerduck.portal.logs.live";
@@ -236,11 +236,14 @@ function LogsViewer({
   const rows = React.useMemo<Row[]>(() => {
     // Identical lines in the same millisecond still need their own keys.
     const seen = new Map<string, number>();
+    // A line without a level, such as a traceback's, filters with the message above it.
+    let group: LogLine["level"] = null;
     return (lines ?? []).map((l) => {
       const base = `${l.ts}|${l.raw}`;
       const n = seen.get(base) ?? 0;
       seen.set(base, n + 1);
-      return { ...l, key: `${base}|${n}`, ms: l.ts ? Date.parse(l.ts) : null };
+      group = l.level ?? group;
+      return { ...l, key: `${base}|${n}`, ms: l.ts ? Date.parse(l.ts) : null, group };
     });
   }, [lines]);
   const newest = rows.reduce((m, r) => (r.ms !== null && r.ms > m ? r.ms : m), -Infinity);
@@ -284,7 +287,7 @@ function LogsViewer({
     {
       key: "level",
       label: "Level",
-      filterValue: (r) => (r.level ? LEVEL_LABEL[r.level] : null),
+      filterValue: (r) => (r.group ? LEVEL_LABEL[r.group] : null),
       filterOptions: LEVELS.map(([, label]) => label),
       className: "py-1.5 phone:px-1.5",
       cell: (r) =>
