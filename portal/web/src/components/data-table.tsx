@@ -178,9 +178,12 @@ export function DataTable<R>({
   empty,
   showPii = false,
   selected,
+  rowClassName,
 }: {
   table: TableModel<R>;
   rowKey: (row: R) => string;
+  /** Extra classes for a row, such as the selected one's. */
+  rowClassName?: (row: R) => string | false;
   /** Below this width the table scrolls sideways; dropped at tablet width. */
   minWidth?: number;
   /** Shown under the headers when no row matches. */
@@ -238,6 +241,7 @@ export function DataTable<R>({
                 className={cn(
                   "border-t border-divider",
                   selected?.(row) ? "bg-selected" : "hover:bg-row-hover",
+                  rowClassName?.(row),
                 )}
               >
                 {table.columns.map((c) => (
