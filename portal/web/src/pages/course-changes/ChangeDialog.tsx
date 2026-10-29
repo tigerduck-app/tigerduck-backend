@@ -96,7 +96,10 @@ export function ChangeDialog({
   });
 
   const changeOn = new Map<string, Kind>();
-  for (const c of existing) for (const d of c.class_days) changeOn.set(d, c.kind);
+  // As in the term strip, a note marks the day only when nothing else changes it.
+  for (const c of existing) {
+    for (const d of c.class_days) if (c.kind !== "note" || !changeOn.has(d)) changeOn.set(d, c.kind);
+  }
   const isClassDay = (iso: string) =>
     iso >= term.start_date && iso <= term.end_date && !holidays.has(iso) && meetingOn(course, iso) !== undefined;
 

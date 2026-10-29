@@ -1,5 +1,12 @@
 import { cn } from "@/lib/cn";
-import { addDays, dayDate, mondayOf, WEEKDAYS, weeks, type Term } from "@/lib/academic";
+import { addDays, dayDate, mondayOf, periodsText, WEEKDAYS, weeks, type Term } from "@/lib/academic";
+import { Pill } from "@/components/page";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { KIND, meetingOn, type Change, type Course } from "./model";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -36,8 +43,8 @@ export function TermStrip({
   const weekCount = weeks(term.start_date, term.end_date);
   // Weekends only when the course meets then.
   const weekdays = [1, 2, 3, 4, 5, 6, 7].filter((d) => d <= 5 || course.meetings.some((m) => m.day === d));
-  const changeOn = new Map<string, Change>();
-  for (const c of changes) for (const d of c.class_days) changeOn.set(d, c);
+  const changesOn = new Map<string, Change[]>();
+  for (const c of changes) for (const d of c.class_days) changesOn.set(d, [...(changesOn.get(d) ?? []), c]);
 
   const months: { label: string; week: number }[] = [];
   for (let w = 0; w < weekCount; w++) {
@@ -84,22 +91,25 @@ export function TermStrip({
               const holiday = holidays.get(iso);
               const inTerm = iso >= term.start_date && iso <= term.end_date;
               const isClass = inTerm && !holiday && meetingOn(course, iso) !== undefined;
-              const change = changeOn.get(iso);
+              const dayChanges = changesOn.get(iso) ?? [];
+              // A note colors the day only when nothing else changes it.
+              const change = dayChanges.find((c) => c.kind !== "note") ?? dayChanges[0];
               const past = iso < today;
               const actionable = !past && (isClass || change !== undefined);
+              const pick = actionable && dayChanges.length > 1;
               const title = [
                 dayDate(iso),
                 ...(holiday ? [holiday] : []),
-                change ? KIND[change.kind].label : isClass ? "class" : null,
-              ].filter(Boolean).join(" · ");
-              return (
+                ...(dayChanges.length ? dayChanges.map((c) => KIND[c.kind].label) : isClass ? ["class"] : []),
+              ].join(" · ");
+              const cell = (
                 <button
                   key={iso}
                   type="button"
                   title={title}
                   aria-label={title}
                   disabled={!actionable}
-                  onClick={() => (change ? onEdit(change) : onAdd(iso))}
+                  onClick={pick ? undefined : () => (change ? onEdit(change) : onAdd(iso))}
                   style={{ gridColumn: w + 2, gridRow: r + 3 }}
                   className={cn(
                     "flex h-7 w-full items-center justify-center rounded-[5px] text-[10px] tabular-nums disabled:cursor-default",
@@ -115,6 +125,20 @@ export function TermStrip({
                 >
                   {Number(iso.slice(8, 10))}
                 </button>
+              );
+              if (!pick) return cell;
+              return (
+                <DropdownMenu key={iso}>
+                  <DropdownMenuTrigger asChild>{cell}</DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="rounded-xl border-line bg-surface p-1.5 text-ink">
+                    {dayChanges.map((c) => (
+                      <DropdownMenuItem key={c.id} onSelect={() => onEdit(c)} className="min-h-[34px] gap-2">
+                        <Pill tone={KIND[c.kind].tone}>{KIND[c.kind].label}</Pill>
+                        {c.periods && <span className="text-xs text-ink-3">{periodsText(c.periods)}</span>}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               );
             }),
           )}
