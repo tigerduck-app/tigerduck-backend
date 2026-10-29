@@ -136,4 +136,4 @@ async def list_moodle_jobs(
         """, *params, limit, offset)
         await audit(conn, request, "user.list", count=len(rows))
 
-    return [dict(r) for r in rows]
+    return {"jobs": [dict(r) for r in rows]}

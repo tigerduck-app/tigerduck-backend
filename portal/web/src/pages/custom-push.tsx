@@ -149,6 +149,7 @@ export function CustomPushPage() {
         method: "POST",
         json: {
           target_classes: selectedClasses(form),
+          keeps_record: form.keeps_record,
           ...(form.user_id.trim() ? { user_id: form.user_id.trim() } : {}),
           ...(form.device_id.trim() ? { device_id: form.device_id.trim() } : {}),
           ...(form.list_id ? { list_id: Number(form.list_id) } : {}),

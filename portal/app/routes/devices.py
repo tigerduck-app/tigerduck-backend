@@ -160,12 +160,22 @@ async def deregister_devices(
         # autocommits, and a crash between them would leave a soft-deleted
         # device with still-active push tokens.
         async with conn.transaction():
+            # Signs the devices out as the app's own sign-out does
+            # (`delete_device` in server/routes/user_devices.py), taking the
+            # account locks first as every sign-in and sign-out does.
+            await conn.execute("""
+                SELECT a.id FROM external_accounts a
+                JOIN user_devices d ON d.user_id = a.user_id
+                WHERE d.id::text = ANY($1::text[]) AND d.deleted_at IS NULL
+                ORDER BY a.id
+                FOR UPDATE OF a
+            """, device_ids)
             deleted = await conn.fetch("""
                 UPDATE user_devices
                 SET deleted_at = now()
                 WHERE id::text = ANY($1::text[])
                   AND deleted_at IS NULL
-                RETURNING id, user_id
+                RETURNING id, user_id, client_device_id
             """, device_ids)
             count = len(deleted)
             for d in deleted:
@@ -174,6 +184,7 @@ async def deregister_devices(
                     user_id=d["user_id"], device_id=d["id"],
                 )
             if count > 0:
+                await _sign_out(conn, deleted)
                 await conn.execute("""
                     UPDATE device_push_tokens
                     SET status = 'invalidated'
@@ -181,3 +192,38 @@ async def deregister_devices(
                       AND status = 'active'
                 """, device_ids)
     return JSONResponse(content={"deleted": count})
+
+
+async def _sign_out(conn, deleted) -> None:
+    """Revoke the deregistered devices' sessions, unlink their anonymous
+    registrations and drop a Moodle token no device of its student is left
+    for (tigerduck-backend#85)."""
+    device_ids = [d["id"] for d in deleted]
+    # In id order and repeated, for the reasons `delete_device` gives.
+    while live := await conn.fetch("""
+        SELECT id FROM auth_sessions
+        WHERE device_id = ANY($1::uuid[]) AND revoked_at IS NULL
+        ORDER BY id
+        FOR UPDATE
+    """, device_ids):
+        await conn.execute("""
+            UPDATE auth_sessions
+            SET revoked_at = now(), revoked_reason = 'admin_revoked'
+            WHERE id = ANY($1::bigint[])
+        """, [r["id"] for r in live])
+    await conn.execute("""
+        UPDATE device_registrations r
+        SET linked_user_id = NULL
+        FROM unnest($1::text[], $2::uuid[]) AS d(client_device_id, user_id)
+        WHERE r.device_id = d.client_device_id AND r.linked_user_id = d.user_id
+    """, [d["client_device_id"] for d in deleted], [d["user_id"] for d in deleted])
+    await conn.execute("""
+        DELETE FROM external_account_credentials c
+        USING external_accounts a
+        WHERE c.external_account_id = a.id
+          AND a.user_id = ANY($1::uuid[])
+          AND NOT EXISTS (
+              SELECT 1 FROM user_devices d
+              WHERE d.user_id = a.user_id AND d.deleted_at IS NULL
+          )
+    """, list({d["user_id"] for d in deleted}))

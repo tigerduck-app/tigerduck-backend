@@ -172,15 +172,6 @@ async def sync_events(
             uid,
         )
 
-    poll_status = {}
-    try:
-        from server.sync.poll_tracker import is_foreground
-        for d in devices:
-            cid = d["client_device_id"]
-            poll_status[str(d["id"])] = "foreground" if is_foreground(str(uid), cid) else "background"
-    except ImportError:
-        pass
-
     device_rows = [dict(d) for d in devices]
     token_rows = [dict(t) for t in tokens]
     queued_jobs = []
@@ -210,7 +201,6 @@ async def sync_events(
             "tombstone_count": topology["tombstone_count"] or 0 if topology else 0,
             "courses_reset_at": str(topology["courses_reset_at"]) if topology and topology["courses_reset_at"] else None,
         },
-        "poll_status": poll_status,
         "jobs": [dict(j) for j in jobs],
         "runs": [dict(r) for r in runs],
         "overrides": [dict(o) for o in overrides],

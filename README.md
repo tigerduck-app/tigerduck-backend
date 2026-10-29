@@ -175,6 +175,10 @@ docker compose exec backend python -c "import urllib.request; print(urllib.reque
 - 匯出 `tigerduck-export-<timestamp>.tar.gz`（含 `pg_dump --format=custom` + manifest）/ 匯入相同格式或單純的 `pg_dump` 檔
 - 組合並發送自訂推播，支援單一裝置或命名裝置清單作為目標，含 payload 預覽與最近發送紀錄
 - 逐裝置檢視同步開關與同步項目、公告訂閱、硬體型號與排隊中的推播；Tests 區可送出測試用的 reauth 通知與即時動態
+- 撰寫與修改公告
+- 註銷裝置（撤銷 session、失效 push token）、管理裝置清單；Deregister 頁刪除學生與他的所有資料
+- 在 Moodle 頁暫停與恢復伺服器同步、重新排入失敗的同步工作、立刻跑推播 tick、取消某位學生排隊中的推播、送出同步觸發推播
+- 編輯學期起訖與校曆假日、轉址連結和 TLS pin
 - 顯示 Access token 裡的登入者 email 與 Sign out 連結，按下會結束其 Access session；dev 模式沒有 Access session，連結不會出現
 
 ### 監控（Grafana）
@@ -273,6 +277,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
+| `POST` | `/v3/devices/anonymous` | 未登入裝置 + push token 註冊，供匿名公告推播與自訂推播 | 無 |
 | `POST` | `/v3/devices/register` | 使用者裝置 + push token 註冊 | JWT |
 | `GET` | `/v3/devices` | 裝置列表 | JWT |
 | `DELETE` | `/v3/devices/{id}` | 刪除裝置（連動撤銷 session、失效 token） | JWT |
@@ -308,7 +313,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
-| `GET` | `/v3/settings` | 列出所有 namespace | JWT |
+| `GET` | `/v3/settings?namespaces=a,b` | 取得多個 namespace 的設定 | JWT |
 | `GET` | `/v3/settings/{namespace}` | 取得特定 namespace 設定 | JWT |
 | `PUT` | `/v3/settings/{namespace}` | 更新設定（revision CAS，衝突回 409） | JWT |
 
@@ -323,7 +328,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `PUT` | `/v3/bulletin-subscriptions` | 批次覆寫此裝置的訂閱規則 | JWT |
 | `POST` | `/v3/bulletin-subscriptions` | 新增此裝置的訂閱規則 | JWT |
 | `PATCH` | `/v3/bulletin-subscriptions/{id}` | 更新訂閱規則（base_revision） | JWT |
-| `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | 刪除訂閱規則（可帶 id 或批次） | JWT |
+| `DELETE` | `/v3/bulletin-subscriptions/{id}` | 刪除訂閱規則（base_revision） | JWT |
 | `GET` | `/v3/bulletin-states` | 公告已讀 / 星號 / 隱藏狀態 | JWT |
 | `PUT` | `/v3/bulletin-states/{id}` | 設定單一公告狀態 | JWT |
 
@@ -368,6 +373,8 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | Method | Path | 用途 | 認證 |
 |---|---|---|---|
 | `GET` | `/health` | liveness | 無 |
+| `GET` | `/ready` | readiness：排程器在跑且資料庫連得上，否則 503 | 無 |
+| `GET` | `/ping` | 不帶版本前綴的探測 | 無 |
 | `GET` | `/version` | 版本與 API base path | 無 |
 | `GET` | `/links/{name}` | 307 轉到連結的目標，目標在 portal 編輯 | 無 |
 | `GET` | `/.well-known/tigerduck/tls-pins.json` | App 的 TLS pin 簽章文件（Ed25519） | 無 |

@@ -3,9 +3,8 @@ leaves behind.
 
 A job whose last run failed on the school's side stays pending and waits
 for its policy interval (server/syncjobs/executor.py), so a button that
-picks jobs by status alone would pass over it. Lives in the server suite
-for the reason test_calendar_gaps.py gives: the portal has no test runner
-of its own.
+picks jobs by status alone would pass over it. Lives in the server suite,
+the only one with the server code and a database.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from portal.app.db import _asyncpg_dsn  # noqa: E402
 from portal.app.routes.moodle.jobs import (  # noqa: E402
     RetryAllRequest,
+    list_moodle_jobs,
     retry_all_jobs,
     retry_all_moodle,
 )
@@ -161,3 +161,24 @@ async def test_the_expire_notification_goes_only_to_a_student_waiting_to_sign_in
         "SELECT u.student_id, p.scenario FROM push_jobs p JOIN users u ON u.id = p.user_id"
     )
     assert [tuple(r) for r in notified] == [("b2", "reauth_required")]
+
+
+async def test_the_job_list_is_under_the_key_the_jobs_table_reads(
+    db_session, portal_pool
+):
+    """tigerduck-backend#55: the Moodle page's Sync jobs table reads `jobs`
+    (portal/web/src/pages/moodle/JobsTable.tsx), and stayed empty while the
+    route answered with a bare list."""
+    await _job(db_session, "b1", status="failed")
+    request = SimpleNamespace(
+        state=SimpleNamespace(actor="ops@example.com"),
+        url=SimpleNamespace(path="/api/moodle/jobs"),
+    )
+
+    listed = await list_moodle_jobs(
+        request, status=None, limit=50, offset=0, pool=portal_pool
+    )
+
+    assert [(job["student_id"], job["status"]) for job in listed["jobs"]] == [
+        ("b1", "failed")
+    ]

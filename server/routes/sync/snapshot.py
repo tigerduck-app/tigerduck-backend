@@ -15,7 +15,6 @@ from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJo
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync import membership
 from server.sync.merge import ClockProtocolDep, to_clock
-from server.sync.poll_tracker import record_poll
 from server.sync.models import (
     ChangeEntityType,
     UserAssignment,
@@ -36,16 +35,15 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 
 @router.get("/revision")
 async def poll_revision(auth: CurrentAuthDep, session: SessionDep):
-    """Lightweight poll endpoint — 10s interval while foregrounded.
+    """Lightweight poll endpoint, called while the app is in the
+    foreground.
 
     Returns just the current revision number so the client can decide
-    whether a full sync is needed.  Records the poll so the push
-    pipeline skips this device (it will pick up changes via polling).
+    whether a full sync is needed, and marks the device seen.
     """
     if auth.device_id:
         device = await session.get(UserDevice, auth.device_id)
         if device:
-            record_poll(str(auth.user_id), device.client_device_id)
             device.last_seen_at = datetime.now(UTC)
             await session.commit()
     state = await session.get(UserSyncState, auth.user_id)
