@@ -48,7 +48,8 @@ function isoDay(date: string): number {
   return new Date(`${date}T00:00:00Z`).getUTCDay() || 7;
 }
 
-/** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods. */
+/** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods.
+ * On a day with several, a cancellation wins, since the class does not meet. */
 export function changeFor(
   block: Pick<Block, "code" | "day" | "from" | "to">,
   changes: CourseChange[],
@@ -59,7 +60,8 @@ export function changeFor(
     if (c.course_no !== block.code) continue;
     if (c.periods && !c.periods.some((p) => periods.includes(String(p)))) continue;
     const date = c.class_days.find((d) => isoDay(d) === block.day);
-    if (date && (!best || date < best.date)) best = { date, c };
+    if (!date || (best && (date > best.date || (date === best.date && best.c.kind === "cancelled")))) continue;
+    if (!best || date < best.date || c.kind === "cancelled") best = { date, c };
   }
   if (!best) return null;
   const { c, date } = best;
