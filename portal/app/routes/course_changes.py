@@ -31,9 +31,9 @@ _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _ROOM_MAX = 128
 
-# The term's enrolled rows with a course number, as the class reminder scan
-# reads them (server/push/course_reminders.py), and each course's row the page
-# shows and checks changes against: a school row first, then the latest.
+# The term's enrolled rows with a course number, as the class reminder scan reads
+# them, and each course's row: a school row first, then the latest, as the page,
+# the apps' feed and the class pushes take it (server/academic_calendar/changes.py).
 _LATEST = """
 WITH taken AS (
     SELECT * FROM user_courses
