@@ -175,6 +175,10 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Export `tigerduck-export-<timestamp>.tar.gz` (custom-format `pg_dump` + manifest); import the same format OR a bare `pg_dump` from a pre-portal install
 - Compose and dispatch a custom push to a single device or a named device-list cohort, with payload preview and recent-history view
 - Per device: its sync switches and synced sections, bulletin subscriptions, hardware model and queued push jobs; the Tests sections send a test reauth notice or Live Activity
+- Write and edit announcements
+- Deregister devices (revoking their sessions and push tokens) and manage device lists; the Deregister page deletes a student with all their data
+- On the Moodle page, suspend and resume the server's sync, requeue failed sync jobs, run a push tick, cancel a student's queued pushes and send a sync trigger push
+- Edit semester dates and school holidays, redirect links and TLS pins
 - Show who signed in, from the Access token, with a Sign out link that ends their Access session. Development has no Access session, so the link stays hidden there
 
 ### Monitoring (Grafana)
@@ -273,6 +277,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
+| `POST` | `/v3/devices/anonymous` | Register a signed-out device + push token, for anonymous bulletin pushes and custom pushes | none |
 | `POST` | `/v3/devices/register` | Register user device + push token | JWT |
 | `GET` | `/v3/devices` | List devices | JWT |
 | `DELETE` | `/v3/devices/{id}` | Delete a device (revokes sessions, invalidates tokens) | JWT |
@@ -308,7 +313,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `GET` | `/v3/settings` | List all namespaces | JWT |
+| `GET` | `/v3/settings?namespaces=a,b` | Get the settings of several namespaces | JWT |
 | `GET` | `/v3/settings/{namespace}` | Get settings for a namespace | JWT |
 | `PUT` | `/v3/settings/{namespace}` | Update settings (revision CAS, 409 on conflict) | JWT |
 
@@ -323,7 +328,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `PUT` | `/v3/bulletin-subscriptions` | Bulk-put this device's subscription rules | JWT |
 | `POST` | `/v3/bulletin-subscriptions` | Create a subscription rule for this device | JWT |
 | `PATCH` | `/v3/bulletin-subscriptions/{id}` | Update subscription rule (base_revision) | JWT |
-| `DELETE` | `/v3/bulletin-subscriptions[/{id}]` | Delete subscription rule(s) | JWT |
+| `DELETE` | `/v3/bulletin-subscriptions/{id}` | Delete a subscription rule (base_revision) | JWT |
 | `GET` | `/v3/bulletin-states` | Bulletin read / starred / hidden state | JWT |
 | `PUT` | `/v3/bulletin-states/{id}` | Set per-bulletin state | JWT |
 
@@ -368,6 +373,8 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `GET` | `/health` | Liveness check | none |
+| `GET` | `/ready` | Readiness: the scheduler runs and the database answers, else 503 | none |
+| `GET` | `/ping` | Probe without a version prefix | none |
 | `GET` | `/version` | Version and API base path | none |
 | `GET` | `/links/{name}` | 307 to the link's target, edited in the portal | none |
 | `GET` | `/.well-known/tigerduck/tls-pins.json` | The apps' signed TLS pin document (Ed25519) | none |
