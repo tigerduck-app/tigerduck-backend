@@ -244,3 +244,31 @@ async def test_a_preview_matches_the_student_id_in_any_case(pool):
     preview = _body(await preview_student(_request(), pool=pool, student_id=" b99900001 "))
 
     assert preview["student_id"] == "B99900001"
+
+
+async def test_the_preview_counts_the_push_tokens_of_deregistered_devices(pool):
+    # Deleting the user cascades to every device row, soft-deleted ones too.
+    _, devices = await _person(
+        pool, "B99900001", "王小明", ("ios", "iphone"), ("ipados", "ipad")
+    )
+    await pool.execute(
+        "UPDATE user_devices SET deleted_at = now() WHERE id = $1", devices[1]
+    )
+    for device in devices:
+        await pool.execute(
+            "INSERT INTO device_push_tokens (device_id, provider, token_kind,"
+            " token_hash, token_value) VALUES ($1, 'apns', 'standard', $2, 't')",
+            device,
+            str(device),
+        )
+
+    preview = _body(await preview_student(_request(), pool=pool, student_id="B99900001"))
+    report = _body(
+        await deregister_student(
+            DeregisterRequest(student_id="B99900001"), _request(), pool=pool
+        )
+    )
+
+    assert preview["deleted_counts"]["device_push_tokens"] == 2
+    assert report["deleted_counts"] == preview["deleted_counts"]
+    assert len(preview["devices"]) == 1

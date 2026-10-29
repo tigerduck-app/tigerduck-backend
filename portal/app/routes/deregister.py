@@ -203,14 +203,12 @@ async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
         except Exception:
             counts[table] = "table_not_found"
 
-    token_count = 0
-    for d in devices:
-        c = await conn.fetchval(
-            "SELECT count(*) FROM device_push_tokens WHERE device_id = $1",
-            d["id"],
-        )
-        token_count += c
-    counts["device_push_tokens"] = token_count
+    # Every device row, deregistered ones too: deleting the user cascades to all of them.
+    counts["device_push_tokens"] = await conn.fetchval(
+        "SELECT count(*) FROM device_push_tokens t"
+        " JOIN user_devices d ON d.id = t.device_id WHERE d.user_id = $1",
+        user_id,
+    )
 
     ext_accounts = await conn.fetchval(
         "SELECT count(*) FROM external_accounts WHERE user_id = $1", user_id
