@@ -556,3 +556,16 @@ async def test_user_page_falls_back_to_a_free_form_semester_while_no_term_is_pub
 
     assert (free_page["term"], len(free_page["courses"])) == ("fall", 1)
     assert mixed_page["term"] == "1142"
+
+
+async def test_user_page_titles_a_class_reminder_with_its_course(db_session, portal_pool):
+    user = await _user(db_session, "n1")
+    job = _job(user, "course", payload={"kind": "course_reminder", "course_name": "資料結構", "body": "TR-412"})
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add(_delivery(job, "sent"))
+    await db_session.commit()
+
+    page = await get_user(_REQUEST, user.id, pool=portal_pool)
+
+    assert [p["title"] for p in page["pushes"]] == ["資料結構"]
