@@ -44,6 +44,7 @@ from .routes import (
     moodle,
     status,
     tls_pins,
+    users,
 )
 
 
@@ -105,6 +106,7 @@ app.include_router(links.router)
 app.include_router(moodle.router)
 app.include_router(audit.router)
 app.include_router(tls_pins.router)
+app.include_router(users.router)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
