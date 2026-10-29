@@ -32,6 +32,26 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.8.1
+
+- **Class reminders are sent.** The scan now reads the weekday-keyed
+  schedule both apps upload, which it took as no meetings before, so it had
+  never filed a class reminder. iPhone and iPad accounts with class
+  reminders on, the iOS default, get one before each meeting. Accounts with
+  only Android devices still get none from the server. The reminders do not
+  take the school's course changes into account yet.
+- **Stored names without the student ID.** NTUST's Moodle spells a full
+  name "student ID @ name", and 3.8.0 stored it whole. `users.display_name`
+  now holds the part after the first `@`, as the apps show it, and so does
+  the sign-in response. Migration `199cfb4bbb49` cuts the student ID off
+  the names already stored.
+- **No `.env` change.** Rollback: run
+  `docker compose exec backend alembic downgrade ea77513de257`, then check
+  out 3.8.0 and run `./start.sh`. The downgrade leaves the names as they
+  are; 3.8.0 stores full names again at each user's next sign-in or sync.
+  Its first scan cancels the class reminders still pending, since it finds
+  no meetings again.
+
 ## Upgrading to 3.8.0
 
 - **Course changes (#177).** Migration `ea77513de257` adds
