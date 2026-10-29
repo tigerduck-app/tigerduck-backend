@@ -19,6 +19,7 @@ import { ErrorAlert, FormDialog, PageHeading } from "@/components/page";
 import { useEnv } from "@/hooks/use-env";
 import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { copyText } from "@/lib/copy";
 import { fileSize, monthDayTime } from "@/lib/format";
 
 const RESTART = "./stop.sh && ./start.sh";
@@ -140,12 +141,7 @@ export function BackupPage() {
               variant="quiet"
               aria-label="Copy command"
               className="size-8 rounded-lg p-0"
-              onClick={() =>
-                navigator.clipboard.writeText(RESTART).then(
-                  () => toast.success("Copied"),
-                  () => toast.error("Copy failed"),
-                )
-              }
+              onClick={() => copyText(RESTART, "Copied")}
             >
               <Copy />
             </Button>

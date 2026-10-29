@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { ChevronRight, Copy, Plus, RefreshCw, Send, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { copyText } from "@/lib/copy";
 import { fullDate, monthDayTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -144,13 +145,6 @@ function reasonTone(reason: string): Tone {
   if (reason.includes("expir")) return "violet";
   if (reason.includes("resign")) return "neutral";
   return "info";
-}
-
-function copyPin(spki: string) {
-  navigator.clipboard.writeText(spki).then(
-    () => toast.success("Copied pin"),
-    () => toast.error("Copy failed"),
-  );
 }
 
 export function TlsPinsPage() {
@@ -377,7 +371,7 @@ function PinSetSection({
           <button
             type="button"
             aria-label="Copy pin"
-            onClick={() => copyPin(p.spki)}
+            onClick={() => copyText(p.spki, "Copied pin")}
             className="flex size-7 items-center justify-center rounded-md text-ink-3 hover:bg-soft hover:text-ink"
           >
             <Copy className="h-3.5 w-3.5" />
