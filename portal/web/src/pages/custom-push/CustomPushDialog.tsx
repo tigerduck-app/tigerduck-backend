@@ -103,10 +103,13 @@ const inputClass = (invalid: boolean, mono = false) =>
 
 /** Composes a custom push and, on review, asks to confirm before `onSend`. */
 export function CustomPushDialog({
+  listId: initialListId = "",
   pending,
   onClose,
   onSend,
 }: {
+  /** The device list the composer starts targeting. */
+  listId?: string;
   pending: boolean;
   onClose: () => void;
   onSend: (request: CustomPushRequest) => void;
@@ -116,7 +119,7 @@ export function CustomPushDialog({
   const [chosenKind, setKind] = useState<Kind>("record");
   const [sound, setSound] = useState(true);
   const [classes, setClasses] = useState<CustomPushTargetClass[]>(ALL_CLASSES);
-  const [listId, setListId] = useState("");
+  const [listId, setListId] = useState(initialListId);
   const [courseCode, setCourseCode] = useState("");
   const [userId, setUserId] = useState("");
   const [deviceId, setDeviceId] = useState("");

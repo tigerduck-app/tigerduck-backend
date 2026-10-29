@@ -2,8 +2,9 @@
 // narrowed by a list, a course this term, a student or a device. The portal
 // files the push jobs itself; the backend's pipeline delivers them.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { Send } from "lucide-react";
 import { api, errorText } from "@/lib/api";
@@ -12,7 +13,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable, useTable, type Column } from "@/components/data-table";
 import { Dot, EmptyState, ErrorAlert, PageHeading, Panel, Pill } from "@/components/page";
-import type { CustomPushRecentItem, CustomPushRequest, CustomPushSendResponse } from "@/types/api";
+import type {
+  CustomPushRecentItem,
+  CustomPushRequest,
+  CustomPushSendResponse,
+  DeviceList,
+} from "@/types/api";
 import { CustomPushDialog } from "./custom-push/CustomPushDialog";
 import { CLASSES, ClassIcon, KINDS } from "./custom-push/kinds";
 
@@ -105,7 +111,15 @@ const columns: Column<CustomPushRecentItem>[] = [
 
 export function CustomPushPage() {
   const qc = useQueryClient();
-  const [composing, setComposing] = useState(false);
+  // null: closed; otherwise the device list it starts targeting, "" for none.
+  const [composing, setComposing] = useState<string | null>(null);
+  const [params, setParams] = useSearchParams();
+  const listParam = params.get("list");
+  const listsQ = useQuery<DeviceList[]>({
+    queryKey: ["device-lists"],
+    queryFn: () => api<DeviceList[]>("/api/device-lists"),
+    enabled: listParam !== null,
+  });
 
   // shortcut: the 7-day tiles count the latest 100 sends; add a stats route if a week ever holds more.
   const recentQ = useQuery<CustomPushRecentItem[]>({
@@ -121,7 +135,7 @@ export function CustomPushPage() {
       api<CustomPushSendResponse>("/api/custom-push", { method: "POST", json: req }),
     onSuccess: (r) => {
       toast.success(`Queued ${r.queued.toLocaleString("en-US")} devices · request ${r.request_id.slice(0, 8)}`);
-      setComposing(false);
+      setComposing(null);
       qc.invalidateQueries({ queryKey: ["custom-push-recent"] });
     },
     onError: (e) => toast.error(`Send failed · ${errorText(e)}`),
@@ -151,13 +165,25 @@ export function CustomPushPage() {
     { label: "Last send", value: last?.sent_at ? monthDayTime(last.sent_at) : "—", note: last?.title ?? "" },
   ];
   // While a send is in flight the dialog stays, so a reopened one cannot send it twice.
-  const open = () => {
+  const open = (listId = "") => {
     if (sendMut.isPending) return;
     sendMut.reset();
-    setComposing(true);
+    setComposing(listId);
   };
+  // Device lists links here with ?list=<id>; it is dropped once read, so a reload opens nothing.
+  useEffect(() => {
+    if (listParam === null || !(listsQ.data || listsQ.isError)) return;
+    setParams(
+      (p) => {
+        p.delete("list");
+        return p;
+      },
+      { replace: true },
+    );
+    if (listsQ.data?.some((l) => String(l.id) === listParam)) open(listParam);
+  }, [listParam, listsQ.data, listsQ.isError]);
   const newButton = (
-    <Button variant="ink" size="form" onClick={open}>
+    <Button variant="ink" size="form" onClick={() => open()}>
       <Send />
       New push
     </Button>
@@ -222,10 +248,11 @@ export function CustomPushPage() {
         )}
       </Panel>
 
-      {composing && (
+      {composing !== null && (
         <CustomPushDialog
+          listId={composing}
           pending={sendMut.isPending}
-          onClose={() => !sendMut.isPending && setComposing(false)}
+          onClose={() => !sendMut.isPending && setComposing(null)}
           onSend={(req) => sendMut.mutate(req)}
         />
       )}
