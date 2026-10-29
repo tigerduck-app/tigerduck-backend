@@ -9,7 +9,9 @@ is transparent to the frontend.
 Field mapping (v2 device_registrations → v3):
   device_id        ← user_devices.id            (server UUID, stable key)
   user_id          ← users.student_id           (human-meaningful owner)
-  device_class     ← platform (ios→iphone, ipados→ipad, else "")
+  device_class     ← user_devices.device_class, or from platform for a row
+                     registered before that column (ios→iphone, ipados→ipad,
+                     macos→mac, else "")
   bundle_id/apns_env ← the device's push token row
   has_pts_token    ← a push_to_start token exists
   has_device_token ← a standard token exists
@@ -24,19 +26,21 @@ from ..db import get_pool
 
 router = APIRouter(prefix="/api/devices")
 
-# One row per device. device_class is derived so the SPA's iPhone/iPad
-# tabs (which match on device_class) keep working without a real column.
+# The stored form factor, or the one a pre-column row's platform implies.
+DEVICE_CLASS_SQL = """COALESCE(NULLIF(ud.device_class, ''), CASE ud.platform
+            WHEN 'ios'    THEN 'iphone'
+            WHEN 'ipados' THEN 'ipad'
+            WHEN 'macos'  THEN 'mac'
+            ELSE ''
+        END)"""
+
 _LIST_SQL = """
 WITH dev AS (
     SELECT
         ud.id::text                            AS device_id,
         COALESCE(u.student_id, u.id::text)     AS user_id,
         ud.platform                            AS platform,
-        CASE ud.platform
-            WHEN 'ios'    THEN 'iphone'
-            WHEN 'ipados' THEN 'ipad'
-            ELSE ''
-        END                                    AS device_class,
+        """ + DEVICE_CLASS_SQL + """         AS device_class,
         ud.server_push_enabled                 AS server_push_enabled,
         ud.created_at                          AS created_at,
         ud.updated_at                          AS updated_at,
@@ -44,7 +48,9 @@ WITH dev AS (
         ud.app_version                         AS app_version,
         ud.os_version                          AS os_version,
         ud.cloud_sync_enabled                  AS cloud_sync_enabled,
+        ud.last_seen_at                        AS last_seen_at,
         u.student_id                           AS student_id,
+        u.display_name                         AS display_name,
         (
             SELECT t.bundle_id FROM device_push_tokens t
             WHERE t.device_id = ud.id AND t.status = 'active'
@@ -83,6 +89,7 @@ WHERE (
     $1::text IS NULL
     OR lower(client_device_id) LIKE $1
     OR lower(COALESCE(student_id, '')) LIKE $1
+    OR lower(COALESCE(display_name, '')) LIKE $1
     OR device_id LIKE $1
 )
 ORDER BY updated_at DESC, device_id
@@ -98,6 +105,7 @@ WHERE ud.deleted_at IS NULL
     $1::text IS NULL
     OR lower(ud.client_device_id) LIKE $1
     OR lower(COALESCE(u.student_id, '')) LIKE $1
+    OR lower(COALESCE(u.display_name, '')) LIKE $1
     OR ud.id::text LIKE $1
   )
 """
@@ -107,6 +115,9 @@ def _row_to_device(r) -> dict:
     return {
         "device_id": r["device_id"],
         "user_id": r["user_id"],
+        "client_device_id": r["client_device_id"],
+        "student_id": r["student_id"],
+        "display_name": r["display_name"],
         "platform": r["platform"],
         "device_class": r["device_class"],
         "bundle_id": r["bundle_id"] or "",
@@ -118,6 +129,7 @@ def _row_to_device(r) -> dict:
         "app_version": r["app_version"] or None,
         "os_version": r["os_version"] or None,
         "cloud_sync_enabled": r["cloud_sync_enabled"],
+        "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
     }
@@ -127,7 +139,8 @@ def _row_to_device(r) -> dict:
 async def list_devices(
     request: Request,
     pool=Depends(get_pool),
-    limit: int = Query(default=200, ge=1, le=1000),
+    # The Devices page loads every device at once for its own sorting and charts.
+    limit: int = Query(default=200, ge=1, le=10_000),
     offset: int = Query(default=0, ge=0),
     search: str | None = Query(default=None, max_length=128),
 ) -> JSONResponse:

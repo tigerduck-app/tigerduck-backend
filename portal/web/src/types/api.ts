@@ -126,6 +126,9 @@ export type DeviceInfo = {
 export type DeviceRow = {
   device_id: string;
   user_id: string;
+  client_device_id: string;
+  student_id: string | null;
+  display_name: string | null;
   platform: string;
   device_class: string;
   bundle_id: string;
@@ -137,6 +140,7 @@ export type DeviceRow = {
   app_version: string | null;
   os_version: string | null;
   cloud_sync_enabled: boolean | null;
+  last_seen_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -216,6 +220,8 @@ export type DeviceList = {
 export type DeviceListMemberRow = {
   device_id: string;
   user_id: string;
+  student_id: string | null;
+  display_name: string | null;
   platform: string;
   device_class: string;
   added_at: string;

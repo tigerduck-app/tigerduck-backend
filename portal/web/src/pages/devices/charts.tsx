@@ -1,129 +1,217 @@
-// Device-population charts and the stat blocks around them.
+// The Statistics view: KPI tiles and horizontal bar charts of the devices.
 
-import { useState } from "react";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { useState, type ReactNode } from "react";
+import { CHART, CHART_OTHER } from "@/lib/chart";
+import { familyLabel } from "@/lib/platform";
 import type { DeviceRow } from "@/types/api";
-import { familyLabel, isApplePlatform, platformLabel } from "@/lib/platform";
+import { Segmented } from "./Segmented";
+import { familyColor, osName, platformName, tokens } from "./format";
 
-export const CHART_COLORS = [
-  "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#8b5cf6",
-  "#ec4899", "#14b8a6", "#f97316", "#6366f1", "#84cc16",
-];
+type Bar = { label: string; value: number; color: string };
 
-export function MiniPie({ data }: { data: { label: string; value: number; color: string }[] }) {
-  const total = data.reduce((s, d) => s + d.value, 0);
-  if (total === 0) return null;
-  const size = 140;
-  const cx = size / 2;
-  const cy = size / 2;
-  const r = size / 2 - 4;
-  if (data.length === 1) {
+const SCOPES = [
+  ["all", "All platforms"],
+  ["apple", "All Apple"],
+  ["iPhone", "iPhone"],
+  ["iPad", "iPad"],
+  ["macOS", "macOS"],
+  ["Android", "Android"],
+] as const;
+type Scope = (typeof SCOPES)[number][0];
+
+const WEEK_MS = 7 * 86_400_000;
+
+function countBy(list: DeviceRow[], key: (d: DeviceRow) => string): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const d of list) counts.set(key(d), (counts.get(key(d)) ?? 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
+const pct = (part: number, total: number) => (total ? `${Math.round((part / total) * 100)}%` : "—");
+
+function Bars({ bars, total }: { bars: Bar[]; total: number }) {
+  const max = Math.max(1, ...bars.map((b) => b.value));
+  return bars.map((b) => {
+    const width = Math.max((b.value / max) * 100, 1.5);
     return (
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={cx} cy={cy} r={r} fill={data[0].color} />
-      </svg>
+      <div
+        key={b.label}
+        tabIndex={0}
+        className="group grid min-h-7 grid-cols-[132px_minmax(0,1fr)_88px] items-center gap-3 outline-none phone:grid-cols-[96px_minmax(0,1fr)_64px] phone:gap-2"
+      >
+        <span title={b.label} className="truncate text-[13px]">
+          {b.label}
+        </span>
+        <div className="relative flex h-[18px] items-center">
+          <div
+            className="h-[18px] rounded-r-[4px]"
+            style={{ width: `${width}%`, background: b.color }}
+          />
+          <div
+            role="tooltip"
+            style={{ left: `${width}%` }}
+            className="pointer-events-none absolute bottom-full z-10 mb-1 hidden -translate-x-1/2 whitespace-nowrap rounded-lg bg-[#15171a] px-2 py-1.5 text-xs text-white group-hover:block group-focus-visible:block"
+          >
+            {b.label}: {b.value} of {total} devices ({((b.value / total) * 100).toFixed(1)}%)
+          </div>
+        </div>
+        <span className="text-right text-xs tabular-nums text-ink-2">
+          {b.value} · {pct(b.value, total)}
+        </span>
+      </div>
     );
-  }
-  let cumAngle = -90;
+  });
+}
+
+function Chart({
+  title,
+  meta,
+  empty,
+  children,
+}: {
+  title: string;
+  meta: string;
+  empty: boolean;
+  children: ReactNode;
+}) {
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      {data.map((d, i) => {
-        const angle = (d.value / total) * 360;
-        const startRad = (cumAngle * Math.PI) / 180;
-        const endRad = ((cumAngle + angle) * Math.PI) / 180;
-        cumAngle += angle;
-        const largeArc = angle > 180 ? 1 : 0;
-        const x1 = cx + r * Math.cos(startRad);
-        const y1 = cy + r * Math.sin(startRad);
-        const x2 = cx + r * Math.cos(endRad);
-        const y2 = cy + r * Math.sin(endRad);
-        return (
-          <path key={i} d={`M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`} fill={d.color} />
-        );
-      })}
-    </svg>
+    <section className="flex min-w-0 flex-col gap-3 rounded-[14px] border border-line bg-surface px-6 pb-5 pt-4 phone:px-4">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="text-[15px] font-semibold">{title}</h2>
+        <span className="text-xs text-ink-3">{meta}</span>
+      </div>
+      {empty ? (
+        <span className="py-6 text-center text-[13px] text-ink-3">No devices on this platform</span>
+      ) : (
+        children
+      )}
+    </section>
   );
 }
 
-export function StatBlock({ title, counts, total }: { title: string; counts: [string, number][]; total: number }) {
-  const chartData = counts.map(([label, value], i) => ({
-    label, value, color: CHART_COLORS[i % CHART_COLORS.length],
-  }));
+function GroupTitle({ children }: { children: ReactNode }) {
   return (
-    <div className="space-y-3">
-      <h4 className="text-sm font-medium">{title}</h4>
-      <div className="flex items-start gap-6">
-        <MiniPie data={chartData} />
-        <div className="space-y-1 text-xs min-w-0">
-          {chartData.map((d) => (
-            <div key={d.label} className="flex items-center gap-2">
-              <span className="inline-block h-2.5 w-2.5 rounded-sm shrink-0" style={{ backgroundColor: d.color }} />
-              <span className="truncate">{d.label}</span>
-              <span className="text-muted-foreground ml-auto tabular-nums">
-                {d.value} ({total > 0 ? ((d.value / total) * 100).toFixed(0) : 0}%)
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
+    <span className="pt-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-3">
+      {children}
+    </span>
   );
 }
 
 export function DeviceStats({ items }: { items: DeviceRow[] }) {
-  const [platformFilter, setPlatformFilter] = useState("all");
+  const [scope, setScope] = useState<Scope>("all");
+  const list = items.filter((d) =>
+    scope === "all"
+      ? true
+      : scope === "apple"
+        ? familyLabel(d.platform) === "Apple"
+        : platformName(d.platform) === scope,
+  );
+  const n = list.length;
+  const count = (fn: (d: DeviceRow) => boolean) => list.filter(fn).length;
+  const family = (fam: string) => count((d) => familyLabel(d.platform) === fam);
+  const colored = (pairs: [string, number][], color: (label: string) => string): Bar[] =>
+    pairs.map(([label, value]) => ({ label, value, color: color(label) }));
 
-  const platforms = ["ios", "ipados", "macos", "android"];
-  const filtered = items.filter((d) => {
-    if (platformFilter === "all") return true;
-    if (platformFilter === "apple") return isApplePlatform(d.platform);
-    return d.platform === platformFilter;
-  });
+  const push = count((d) => d.server_push_enabled);
+  const sync = count((d) => !!d.cloud_sync_enabled);
+  const now = Date.now();
+  const week = count((d) => !!d.last_seen_at && now - new Date(d.last_seen_at).getTime() <= WEEK_MS);
+  const kpis = [
+    ["Devices", String(n), `${family("Apple")} Apple · ${family("Android")} Android`],
+    ["Server push on", pct(push, n), `${push} devices`],
+    ["Cloud sync on", pct(sync, n), `${sync} devices`],
+    ["Active in 7 days", pct(week, n), `${week} devices`],
+  ];
 
-  const countBy = (key: "os_version" | "app_version") => {
-    const map: Record<string, number> = {};
-    for (const d of filtered) {
-      const v = key === "os_version"
-        ? `${platformLabel(d.platform)} ${d[key] ?? "?"}`
-        : `${familyLabel(d.platform)} ${d[key] ?? "?"}`;
-      map[v] = (map[v] ?? 0) + 1;
-    }
-    // Label breaks ties so the order is stable between renders and the two
-    // families stay contiguous rather than interleaving at equal counts.
-    return Object.entries(map).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  };
+  const platforms: Bar[] = countBy(list, (d) => d.platform).map(([p, value]) => ({
+    label: platformName(p),
+    value,
+    color: familyColor(familyLabel(p)),
+  }));
+  const apps = ["Apple", "Android"]
+    .map((fam) => ({
+      fam,
+      bars: colored(
+        countBy(
+          list.filter((d) => familyLabel(d.platform) === fam),
+          (d) => d.app_version ?? "—",
+        ),
+        () => familyColor(fam),
+      ),
+    }))
+    .filter((g) => g.bars.length > 0);
+  const os = countBy(list, osName);
+  const osBars = colored(os.slice(0, 6), (label) =>
+    familyColor(label.startsWith("Android") ? "Android" : "Apple"),
+  );
+  const osOther = os.slice(6).reduce((sum, [, v]) => sum + v, 0);
+  if (osOther) osBars.push({ label: "Other", value: osOther, color: CHART_OTHER });
+  const toggles: Bar[] = (
+    [
+      ["Server push", push],
+      ["Cloud sync", sync],
+      ["APNs token", count((d) => tokens(d).includes("apns"))],
+      ["Push-to-start", count((d) => tokens(d).includes("pts"))],
+      ["FCM token", count((d) => tokens(d).includes("fcm"))],
+    ] as const
+  ).map(([label, value]) => ({ label, value, color: CHART[0] }));
 
   return (
-    <Card>
-      <CardContent className="space-y-6 pt-4">
-        <Select value={platformFilter} onValueChange={setPlatformFilter}>
-          <SelectTrigger className="w-44">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Platforms</SelectItem>
-            <SelectItem value="apple">All Apple</SelectItem>
-            {platforms.map((p) => (
-              <SelectItem key={p} value={p}>{platformLabel(p)}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {filtered.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No devices for this platform filter.</p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <StatBlock title="OS Version" counts={countBy("os_version")} total={filtered.length} />
-            <StatBlock title="App Version" counts={countBy("app_version")} total={filtered.length} />
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Segmented label="Platforms" options={SCOPES} value={scope} onChange={setScope} />
+        <div className="flex gap-3.5 text-xs text-ink-2">
+          {["Apple", "Android"].map((fam) => (
+            <span key={fam} className="flex items-center gap-1.5">
+              <span
+                aria-hidden="true"
+                className="size-3 rounded-[3px]"
+                style={{ background: familyColor(fam) }}
+              />
+              {fam}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3 phone:grid-cols-2">
+        {kpis.map(([label, value, note]) => (
+          <div
+            key={label}
+            className="flex flex-col gap-1 rounded-[14px] border border-line bg-surface px-[18px] py-4"
+          >
+            <span className="text-xs font-medium text-ink-3">{label}</span>
+            <span className="text-[26px] font-semibold tabular-nums tracking-[-0.01em]">{value}</span>
+            <span className="text-xs tabular-nums text-ink-2">{note}</span>
           </div>
-        )}
-      </CardContent>
-    </Card>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(440px,1fr))] gap-5 tablet:grid-cols-1">
+        <Chart title="Platform" meta={`${n} devices`} empty={n === 0}>
+          <div className="flex flex-col gap-1">
+            <Bars bars={platforms} total={n} />
+          </div>
+        </Chart>
+        <Chart title="App version" meta="by build family" empty={n === 0}>
+          {apps.map((g) => (
+            <div key={g.fam} className="flex flex-col gap-1">
+              <GroupTitle>{g.fam}</GroupTitle>
+              <Bars bars={g.bars} total={n} />
+            </div>
+          ))}
+        </Chart>
+        <Chart title="OS version" meta="top 6" empty={n === 0}>
+          <div className="flex flex-col gap-1">
+            <Bars bars={osBars} total={n} />
+          </div>
+        </Chart>
+        <Chart title="Push and sync" meta="devices with each on" empty={n === 0}>
+          <div className="flex flex-col gap-1">
+            <Bars bars={toggles} total={n} />
+          </div>
+        </Chart>
+      </div>
+    </div>
   );
 }
