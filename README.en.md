@@ -60,6 +60,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Tick** — Every 5 seconds, and each one drains every due job. Live Activity starts and ends are filed at priority 10, ahead of every other job (default 100)
 - **Reminder sources** — Assignment reminders (lead times from the notification settings document, sent only to iPhones and iPads with reminder sync on, none for a course whose assignments the user ignores) and course reminders (class start computed from schedule_json × the NTUST period table, default 10 minutes ahead, sent only to iPhones and iPads; Android schedules its own); submitting / dropping / schedule changes cancel stale reminders
 - **Term dates and school holidays** — Course reminders go to the courses of the term both apps show on the day: the published term (`semester_terms`) that began most recently, or, with no term published, the latest term the user synced, as before. They and the class Live Activities (`classPreparing` / `inClass`) are not sent on a day no published term runs on (from its first day of classes through its last, both inclusive, as both apps count them), nor on an academic holiday (`academic_holidays`) unless the user opted in to that holiday with "Still have class?" (`user_holiday_overrides`). The opt-in puts back the holiday, never a day outside the term. The app files Live Activity starts ahead of time, so the check runs **when a start fires**: a term or holiday published later, or an opt-in changed later, still applies to jobs already queued, and a held job ends `cancelled` with `last_error` `outside_term` or `holiday`. Assignment Live Activities ignore both
+- **Course changes** — The school's cancelled classes and room, start and end changes (`course_changes`, entered in the portal) apply to course reminders and class Live Activities on iPhone and iPad, per day and period: a change applies to the meeting that starts in one of its periods. The scan files no reminder for a cancelled meeting, times one to a changed start and puts a changed room in its text. Right before the first delivery the pipeline checks again: a reminder whose class was cancelled or moved since, or a start whose class was cancelled, ends `cancelled` with `last_error` `class_changed`; a start takes the changed room and times, and waits for a later start. When the check cannot answer, the push is cancelled with `unverified_before_send`. Android schedules its own and applies the feed itself
 - **One alert per moment** (off by default) — With `push_countdown_dedupe_window_seconds` set (300), when an assignment's `assignmentUrgent` Live Activity start went to an iPhone within that many seconds before an assignment reminder's fire time, and the app there registered the activity it started, the reminder leaves that iPhone out: the start's alert already rang. A reminder due right after such a start waits once, a minute, for the registration, when the pre-send grace leaves room; an iPhone still unregistered then gets it. A reminder left out on every device ends `cancelled` with `last_error` `countdown_start_sent`; `0` turns the skip off
 - **Localized copy** — Assignment reminder and reauth notification text is built at delivery time in each device's language, from app-translation
 - **Signing in again** — A device that keeps opening the app without a session it can use, with TigerSync on and seen in the last 3 days, gets a `reauth_required` push of its own with `reason: "session"`: an hour after its newest session ended (revoked for any reason but logout, or expired) with no live one left, or once a live one has gone 24 hours without a refresh. At most once every 7 days per device, until 28 days after a session that ended, only between 09:00 and 21:00 school time, and checked again right before it goes out
@@ -337,6 +338,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | `GET` | `/v3/calendar/semesters` | Term dates and school holidays (ETag) | none |
+| `GET` | `/v3/calendar/course-changes?term=` | A term's course changes, whole (the current term by default), each with the class days the server resolved (ETag) | none |
 | `GET` | `/v3/sync/holiday-overrides` | The user's holiday exceptions ("Still have class?") | JWT |
 | `PUT` | `/v3/sync/holiday-overrides/{holiday_id}` | Set whether one holiday still gets class notifications | JWT |
 
@@ -350,7 +352,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
-| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler; class starts are checked against the term dates and school holidays when they fire) | JWT |
+| `POST` | `/v3/schedule/sync` | Class-table sync (feeds the Live Activity scheduler; class starts are checked against the term dates, school holidays and course changes when they fire) | JWT |
 | `DELETE` | `/v3/schedule/{source_id}` | Cancel this device's pending starts for one source | JWT |
 | `POST` | `/v3/live-activities/register` | Register Live Activity update token | JWT |
 
@@ -411,7 +413,7 @@ tigerduck-backend/
 │   ├── sync/                    # v3 user sync: upload / changelog / serializers / retention / models
 │   ├── syncjobs/                # Server-side fetching: executor / credentials (Moodle token, invalidation) / moodle_client / assignments / provisioning
 │   ├── routes/                  # v3: auth / user_devices / sync / academics / overrides / settings_docs / bulletins_feed / bulletins_v3 / sync_jobs / schedule_v3 / live_activities_v3
-│   ├── push/                    # apns_client / fcm_client / router / pipeline (two-phase delivery) / reminders / course_reminders / job_payloads
+│   ├── push/                    # apns_client / fcm_client / router / pipeline (two-phase delivery) / reminders / course_reminders / class_starts / job_payloads
 │   ├── scheduler/               # APScheduler runtime, dispatch, retention
 │   ├── bulletins/               # scraper / dedup / matcher / dispatcher (anonymous) / user_dispatch (logged-in) / taxonomy
 │   │   └── llm/                 # OpenAI-compatible client + prompt

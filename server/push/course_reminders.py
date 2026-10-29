@@ -13,13 +13,15 @@ cancels pending jobs whose key is no longer valid.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import Row, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.changes import load_course_changes, meeting_changes
 from server.academic_calendar.models import AcademicHoliday, UserHolidayOverride
 from server.academic_calendar.terms import (
     current_term_code,
@@ -55,15 +57,15 @@ CHANNEL = "course"
 
 def _entry_start_time(
     entry: object, period_times: dict[str, str]
-) -> tuple[int, time] | None:
-    """Return (iso_weekday, local_start_time) for one schedule entry, or
-    None when the entry is malformed / has no known period."""
+) -> tuple[int, time, str] | None:
+    """Return (iso_weekday, local_start_time, first_period) for one schedule
+    entry, or None when the entry is malformed / has no known period."""
     if not isinstance(entry, dict):
         return None
     day = entry.get("day")
     if not isinstance(day, int) or day not in _ISO_WEEKDAYS:
         return None
-    starts: list[time] = []
+    starts: list[tuple[time, str]] = []
     periods = entry.get("periods")
     if not isinstance(periods, list):
         return None
@@ -73,7 +75,7 @@ def _entry_start_time(
             continue
         hour, _, minute = raw.partition(":")
         try:
-            starts.append(time(int(hour), int(minute)))
+            starts.append((time(int(hour), int(minute)), str(period)))
         except ValueError:
             # Malformed operator config ("HH:MM" expected) must degrade to
             # "no reminder for this period", not crash the whole scan tick.
@@ -85,7 +87,7 @@ def _entry_start_time(
             continue
     if not starts:
         return None
-    return day, min(starts)
+    return day, *min(starts)
 
 
 def course_occurrences(
@@ -102,6 +104,27 @@ def course_occurrences(
     teaching block starting at its earliest period. Malformed entries and
     unknown periods are skipped. Result is sorted and de-duplicated.
     """
+    return [
+        occurrence
+        for occurrence, _ in class_meetings(
+            schedule_json,
+            window_start=window_start,
+            window_end=window_end,
+            tz=tz,
+            period_times=period_times,
+        )
+    ]
+
+
+def class_meetings(
+    schedule_json: list,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    tz: tzinfo,
+    period_times: dict[str, str],
+) -> list[tuple[datetime, str]]:
+    """`course_occurrences`, each with the period it starts in."""
     slots = [
         slot
         for entry in schedule_json
@@ -110,19 +133,88 @@ def course_occurrences(
     if not slots:
         return []
 
-    occurrences: set[datetime] = set()
+    occurrences: dict[datetime, str] = {}
     local_date = window_start.astimezone(tz).date()
     end_date = window_end.astimezone(tz).date()
     while local_date <= end_date:
         weekday = local_date.isoweekday()
-        for day, start in slots:
+        for day, start, period in slots:
             if day != weekday:
                 continue
             occurrence = datetime.combine(local_date, start, tzinfo=tz)
             if window_start < occurrence <= window_end:
-                occurrences.add(occurrence.astimezone(window_start.tzinfo))
+                occurrences.setdefault(occurrence.astimezone(window_start.tzinfo), period)
         local_date += timedelta(days=1)
-    return sorted(occurrences)
+    return sorted(occurrences.items())
+
+
+def changed_meeting(
+    changes: Sequence[Row], course: UserCourse, occurrence: datetime, period: str, tz: tzinfo
+) -> tuple[datetime, str | None] | None:
+    """The start and room of the meeting of `course` that starts in `period`
+    at `occurrence`, as the school's course changes leave them; None when it
+    is cancelled."""
+    day = occurrence.astimezone(tz).date()
+    changed = (
+        meeting_changes(
+            changes, term=course.semester, course_no=course.course_no, day=day, period=period
+        )
+        if course.course_no
+        else {}
+    )
+    if "cancelled" in changed:
+        return None
+    if "start" in changed:
+        hour, minute = changed["start"].start_time.split(":")
+        occurrence = datetime.combine(day, time(int(hour), int(minute)), tzinfo=tz)
+    room = changed["room"].room if "room" in changed else course.classroom
+    return occurrence.astimezone(UTC), room
+
+
+def _reminder_body(start: datetime, room: str | None, tz: tzinfo) -> str:
+    # The start time and room, as Android's own class reminder shows them; the
+    # same in every language.
+    return " · ".join(part for part in (f"{start.astimezone(tz):%H:%M}", room) if part)
+
+
+async def recheck_class_reminder(
+    session: AsyncSession, payload: dict, *, tz: tzinfo, period_times: dict[str, str]
+) -> dict | None:
+    """The class reminder's payload as its course and the school's course
+    changes stand now, or None when its class no longer starts at the time
+    it was filed for: cancelled, moved, or the course gone.
+
+    The pipeline asks right before the first delivery; a moved class has a
+    reminder of its own from the scan. A job filed before copy moved to send
+    time keeps its own body.
+    """
+    user_course_id = payload.get("user_course_id")
+    start_epoch = payload.get("start_epoch")
+    if type(user_course_id) is not int or type(start_epoch) is not int:
+        return None
+    course = await session.get(UserCourse, user_course_id)
+    if course is None:
+        return None
+    start = datetime.fromtimestamp(start_epoch, UTC)
+    midnight = datetime.combine(start.astimezone(tz).date(), time(0), tzinfo=tz)
+    changes = (
+        await load_course_changes(session, [course.semester], course_no=course.course_no)
+        if course.course_no
+        else []
+    )
+    for occurrence, period in class_meetings(
+        course.schedule_json,
+        window_start=midnight.astimezone(UTC),
+        window_end=midnight.astimezone(UTC) + timedelta(days=1),
+        tz=tz,
+        period_times=period_times,
+    ):
+        meeting = changed_meeting(changes, course, occurrence, period, tz)
+        if meeting is not None and meeting[0] == start:
+            if "course_name" not in payload:
+                return payload
+            return {**payload, "body": _reminder_body(*meeting, tz)}
+    return None
 
 
 def _fmt_offset(minutes: float) -> str:
@@ -240,10 +332,12 @@ async def scan_course_reminders(
     semester (lexicographic max of "1141"-style strings — older semesters
     must not keep firing weekly reminders). Occurrence dates listed in
     user_course_skipped_dates are excluded, and so are days no published
-    term runs on (`outside_term`). Cancellation mirrors assignment
-    reminders: pending jobs whose dedupe key no longer maps to an eligible
-    (course, occurrence, offset) tuple are cancelled, under SKIP LOCKED so
-    a job the pipeline is claiming concurrently is left alone.
+    term runs on (`outside_term`). The school's course changes apply
+    (`changed_meeting`): a cancelled class files nothing, a new start moves
+    the reminder and a new room reaches its body. Cancellation mirrors
+    assignment reminders: pending jobs whose dedupe key no longer maps to an
+    eligible (course, occurrence, offset) tuple are cancelled, under SKIP
+    LOCKED so a job the pipeline is claiming concurrently is left alone.
 
     Two deliberate semantics worth naming:
     * The global pending scan is unbounded by user but bounded by
@@ -260,6 +354,8 @@ async def scan_course_reminders(
     now = datetime.now(UTC)
     window_end = now + timedelta(hours=settings.course_reminder_window_hours)
     tz = ZoneInfo(settings.course_reminder_timezone)
+    # From the start of today: a class that began may have a later start today.
+    day_start = datetime.combine(now.astimezone(tz).date(), time(0), tzinfo=tz)
     period_times = settings.course_period_start_times
     created = 0
     cancelled = 0
@@ -369,6 +465,9 @@ async def scan_course_reminders(
                 if course.semester == latest_semester[course.user_id]
             ]
         user_ids = {course.user_id for course, _ in eligible}
+        changes = await load_course_changes(
+            session, {course.semester for course, _ in eligible}
+        )
 
         # SKIP LOCKED: don't fight the pipeline's claim — see
         # reminders.scan_assignment_reminders for the race rationale.
@@ -436,9 +535,9 @@ async def scan_course_reminders(
                 and course.user_id not in awaiting_token
             ):
                 continue
-            occurrences = course_occurrences(
+            meetings = class_meetings(
                 course.schedule_json,
-                window_start=now,
+                window_start=day_start.astimezone(UTC),
                 window_end=window_end,
                 tz=tz,
                 period_times=period_times,
@@ -448,7 +547,7 @@ async def scan_course_reminders(
                 if override is not None and override.custom_name
                 else course.course_name
             )
-            for occurrence in occurrences:
+            for occurrence, period in meetings:
                 occurrence_day = occurrence.astimezone(tz).date()
                 if (course.id, occurrence_day) in skipped:
                     continue
@@ -459,14 +558,15 @@ async def scan_course_reminders(
                     continue
                 if is_quiet(course.user_id, occurrence_day):
                     continue
+                meeting = changed_meeting(changes, course, occurrence, period, tz)
+                if meeting is None:
+                    continue
+                occurrence, room = meeting
+                # Begun, so it files nothing and its pending reminders go below.
+                if occurrence <= now:
+                    continue
                 start_epoch = int(occurrence.timestamp())
-                # The start time and room, as Android's own class reminder shows
-                # them; the same in every language.
-                body = " · ".join(
-                    part
-                    for part in (f"{occurrence.astimezone(tz):%H:%M}", course.classroom)
-                    if part
-                )
+                body = _reminder_body(occurrence, room, tz)
                 for offset in offsets:
                     fire_at = occurrence - timedelta(minutes=offset)
                     key = _dedupe_key(course.id, offset, start_epoch)
