@@ -180,9 +180,9 @@ async def student_timetable(
 
 
 def _schedule(raw) -> list:
-    """asyncpg hands JSONB back as text; a malformed upload shows no meetings."""
+    """asyncpg hands JSONB back as text; a malformed upload or entry shows no meetings."""
     value = json.loads(raw) if isinstance(raw, str) else raw
-    return value if isinstance(value, list) else []
+    return [e for e in value if isinstance(e, dict)] if isinstance(value, list) else []
 
 
 @router.get("/sync-events")

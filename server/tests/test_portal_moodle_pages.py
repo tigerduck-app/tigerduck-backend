@@ -208,6 +208,22 @@ async def test_timetable_takes_the_earliest_term_before_any_has_begun(db_session
     assert (current["term"], current["current_term"], current["terms"]) == ("1151", "1151", ["1151"])
 
 
+async def test_timetable_drops_schedule_entries_that_are_not_meetings(db_session, pool):
+    """The course upload takes any list, so a null or a bare value may sit
+    among the meetings; the grid gets only the objects."""
+    user = await _timetable_fixture(db_session)
+    db_session.add(UserCourse(
+        user_id=user.id, semester="1151", course_key="client:x2", course_no="X2",
+        course_name="Reading group", schedule_json=[None, "x", {"day": 5, "periods": ["1"]}],
+    ))
+    await db_session.commit()
+
+    current = await student_timetable(_request(), student_id="B99915023", term=None, pool=pool)
+
+    schedules = {c["course_no"]: c["schedule"] for c in current["courses"]}
+    assert schedules["X2"] == [{"day": 5, "periods": ["1"]}]
+
+
 async def test_timetable_offers_only_term_codes_as_terms(db_session, pool):
     """Moodle mirror rows are filed under an empty semester and a hand-added
     course may carry any string; neither is a term to toggle to."""
