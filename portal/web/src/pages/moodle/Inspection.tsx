@@ -131,6 +131,10 @@ function Student({
     onError: failed,
   });
 
+  const coursesError = coursesQ.isError && (
+    <LoadError title="Couldn’t load synced data" detail={errorText(coursesQ.error)} onRetry={() => void coursesQ.refetch()} />
+  );
+
   const data = eventsQ.data;
   const found = data?.found ? data : undefined;
   const devices = (found?.devices ?? []).filter((d) => !d.deleted_at);
@@ -201,11 +205,18 @@ function Student({
               device={device}
               events={found}
               courses={coursesQ.data}
+              coursesError={coursesError}
               studentId={studentId}
               onLiveActivity={() => setDialog({ kind: "la", device })}
             />
           ) : (
-            <BackendPanel events={found} courses={coursesQ.data} devices={devices} onReauth={() => setDialog({ kind: "reauth" })} />
+            <BackendPanel
+              events={found}
+              courses={coursesQ.data}
+              coursesError={coursesError}
+              devices={devices}
+              onReauth={() => setDialog({ kind: "reauth" })}
+            />
           )}
           <div className="flex flex-wrap items-start gap-6">
             <JobCards jobs={found.jobs ?? []} />

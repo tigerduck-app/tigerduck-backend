@@ -1,7 +1,7 @@
 // One device of the account: what it syncs, the account data it sees, the
 // pushes it got, what the server has queued for it and the pushes it caused.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Check, Copy, TriangleAlert, X } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -24,12 +24,15 @@ export function DevicePanel({
   device,
   events,
   courses,
+  coursesError,
   studentId,
   onLiveActivity,
 }: {
   device: SyncDevice;
   events: SyncEventsResponse;
   courses?: SyncCoursesResponse;
+  /** The alert for a failed course load; the synced list and data tabs show it. */
+  coursesError?: ReactNode;
   studentId: string;
   onLiveActivity: () => void;
 }) {
@@ -79,8 +82,10 @@ export function DevicePanel({
           ]}
         />
       </div>
-      {shown === "synced" && <SyncedList device={device} courses={courses} />}
-      {shown === "data" && (courses ? <DataTabs device={device} events={events} courses={courses} /> : <Skeleton className="m-6 h-40" />)}
+      {coursesError && (shown === "synced" || shown === "data") && <div className="px-6 pt-4 phone:px-4">{coursesError}</div>}
+      {shown === "synced" && (courses || !coursesError) && <SyncedList device={device} courses={courses} />}
+      {shown === "data" &&
+        (courses ? <DataTabs device={device} events={events} courses={courses} /> : !coursesError && <Skeleton className="m-6 h-40" />)}
       {shown === "push" && <PushTable device={device} deliveries={deliveries} />}
       {shown === "queued" && <QueuedList jobs={queued} deviceId={device.id} studentId={studentId} />}
       {shown === "source" && (

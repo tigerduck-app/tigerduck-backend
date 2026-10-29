@@ -1,7 +1,7 @@
 // The backend's copy of the account: its courses (with the deleted ones),
 // assignments and overrides, and the sign-in expired notice to test.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { BellRing, Send, Server } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -123,11 +123,14 @@ type Tab = "courses" | "assignments" | "overrides" | "tests";
 export function BackendPanel({
   events,
   courses,
+  coursesError,
   devices,
   onReauth,
 }: {
   events: SyncEventsResponse;
   courses?: SyncCoursesResponse;
+  /** The alert for a failed course load; the courses and assignments tabs show it. */
+  coursesError?: ReactNode;
   devices: SyncDevice[];
   onReauth: () => void;
 }) {
@@ -249,7 +252,7 @@ export function BackendPanel({
     ],
   });
 
-  const loading = <Skeleton className="m-6 h-40" />;
+  const loading = coursesError ? null : <Skeleton className="m-6 h-40" />;
   return (
     <section aria-labelledby="be-title" className="min-w-0 rounded-[14px] border border-line bg-surface">
       <div className="flex flex-col gap-3 border-b border-line px-6 pt-4 phone:px-4">
@@ -288,6 +291,7 @@ export function BackendPanel({
           ]}
         />
       </div>
+      {coursesError && (tab === "courses" || tab === "assignments") && <div className="px-6 pt-4 phone:px-4">{coursesError}</div>}
       {tab === "courses" && (
         <>
           <div className="flex justify-end border-b border-divider px-6 py-2.5 phone:px-4">
