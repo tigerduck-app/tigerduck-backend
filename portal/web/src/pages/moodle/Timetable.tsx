@@ -48,7 +48,8 @@ function isoDay(date: string): number {
   return new Date(`${date}T00:00:00Z`).getUTCDay() || 7;
 }
 
-/** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods. */
+/** The first coming change that reaches this meeting: a class day of the change on its weekday, in one of its periods.
+ * On a day with several, a cancellation wins, since the class does not meet. */
 export function changeFor(
   block: Pick<Block, "code" | "day" | "from" | "to">,
   changes: CourseChange[],
@@ -59,7 +60,8 @@ export function changeFor(
     if (c.course_no !== block.code) continue;
     if (c.periods && !c.periods.some((p) => periods.includes(String(p)))) continue;
     const date = c.class_days.find((d) => isoDay(d) === block.day);
-    if (date && (!best || date < best.date)) best = { date, c };
+    if (!date || (best && (date > best.date || (date === best.date && best.c.kind === "cancelled")))) continue;
+    if (!best || date < best.date || c.kind === "cancelled") best = { date, c };
   }
   if (!best) return null;
   const { c, date } = best;
@@ -73,33 +75,40 @@ export function changeFor(
   return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}`, date };
 }
 
+const sameChange = (a: Block["change"], b: Block["change"]) =>
+  a === b || (a !== null && b !== null && a.kind === b.kind && a.label === b.label && a.date === b.date);
+
 function blocksOf(data: TimetableResponse): Block[] {
-  const out: Omit<Block, "change">[] = [];
+  const out: Block[] = [];
   data.courses.forEach((c, ci) => {
     c.schedule.forEach((entry, ei) => {
       const day = entry.day;
       if (typeof day !== "number" || day < 1 || day > 7 || !Array.isArray(entry.periods)) return;
+      const code = c.course_no ?? "";
       const rows = [...new Set(entry.periods.map((p) => PERIODS.findIndex(([id]) => id === String(p))))]
         .filter((i) => i >= 0)
         .sort((a, b) => a - b);
       rows.forEach((row, i) => {
+        // Period by period, since a change may reach only some of a meeting's periods.
+        const change = changeFor({ code, day, from: row, to: row }, data.changes);
         const last = out[out.length - 1];
-        if (i > 0 && last.to === row - 1) last.to = row;
+        if (i > 0 && last.to === row - 1 && sameChange(last.change, change)) last.to = row;
         else
           out.push({
             key: `${ci}-${ei}-${row}`,
             name: c.name,
-            code: c.course_no ?? "",
+            code,
             room: c.classroom ?? "",
             color: c.color,
             day,
             from: row,
             to: row,
+            change,
           });
       });
     });
   });
-  return out.map((b) => ({ ...b, change: changeFor(b, data.changes) }));
+  return out;
 }
 
 export const changesLink = (term: string | null | undefined) =>
@@ -142,6 +151,8 @@ export function Timetable({ studentId }: { studentId: string }) {
   const blocks = data ? blocksOf(data) : [];
   const dayCount = Math.max(5, ...blocks.map((b) => b.day));
   const periodCount = Math.max(10, ...blocks.map((b) => b.to + 1));
+  // A one-period card with a change tag gets a row tall enough to show it, since a touch screen cannot hover.
+  const tall = new Set(blocks.filter((b) => b.from === b.to && b.change).map((b) => b.from));
   const day = pickedDay ?? (todayDay >= 1 && todayDay <= dayCount ? todayDay : 1);
   const dayBlocks = blocks.filter((b) => b.day === day).sort((a, b) => a.from - b.from);
   const codes = new Set(data?.courses.map((c) => c.course_no ?? c.name));
@@ -207,7 +218,9 @@ export function Timetable({ studentId }: { studentId: string }) {
               className="grid min-w-[840px] gap-[3px] tablet:min-w-0"
               style={{
                 gridTemplateColumns: `64px repeat(${dayCount}, minmax(0, 1fr))`,
-                gridTemplateRows: `26px repeat(${periodCount}, 44px)`,
+                gridTemplateRows: `26px ${PERIODS.slice(0, periodCount)
+                  .map((_, p) => (tall.has(p) ? "minmax(44px, auto)" : "44px"))
+                  .join(" ")}`,
               }}
             >
               {DAYS.slice(0, dayCount).map((d, i) => (

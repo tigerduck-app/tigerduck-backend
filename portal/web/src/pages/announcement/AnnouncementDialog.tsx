@@ -38,7 +38,7 @@ function draftOf(b: BulletinDetail | null, taxonomy: Taxonomy): Draft {
     summary: b?.summary ?? "",
     body_clean: b?.body_clean ?? "",
     body_md: b?.body_md ?? "",
-    canonical_org: b?.canonical_org ?? taxonomy.orgs[0]?.id ?? "",
+    canonical_org: b ? (b.canonical_org ?? "") : (taxonomy.orgs[0]?.id ?? ""),
     importance: b?.importance ?? "normal",
     content_tags: b?.content_tags ?? [],
     source_url: b?.source_url ?? "https://announce.ntust.edu.tw/manual",
@@ -224,6 +224,7 @@ export function AnnouncementDialog({
             <label className="flex flex-[1_1_220px] flex-col gap-1.5 text-[13px] font-medium">
               Organization
               <select value={d.canonical_org} onChange={field("canonical_org")} className={cn(fieldClass, "font-normal")}>
+                {d.canonical_org === "" && <option value="" />}
                 {taxonomy.orgs.map((o) => (
                   <option key={o.id} value={o.id}>
                     {o.label}

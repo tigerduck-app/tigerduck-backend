@@ -187,7 +187,7 @@ function UserContent({ user }: { user: UserDetail }) {
             </Link>
           </Button>
           <Button asChild variant="line" size="form" className="[&_svg]:size-[15px]">
-            <Link to="/inspect">
+            <Link to={user.student_id ? `/inspect?student=${encodeURIComponent(user.student_id)}` : "/inspect"}>
               <GraduationCap />
               Moodle data
             </Link>

@@ -27,6 +27,7 @@ from server.auth.models import (  # noqa: E402
     AuthSession,
     DevicePushToken,
     ExternalAccount,
+    ExternalAccountCredential,
     PushDelivery,
     PushJob,
     User,
@@ -64,19 +65,28 @@ def _today() -> date:
     return datetime.now(_TAIPEI).date()
 
 
-async def _user(db_session, student_id: str, *, account: str | None = "active", **fields) -> User:
+async def _user(
+    db_session, student_id: str, *, account: str | None = "active", credential: bool = True, **fields
+) -> User:
+    """A user, with a school account holding a stored credential unless told otherwise."""
     user = User(student_id=student_id, **fields)
     db_session.add(user)
     await db_session.flush()
     if account is not None:
-        db_session.add(
-            ExternalAccount(
-                user_id=user.id,
-                provider="ntust_sso",
-                external_user_id=student_id,
-                credential_status=account,
-            )
+        ea = ExternalAccount(
+            user_id=user.id,
+            provider="ntust_sso",
+            external_user_id=student_id,
+            credential_status=account,
         )
+        db_session.add(ea)
+        if credential:
+            await db_session.flush()
+            db_session.add(
+                ExternalAccountCredential(
+                    external_account_id=ea.id, encryption_key_id="v1", ciphertext=b"c", nonce=b"n", aad="a"
+                )
+            )
     return user
 
 
@@ -171,6 +181,18 @@ async def test_school_accounts_split_signed_in_needs_sign_in_and_failing(
     stats = await user_stats(pool=portal_pool)
 
     assert stats["accounts"] == {"signed_in": 1, "needs_sign_in": 1, "failing": 1}
+
+
+async def test_a_school_account_without_a_stored_credential_needs_sign_in(db_session, portal_pool):
+    """Deregistering a student's last device drops the credential but leaves the
+    status active, and no sync job runs to correct it."""
+    await _user(db_session, "s1")
+    await _user(db_session, "s2", credential=False)
+    await db_session.commit()
+
+    stats = await user_stats(pool=portal_pool)
+
+    assert stats["accounts"] == {"signed_in": 1, "needs_sign_in": 1, "failing": 0}
 
 
 async def test_devices_by_version_feature_share_and_daily_count(db_session, portal_pool):
