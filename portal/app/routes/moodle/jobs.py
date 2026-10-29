@@ -13,22 +13,24 @@ class RetryAllRequest(BaseModel):
     notify: bool = False
 
 
+# The jobs of users waiting for a sign-in (a disabled job): only they get the
+# expire notification (tigerduck-backend#54), and only with an iPhone or iPad
+# syncing, the devices `mark_credentials_invalid` sends it to.
+WAITING_TO_SIGN_IN = """
+    FROM sync_jobs sj
+    WHERE job_type IN ('moodle_assignments', 'ntust_courses')
+      AND status = 'disabled'
+      AND EXISTS (
+          SELECT 1 FROM user_devices d
+          WHERE d.user_id = sj.user_id AND d.deleted_at IS NULL
+            AND d.cloud_sync_enabled AND d.platform IN ('ios', 'ipados')
+      )
+"""
+
+
 async def _waiting_to_sign_in(conn) -> list:
-    """The users with a disabled job, the ones waiting for a sign-in, locked
-    for the reset that follows: only they get the expire notification
-    (tigerduck-backend#54), and only with an iPhone or iPad syncing, the
-    devices `mark_credentials_invalid` sends it to."""
-    rows = await conn.fetch("""
-        SELECT user_id FROM sync_jobs sj
-        WHERE job_type IN ('moodle_assignments', 'ntust_courses')
-          AND status = 'disabled'
-          AND EXISTS (
-              SELECT 1 FROM user_devices d
-              WHERE d.user_id = sj.user_id AND d.deleted_at IS NULL
-                AND d.cloud_sync_enabled AND d.platform IN ('ios', 'ipados')
-          )
-        FOR UPDATE OF sj
-    """)
+    """Those users, locked for the reset that follows."""
+    rows = await conn.fetch(f"SELECT user_id {WAITING_TO_SIGN_IN} FOR UPDATE OF sj")
     return list({r["user_id"] for r in rows})
 
 
@@ -105,7 +107,7 @@ async def retry_all_jobs(
 async def list_moodle_jobs(
     request: Request,
     status: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
     pool=Depends(get_pool),
 ):

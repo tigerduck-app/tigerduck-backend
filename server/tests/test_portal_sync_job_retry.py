@@ -167,7 +167,7 @@ async def test_the_job_list_is_under_the_key_the_jobs_table_reads(
     db_session, portal_pool
 ):
     """tigerduck-backend#55: the Moodle page's Sync jobs table reads `jobs`
-    (portal/web/src/pages/moodle/JobsTable.tsx), and stayed empty while the
+    (portal/web/src/pages/moodle.tsx), and stayed empty while the
     route answered with a bare list."""
     await _job(db_session, "b1", status="failed")
     request = SimpleNamespace(
