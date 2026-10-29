@@ -3,6 +3,8 @@
 // upstream backend schemas it proxies). Keep them in sync if you change
 // either side.
 
+import type { CourseChange } from "@/pages/moodle/types";
+
 export type EnvInfo = {
   env: "development" | "production" | string;
   apns_env: string;
@@ -203,11 +205,14 @@ export type UserDetail = {
   week_start: string;
   courses: {
     id: number;
+    course_no: string | null;
     name: string;
     classroom: string | null;
     schedule: { day?: number; periods?: string[] }[];
     skipped: string[];
   }[];
+  /** The school's changes to those courses, with their class days from `week_start` on. */
+  changes: CourseChange[];
   /** Up to 500, newest first. */
   pushes: UserPush[];
   /** Every push of the last 7 days, by status. */

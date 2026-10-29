@@ -1,8 +1,10 @@
 // This week's classes for one user: the term's course meetings on a
-// weekday-by-period grid, with the dates the user skipped struck through.
+// weekday-by-period grid, with the dates the user skipped or the school
+// cancelled struck through and the school's coming room changes tagged.
 
 import { cn } from "@/lib/cn";
 import type { UserDetail } from "@/types/api";
+import { changeFor } from "../moodle/Timetable";
 
 // NTUST periods and their start times, as in server/config.py
 // `course_period_start_times`.
@@ -24,16 +26,25 @@ const PERIODS: [string, string][] = [
 ];
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-type Block = { name: string; room: string; day: number; from: number; to: number; cancelled: boolean };
+type Block = {
+  name: string;
+  code: string;
+  room: string;
+  day: number;
+  from: number;
+  to: number;
+  cancelled: boolean;
+  tag: string | null;
+};
 
-function isoDate(start: string, offset: number): string {
+export function isoDate(start: string, offset: number): string {
   const d = new Date(`${start}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + offset);
   return d.toISOString().slice(0, 10);
 }
 
 /** Each meeting split into runs of consecutive periods. */
-function blocks(courses: UserDetail["courses"], weekStart: string): Block[] {
+function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
   const out: Block[] = [];
   for (const c of courses) {
     for (const entry of c.schedule) {
@@ -46,15 +57,22 @@ function blocks(courses: UserDetail["courses"], weekStart: string): Block[] {
       rows.forEach((row, i) => {
         const last = out[out.length - 1];
         if (i > 0 && last.to === row - 1) last.to = row;
-        else out.push({ name: c.name, room: c.classroom ?? "", day, from: row, to: row, cancelled });
+        else
+          out.push({ name: c.name, code: c.course_no ?? "", room: c.classroom ?? "", day, from: row, to: row, cancelled, tag: null });
       });
     }
   }
-  return out;
+  const rooms = changes.filter((c) => c.kind === "room");
+  const cancels = changes.filter((c) => c.kind === "cancelled");
+  return out.map((b) => {
+    const cancelled = b.cancelled || changeFor(b, cancels)?.date === isoDate(weekStart, b.day - 1);
+    return { ...b, cancelled, tag: cancelled ? null : (changeFor(b, rooms)?.label ?? null) };
+  });
 }
 
-export function Timetable({ courses, weekStart }: { courses: UserDetail["courses"]; weekStart: string }) {
-  const all = blocks(courses, weekStart);
+export function Timetable({ user }: { user: UserDetail }) {
+  const weekStart = user.week_start;
+  const all = blocks(user);
   // Weekdays and periods 1 to 10 always; a weekend day or evening period only when a class meets then.
   const dayCount = Math.max(5, ...all.map((b) => b.day));
   const periodCount = Math.max(10, ...all.map((b) => b.to + 1));
@@ -64,12 +82,13 @@ export function Timetable({ courses, weekStart }: { courses: UserDetail["courses
   );
   const meetings = all.length;
   const cancelled = all.filter((b) => b.cancelled).map((b) => b.name);
+  const moved = all.filter((b) => b.tag).map((b) => `${b.name} ${b.tag}`);
 
   return (
     <div className="overflow-x-auto">
       <div
         role="img"
-        aria-label={`Timetable for this week with ${meetings} class meetings${cancelled.length ? `; cancelled: ${[...new Set(cancelled)].join(", ")}` : ""}`}
+        aria-label={`Timetable for this week with ${meetings} class meetings${cancelled.length ? `; cancelled: ${[...new Set(cancelled)].join(", ")}` : ""}${moved.length ? `; room changes: ${moved.join(", ")}` : ""}`}
         className="grid min-w-[820px] gap-[3px] phone:min-w-[560px] phone:[--tt-col:100px] phone:[--tt-head:32px]"
         style={{
           gridTemplateColumns: `var(--tt-head, 44px) repeat(${dayCount}, minmax(var(--tt-col, 150px), 1fr))`,
@@ -120,6 +139,14 @@ export function Timetable({ courses, weekStart }: { courses: UserDetail["courses
             {b.cancelled && (
               <span className="mt-auto self-start rounded-full bg-badge-danger px-1.5 py-px text-[10px] font-semibold text-badge-danger-fg">
                 Cancelled
+              </span>
+            )}
+            {b.tag && (
+              <span
+                title={b.tag}
+                className="mt-auto max-w-full self-start truncate rounded-full bg-surface px-1.5 py-px text-[10px] font-semibold text-badge-info-fg"
+              >
+                {b.tag}
               </span>
             )}
           </div>
