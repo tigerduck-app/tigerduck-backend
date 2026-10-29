@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DataTable, useTable, type Column } from "@/components/data-table";
 import {
   ErrorAlert,
+  FormDialog,
   PageHeading,
   Panel,
   Pill,
@@ -89,8 +90,14 @@ type Dialog = { key: number; kind: PinDialogKind; set: PinSet; pin?: Pin };
 
 type HostRow = { host: string; result?: WatchResult };
 
+type Confirm = { key: number; kind: "publish" | "resign" };
+
 function day(iso: string | null): string {
   return iso ? iso.slice(0, 10) : "—";
+}
+
+function shortPin(spki: string): string {
+  return `${spki.slice(0, 10)}…${spki.slice(-6)}`;
 }
 
 function daysFromNow(iso: string): number {
@@ -154,6 +161,11 @@ export function TlsPinsPage() {
     openedDialogs.current += 1;
     setDialog({ ...d, key: openedDialogs.current });
   };
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const openConfirm = (kind: Confirm["kind"]) => {
+    openedDialogs.current += 1;
+    setConfirm({ kind, key: openedDialogs.current });
+  };
 
   const pinsQ = useQuery<TlsPinsResponse>({
     queryKey: ["tls-pins"],
@@ -169,6 +181,7 @@ export function TlsPinsPage() {
     onSuccess: (r, a) => {
       // Another dialog opened meanwhile stays open.
       setDialog((current) => (current?.key === a.dialog ? null : current));
+      setConfirm((current) => (current?.key === a.dialog ? null : current));
       if (!r.publishes) toast.success("Saved");
       else if (r.serial !== null) toast.success(`Published serial ${r.serial}`);
       else toast.warning("Saved, not published: no signing key");
@@ -193,10 +206,8 @@ export function TlsPinsPage() {
   };
 
   const data = pinsQ.data;
-  const pendingCount = (data?.sets ?? []).reduce(
-    (n, s) => n + s.pins.filter((p) => p.pending).length,
-    0,
-  );
+  const pendingPins = (data?.sets ?? []).flatMap((s) => s.pins.filter((p) => p.pending));
+  const pendingCount = pendingPins.length;
 
   return (
     <>
@@ -210,7 +221,7 @@ export function TlsPinsPage() {
               variant="line"
               size="form"
               disabled={action.isPending}
-              onClick={() => action.mutate({ path: "/resign", method: "POST", publishes: true })}
+              onClick={() => openConfirm("resign")}
             >
               <RefreshCw />
               Re-sign now
@@ -219,14 +230,7 @@ export function TlsPinsPage() {
               variant="ink"
               size="form"
               disabled={action.isPending}
-              onClick={() =>
-                action.mutate({
-                  path: "/publish",
-                  method: "POST",
-                  json: { approve: shownPending(data) },
-                  publishes: true,
-                })
-              }
+              onClick={() => openConfirm("publish")}
             >
               <Send />
               Publish now
@@ -269,6 +273,57 @@ export function TlsPinsPage() {
           onClose={() => setDialog(null)}
           onSave={(r) => save(dialog, r)}
         />
+      )}
+
+      {confirm && (
+        <FormDialog
+          open
+          onOpenChange={(open) => !open && setConfirm(null)}
+          title={
+            confirm.kind === "resign"
+              ? "Re-sign the pin document?"
+              : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
+          }
+          width={560}
+          footer={
+            <>
+              <Button variant="line" size="form" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="ink"
+                size="form"
+                disabled={action.isPending}
+                onClick={() =>
+                  action.mutate(
+                    confirm.kind === "resign"
+                      ? { path: "/resign", method: "POST", publishes: true, dialog: confirm.key }
+                      : {
+                          path: "/publish",
+                          method: "POST",
+                          json: { approve: shownPending(data) },
+                          publishes: true,
+                          dialog: confirm.key,
+                        },
+                  )
+                }
+              >
+                {confirm.kind === "resign" ? "Re-sign" : "Publish"}
+              </Button>
+            </>
+          }
+        >
+          {confirm.kind === "publish" && pendingPins.length > 0 && (
+            <ul className="flex flex-col divide-y divide-divider rounded-xl border border-line">
+              {pendingPins.map((p) => (
+                <li key={p.spki} className="flex flex-col gap-0.5 px-4 py-2.5">
+                  <span className="break-words font-medium">{p.label}</span>
+                  <span className="font-mono text-xs text-ink-2">{shortPin(p.spki)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </FormDialog>
       )}
     </>
   );
@@ -317,7 +372,7 @@ function PinSetSection({
       cell: (p) => (
         <div className="flex items-center gap-1">
           <span title={p.spki} className="whitespace-nowrap font-mono text-xs text-ink-2">
-            {p.spki.slice(0, 10)}…{p.spki.slice(-6)}
+            {shortPin(p.spki)}
           </span>
           <button
             type="button"
