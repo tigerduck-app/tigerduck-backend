@@ -52,7 +52,7 @@ export type TableModel<R> = {
   columns: readonly Column<R>[];
   /** The rows on the current page. */
   rows: R[];
-  /** Rows left after the filters and `match`. */
+  /** Rows left after the filters and the search. */
   total: number;
   page: number;
   pages: number;
@@ -72,25 +72,33 @@ function compare(a: string | number, b: string | number): number {
 }
 
 /**
- * Sorting, filtering and paging state for a `DataTable`. `match` narrows the
- * rows further, for a search box; `perPage: Infinity` turns paging off.
+ * Sorting, filtering and paging state for a `DataTable`. A non-empty `search`
+ * keeps the rows `match` accepts and returns to the first page whenever it
+ * changes; `perPage: Infinity` turns paging off.
  */
 export function useTable<R>({
   rows,
   columns,
   perPage = 10,
   initialSort = null,
+  search = "",
   match,
 }: {
   rows: readonly R[];
   columns: readonly Column<R>[];
   perPage?: number;
   initialSort?: SortState | null;
-  match?: (row: R) => boolean;
+  search?: string;
+  match?: (row: R, search: string) => boolean;
 }): TableModel<R> {
   const [sort, setSort] = React.useState<SortState | null>(initialSort);
   const [filters, setFilters] = React.useState<Filters>({});
   const [page, setPage] = React.useState(1);
+  const [searched, setSearched] = React.useState(search);
+  if (searched !== search) {
+    setSearched(search);
+    setPage(1);
+  }
 
   // `except` leaves one column's own filter out, for that column's counts.
   const passes = (r: R, except?: string) =>
@@ -99,7 +107,7 @@ export function useTable<R>({
       return (
         c.key === except || !chosen?.length || !c.filterValue || chosen.includes(c.filterValue(r))
       );
-    }) && (!match || match(r));
+    }) && (!search || !match || match(r, search));
   const filtered = rows.filter((r) => passes(r));
   const sortColumn = sort && columns.find((c) => c.key === sort.key);
   const sorted = sortColumn?.sortValue

@@ -263,9 +263,9 @@ export function LinksPage() {
     rows: links ?? [],
     columns,
     initialSort: { key: "name", dir: "asc" },
-    match: q
-      ? (l) => l.name.toLowerCase().includes(q) || l.target_url.toLowerCase().includes(q)
-      : undefined,
+    search: q,
+    match: (l, term) =>
+      l.name.toLowerCase().includes(term) || l.target_url.toLowerCase().includes(term),
   });
   const checkFilter = table.filters.check ?? [];
   const host = env.data?.backend_public_url.replace(/^https?:\/\//, "").replace(/\/+$/, "") ?? "";
@@ -322,10 +322,7 @@ export function LinksPage() {
               aria-label="Search links"
               placeholder="Name or target"
               value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                table.setPage(1);
-              }}
+              onChange={(e) => setQuery(e.target.value)}
               className="min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-3"
             />
           </label>
