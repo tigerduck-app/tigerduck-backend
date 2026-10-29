@@ -3,9 +3,8 @@ leaves behind.
 
 A job whose last run failed on the school's side stays pending and waits
 for its policy interval (server/syncjobs/executor.py), so a button that
-picks jobs by status alone would pass over it. Lives in the server suite
-for the reason test_calendar_gaps.py gives: the portal has no test runner
-of its own.
+picks jobs by status alone would pass over it. Lives in the server suite,
+the only one with the server code and a database.
 """
 
 from __future__ import annotations

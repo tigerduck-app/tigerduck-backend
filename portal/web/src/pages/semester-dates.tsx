@@ -8,10 +8,9 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { AlertTriangle, CalendarDays, Pencil, Plus, Trash2 } from "lucide-react";
+import { CalendarDays, Pencil, Plus, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -48,21 +47,11 @@ type Holiday = {
   end_date: string;
 };
 
-/** A between-term stretch that no holiday covers — see `_uncovered_gaps`. */
-type Gap = {
-  after: string;
-  before: string;
-  start_date: string;
-  end_date: string;
-  uncovered_days: number;
-};
-
 type CalendarResponse = {
   terms: Term[];
   holidays: Holiday[];
   /** Terms the clients have filed courses under that have no dates yet. */
   undated_terms: string[];
-  gaps: Gap[];
 };
 
 /** "1151" -> "115-1", matching how both apps render a term. */
@@ -196,38 +185,12 @@ export function SemesterDatesPage() {
     return [...dated, ...discovered].sort((a, b) => b.code.localeCompare(a.code));
   }, [data]);
 
-  const warnings = useMemo(() => {
-    if (!data) return [];
-    const out: { key: string; text: string }[] = data.gaps.map((g) => ({
-      key: `gap-${g.after}-${g.before}`,
-      text:
-        `${g.uncovered_days} day(s) between ${formatCode(g.after)} and ` +
-        `${formatCode(g.before)} (${formatRange(g.start_date, g.end_date)}) ` +
-        `have no holiday. Devices keep their last timetable, so class ` +
-        `reminders will fire on those days.`,
-    }));
-    return out;
-  }, [data]);
-
   return (
     <div className="space-y-6">
       <PageHeader
         title="Semester dates"
         description="Term ranges and school holidays. Served to every app — signed in or not — from /v3/calendar/semesters."
       />
-
-      {warnings.length > 0 && (
-        <Card className="border-amber-500/50 bg-amber-500/5">
-          <CardContent className="space-y-2 py-4">
-            {warnings.map((w) => (
-              <div key={w.key} className="flex gap-2 text-sm">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
-                <span>{w.text}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
 
       <Section
         title="Semesters"

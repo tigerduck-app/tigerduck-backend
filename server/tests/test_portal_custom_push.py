@@ -2,8 +2,8 @@
 
 The portal writes these push_jobs rows with raw SQL and does not import the
 server package, so nothing else keeps the payload in the shape the push
-pipeline and the two apps expect. Lives in the server suite for the reason
-test_calendar_gaps.py gives: the portal has no test runner of its own.
+pipeline and the two apps expect. Lives in the server suite, the only one
+with the server code and a database.
 """
 
 from __future__ import annotations

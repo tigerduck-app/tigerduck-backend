@@ -60,7 +60,7 @@ def _parse_range(body: dict) -> tuple[date, date] | JSONResponse:
 
 @router.get("")
 async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
-    """Terms, holidays, and the coverage gaps worth an operator's attention."""
+    """Terms, holidays, and the terms the clients use that have no dates."""
     async with pool.acquire() as conn:
         terms = await conn.fetch(
             "SELECT code, start_date, end_date, name_zh, name_en "
@@ -85,50 +85,8 @@ async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
             "terms": [_term_to_dict(r) for r in terms],
             "holidays": [_holiday_to_dict(r) for r in holidays],
             "undated_terms": [r["code"] for r in undated],
-            "gaps": _uncovered_gaps(terms, holidays),
         }
     )
-
-
-def _uncovered_gaps(terms, holidays) -> list[dict]:
-    """Between-term stretches that no holiday covers.
-
-    Suppression comes only from holidays, so a gap nobody authored a holiday
-    for is a stretch where every device keeps ringing for the previous
-    term's timetable. This is the one failure mode of that rule, and it is
-    silent — the operator sees nothing wrong until a student is woken at 8am
-    over winter break. Surfacing it turns a silent mistake into a visible
-    to-do.
-    """
-    ordered = sorted(terms, key=lambda r: r["start_date"])
-    covered = [(h["start_date"], h["end_date"]) for h in holidays]
-    gaps: list[dict] = []
-    for earlier, later in zip(ordered, ordered[1:]):
-        gap_start = earlier["end_date"]
-        gap_end = later["start_date"]
-        # The day after one term ends through the day before the next opens.
-        # A zero-length or negative gap means the terms touch or overlap;
-        # there is nothing to cover.
-        if (gap_end - gap_start).days <= 1:
-            continue
-        day_after = gap_start.toordinal() + 1
-        day_before = gap_end.toordinal() - 1
-        uncovered = [
-            date.fromordinal(d)
-            for d in range(day_after, day_before + 1)
-            if not any(s <= date.fromordinal(d) <= e for s, e in covered)
-        ]
-        if uncovered:
-            gaps.append(
-                {
-                    "after": earlier["code"],
-                    "before": later["code"],
-                    "start_date": uncovered[0].isoformat(),
-                    "end_date": uncovered[-1].isoformat(),
-                    "uncovered_days": len(uncovered),
-                }
-            )
-    return gaps
 
 
 @router.put("/terms/{code}")
