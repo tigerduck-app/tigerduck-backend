@@ -2,6 +2,27 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Breakpoints of the shell, measured on its `@container/app` root. */
+@custom-variant tablet {
+  @container app (max-width: 1100px) {
+    @slot;
+  }
+}
+/* The sidebar's icon rail: tablet width, or collapsed by the operator. */
+@custom-variant rail {
+  @container app (max-width: 1100px) {
+    @slot;
+  }
+  &:where([data-rail="true"], [data-rail="true"] *) {
+    @slot;
+  }
+}
+@custom-variant phone {
+  @container app (max-width: 720px) {
+    @slot;
+  }
+}
+
 @utility container {
   margin-inline: auto;
   padding-inline: 1.5rem;
@@ -42,9 +63,56 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
 
-  --font-sans:
-    InterVariable, Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-sans: "IBM Plex Sans", "Noto Sans TC", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Portal redesign tokens; .dark below redefines the themed ones. */
+  --color-ground: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-line: #e3e5e9;
+  --color-divider: #eef0f3;
+  --color-field: #d5d8de;
+  --color-soft: #e9ebef;
+  --color-row-hover: #f8f9fb;
+  --color-selected: #eef2fc;
+  --color-ink: #15171a;
+  --color-ink-2: #3a3f47;
+  --color-ink-3: #5b616b;
+  --color-on-ink: #ffffff;
+  --color-disabled: #c4c9d1;
+  --color-link: #2457d6;
+  --color-link-hover: #1a3fa0;
+  --color-danger: #b42318;
+  --color-brand: #f5b841;
+  --color-chart-1: #2a78d6;
+
+  --color-side: #14161a;
+  --color-side-raised: #1c1f24;
+  --color-side-active: #2a2f37;
+  --color-side-hover: #21252b;
+  --color-side-chip: #262a31;
+  --color-side-ink: #c4c9d1;
+  --color-side-muted: #8b929c;
+
+  --color-badge-neutral: #e9ebef;
+  --color-badge-neutral-fg: #3a3f47;
+  --color-badge-info: #e8f0fe;
+  --color-badge-info-fg: #1f4fc1;
+  --color-badge-success: #e7f5ec;
+  --color-badge-success-fg: #17663a;
+  --color-badge-warning: #fff4db;
+  --color-badge-warning-fg: #8a5300;
+  --color-badge-danger: #fdecec;
+  --color-badge-danger-fg: #a61b1b;
+  --color-badge-violet: #efeafb;
+  --color-badge-violet-fg: #5b3cc4;
+  --color-badge-orange: #fff2e0;
+  --color-badge-orange-fg: #9a4a00;
+
+  --color-dot-ok: #1f8a4c;
+  --color-dot-warn: #d08a00;
+  --color-dot-bad: #c4321f;
+  --color-dot-off: #9aa0a8;
 
   --animate-accordion-down: accordion-down 0.2s ease-out;
   --animate-accordion-up: accordion-up 0.2s ease-out;
@@ -165,6 +233,42 @@
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
     --ring: 224.3 76.3% 48%;
+
+    /* Derived from the shadcn dark palette above; the sidebar keeps its colors. */
+    --color-ground: hsl(222.2 47% 6%);
+    --color-surface: hsl(222.2 47% 9%);
+    --color-line: hsl(217.2 32.6% 17.5%);
+    --color-divider: hsl(217.2 32.6% 14%);
+    --color-field: hsl(217.2 32.6% 24%);
+    --color-soft: hsl(217.2 32.6% 17.5%);
+    --color-row-hover: hsl(217.2 32.6% 12%);
+    --color-selected: hsl(221 55% 17%);
+    --color-ink: hsl(210 40% 98%);
+    --color-ink-2: hsl(214 25% 84%);
+    --color-ink-3: hsl(215 20.2% 65.1%);
+    --color-on-ink: hsl(222.2 47% 9%);
+    --color-disabled: hsl(217.2 32.6% 26%);
+    --color-link: hsl(217.2 91.2% 68%);
+    --color-link-hover: hsl(217.2 91.2% 78%);
+    --color-danger: hsl(0 62.8% 50.6%);
+    --color-chart-1: #4a90e2;
+
+    --color-badge-neutral: hsl(217.2 32.6% 17.5%);
+    --color-badge-neutral-fg: hsl(214 25% 84%);
+    --color-badge-info: rgb(59 130 246 / 0.16);
+    --color-badge-info-fg: #93b4f8;
+    --color-badge-success: rgb(34 197 94 / 0.15);
+    --color-badge-success-fg: #6ee7a0;
+    --color-badge-warning: rgb(245 158 11 / 0.16);
+    --color-badge-warning-fg: #fbcb6b;
+    --color-badge-danger: rgb(239 68 68 / 0.16);
+    --color-badge-danger-fg: #fca5a5;
+    --color-badge-violet: rgb(139 92 246 / 0.18);
+    --color-badge-violet-fg: #c4b5fd;
+    --color-badge-orange: rgb(249 115 22 / 0.16);
+    --color-badge-orange-fg: #fdba74;
+
+    --color-dot-off: #6b7280;
   }
 }
 
@@ -173,13 +277,12 @@
     @apply border-border;
   }
 
+  :focus-visible {
+    outline: 2px solid var(--color-link);
+    outline-offset: 2px;
+  }
+
   body {
     @apply bg-background text-foreground;
-    font-feature-settings:
-      "rlig" 1,
-      "calt" 1,
-      "cv11" 1,
-      "ss01" 1,
-      "ss03" 1;
   }
 }

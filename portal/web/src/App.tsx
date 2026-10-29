@@ -12,6 +12,7 @@ import { SemesterDatesPage } from "@/pages/semester-dates";
 import { DeregisterPage } from "@/pages/deregister";
 import { LinksPage } from "@/pages/links";
 import { TlsPinsPage } from "@/pages/tls-pins";
+import { StackPage } from "@/pages/stack";
 
 export function App() {
   return (
@@ -31,6 +32,7 @@ export function App() {
         <Route path="links" element={<LinksPage />} />
         <Route path="deregister" element={<DeregisterPage />} />
         <Route path="tls-pins" element={<TlsPinsPage />} />
+        <Route path="stack" element={<StackPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

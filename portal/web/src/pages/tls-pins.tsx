@@ -2,35 +2,28 @@
 // watcher last saw on each host, and every document published. Changes go
 // through the backend, which holds the signing key and audits each one.
 
-import { useRef, useState } from "react";
+import { Fragment, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, RefreshCw, Send, Trash2 } from "lucide-react";
+import { ChevronRight, Copy, Plus, RefreshCw, Send, Trash2 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/cn";
+import { copyText } from "@/lib/copy";
+import { fullDate, monthDayTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { PageHeader, Section } from "@/components/ui/section";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DataTable, useTable, type Column } from "@/components/data-table";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
+  ErrorAlert,
+  FormDialog,
+  PageHeading,
+  Panel,
+  Pill,
+  Switch,
+  type DotTone,
+  type Tone,
+} from "@/components/page";
+import { TlsPinDialog, type PinDialogKind, type PinDialogResult } from "./tls-pins/TlsPinDialog";
 
 type Pin = {
   spki: string;
@@ -84,26 +77,39 @@ type TlsPinsResponse = { sets: PinSet[]; documents: PinDocument[] };
 
 type ActionResult = { ok: boolean; serial: number | null };
 
-type DraftFields =
-  | { kind: "pin"; set: string; spki: string; label: string }
-  | { kind: "hosts"; set: string; hosts: string }
-  | { kind: "expiry"; set: string; date: string };
+type Action = {
+  path: string;
+  method: "POST" | "PUT";
+  json?: unknown;
+  publishes: boolean;
+  dialog?: number;
+};
+type Mutate = (a: Action) => void;
+
 // `key` tells dialogs apart, so a late answer closes only the one that sent it.
-type Draft = DraftFields & { key: number };
+type Dialog = { key: number; kind: PinDialogKind; set: PinSet; pin?: Pin };
+
+type HostRow = { host: string; result?: WatchResult };
+
+type Confirm = { key: number; kind: "publish" | "resign" };
 
 function day(iso: string | null): string {
   return iso ? iso.slice(0, 10) : "—";
 }
 
-function time(iso: string): string {
-  return new Date(iso).toLocaleString();
+function shortPin(spki: string): string {
+  return `${spki.slice(0, 10)}…${spki.slice(-6)}`;
 }
 
-const STATUS_VARIANT = {
-  trusted: "success",
-  untrusted: "destructive",
-  error: "warning",
-} as const;
+function daysFromNow(iso: string): number {
+  return Math.round((Date.parse(iso) - Date.now()) / 86_400_000);
+}
+
+function commonName(subject: string): string {
+  return /(?:^|,)CN=([^,]+)/.exec(subject)?.[1] ?? subject;
+}
+
+const setPath = (id: string, rest: string) => `/sets/${encodeURIComponent(id)}${rest}`;
 
 // Publish now approves only the pending pins on screen, not ones found since.
 const shownPending = (data?: TlsPinsResponse) =>
@@ -111,13 +117,48 @@ const shownPending = (data?: TlsPinsResponse) =>
     (data?.sets ?? []).map((s) => [s.id, s.pins.filter((p) => p.pending).map((p) => p.spki)]),
   );
 
+type PinStatus = "Published" | "Not published" | "Unseen 90 days" | "Renewal root";
+const PIN_STATUSES: PinStatus[] = ["Published", "Not published", "Unseen 90 days", "Renewal root"];
+const PIN_TONE: Record<PinStatus, Tone> = {
+  Published: "success",
+  "Not published": "warning",
+  "Unseen 90 days": "orange",
+  "Renewal root": "neutral",
+};
+
+function statusOf(p: Pin): PinStatus {
+  if (p.pending) return "Not published";
+  if (p.stale) return "Unseen 90 days";
+  // Never served by a monitored host: kept for the chain that replaces today's.
+  if (p.last_seen_at === null) return "Renewal root";
+  return "Published";
+}
+
+const RESULT_TONE: Record<WatchResult["status"], [Tone, DotTone]> = {
+  trusted: ["success", "ok"],
+  untrusted: ["danger", "bad"],
+  error: ["warning", "warn"],
+};
+
+function reasonTone(reason: string): Tone {
+  if (reason.includes("remove")) return "orange";
+  if (reason.includes("expir")) return "violet";
+  if (reason.includes("resign")) return "neutral";
+  return "info";
+}
+
 export function TlsPinsPage() {
   const qc = useQueryClient();
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
   const openedDialogs = useRef(0);
-  const openDraft = (fields: DraftFields) => {
+  const openDialog = (d: Omit<Dialog, "key">) => {
     openedDialogs.current += 1;
-    setDraft({ ...fields, key: openedDialogs.current });
+    setDialog({ ...d, key: openedDialogs.current });
+  };
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const openConfirm = (kind: Confirm["kind"]) => {
+    openedDialogs.current += 1;
+    setConfirm({ kind, key: openedDialogs.current });
   };
 
   const pinsQ = useQuery<TlsPinsResponse>({
@@ -126,20 +167,15 @@ export function TlsPinsPage() {
   });
 
   const action = useMutation({
-    mutationFn: (a: {
-      path: string;
-      method: "POST" | "PUT";
-      json?: unknown;
-      publishes: boolean;
-      dialog?: number;
-    }) =>
+    mutationFn: (a: Action) =>
       api<ActionResult>(`/api/tls-pins${a.path}`, {
         method: a.method,
         json: a.json,
       }).then((r) => ({ ...r, publishes: a.publishes })),
     onSuccess: (r, a) => {
       // Another dialog opened meanwhile stays open.
-      setDraft((current) => (current?.key === a.dialog ? null : current));
+      setDialog((current) => (current?.key === a.dialog ? null : current));
+      setConfirm((current) => (current?.key === a.dialog ? null : current));
       if (!r.publishes) toast.success("Saved");
       else if (r.serial !== null) toast.success(`Published serial ${r.serial}`);
       else toast.warning("Saved, not published: no signing key");
@@ -149,352 +185,467 @@ export function TlsPinsPage() {
       toast.error(e instanceof ApiError ? e.message : "Request failed"),
   });
 
-  const setPath = (id: string, rest: string) =>
-    `/sets/${encodeURIComponent(id)}${rest}`;
-
-  const save = () => {
-    if (!draft) return;
-    if (draft.kind === "pin") {
-      action.mutate({
-        path: setPath(draft.set, "/pins"),
-        method: "POST",
-        json: { spki: draft.spki.trim(), label: draft.label.trim() },
-        publishes: true,
-        dialog: draft.key,
-      });
-    } else if (draft.kind === "hosts") {
-      action.mutate({
-        path: setPath(draft.set, "/monitored-hosts"),
-        method: "PUT",
-        json: {
-          hosts: draft.hosts
-            .split("\n")
-            .map((h) => h.trim())
-            .filter(Boolean),
-        },
-        publishes: false,
-        dialog: draft.key,
-      });
+  const save = (d: Dialog, r: PinDialogResult) => {
+    const id = d.set.id;
+    const send = (a: Omit<Action, "dialog">) => action.mutate({ ...a, dialog: d.key });
+    if (r.kind === "pin") {
+      send({ path: setPath(id, "/pins"), method: "POST", json: { spki: r.spki, label: r.label }, publishes: true });
+    } else if (r.kind === "hosts") {
+      send({ path: setPath(id, "/monitored-hosts"), method: "PUT", json: { hosts: r.hosts }, publishes: false });
+    } else if (r.kind === "expiry") {
+      send({ path: setPath(id, "/expires-at"), method: "PUT", json: { expires_at: `${r.date}T00:00:00Z` }, publishes: true });
     } else {
-      action.mutate({
-        path: setPath(draft.set, "/expires-at"),
-        method: "PUT",
-        json: { expires_at: `${draft.date}T00:00:00Z` },
-        publishes: true,
-        dialog: draft.key,
-      });
+      send({ path: setPath(id, "/pins/remove"), method: "POST", json: { spki: r.spki }, publishes: true });
     }
   };
 
   const data = pinsQ.data;
+  const pendingPins = (data?.sets ?? []).flatMap((s) => s.pins.filter((p) => p.pending));
+  const pendingCount = pendingPins.length;
 
   return (
-    <div className="space-y-6">
-      <PageHeader
+    <>
+      <PageHeading
+        group="System"
         title="TLS pins"
-        description="Signed into /.well-known/tigerduck/tls-pins.json, which the apps verify. The watcher checks every monitored host hourly."
+        meta="/.well-known/tigerduck/tls-pins.json · watcher hourly"
         actions={
           <>
             <Button
-              size="sm"
-              variant="outline"
+              variant="line"
+              size="form"
               disabled={action.isPending}
-              onClick={() =>
-                action.mutate({ path: "/resign", method: "POST", publishes: true })
-              }
+              onClick={() => openConfirm("resign")}
             >
-              <RefreshCw className="mr-1 h-4 w-4" /> Re-sign now
+              <RefreshCw />
+              Re-sign now
             </Button>
             <Button
-              size="sm"
+              variant="ink"
+              size="form"
               disabled={action.isPending}
-              onClick={() =>
-                action.mutate({
-                  path: "/publish",
-                  method: "POST",
-                  json: { approve: shownPending(data) },
-                  publishes: true,
-                })
-              }
+              onClick={() => openConfirm("publish")}
             >
-              <Send className="mr-1 h-4 w-4" /> Publish now
+              <Send />
+              Publish now
+              {pendingCount > 0 && (
+                <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-brand px-1.5 text-xs font-semibold text-side">
+                  {pendingCount}
+                </span>
+              )}
             </Button>
           </>
         }
       />
 
-      {pinsQ.isLoading && <Skeleton className="h-48 w-full" />}
+      {pinsQ.isLoading && <Skeleton className="h-64 w-full rounded-[14px]" />}
       {pinsQ.isError && (
-        <Card>
-          <CardContent className="text-sm text-destructive">
-            Failed to load TLS pins: {(pinsQ.error as Error).message}
-          </CardContent>
-        </Card>
+        <ErrorAlert className="items-center" onRetry={() => pinsQ.refetch()}>
+          Failed to load TLS pins: {(pinsQ.error as Error).message}
+        </ErrorAlert>
       )}
       {data?.sets.map((s) => (
-        <Section
+        <PinSetSection
           key={s.id}
-          title={s.id}
-          description={`${s.domains
-            .map((d) => (d.include_subdomains ? `*.${d.name}` : d.name))
-            .join(", ")} · expires ${day(s.expires_at)}`}
-          actions={
-            <div className="flex flex-wrap items-center gap-2">
-              <Label className="flex items-center gap-2 text-sm">
-                <Checkbox
-                  checked={s.auto_publish}
-                  disabled={action.isPending}
-                  onCheckedChange={(v) =>
-                    action.mutate({
-                      path: setPath(s.id, "/auto-publish"),
-                      method: "PUT",
-                      json: { enabled: v === true },
-                      publishes: false,
-                    })
-                  }
-                />
-                Auto-publish
-              </Label>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  openDraft({ kind: "expiry", set: s.id, date: day(s.expires_at) })
-                }
-              >
-                Extend expiry
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  openDraft({
-                    kind: "hosts",
-                    set: s.id,
-                    hosts: s.monitored_hosts.join("\n"),
-                  })
-                }
-              >
-                Edit hosts
-              </Button>
-              <Button
-                size="sm"
-                onClick={() => openDraft({ kind: "pin", set: s.id, spki: "", label: "" })}
-              >
-                <Plus className="mr-1 h-4 w-4" /> Add pin
-              </Button>
-            </div>
-          }
-        >
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Label</TableHead>
-                <TableHead>Pin</TableHead>
-                <TableHead>Source</TableHead>
-                <TableHead>First seen</TableHead>
-                <TableHead>Last seen</TableHead>
-                <TableHead className="w-12" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {s.pins.map((p) => (
-                <TableRow key={p.spki}>
-                  <TableCell className="min-w-40 max-w-64 break-words">
-                    {p.label}
-                    {p.pending && (
-                      <Badge variant="warning" className="ml-2">
-                        not published
-                      </Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="min-w-72 font-mono text-xs break-all">{p.spki}</TableCell>
-                  <TableCell>{p.source}</TableCell>
-                  <TableCell className="whitespace-nowrap">{day(p.first_seen_at)}</TableCell>
-                  <TableCell className="whitespace-nowrap">
-                    {day(p.last_seen_at)}
-                    {p.stale && (
-                      <Badge variant="warning" className="ml-2">
-                        unseen 90 days
-                      </Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      disabled={
-                        action.isPending ||
-                        (!p.pending && s.pins.filter((q) => !q.pending).length === 1)
-                      }
-                      onClick={() => {
-                        if (!confirm(`Remove ${p.label} from ${s.id} and publish?`)) return;
-                        action.mutate({
-                          path: setPath(s.id, "/pins/remove"),
-                          method: "POST",
-                          json: { spki: p.spki },
-                          publishes: true,
-                        });
-                      }}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Host</TableHead>
-                <TableHead>Checked</TableHead>
-                <TableHead>Result</TableHead>
-                <TableHead>Chain</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {s.monitored_hosts.map((host) => {
-                const r = s.watch_results[host];
-                return (
-                  <TableRow key={host}>
-                    <TableCell className="whitespace-nowrap font-medium">{host}</TableCell>
-                    <TableCell className="whitespace-nowrap">
-                      {r ? time(r.checked_at) : "—"}
-                    </TableCell>
-                    <TableCell className="min-w-40">
-                      {r && (
-                        <div className="space-y-1">
-                          <Badge variant={STATUS_VARIANT[r.status]}>{r.status}</Badge>
-                          {r.via_aia && <Badge variant="muted">AIA</Badge>}
-                          {r.added.length > 0 && (
-                            <Badge variant="warning">{r.added.length} pins added</Badge>
-                          )}
-                          {r.detail && (
-                            <div className="text-xs text-muted-foreground break-words">
-                              {r.detail}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="min-w-80 text-xs">
-                      {r?.chain.map((c) => (
-                        <div key={c.spki} className="break-words">
-                          {c.subject}
-                          <span className="ml-1 text-muted-foreground">
-                            until {day(c.not_after)}
-                          </span>
-                        </div>
-                      ))}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </Section>
+          set={s}
+          busy={action.isPending}
+          mutate={action.mutate}
+          openDialog={openDialog}
+        />
       ))}
+      {data && <DocumentsPanel documents={data.documents} />}
 
-      {data && (
-        <Section title="Documents">
-          {data.documents.length === 0 ? (
-            <p className="py-4 text-sm text-muted-foreground">
-              No document yet. The apps use their built-in pins.
-            </p>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Serial</TableHead>
-                  <TableHead>Reason</TableHead>
-                  <TableHead>Key</TableHead>
-                  <TableHead>Issued</TableHead>
-                  <TableHead>Expires</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.documents.map((d) => (
-                  <TableRow key={d.serial}>
-                    <TableCell className="font-mono text-xs">{d.serial}</TableCell>
-                    <TableCell>{d.reason}</TableCell>
-                    <TableCell>{d.key_id}</TableCell>
-                    <TableCell className="whitespace-nowrap">{time(d.issued_at)}</TableCell>
-                    <TableCell className="whitespace-nowrap">{time(d.expires_at)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </Section>
+      {dialog && (
+        <TlsPinDialog
+          key={dialog.key}
+          kind={dialog.kind}
+          setId={dialog.set.id}
+          hosts={dialog.set.monitored_hosts}
+          expiresAt={dialog.set.expires_at}
+          pin={dialog.pin}
+          pending={action.isPending}
+          onClose={() => setDialog(null)}
+          onSave={(r) => save(dialog, r)}
+        />
       )}
 
-      <Dialog open={draft !== null} onOpenChange={(o) => !o && setDraft(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {draft?.kind === "pin"
-                ? `Add pin to ${draft.set}`
-                : draft?.kind === "hosts"
-                  ? `Monitored hosts of ${draft.set}`
-                  : `Extend ${draft?.set}`}
-            </DialogTitle>
-          </DialogHeader>
-          {draft?.kind === "pin" && (
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="pin-spki">SPKI SHA-256 (base64)</Label>
-                <Input
-                  id="pin-spki"
-                  className="font-mono text-xs"
-                  value={draft.spki}
-                  onChange={(e) => setDraft({ ...draft, spki: e.target.value })}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="pin-label">Label</Label>
-                <Input
-                  id="pin-label"
-                  value={draft.label}
-                  onChange={(e) => setDraft({ ...draft, label: e.target.value })}
-                />
-              </div>
-            </div>
+      {confirm && (
+        <FormDialog
+          open
+          onOpenChange={(open) => !open && setConfirm(null)}
+          title={
+            confirm.kind === "resign"
+              ? "Re-sign the pin document?"
+              : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
+          }
+          width={560}
+          footer={
+            <>
+              <Button variant="line" size="form" onClick={() => setConfirm(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="ink"
+                size="form"
+                disabled={action.isPending}
+                onClick={() =>
+                  action.mutate(
+                    confirm.kind === "resign"
+                      ? { path: "/resign", method: "POST", publishes: true, dialog: confirm.key }
+                      : {
+                          path: "/publish",
+                          method: "POST",
+                          json: { approve: shownPending(data) },
+                          publishes: true,
+                          dialog: confirm.key,
+                        },
+                  )
+                }
+              >
+                {confirm.kind === "resign" ? "Re-sign" : "Publish"}
+              </Button>
+            </>
+          }
+        >
+          {confirm.kind === "publish" && pendingPins.length > 0 && (
+            <ul className="flex flex-col divide-y divide-divider rounded-xl border border-line">
+              {pendingPins.map((p) => (
+                <li key={p.spki} className="flex flex-col gap-0.5 px-4 py-2.5">
+                  <span className="break-words font-medium">{p.label}</span>
+                  <span className="font-mono text-xs text-ink-2">{shortPin(p.spki)}</span>
+                </li>
+              ))}
+            </ul>
           )}
-          {draft?.kind === "hosts" && (
-            <div className="space-y-1.5">
-              <Label htmlFor="pin-hosts">One host or host:port per line</Label>
-              <Textarea
-                id="pin-hosts"
-                rows={8}
-                className="font-mono text-xs"
-                value={draft.hosts}
-                onChange={(e) => setDraft({ ...draft, hosts: e.target.value })}
-              />
-            </div>
-          )}
-          {draft?.kind === "expiry" && (
-            <div className="space-y-1.5">
-              <Label htmlFor="pin-expiry">New expiry (UTC)</Label>
-              <Input
-                id="pin-expiry"
-                type="date"
-                value={draft.date}
-                onChange={(e) => setDraft({ ...draft, date: e.target.value })}
-              />
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDraft(null)}>
-              Cancel
-            </Button>
-            <Button disabled={action.isPending} onClick={save}>
-              Save
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </FormDialog>
+      )}
+    </>
+  );
+}
+
+function SubHeading({ title, aside, divided }: { title: string; aside: string; divided?: boolean }) {
+  return (
+    <div
+      className={cn(
+        "flex items-baseline justify-between gap-3 px-6 pb-1.5 phone:px-4",
+        divided ? "border-t border-line pt-5" : "pt-3.5",
+      )}
+    >
+      <h3 className="text-sm font-semibold">{title}</h3>
+      <span className="text-xs text-ink-3">{aside}</span>
     </div>
+  );
+}
+
+function PinSetSection({
+  set: s,
+  busy,
+  mutate,
+  openDialog,
+}: {
+  set: PinSet;
+  busy: boolean;
+  mutate: Mutate;
+  openDialog: (d: Omit<Dialog, "key">) => void;
+}) {
+  const published = s.pins.filter((p) => !p.pending).length;
+  const left = daysFromNow(s.expires_at);
+
+  const pinColumns: Column<Pin>[] = [
+    {
+      key: "label",
+      label: "Label",
+      sortValue: (p) => p.label,
+      className: "min-w-[180px] break-words font-medium",
+      cell: (p) => p.label,
+    },
+    {
+      key: "spki",
+      label: "Pin",
+      hide: "phone",
+      cell: (p) => (
+        <div className="flex items-center gap-1">
+          <span title={p.spki} className="whitespace-nowrap font-mono text-xs text-ink-2">
+            {shortPin(p.spki)}
+          </span>
+          <button
+            type="button"
+            aria-label="Copy pin"
+            onClick={() => copyText(p.spki, "Copied pin")}
+            className="flex size-7 items-center justify-center rounded-md text-ink-3 hover:bg-soft hover:text-ink"
+          >
+            <Copy className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ),
+    },
+    {
+      key: "status",
+      label: "Status",
+      sortValue: statusOf,
+      filterValue: statusOf,
+      filterOptions: PIN_STATUSES,
+      cell: (p) => <Pill tone={PIN_TONE[statusOf(p)]}>{statusOf(p)}</Pill>,
+    },
+    {
+      key: "source",
+      label: "Source",
+      sortValue: (p) => p.source,
+      filterValue: (p) => p.source,
+      hide: "phone",
+      className: "text-ink-2",
+      cell: (p) => p.source,
+    },
+    {
+      key: "first",
+      label: "First seen",
+      sortValue: (p) => p.first_seen_at ?? "",
+      hide: "tablet",
+      className: "whitespace-nowrap tabular-nums text-ink-2",
+      cell: (p) => day(p.first_seen_at),
+    },
+    {
+      key: "last",
+      label: "Last seen",
+      sortValue: (p) => p.last_seen_at ?? "",
+      hide: "phone",
+      className: "whitespace-nowrap tabular-nums text-ink-2",
+      cell: (p) => day(p.last_seen_at),
+    },
+    {
+      key: "actions",
+      label: "",
+      className: "py-2 text-right last:pr-4",
+      cell: (p) => {
+        const lastOne = !p.pending && published === 1;
+        return (
+          <Button
+            variant="quiet"
+            size="iconSm"
+            aria-label={`Remove ${p.label}`}
+            title={lastOne ? "The last published pin stays" : "Remove"}
+            disabled={busy || lastOne}
+            onClick={() => openDialog({ kind: "remove", set: s, pin: p })}
+          >
+            <Trash2 />
+          </Button>
+        );
+      },
+    },
+  ];
+  const pins = useTable({
+    rows: s.pins,
+    columns: pinColumns,
+    perPage: Infinity,
+    initialSort: { key: "first", dir: "desc" },
+  });
+
+  const hostRows: HostRow[] = s.monitored_hosts.map((host) => ({ host, result: s.watch_results[host] }));
+  const hostColumns: Column<HostRow>[] = [
+    {
+      key: "host",
+      label: "Host",
+      sortValue: (h) => h.host,
+      className: "whitespace-nowrap font-mono text-[13px]",
+      cell: (h) => h.host,
+    },
+    {
+      key: "checked",
+      label: "Checked",
+      sortValue: (h) => h.result?.checked_at ?? "",
+      hide: "phone",
+      className: "whitespace-nowrap tabular-nums text-ink-2",
+      cell: (h) => (h.result ? monthDayTime(h.result.checked_at) : "—"),
+    },
+    {
+      key: "result",
+      label: "Result",
+      sortValue: (h) => h.result?.status ?? "",
+      filterValue: (h) => h.result?.status ?? null,
+      filterOptions: ["trusted", "untrusted", "error"],
+      className: "min-w-[180px]",
+      cell: ({ result: r }) =>
+        r ? (
+          <>
+            <div className="flex flex-wrap gap-1">
+              <Pill tone={RESULT_TONE[r.status][0]} dot={RESULT_TONE[r.status][1]}>
+                {r.status}
+              </Pill>
+              {r.via_aia && <Pill>AIA</Pill>}
+              {r.added.length > 0 && (
+                <Pill tone="warning">
+                  {r.added.length} {r.added.length === 1 ? "pin added" : "pins added"}
+                </Pill>
+              )}
+            </div>
+            {r.detail && <div className="mt-1 break-words text-xs text-ink-3">{r.detail}</div>}
+          </>
+        ) : (
+          "—"
+        ),
+    },
+    {
+      key: "chain",
+      label: "Chain served",
+      hide: "phone",
+      cell: ({ result: r }) => (
+        <div className="flex flex-wrap items-center gap-1">
+          {r?.chain.map((c, i) => {
+            const name = commonName(c.subject);
+            return (
+              <Fragment key={`${c.spki}-${i}`}>
+                {i > 0 && <ChevronRight aria-hidden="true" className="h-3.5 w-3.5 text-ink-3" />}
+                <span
+                  title={`${name} · valid until ${fullDate(c.not_after, true)}`}
+                  className={cn(
+                    "inline-flex flex-col rounded-lg px-2 py-1 text-xs leading-tight",
+                    i === 0 ? "bg-badge-info text-badge-info-fg" : "bg-ground text-ink",
+                    daysFromNow(c.not_after) < 45 && "ring-1 ring-inset ring-dot-warn",
+                  )}
+                >
+                  <span className="whitespace-nowrap font-medium">{name}</span>
+                  <span className="text-[11px] tabular-nums text-ink-3">{c.not_after.slice(0, 7)}</span>
+                </span>
+              </Fragment>
+            );
+          })}
+        </div>
+      ),
+    },
+  ];
+  const hosts = useTable({
+    rows: hostRows,
+    columns: hostColumns,
+    perPage: Infinity,
+    initialSort: { key: "host", dir: "asc" },
+  });
+  const trusted = hostRows.filter((h) => h.result?.status === "trusted").length;
+
+  return (
+    <section aria-label={s.id} className="min-w-0 rounded-[14px] border border-line bg-surface">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-line px-6 py-[18px] phone:px-4">
+        <div className="flex min-w-0 flex-col gap-2">
+          <h2 className="break-all font-mono text-lg font-semibold">{s.id}</h2>
+          <div className="flex flex-wrap gap-1.5">
+            {s.domains.map((d) => {
+              const name = d.include_subdomains ? `*.${d.name}` : d.name;
+              return (
+                <span
+                  key={name}
+                  className="inline-flex min-h-6 items-center break-all rounded-full bg-soft px-2 font-mono text-xs text-ink-2"
+                >
+                  {name}
+                </span>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-center gap-2.5 text-[13px] text-ink-2">
+            <span className="tabular-nums">
+              Expires {fullDate(s.expires_at, true)} · {left < 0 ? "expired" : `in ${left} days`}
+            </span>
+            <span aria-hidden="true" className="h-1.5 w-[120px] overflow-hidden rounded-full bg-divider">
+              <span
+                className={cn("block h-1.5 rounded-full", left < 45 ? "bg-dot-warn" : "bg-chart-1")}
+                style={{ width: `${Math.min(100, Math.max(0, Math.round((left / 365) * 100)))}%` }}
+              />
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Switch
+            checked={s.auto_publish}
+            disabled={busy}
+            onCheckedChange={(enabled) =>
+              mutate({
+                path: setPath(s.id, "/auto-publish"),
+                method: "PUT",
+                json: { enabled },
+                publishes: false,
+              })
+            }
+            className="min-h-10 pl-1.5 pr-3"
+          >
+            Auto-publish
+          </Switch>
+          <Button variant="line" size="form" onClick={() => openDialog({ kind: "expiry", set: s })}>
+            Extend expiry
+          </Button>
+          <Button variant="line" size="form" onClick={() => openDialog({ kind: "hosts", set: s })}>
+            Edit hosts
+          </Button>
+          <Button variant="ink" size="form" onClick={() => openDialog({ kind: "pin", set: s })}>
+            <Plus />
+            Add pin
+          </Button>
+        </div>
+      </div>
+
+      <SubHeading title="Pins" aside={`${published} published · ${s.pins.length - published} waiting`} />
+      <DataTable table={pins} rowKey={(p) => p.spki} minWidth={900} empty="No pins match" />
+
+      <SubHeading divided title="Monitored hosts" aside={`${trusted} of ${hostRows.length} trusted`} />
+      <DataTable table={hosts} rowKey={(h) => h.host} minWidth={900} empty="No hosts match" />
+      <div className="h-2" />
+    </section>
+  );
+}
+
+function DocumentsPanel({ documents }: { documents: PinDocument[] }) {
+  const columns: Column<PinDocument>[] = [
+    {
+      key: "serial",
+      label: "Serial",
+      sortValue: (d) => d.serial,
+      className: "py-[11px] font-mono text-[13px] tabular-nums",
+      cell: (d) => d.serial,
+    },
+    {
+      key: "reason",
+      label: "Reason",
+      sortValue: (d) => d.reason,
+      filterValue: (d) => d.reason,
+      className: "py-[11px]",
+      cell: (d) => <Pill tone={reasonTone(d.reason)}>{d.reason}</Pill>,
+    },
+    {
+      key: "key",
+      label: "Key",
+      sortValue: (d) => d.key_id,
+      filterValue: (d) => d.key_id,
+      hide: "tablet",
+      className: "py-[11px] font-mono text-xs text-ink-2",
+      cell: (d) => d.key_id,
+    },
+    {
+      key: "issued",
+      label: "Issued",
+      sortValue: (d) => d.issued_at,
+      hide: "phone",
+      className: "whitespace-nowrap py-[11px] tabular-nums text-ink-2",
+      cell: (d) => <span title={new Date(d.issued_at).toLocaleString()}>{fullDate(d.issued_at)}</span>,
+    },
+    {
+      key: "expires",
+      label: "Expires",
+      sortValue: (d) => d.expires_at,
+      className: "whitespace-nowrap py-[11px] tabular-nums text-ink-2",
+      cell: (d) => <span title={new Date(d.expires_at).toLocaleString()}>{fullDate(d.expires_at)}</span>,
+    },
+  ];
+  const table = useTable({
+    rows: documents,
+    columns,
+    initialSort: { key: "serial", dir: "desc" },
+  });
+  return (
+    <Panel title="Documents" aside={<span className="text-xs text-ink-3">Every signed document published</span>}>
+      {documents.length === 0 ? (
+        <p className="px-6 py-8 text-center text-[13px] text-ink-3">
+          No document yet. The apps use their built-in pins.
+        </p>
+      ) : (
+        <DataTable table={table} rowKey={(d) => String(d.serial)} empty="No documents match" />
+      )}
+    </Panel>
   );
 }
