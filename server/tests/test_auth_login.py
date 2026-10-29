@@ -409,6 +409,25 @@ async def test_sign_in_stores_the_moodle_full_name(client) -> None:
     assert await _stored_display_name(client) == "Renamed Student"
 
 
+@pytest.mark.parametrize(
+    ("fullname", "stored"),
+    [
+        ("B11015000 @ 王小明", "王小明"),
+        ("B11015000@Test Student", "Test Student"),
+        ("B11015000 @ ", "B11015000 @"),
+    ],
+    ids=["spaced", "unspaced", "nothing-after"],
+)
+async def test_sign_in_stores_the_name_after_the_student_id(
+    client, fullname, stored
+) -> None:
+    allow_moodle(client, fullname=fullname)
+    response = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    assert response.status_code == 200, response.text
+    assert response.json()["user"]["display_name"] == stored
+    assert await _stored_display_name(client) == stored
+
+
 @pytest.mark.parametrize("fullname", [None, "", "   "])
 async def test_a_blank_or_missing_full_name_keeps_the_stored_one(
     client, fullname
