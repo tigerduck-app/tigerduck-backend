@@ -115,7 +115,8 @@ export function AnnouncementDialog({
   const tagLabel = (id: string) => taxonomy.tags.find((t) => t.id === id)?.label ?? id;
   const full = d.content_tags.length >= MAX_TAGS;
   const imp = IMPORTANCE[d.importance];
-  const canSubmit = d.title.trim().length > 0;
+  // An edit sends no source URL; a new one must be http or https, as the server checks.
+  const canSubmit = d.title.trim().length > 0 && (isEdit || isHttpUrl(d.source_url));
 
   const chosenTags = d.content_tags.map((t) => (
     <span key={t} className="rounded-full border border-line bg-ground px-2 py-px text-xs text-ink-2">
@@ -349,10 +350,11 @@ export function AnnouncementDialog({
               Source URL
               <input
                 type="url"
+                aria-invalid={!isHttpUrl(d.source_url)}
                 value={d.source_url}
                 onChange={field("source_url")}
                 maxLength={1000}
-                className={cn(fieldClass, "font-mono text-[13px] font-normal")}
+                className={cn(fieldClass, "font-mono text-[13px] font-normal", !isHttpUrl(d.source_url) && "border-dot-bad")}
               />
             </label>
           )}

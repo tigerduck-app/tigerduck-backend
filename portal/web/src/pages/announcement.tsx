@@ -31,7 +31,7 @@ function createBody(d: Draft): Record<string, unknown> {
     canonical_org: d.canonical_org,
     content_tags: d.content_tags,
     importance: d.importance,
-    source_url: d.source_url,
+    source_url: d.source_url.trim(),
   };
 }
 
