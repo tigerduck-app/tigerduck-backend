@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
   Calendar,
+  CalendarClock,
   FileText,
   GraduationCap,
   HardDrive,
@@ -29,7 +30,6 @@ import type { AccessSession, BackendVersion, EnvInfo } from "@/types/api";
 
 type NavItem = { to: string; label: string; icon: LucideIcon };
 
-// Course changes joins Academic once its page exists.
 const NAV: { group: string; items: NavItem[] }[] = [
   {
     group: "Overview",
@@ -55,7 +55,10 @@ const NAV: { group: string; items: NavItem[] }[] = [
   },
   {
     group: "Academic",
-    items: [{ to: "/semester-dates", label: "Semester dates", icon: Calendar }],
+    items: [
+      { to: "/semester-dates", label: "Semester dates", icon: Calendar },
+      { to: "/course-changes", label: "Course changes", icon: CalendarClock },
+    ],
   },
   {
     group: "Moodle",
