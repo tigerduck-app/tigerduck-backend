@@ -275,6 +275,9 @@ async def _check(
     if isinstance(parsed, JSONResponse):
         return parsed
     columns, days = parsed
+    # An exam and a make-up class can share a day; two values of another kind cannot.
+    if columns["kind"] == "note":
+        return columns
     periods = set(columns["periods"] or ())
     others = await conn.fetch(
         "SELECT start_date, end_date, excluded_weekdays, periods FROM course_changes"

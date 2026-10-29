@@ -465,3 +465,14 @@ async def test_a_change_of_a_course_nobody_takes_any_more_can_only_be_deleted(
     assert response.status_code == 409
     assert "delete" in _body(response)["detail"]
     assert (await delete_change(change["id"], _OTHER, pool=pool)).status_code == 200
+
+
+async def test_notes_share_a_day(term, pool) -> None:
+    exam = await _create(pool, kind="note", day="2026-11-05", note_zh="期中考")
+    makeup = await _create(pool, kind="note", day="2026-11-05", note_zh="補課", periods=["2"])
+    week = await _create(
+        pool, kind="note", note_zh="線上上課", mode="range",
+        **{"from": "2026-11-02", "to": "2026-11-08"},
+    )
+
+    assert [status for status, _ in (exam, makeup, week)] == [200, 200, 200]
