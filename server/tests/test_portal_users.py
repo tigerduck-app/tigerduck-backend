@@ -484,3 +484,26 @@ async def test_class_reminders_count_users_not_their_devices(db_session, portal_
 
     assert stats["devices"]["features"]["class_reminders"] == 1
     assert stats["devices"]["users"] == 2
+
+
+async def test_user_page_drops_schedule_entries_that_are_not_objects(db_session, portal_pool):
+    today = _today()
+    user = await _user(db_session, "s1")
+    db_session.add(
+        SemesterTerm(code="1151", start_date=today - timedelta(days=60), end_date=today + timedelta(days=60))
+    )
+    db_session.add(
+        UserCourse(
+            user_id=user.id,
+            semester="1151",
+            course_key="k1",
+            course_no="CS1",
+            course_name="c",
+            schedule_json=[None, 3, {"day": 2, "periods": ["3"]}],
+        )
+    )
+    await db_session.commit()
+
+    page = await get_user(_REQUEST, user.id, pool=portal_pool)
+
+    assert page["courses"][0]["schedule"] == [{"day": 2, "periods": ["3"]}]
