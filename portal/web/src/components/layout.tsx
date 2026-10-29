@@ -222,10 +222,12 @@ function EnvRow({ label, value, detail }: { label: string; value?: string; detai
 
 function NavItemLink({ item }: { item: NavItem }) {
   const Icon = item.icon;
+  const { pathname } = useLocation();
   return (
     <NavLink
       to={item.to}
-      end={item.to === "/"}
+      // A user's page opens from Status, so Status stays current there.
+      end={item.to === "/" && !pathname.startsWith("/users/")}
       title={item.label}
       aria-label={item.label}
       className={({ isActive }) =>
