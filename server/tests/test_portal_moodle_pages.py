@@ -192,6 +192,27 @@ async def test_timetable_opens_on_the_current_term_with_its_upcoming_changes(
     ]
 
 
+async def test_timetable_offers_only_term_codes_as_terms(db_session, pool):
+    """Moodle mirror rows are filed under an empty semester and a hand-added
+    course may carry any string; neither is a term to toggle to."""
+    user = await _timetable_fixture(db_session)
+    db_session.add_all([
+        UserCourse(
+            user_id=user.id, semester="", course_key="moodle:4120",
+            source="ntust_portal", course_no="CS2001301", course_name="資料結構",
+        ),
+        UserCourse(
+            user_id=user.id, semester="fall", course_key="client:x1",
+            course_no="X1", course_name="Reading group",
+        ),
+    ])
+    await db_session.commit()
+
+    current = await student_timetable(_request(), student_id="B99915023", term=None, pool=pool)
+
+    assert current["terms"] == ["1151", "1142"]
+
+
 async def test_timetable_of_an_earlier_term_carries_no_changes(db_session, pool):
     await _timetable_fixture(db_session)
 

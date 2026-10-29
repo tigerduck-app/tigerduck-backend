@@ -129,8 +129,12 @@ async def student_timetable(
         if uid is None:
             return JSONResponse({"error": "user not found"}, 404)
         current = await conn.fetchval(_CURRENT_TERM_SQL)
+        # Moodle mirror rows carry an empty semester and hand-added ones any
+        # string; only a term code (server/academic_calendar/terms.py) is a term.
         held = await conn.fetch(
-            "SELECT DISTINCT semester FROM user_courses WHERE user_id = $1", uid
+            "SELECT DISTINCT semester FROM user_courses "
+            "WHERE user_id = $1 AND semester ~ '^[0-9]{3}[12H]$'",
+            uid,
         )
         terms = sorted({r["semester"] for r in held} | ({current} if current else set()), reverse=True)
         chosen = term or current or (terms[0] if terms else None)
