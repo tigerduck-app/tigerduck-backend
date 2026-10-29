@@ -32,12 +32,18 @@ _DISPLAY_NAME_MAX = 128
 
 def display_name_from(fullname: str | None) -> str | None:
     """The name in Moodle's full name, as `users.display_name` stores it;
-    None when blank. NTUST spells a full name "student ID @ name", so the
-    name is the part after the first `@`, as the apps show it; without one,
-    or with nothing after it, the full name is the name."""
+    None when blank. NTUST spells a full name "student ID @ name", or
+    "name student ID@" in some users' display order, and any other full name
+    is the name whole, as the iOS app's `MoodlePersonName` reads it."""
     whole = (fullname or "").strip()
-    name = whole.partition("@")[2].strip() or whole
-    return name[:_DISPLAY_NAME_MAX].rstrip() or None
+    before, at, after = whole.partition("@")
+    name = after.strip()
+    if at and not name:
+        # "name student ID@": the last word before the `@` is the ID, and it has digits.
+        rest, _, last = before.strip().rpartition(" ")
+        if rest.strip() and any(c.isdigit() for c in last):
+            name = rest.strip()
+    return (name or whole)[:_DISPLAY_NAME_MAX].rstrip() or None
 
 
 @dataclass(frozen=True)

@@ -415,8 +415,11 @@ async def test_sign_in_stores_the_moodle_full_name(client) -> None:
         ("B11015000 @ 王小明", "王小明"),
         ("B11015000@Test Student", "Test Student"),
         ("B11015000 @ ", "B11015000 @"),
+        ("Test Student B11015000@", "Test Student"),
+        ("王小明  B11015000@ ", "王小明"),
+        ("Test Student@", "Test Student@"),
     ],
-    ids=["spaced", "unspaced", "nothing-after"],
+    ids=["spaced", "unspaced", "nothing-after", "name-first", "name-first-cjk", "no-id"],
 )
 async def test_sign_in_stores_the_name_after_the_student_id(
     client, fullname, stored
