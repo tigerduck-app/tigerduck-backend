@@ -228,6 +228,14 @@ export function AnnouncementPage() {
         }
       />
 
+      {/* The composer needs the orgs and tags; without them it cannot open. */}
+      {taxonomyQ.isError && (
+        <ErrorAlert className="items-center" onRetry={() => taxonomyQ.refetch()}>
+          Couldn’t load orgs and tags
+          <div className="font-mono text-xs">{errorText(taxonomyQ.error)}</div>
+        </ErrorAlert>
+      )}
+
       <Panel
         title="Bulletins"
         aside={
