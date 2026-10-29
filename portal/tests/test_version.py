@@ -38,5 +38,5 @@ async def test_reports_an_unreachable_backend(monkeypatch: pytest.MonkeyPatch) -
 
     r = await _get_version()
 
-    assert r.status_code == 200
+    assert r.status_code == 503
     assert r.json() == {"ok": False, "detail": "ConnectError: refused"}

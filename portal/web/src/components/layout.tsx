@@ -141,7 +141,9 @@ function Brand({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => vo
   const version = useQuery<BackendVersion>({
     queryKey: ["version"],
     queryFn: () => api<BackendVersion>("/api/version"),
-    staleTime: Infinity,
+    // A deploy changes it while the tab stays open.
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
   });
   const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
   const Icon = collapsed ? PanelLeftOpen : PanelLeftClose;
@@ -156,7 +158,7 @@ function Brand({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => vo
       <div className="flex min-w-0 flex-col rail:hidden">
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-semibold text-white">TigerDuck</span>
-          {version.data?.ok && version.data.version && (
+          {version.isSuccess && version.data.version && (
             <span
               title="Backend version"
               className="rounded-md bg-side-chip px-1.5 font-mono text-[11px] leading-4 text-side-ink"

@@ -54,8 +54,12 @@ async def env_info(request: Request) -> JSONResponse:
 
 @router.get("/version")
 async def version_info() -> JSONResponse:
-    """The backend's version for the nav, without the checks /api/status runs."""
-    return JSONResponse(await backend_version())
+    """The backend's version for the nav, without the checks /api/status runs.
+
+    503 while the backend cannot answer, so the nav's query fails and retries.
+    """
+    version = await backend_version()
+    return JSONResponse(version, status_code=200 if version["ok"] else 503)
 
 
 @router.get("/status")
