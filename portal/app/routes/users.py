@@ -105,9 +105,11 @@ GROUP BY 1, 2
 ORDER BY 1, 2
 """
 
+# Class reminders are a user's setting, so they count users with a device.
 _FEATURES_SQL = f"""
 SELECT
-    count(*) FILTER (WHERE {_CLASS_REMINDERS_ON}) AS class_reminders,
+    count(DISTINCT u.id) AS users,
+    count(DISTINCT u.id) FILTER (WHERE {_CLASS_REMINDERS_ON}) AS class_reminders,
     count(*) FILTER (WHERE ud.bulletin_push_enabled) AS bulletin_push,
     count(*) FILTER (WHERE ud.sync_live_activity) AS live_activity,
     count(*) FILTER (WHERE ud.sync_assignment_reminders) AS assignment_reminders,
@@ -188,7 +190,7 @@ async def user_stats(pool=Depends(get_pool)) -> dict:
         daily_active = await conn.fetch(_DAILY_ACTIVE_SQL)
         active_7d = await conn.fetchval(_ACTIVE_7D_SQL)
         versions = await conn.fetch(_VERSIONS_SQL)
-        features = await conn.fetchrow(_FEATURES_SQL)
+        features = dict(await conn.fetchrow(_FEATURES_SQL))
         daily_devices = await conn.fetch(_DAILY_DEVICES_SQL)
         anonymous = await conn.fetchval(_ANONYMOUS_SQL)
         accounts = {r["state"]: r["users"] for r in await conn.fetch(_ACCOUNTS_SQL)}
@@ -199,7 +201,8 @@ async def user_stats(pool=Depends(get_pool)) -> dict:
         "active": {"last_7d": active_7d, "daily": [dict(r) for r in daily_active]},
         "devices": {
             "versions": [dict(r) for r in versions],
-            "features": dict(features),
+            "users": features.pop("users"),
+            "features": features,
             "daily": [dict(r) for r in daily_devices],
         },
         "anonymous_devices": anonymous,

@@ -222,9 +222,12 @@ function Overview({ stats }: { stats: UserStats }) {
           <div className="flex flex-col gap-2.5">
             {FEATURES.map(([key, label]) => {
               const n = devices.features[key];
-              const pct = deviceTotal ? Math.round((n / deviceTotal) * 100) : 0;
+              const perUser = key === "class_reminders";
+              const base = perUser ? devices.users : deviceTotal;
+              const pct = base ? Math.round((n / base) * 100) : 0;
+              const of = `${num(n)} of ${num(base)} ${perUser ? "users" : "devices"}`;
               return (
-                <div key={key} title={`${label}: ${num(n)} of ${num(deviceTotal)} devices`} className="flex items-center gap-3">
+                <div key={key} title={`${label}: ${of}`} className="flex items-center gap-3">
                   <span className="w-[150px] shrink-0 text-[13px] phone:w-[104px]">{label}</span>
                   <div aria-hidden="true" className="h-2.5 flex-1 rounded-full bg-divider">
                     <div className="h-2.5 rounded-full bg-chart-1" style={{ width: `${pct}%` }} />

@@ -131,6 +131,9 @@ export type UserStats = {
   active: { last_7d: number; daily: { day: string; users: number }[] };
   devices: {
     versions: { platform: string; app_version: string; devices: number }[];
+    /** Users with a signed-in device: what `class_reminders` counts out of. */
+    users: number;
+    /** Devices with each switch on; `class_reminders`, a user setting, counts users. */
     features: Record<
       | "class_reminders"
       | "bulletin_push"

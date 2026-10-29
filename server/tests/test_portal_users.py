@@ -464,3 +464,23 @@ async def test_user_page_counts_every_push_while_listing_a_capped_number(
     assert len(page["pushes"]) == 1
     assert page["push_counts"] == {"sent": 1, "failed": 1, "cancelled": 1}
 
+
+async def test_class_reminders_count_users_not_their_devices(db_session, portal_pool):
+    on = await _user(db_session, "r1")
+    off = await _user(db_session, "r2")
+    db_session.add_all(
+        [
+            UserDevice(user_id=on.id, client_device_id="r1a", platform="ios"),
+            UserDevice(user_id=on.id, client_device_id="r1b", platform="ipados"),
+            UserDevice(user_id=off.id, client_device_id="r2a", platform="ios"),
+            UserSettingsDocument(
+                user_id=off.id, namespace="notification", document={"courses": {"enabled": False}}
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    stats = await user_stats(pool=portal_pool)
+
+    assert stats["devices"]["features"]["class_reminders"] == 1
+    assert stats["devices"]["users"] == 2
