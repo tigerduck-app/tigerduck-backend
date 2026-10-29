@@ -156,7 +156,11 @@ export function DevicesPage() {
           }
         >
           {chosenRows.length > 0 && (
-            <SelectionBar selected={chosenRows} onClear={() => setSelected(new Set())} />
+            <SelectionBar
+              selected={chosenRows}
+              showPii={showPii}
+              onClear={() => setSelected(new Set())}
+            />
           )}
           {q.isLoading && <Skeleton className="m-6 h-48" />}
           {loadError}

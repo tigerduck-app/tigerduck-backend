@@ -8,6 +8,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { Button } from "@/components/ui/button";
+import { Reveal } from "@/components/data-table";
 import { DialogIcon, ErrorAlert, FormDialog } from "@/components/page";
 import type { AddMembersResponse, DeviceList, DeviceRow } from "@/types/api";
 import { ListDialog, type ListBody } from "@/pages/lists/ListDialog";
@@ -19,9 +20,12 @@ const plural = (n: number) => `${n} ${n === 1 ? "device" : "devices"}`;
 
 export function SelectionBar({
   selected,
+  showPii,
   onClear,
 }: {
   selected: DeviceRow[];
+  /** The table's eye toggle, which the dialog's student IDs follow. */
+  showPii: boolean;
   onClear: () => void;
 }) {
   const qc = useQueryClient();
@@ -206,7 +210,9 @@ export function SelectionBar({
                 <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-ink-2" />
                 <span className="w-16 shrink-0 text-[13px]">{platformName(d.platform)}</span>
                 <span className="font-mono text-[13px]">{shortId(d.device_id)}</span>
-                <span className="truncate font-mono text-[13px] text-ink-3">{d.student_id ?? "—"}</span>
+                <Reveal shown={showPii} width={110}>
+                  <span className="font-mono text-[13px] text-ink-3">{d.student_id ?? "—"}</span>
+                </Reveal>
                 <span className="ml-auto font-mono text-xs text-ink-3 max-[720px]:hidden">
                   {d.app_version ?? "—"}
                 </span>
