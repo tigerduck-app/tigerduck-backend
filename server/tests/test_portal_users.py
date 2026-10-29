@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from portal.app.db import _asyncpg_dsn  # noqa: E402
 from portal.app.routes import users as users_route  # noqa: E402
 from portal.app.routes.users import get_user, list_users, user_stats  # noqa: E402
-from server.academic_calendar.models import SemesterTerm  # noqa: E402
+from server.academic_calendar.models import CourseChange, SemesterTerm  # noqa: E402
 from server.auth.models import (  # noqa: E402
     AuthSession,
     DevicePushToken,
@@ -422,6 +422,7 @@ async def test_user_page_shows_devices_week_pushes_and_last_upload(db_session, p
     assert page["courses"] == [
         {
             "id": course.id,
+            "course_no": "CS1",
             "name": "資料結構",
             "classroom": "TR-412",
             "schedule": [{"day": 2, "periods": ["3", "4"]}],
@@ -507,6 +508,53 @@ async def test_user_page_drops_schedule_entries_that_are_not_objects(db_session,
     page = await get_user(_REQUEST, user.id, pool=portal_pool)
 
     assert page["courses"][0]["schedule"] == [{"day": 2, "periods": ["3"]}]
+
+
+async def test_user_page_lists_the_school_changes_to_its_courses_from_this_week_on(
+    db_session, portal_pool
+):
+    today = _today()
+    monday = today - timedelta(days=today.isoweekday() - 1)
+    tuesday = monday + timedelta(days=1)
+    user = await _user(db_session, "s1")
+    db_session.add(
+        SemesterTerm(code="1151", start_date=monday - timedelta(days=60), end_date=monday + timedelta(days=60))
+    )
+    db_session.add(
+        UserCourse(
+            user_id=user.id,
+            semester="1151",
+            course_key="k1",
+            course_no="CS1",
+            course_name="c",
+            schedule_json=[{"day": 2, "periods": ["3"]}],
+        )
+    )
+    await db_session.flush()
+
+    def change(course_no: str, first: date, last: date, room: str) -> CourseChange:
+        mode = "day" if first == last else "range"
+        return CourseChange(
+            term_code="1151", course_no=course_no, kind="room", mode=mode,
+            start_date=first, end_date=last, room=room, created_by="ops", updated_by="ops",
+        )
+
+    db_session.add_all(
+        [
+            change("CS1", tuesday - timedelta(days=7), tuesday - timedelta(days=7), "over"),
+            change("CS1", tuesday - timedelta(days=7), tuesday + timedelta(days=7), "running"),
+            change("CS1", tuesday + timedelta(days=14), tuesday + timedelta(days=14), "ahead"),
+            change("CS9", tuesday, tuesday, "not taken"),
+        ]
+    )
+    await db_session.commit()
+
+    page = await get_user(_REQUEST, user.id, pool=portal_pool)
+
+    assert [(c["course_no"], c["kind"], c["room"], c["class_days"]) for c in page["changes"]] == [
+        ("CS1", "room", "running", [tuesday, tuesday + timedelta(days=7)]),
+        ("CS1", "room", "ahead", [tuesday + timedelta(days=14)]),
+    ]
 
 
 async def test_user_page_lists_pushes_by_when_they_went_out(db_session, portal_pool):

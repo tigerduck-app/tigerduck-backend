@@ -9,6 +9,7 @@ is transparent to the frontend.
 Field mapping (v2 device_registrations → v3):
   device_id        ← user_devices.id            (server UUID, stable key)
   user_id          ← users.student_id           (human-meaningful owner)
+  user_uuid        ← users.id                   (the user page's key)
   device_class     ← user_devices.device_class, or from platform for a row
                      registered before that column (ios→iphone, ipados→ipad,
                      macos→mac, else "")
@@ -39,6 +40,7 @@ WITH dev AS (
     SELECT
         ud.id::text                            AS device_id,
         COALESCE(u.student_id, u.id::text)     AS user_id,
+        u.id::text                             AS user_uuid,
         ud.platform                            AS platform,
         """ + DEVICE_CLASS_SQL + """         AS device_class,
         ud.server_push_enabled                 AS server_push_enabled,
@@ -115,6 +117,7 @@ def _row_to_device(r) -> dict:
     return {
         "device_id": r["device_id"],
         "user_id": r["user_id"],
+        "user_uuid": r["user_uuid"],
         "client_device_id": r["client_device_id"],
         "student_id": r["student_id"],
         "display_name": r["display_name"],

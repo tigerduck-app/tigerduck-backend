@@ -295,7 +295,7 @@ _WEEK_SQL = f"SELECT {_TODAY} - (extract(isodow FROM {_TODAY})::int - 1)"
 
 # Enrolled courses of the term, as course_reminders.py reads them.
 _COURSES_SQL = """
-SELECT c.id, c.course_name AS name, c.classroom, c.schedule_json AS schedule,
+SELECT c.id, c.course_no, c.course_name AS name, c.classroom, c.schedule_json AS schedule,
        COALESCE(
            array_agg(s.skipped_on ORDER BY s.skipped_on) FILTER (WHERE s.id IS NOT NULL),
            '{}'
@@ -307,6 +307,25 @@ LEFT JOIN user_course_skipped_dates s
 WHERE c.user_id = $1 AND c.semester = $2 AND c.enrollment_status = 'enrolled'
 GROUP BY c.id
 ORDER BY c.course_name, c.id
+"""
+
+# The school's changes to those courses still reaching a class day this week,
+# in the shape of moodle/inspection.py's, which counts from today instead.
+_CHANGES_SQL = """
+SELECT ch.course_no, ch.kind, ch.mode, ch.start_date, ch.end_date,
+       ch.excluded_weekdays, ch.periods, ch.room, ch.start_time, ch.end_time,
+       ch.note_zh, ch.note_en,
+       course_class_days(ch.term_code, uc.schedule_json, greatest(ch.start_date, $3),
+                         ch.end_date, ch.excluded_weekdays, ch.periods) AS class_days
+FROM course_changes ch
+CROSS JOIN LATERAL (
+    SELECT schedule_json FROM user_courses
+    WHERE user_id = $1 AND semester = ch.term_code AND course_no = ch.course_no
+      AND enrollment_status = 'enrolled'
+    ORDER BY id LIMIT 1
+) AS uc
+WHERE ch.term_code = $2 AND ch.end_date >= $3
+ORDER BY ch.start_date, ch.id
 """
 
 _PUSH_AT = "COALESCE(pd.sent_at, pd.updated_at, j.cancelled_at, j.updated_at)"
@@ -370,6 +389,7 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
         term = await conn.fetchval(_TERM_SQL, user_id)
         week_start = await conn.fetchval(_WEEK_SQL)
         courses = await conn.fetch(_COURSES_SQL, user_id, term, week_start) if term else []
+        changes = await conn.fetch(_CHANGES_SQL, user_id, term, week_start) if term else []
         pushes = await conn.fetch(_PUSHES_SQL, user_id, _PUSH_ROWS)
         counts = {r["status"]: r["pushes"] for r in await conn.fetch(_PUSH_COUNTS_SQL, user_id)}
         last_upload = await conn.fetchrow(_LAST_UPLOAD_SQL, user_id)
@@ -385,6 +405,7 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
         "courses": [
             {**dict(c), "schedule": _json_list(c["schedule"])} for c in courses
         ],
+        "changes": [dict(c) for c in changes],
         "pushes": [_push(p) for p in pushes],
         "push_counts": {k: counts.get(k, 0) for k in ("sent", "failed", "cancelled")},
         "last_upload": dict(last_upload) if last_upload else None,

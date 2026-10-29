@@ -16,7 +16,8 @@ import { Dot, EmptyState, ErrorAlert, Panel, Pill, type Tone } from "@/component
 import type { AccountState, UserDetail, UserDevice, UserPush } from "@/types/api";
 import { Card } from "./status/Card";
 import { ACCOUNT, PLATFORM_ICON, ago, termLabel } from "./status/format";
-import { Timetable } from "./user-detail/Timetable";
+import { changesLink } from "./moodle/Timetable";
+import { Timetable, isoDate } from "./user-detail/Timetable";
 
 const ACCOUNT_LINE: Record<AccountState, string> = {
   signed_in: "School account signed in",
@@ -106,6 +107,9 @@ function UserContent({ user }: { user: UserDetail }) {
           ? fullDate(user.last_upload.at)
           : "";
 
+  const weekEnd = isoDate(user.week_start, 6);
+  const changed = new Set(user.changes.filter((c) => c.class_days[0] <= weekEnd).map((c) => c.course_no));
+
   const tiles = [
     {
       label: "Devices",
@@ -115,7 +119,7 @@ function UserContent({ user }: { user: UserDetail }) {
     {
       label: user.term ? `Courses in ${termLabel(user.term)}` : "Courses",
       value: String(user.courses.length),
-      note: "",
+      note: user.courses.length ? `${changed.size} with changes this week` : "",
     },
     { label: "Pushes, last 7 days", value: String(sent + failed), note: `${failed} failed` },
     {
@@ -219,8 +223,15 @@ function UserContent({ user }: { user: UserDetail }) {
       <DevicesPanel devices={devices} classReminders={user.class_reminders} />
 
       {user.term && (
-        <Card title={`This week in ${termLabel(user.term)}`}>
-          <Timetable courses={user.courses} weekStart={user.week_start} />
+        <Card
+          title={`This week in ${termLabel(user.term)}`}
+          aside={
+            <Link to={changesLink(user.term)} className="text-[13px] text-link no-underline hover:text-link-hover">
+              Course changes
+            </Link>
+          }
+        >
+          <Timetable user={user} />
         </Card>
       )}
 
