@@ -68,8 +68,10 @@ async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
             "FROM semester_terms ORDER BY code DESC"
         )
         holidays = await conn.fetch(
-            "SELECT id, name_zh, name_en, start_date, end_date "
-            "FROM academic_holidays ORDER BY start_date"
+            "SELECT h.id, h.name_zh, h.name_en, h.start_date, h.end_date, "
+            "(SELECT count(*) FROM user_holiday_overrides o "
+            "WHERE o.holiday_id = h.id AND o.notify) AS overrides "
+            "FROM academic_holidays h ORDER BY h.start_date"
         )
         # Terms the clients have filed courses under but that have no dates
         # yet. Without dates the apps cannot place a semester boundary in the
@@ -84,7 +86,10 @@ async def get_calendar(pool=Depends(get_pool)) -> JSONResponse:
     return JSONResponse(
         content={
             "terms": [_term_to_dict(r) for r in terms],
-            "holidays": [_holiday_to_dict(r) for r in holidays],
+            # How many users chose reminders anyway, which a delete drops.
+            "holidays": [
+                {**_holiday_to_dict(r), "overrides": r["overrides"]} for r in holidays
+            ],
             "undated_terms": [r["code"] for r in undated],
         }
     )
