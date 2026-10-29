@@ -36,6 +36,8 @@ PERSONAL_READS = {
     ("device_lists.py", "list_members"),
     ("devices.py", "list_devices"),
     ("moodle/inspection.py", "list_moodle_students"),
+    ("moodle/inspection.py", "search_students"),
+    ("moodle/inspection.py", "student_timetable"),
     ("moodle/inspection.py", "sync_courses"),
     ("moodle/inspection.py", "sync_events"),
     ("moodle/jobs.py", "list_moodle_jobs"),
