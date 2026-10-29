@@ -72,7 +72,7 @@ export function SemesterDatesPage() {
   const saveMut = useMutation({
     mutationFn: ({ draft, value }: { key: number; draft: SemesterDraft; value: SemesterSave }) =>
       draft.kind === "term"
-        ? api(`/api/academic-calendar/terms/${encodeURIComponent(draft.code || value.code)}`, {
+        ? api(`/api/academic-calendar/terms/${encodeURIComponent(value.code)}`, {
             method: "PUT",
             json: value,
           })
