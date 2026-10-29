@@ -151,6 +151,8 @@ export function Timetable({ studentId }: { studentId: string }) {
   const blocks = data ? blocksOf(data) : [];
   const dayCount = Math.max(5, ...blocks.map((b) => b.day));
   const periodCount = Math.max(10, ...blocks.map((b) => b.to + 1));
+  // A one-period card with a change tag gets a row tall enough to show it, since a touch screen cannot hover.
+  const tall = new Set(blocks.filter((b) => b.from === b.to && b.change).map((b) => b.from));
   const day = pickedDay ?? (todayDay >= 1 && todayDay <= dayCount ? todayDay : 1);
   const dayBlocks = blocks.filter((b) => b.day === day).sort((a, b) => a.from - b.from);
   const codes = new Set(data?.courses.map((c) => c.course_no ?? c.name));
@@ -216,7 +218,9 @@ export function Timetable({ studentId }: { studentId: string }) {
               className="grid min-w-[840px] gap-[3px] tablet:min-w-0"
               style={{
                 gridTemplateColumns: `64px repeat(${dayCount}, minmax(0, 1fr))`,
-                gridTemplateRows: `26px repeat(${periodCount}, 44px)`,
+                gridTemplateRows: `26px ${PERIODS.slice(0, periodCount)
+                  .map((_, p) => (tall.has(p) ? "minmax(44px, auto)" : "44px"))
+                  .join(" ")}`,
               }}
             >
               {DAYS.slice(0, dayCount).map((d, i) => (
