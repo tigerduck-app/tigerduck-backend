@@ -94,8 +94,7 @@ function UserContent({ user }: { user: UserDetail }) {
   const byId = new Map(devices.map((d) => [d.id, d]));
   const lastActive = devices.map((d) => d.last_seen_at).filter(Boolean).sort().pop() ?? null;
   const cloudSync = devices.length ? devices.some((d) => d.cloud_sync_enabled) : null;
-  const settled = pushes.filter((p) => p.status !== "cancelled");
-  const failed = pushes.filter((p) => p.status === "failed").length;
+  const { sent, failed } = user.push_counts;
   const syncDevice = user.last_sync && byId.get(user.last_sync.device_id);
   const syncMs = user.last_sync ? Date.parse(user.last_sync.at) : 0;
   const syncDay =
@@ -118,7 +117,7 @@ function UserContent({ user }: { user: UserDetail }) {
       value: String(user.courses.length),
       note: "",
     },
-    { label: "Pushes, last 7 days", value: String(settled.length), note: `${failed} failed` },
+    { label: "Pushes, last 7 days", value: String(sent + failed), note: `${failed} failed` },
     {
       label: "Last sync",
       value: user.last_sync

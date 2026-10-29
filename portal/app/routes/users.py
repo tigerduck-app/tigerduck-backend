@@ -296,19 +296,32 @@ ORDER BY c.course_name, c.id
 """
 
 # One row per delivery that settled, or per job that ended without one.
-_PUSHES_SQL = """
-SELECT j.id AS job_id, pd.id AS delivery_id, j.channel, j.scenario, j.payload,
-       COALESCE(pd.device_id, j.device_id) AS device_id,
-       COALESCE(pd.status, j.status) AS status,
-       COALESCE(pd.sent_at, pd.updated_at, j.cancelled_at, j.updated_at) AS at
+_PUSH_OUTCOMES = """
 FROM push_jobs j
 LEFT JOIN push_deliveries pd ON pd.push_job_id = j.id AND pd.status IN ('sent', 'failed')
 WHERE j.user_id = $1
   AND j.created_at > now() - interval '7 days'
   AND (pd.id IS NOT NULL OR j.status IN ('failed', 'cancelled'))
-ORDER BY at DESC, j.id DESC
-LIMIT 500
 """
+
+_PUSHES_SQL = f"""
+SELECT j.id AS job_id, pd.id AS delivery_id, j.channel, j.scenario, j.payload,
+       COALESCE(pd.device_id, j.device_id) AS device_id,
+       COALESCE(pd.status, j.status) AS status,
+       COALESCE(pd.sent_at, pd.updated_at, j.cancelled_at, j.updated_at) AS at
+{_PUSH_OUTCOMES}
+ORDER BY at DESC, j.id DESC
+LIMIT $2
+"""
+
+_PUSH_COUNTS_SQL = f"""
+SELECT COALESCE(pd.status, j.status) AS status, count(*) AS pushes
+{_PUSH_OUTCOMES}
+GROUP BY 1
+"""
+
+# The page lists this many; `push_counts` still counts them all.
+_PUSH_ROWS = 500
 
 _LAST_SYNC_SQL = """
 SELECT created_at AS at, device_id FROM user_change_log
@@ -340,7 +353,8 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
         term = await conn.fetchval(_TERM_SQL, user_id)
         week_start = await conn.fetchval(_WEEK_SQL)
         courses = await conn.fetch(_COURSES_SQL, user_id, term, week_start) if term else []
-        pushes = await conn.fetch(_PUSHES_SQL, user_id)
+        pushes = await conn.fetch(_PUSHES_SQL, user_id, _PUSH_ROWS)
+        counts = {r["status"]: r["pushes"] for r in await conn.fetch(_PUSH_COUNTS_SQL, user_id)}
         last_sync = await conn.fetchrow(_LAST_SYNC_SQL, user_id)
         await audit(conn, request, "user.view", user_id=user_id)
     return {
@@ -355,6 +369,7 @@ async def get_user(request: Request, user_id: uuid.UUID, pool=Depends(get_pool))
             {**dict(c), "schedule": _json_list(c["schedule"])} for c in courses
         ],
         "pushes": [_push(p) for p in pushes],
+        "push_counts": {k: counts.get(k, 0) for k in ("sent", "failed", "cancelled")},
         "last_sync": dict(last_sync) if last_sync else None,
     }
 

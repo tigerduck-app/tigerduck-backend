@@ -20,6 +20,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from portal.app.db import _asyncpg_dsn  # noqa: E402
+from portal.app.routes import users as users_route  # noqa: E402
 from portal.app.routes.users import get_user, list_users, user_stats  # noqa: E402
 from server.academic_calendar.models import SemesterTerm  # noqa: E402
 from server.auth.models import (  # noqa: E402
@@ -443,3 +444,23 @@ async def test_user_page_for_an_unknown_user_is_not_found(db_session, portal_poo
     with pytest.raises(HTTPException) as caught:
         await get_user(_REQUEST, uuid.uuid4(), pool=portal_pool)
     assert caught.value.status_code == 404
+
+
+async def test_user_page_counts_every_push_while_listing_a_capped_number(
+    db_session, portal_pool, monkeypatch
+):
+    user = await _user(db_session, "c1")
+    job = _job(user, "course")
+    db_session.add(job)
+    await db_session.flush()
+    db_session.add_all([_delivery(job, "sent"), _delivery(job, "failed")])
+    cancelled = _job(user, "schedule", status="cancelled")
+    db_session.add(cancelled)
+    await db_session.commit()
+    monkeypatch.setattr(users_route, "_PUSH_ROWS", 1)
+
+    page = await get_user(_REQUEST, user.id, pool=portal_pool)
+
+    assert len(page["pushes"]) == 1
+    assert page["push_counts"] == {"sent": 1, "failed": 1, "cancelled": 1}
+

@@ -205,7 +205,10 @@ export type UserDetail = {
     schedule: { day?: number; periods?: string[] }[];
     skipped: string[];
   }[];
+  /** Up to 500, newest first. */
   pushes: UserPush[];
+  /** Every push of the last 7 days, by status. */
+  push_counts: Record<UserPush["status"], number>;
   last_sync: { at: string; device_id: string } | null;
 };
 
