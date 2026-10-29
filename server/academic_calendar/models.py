@@ -14,6 +14,9 @@ Tables
   per (user, holiday). Rides the normal cloud-sync changelog so a user's
   devices agree when sync is on; devices with sync off keep the choice
   locally and never create a row here.
+* `course_changes` — the school's exceptions to one course's classes in a
+  term (`course_no` as in `user_courses`), recorded in the portal: a
+  cancelled class, a new room, start or end time, or a note.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    DDL,
     Boolean,
     CheckConstraint,
     Date,
@@ -29,11 +33,14 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
+    event,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from server.db import Base
@@ -137,3 +144,144 @@ class UserHolidayOverride(Base):
         # `ix_user_holiday_overrides_user_id` and not match the database.
         Index("ix_user_holiday_overrides_user", "user_id"),
     )
+
+
+class CourseChange(Base):
+    """One exception to a course's classes: on one day, or on every class
+    day of a range but the weekdays left out. Keep in step with
+    `ea77513de257_course_changes.py`."""
+
+    __tablename__ = "course_changes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # No cascade: deleting a term must not drop the changes recorded for it.
+    term_code: Mapped[str] = mapped_column(
+        String(8), ForeignKey("semester_terms.code")
+    )
+    course_no: Mapped[str] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(String(16))
+    mode: Mapped[str] = mapped_column(String(8))
+    # Both inclusive; a day change has start == end.
+    start_date: Mapped[date] = mapped_column(Date)
+    end_date: Mapped[date] = mapped_column(Date)
+    # ISO weekdays, 1 (Monday) to 7, a range leaves out.
+    excluded_weekdays: Mapped[list[int]] = mapped_column(
+        ARRAY(SmallInteger), default=list, server_default="{}"
+    )
+    # NTUST periods ("3", "A"); None is every period of the day.
+    periods: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
+    room: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # "HH:mm", Asia/Taipei.
+    start_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    end_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    note_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # None falls back to note_zh.
+    note_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    # The operator's Cloudflare Access email.
+    created_by: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[str] = mapped_column(Text)
+
+    # A check passes on NULL, so each blank or format test binds only a value
+    # that is there.
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('cancelled', 'room', 'start', 'end', 'note')",
+            name="chk_course_change_kind",
+        ),
+        CheckConstraint(
+            "(mode = 'day' AND end_date = start_date AND excluded_weekdays = '{}')"
+            " OR (mode = 'range' AND end_date >= start_date)",
+            name="chk_course_change_mode",
+        ),
+        CheckConstraint(
+            "excluded_weekdays <@ '{1,2,3,4,5,6,7}'::smallint[]",
+            name="chk_course_change_weekdays",
+        ),
+        CheckConstraint(
+            "periods IS NULL OR cardinality(periods) > 0",
+            name="chk_course_change_periods",
+        ),
+        CheckConstraint(
+            "(kind = 'room') = (room IS NOT NULL) AND btrim(room) <> ''",
+            name="chk_course_change_room",
+        ),
+        CheckConstraint(
+            "(kind = 'start') = (start_time IS NOT NULL)"
+            " AND start_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'",
+            name="chk_course_change_start",
+        ),
+        CheckConstraint(
+            "(kind = 'end') = (end_time IS NOT NULL)"
+            " AND end_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'",
+            name="chk_course_change_end",
+        ),
+        CheckConstraint(
+            "(kind = 'note') = (note_zh IS NOT NULL) AND btrim(note_zh) <> ''"
+            " AND (note_en IS NULL OR kind = 'note') AND btrim(note_en) <> ''",
+            name="chk_course_change_note",
+        ),
+        Index("ix_course_changes_term_course", "term_code", "course_no"),
+    )
+
+
+# The weekdays a `user_courses.schedule_json` meets on, ISO 1-7, each with its
+# NTUST periods as text. Entries the class reminder scan skips are skipped.
+COURSE_MEETINGS_SQL = """
+CREATE OR REPLACE FUNCTION course_meetings(schedule jsonb)
+RETURNS TABLE (weekday integer, periods text[])
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT (entry->>'day')::integer, array_agg(DISTINCT period)
+    FROM jsonb_array_elements(
+        CASE jsonb_typeof(schedule) WHEN 'array' THEN schedule ELSE '[]' END
+    ) AS e(entry)
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE jsonb_typeof(entry->'periods') WHEN 'array' THEN entry->'periods' ELSE '[]' END
+    ) AS p(period)
+    WHERE jsonb_typeof(entry->'day') = 'number'
+      AND entry->>'day' IN ('1', '2', '3', '4', '5', '6', '7')
+      AND period IS NOT NULL
+    GROUP BY 1
+$$
+"""
+
+# A change's class days by today's calendar: the days from first to last,
+# inside the term, not a holiday or an excluded weekday, on which the course
+# meets in every one of `wanted` (any period when NULL). One computation for
+# the portal, the apps' feed and the class reminders.
+COURSE_CLASS_DAYS_SQL = """
+CREATE OR REPLACE FUNCTION course_class_days(
+    term text, schedule jsonb, first_day date, last_day date,
+    excluded smallint[], wanted text[]
+)
+RETURNS date[]
+LANGUAGE sql STABLE
+AS $$
+    SELECT coalesce(array_agg(class_day ORDER BY class_day), '{}')
+    FROM semester_terms
+    CROSS JOIN LATERAL generate_series(
+        greatest(first_day, start_date), least(last_day, end_date), interval '1 day'
+    ) AS g(moment)
+    CROSS JOIN LATERAL (SELECT moment::date AS class_day) AS d
+    JOIN course_meetings(schedule) AS m
+      ON m.weekday = extract(isodow FROM class_day)::integer
+    WHERE code = term
+      AND extract(isodow FROM class_day)::smallint <> ALL (excluded)
+      AND (wanted IS NULL OR wanted <@ m.periods)
+      AND NOT EXISTS (
+          SELECT 1 FROM academic_holidays AS h
+          WHERE class_day BETWEEN h.start_date AND h.end_date
+      )
+$$
+"""
+
+# After every table: a sql function's body names tables that must exist.
+event.listen(Base.metadata, "after_create", DDL(COURSE_MEETINGS_SQL))
+event.listen(Base.metadata, "after_create", DDL(COURSE_CLASS_DAYS_SQL))

@@ -47,9 +47,10 @@ server/
 │                              #   rules and the scheduled link checker
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
-├── academic_calendar/         # semester terms + school holidays (models, schemas,
-│                              #   terms.py: the current term and the days a term
-│                              #   runs on, as the apps take them)
+├── academic_calendar/         # semester terms, school holidays and course changes
+│                              #   (models, schemas, terms.py: the current term and
+│                              #   the days a term runs on, as the apps take them);
+│                              #   the portal writes course changes, nothing reads them yet
 ├── routes/
 │   ├── auth.py                # /v3/auth/*
 │   ├── user_devices.py        # /v3/devices/*

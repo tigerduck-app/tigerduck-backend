@@ -46,6 +46,8 @@ OTHER_READS = {
     ("announcement.py", "get_bulletin"),
     ("announcement.py", "list_bulletins"),
     ("announcement.py", "taxonomy"),
+    ("course_changes.py", "list_changes"),
+    ("course_changes.py", "list_courses"),
     ("custom_push.py", "recent"),
     ("device_lists.py", "get_list"),
     ("device_lists.py", "list_lists"),
