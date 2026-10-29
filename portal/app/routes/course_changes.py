@@ -234,7 +234,10 @@ async def _check(
         f"course_changes|{term}|{course_no}",
     )
     term_row = await conn.fetchrow(
-        "SELECT start_date, end_date FROM semester_terms WHERE code = $1", term
+        # Blocks a term delete until this write commits, so the delete's
+        # foreign key check sees the change and answers 409.
+        "SELECT start_date, end_date FROM semester_terms WHERE code = $1 FOR KEY SHARE",
+        term,
     )
     if term_row is None:
         return _bad("term not found", 404)
