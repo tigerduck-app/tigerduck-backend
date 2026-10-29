@@ -225,8 +225,11 @@ async def update_credentials(
                 last_error=None,
             )
         )
-    await service.store_display_name(session, auth.user_id, verify.fullname)
-
+    # The token is stored first, so a failed name write cannot cost it.
+    await session.commit()
+    await service.try_store_display_name(
+        request.app.state.session_factory, auth.user_id, verify.fullname
+    )
     return UpdateCredentialsResponse(updated=True)
 
 
