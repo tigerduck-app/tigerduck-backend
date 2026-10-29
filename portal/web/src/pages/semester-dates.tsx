@@ -313,7 +313,7 @@ function termColumns(
       sortValue: (r) => r.code,
       className: "whitespace-nowrap",
       cell: (r) => (
-        <span className="inline-flex items-center gap-2 font-semibold">
+        <span className="inline-flex items-center gap-2 whitespace-nowrap font-semibold">
           <span
             aria-hidden="true"
             className={cn("size-2.5 rounded-[3px]", r.term ? "bg-link" : "border-[1.5px] border-dashed border-side-muted")}
