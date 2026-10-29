@@ -333,6 +333,7 @@ async def test_values_of_another_kind_are_dropped(term, pool) -> None:
         ({"day": "2026-11-05", "periods": ["4"]}, 400),  # Thursday meets 2-3
         ({"day": "2026-11-05", "periods": []}, 400),
         ({"day": "2026-11-05", "periods": "3"}, 400),
+        ({"day": "2026-11-05", "periods": ["\u00b2"]}, 400),  # a digit int() rejects
         ({"mode": "range", "from": "2026-11-16", "to": "2026-11-30", "periods": ["3"]}, 200),
         ({"mode": "range", "from": "2026-11-16", "to": "2026-11-30", "periods": ["4"]}, 400),
         (

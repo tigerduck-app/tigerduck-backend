@@ -85,8 +85,10 @@ def _bad(detail: str, status: int = 400) -> JSONResponse:
 
 
 def _period_key(period: str) -> tuple:
-    # NTUST's order: 1-10, then the evening's A-D.
-    return (not period.isdigit(), int(period) if period.isdigit() else 0, period)
+    # NTUST's order: 1-10, then the evening's A-D. isdigit() alone lets in
+    # digits such as "\u00b2" that int() rejects.
+    numeric = period.isascii() and period.isdigit()
+    return (not numeric, int(period) if numeric else 0, period)
 
 
 def _change_to_dict(r) -> dict:
