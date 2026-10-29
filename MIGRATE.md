@@ -41,8 +41,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   only Android devices still get none from the server. The reminders do not
   take the school's course changes into account yet.
 - **No migration and no `.env` change.** Rollback: check out 3.8.0 and
-  run `./start.sh`. Class reminders already filed then stay pending and go
-  out as filed.
+  run `./start.sh`. Its first scan cancels the class reminders still
+  pending, since it finds no meetings again.
 
 ## Upgrading to 3.8.0
 
