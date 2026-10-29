@@ -476,3 +476,21 @@ async def test_notes_share_a_day(term, pool) -> None:
     )
 
     assert [status for status, _ in (exam, makeup, week)] == [200, 200, 200]
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    ["null", '"Mon 2, 6"', "5", '[null, 5, {"day": 1, "periods": null}, {"day": "1", "periods": [2]}]'],
+)
+async def test_a_malformed_schedule_counts_as_no_meetings(term, pool, schedule) -> None:
+    await pool.execute(
+        "UPDATE user_courses SET schedule_json = $1::jsonb, classroom_map = 'null'"
+        " WHERE course_no = 'EE2005701'",
+        schedule,
+    )
+
+    _, el = _body(await list_courses("1151", pool=pool))["courses"]
+    status, _ = await _create(pool, course_no="EE2005701", day="2026-11-02")
+
+    assert (el["course_no"], el["meetings"], el["classroom_map"]) == ("EE2005701", [], {})
+    assert status == 404

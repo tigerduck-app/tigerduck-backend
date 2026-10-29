@@ -45,7 +45,9 @@ WITH taken AS (
     WHERE semester = $1 AND course_no IS NOT NULL AND enrollment_status = 'enrolled'
 ), latest AS (
     SELECT DISTINCT ON (course_no) course_no, course_name, course_name_en,
-           instructors, credits, classroom, classroom_map, schedule_json
+           instructors, credits, classroom, schedule_json,
+           CASE jsonb_typeof(classroom_map) WHEN 'object' THEN classroom_map
+           ELSE '{}' END AS classroom_map
     FROM taken
     ORDER BY course_no, (source = 'ntust_portal') DESC, updated_at DESC
 ), reach AS (
@@ -87,7 +89,8 @@ def _period_key(period: str) -> tuple:
 def _meetings(schedule_json: str) -> dict[int, set[str]]:
     """ISO weekday -> the periods the course meets that day."""
     meets: dict[int, set[str]] = {}
-    for entry in json.loads(schedule_json):
+    entries = json.loads(schedule_json)
+    for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict) or not isinstance(entry.get("periods"), list):
             continue
         day = entry.get("day")
