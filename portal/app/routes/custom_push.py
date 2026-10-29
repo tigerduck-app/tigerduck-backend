@@ -64,7 +64,12 @@ class _TargetFilter(BaseModel):
     @field_validator("course_code")
     @classmethod
     def _course_code(cls, v: str | None) -> str | None:
-        return v.strip().upper() or None if v else None
+        if v is None:
+            return None
+        # Read as no course, a blank code would send to every student.
+        if not v.strip():
+            raise ValueError("course_code is blank")
+        return v.strip().upper()
 
 
 class _PreviewRequest(_TargetFilter):
