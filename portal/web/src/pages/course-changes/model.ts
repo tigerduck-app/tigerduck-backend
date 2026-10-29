@@ -189,7 +189,9 @@ export function rangeSub(c: Change, course: Course | undefined): string {
 export function changeError(e: unknown, kind: Kind | null): string {
   if (e instanceof ApiError && e.status === 409) {
     const day = (e.body as { day?: unknown } | null)?.day;
-    if (typeof day !== "string") return "No class day is left for this change. Delete it instead.";
+    // The stale edit's detail ends "so the change can only be deleted".
+    if (e.message.includes("can only be deleted")) return "No class day is left for this change. Delete it instead.";
+    if (typeof day !== "string") return asMessage(e);
     if (kind === "cancelled") return `${dayDate(day)} is already cancelled.`;
     return `${dayDate(day)} already has a ${KIND[kind ?? "room"].label.toLowerCase()}.`;
   }
