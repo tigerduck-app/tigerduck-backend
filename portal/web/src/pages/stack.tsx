@@ -35,6 +35,9 @@ function uptime(ms: number): string {
   return `${minutes}m`;
 }
 
+// An empty or relative value from .env would make a dead link.
+const isWebUrl = (v: string) => /^https?:\/\/\S+$/i.test(v);
+
 function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -217,7 +220,7 @@ function StackContent({ data }: { data: StatusPayload }) {
               <dd className="flex min-w-0 flex-col gap-1">
                 {e.values.length === 0 && <span className="font-mono text-[13px]">—</span>}
                 {e.values.map((v) =>
-                  e.link ? (
+                  e.link && isWebUrl(v) ? (
                     <a
                       key={v}
                       href={v}
@@ -231,7 +234,7 @@ function StackContent({ data }: { data: StatusPayload }) {
                     </a>
                   ) : (
                     <span key={v} className="break-all font-mono text-[13px]">
-                      {v}
+                      {v || "—"}
                     </span>
                   ),
                 )}
