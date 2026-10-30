@@ -268,7 +268,8 @@ into the backend container via `docker-compose.yml`.
   started (its pending `la_end` job, as `_activity_already_registered`
   reads): the start's alert already rang there. A start iOS cannot show, or
   one the app ends on arrival, never registers. A reminder due within 30 s
-  of such a start's send waits once, 60 s, for the registration, when the
+  of such a start's send waits once, 60 s, for the registration (as for a
+  start another tick is still delivering), when the
   pre-send grace leaves room for the next round; a device still
   unregistered then gets it, as does one whose start did not go out. A
   reminder left out on every device ends `cancelled` (`countdown_start_sent`).

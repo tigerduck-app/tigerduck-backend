@@ -1028,7 +1028,8 @@ async def _countdown_starts(
     """When the countdown start of reminder `job`'s assignment went out to
     each of `device_ids` it reached at most `window` before the reminder's
     fire time, or since, as `(covered, waiting)`: whether the app there has
-    registered the activity the start created, or not yet.
+    registered the activity the start created, or not yet (as for a start
+    still being delivered, at its fire time).
 
     The start is the device's own `/schedule/sync` job for the assignment,
     the one the pre-send check guards, and counts once a delivery of it was
@@ -1044,11 +1045,13 @@ async def _countdown_starts(
         return {}, {}
     source_id = str(assignment_id)
     scenario = ScheduleScenario.assignment_urgent.value
+    keys = {
+        schedule_key(device_id, source_id, scenario): device_id
+        for device_id in device_ids
+    }
     starts = select(PushJob.id).where(
         PushJob.user_id == job.user_id,
-        PushJob.dedupe_key.in_(
-            [schedule_key(device_id, source_id, scenario) for device_id in device_ids]
-        ),
+        PushJob.dedupe_key.in_(list(keys)),
         # SQL text, so a generic plan still reads ux_push_jobs_dedupe_active:
         # a start that went out is sent, partial_failed or still retrying.
         PUSH_JOB_DEDUPE_ACTIVE_WHERE,
@@ -1061,7 +1064,18 @@ async def _countdown_starts(
         )
     )
     sent = {device_id: at for device_id, at in rows}
-    if not sent:
+    # A start another tick is still delivering has no sent delivery until that
+    # tick commits; the reminder waits for it as for a registration (#114).
+    claimed = await session.execute(
+        select(PushJob.dedupe_key, PushJob.fire_at).where(
+            PushJob.user_id == job.user_id,
+            PushJob.dedupe_key.in_(list(keys)),
+            text("status = 'processing'"),
+            PushJob.fire_at >= job.fire_at - window,
+        )
+    )
+    in_flight = {keys[key]: at for key, at in claimed if keys[key] not in sent}
+    if not sent and not in_flight:
         return {}, {}
     registered = await _registered(
         session,
@@ -1071,7 +1085,7 @@ async def _countdown_starts(
         now=now,
     )
     covered = {d: at for d, at in sent.items() if d in registered}
-    waiting = {d: at for d, at in sent.items() if d not in registered}
+    waiting = {d: at for d, at in sent.items() if d not in registered} | in_flight
     return covered, waiting
 
 

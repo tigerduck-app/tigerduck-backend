@@ -373,6 +373,34 @@ async def test_a_reminder_waits_once_for_its_countdown_to_register(
     ] == [{str(iphone.id): sent_at.isoformat()}]
 
 
+async def test_a_reminder_waits_for_a_start_another_tick_is_delivering(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """The scheduled tick and a `POST /push-tick` run can overlap: one holds
+    the start, its delivery not yet committed, while the other claims the
+    reminder. The reminder waits as it waits for a registration (#114)."""
+    user = await _user(db_session, store_moodle_token)
+    iphone = await _iphone(db_session, user, "a")
+    fire_at = datetime.now(UTC) - timedelta(seconds=5)
+    due_at = fire_at + timedelta(hours=8)
+    await make_assignment(user_id=user.id, moodle_assignment_id=69, due_at=due_at)
+    start = _start(user, iphone, 69, due_at, fire_at=fire_at, status="processing")
+    start.locked_by = "the-other-tick"
+    start.locked_at = datetime.now(UTC)
+    reminder = _reminder(user, 69, due_at, fire_at=fire_at)
+    db_session.add_all([start, reminder])
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    before = datetime.now(UTC)
+    await run_push_tick(_worker(prepared_engine, test_settings, apple))
+
+    await db_session.refresh(reminder)
+    assert apple.requests == []
+    assert (reminder.status, reminder.attempts) == ("pending", 0)
+    assert reminder.available_at >= before + timedelta(seconds=60)
+
+
 async def test_a_countdown_that_never_registers_leaves_the_reminder(
     db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
 ):
