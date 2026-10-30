@@ -266,3 +266,30 @@ async def test_overdue_triggers_go_out_one_per_gap(
         "pending",
         "sent",
     ]
+
+
+async def test_the_portals_forced_trigger_skips_the_gap(
+    db_session, prepared_engine, test_settings
+):
+    """An operator presses the force button to sync now, and the portal
+    reports success at once."""
+    user = await _user(db_session)
+    await _iphone(db_session, user)
+    await _enqueue(prepared_engine, user)
+    assert len(await _tick(prepared_engine, test_settings)) == 1
+    # As portal/app/routes/moodle/push.py files it.
+    forced = PushJob(
+        user_id=user.id,
+        dedupe_key=f"sync_trigger:{user.id}:forced",
+        channel="system",
+        scenario="sync_trigger",
+        fire_at=datetime.now(UTC) - timedelta(seconds=1),
+        available_at=datetime.now(UTC) - timedelta(seconds=1),
+        payload={"kind": "sync_trigger", "source": "portal_force"},
+    )
+    db_session.add(forced)
+    await db_session.commit()
+
+    assert len(await _tick(prepared_engine, test_settings)) == 1
+    await db_session.refresh(forced)
+    assert forced.status == "sent"

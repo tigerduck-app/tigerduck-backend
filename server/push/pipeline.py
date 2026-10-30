@@ -647,8 +647,12 @@ async def _materialize(
     source_device_id: str | None = None
     if is_sync_trigger:
         # Paced from the last send, not the planned time: downtime or a retry
-        # can leave triggers due together (#107).
-        if last := await _last_sync_trigger_sent(session, job, now=now):
+        # can leave triggers due together (#107). The portal's force button is not.
+        forced = (job.payload or {}).get("source") == "portal_force"
+        last = (
+            None if forced else await _last_sync_trigger_sent(session, job, now=now)
+        )
+        if last:
             job.status = PushJobStatus.pending.value
             job.available_at = last + SYNC_TRIGGER_GAP
             job.locked_by = None
