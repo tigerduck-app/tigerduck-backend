@@ -3,6 +3,7 @@ that follows it."""
 
 from __future__ import annotations
 from datetime import UTC, datetime, timedelta
+from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field, StrictInt
 from sqlalchemy import delete, func, or_, select, text, update
@@ -18,6 +19,7 @@ from server.sync.merge import OLDEST, ClockProtocolDep, apply_field, edit_time, 
 from server.sync.models import (
     ChangeEntityType,
     CourseSource,
+    EnrollmentStatus,
     UserAssignment,
     UserAssignmentOverride,
     UserBulletinState,
@@ -25,6 +27,7 @@ from server.sync.models import (
     UserChangeLog,
     UserCourse,
     UserCourseOverride,
+    UserCourseRoster,
     UserCourseSkippedDate,
     UserCourseTombstone,
     UserSettingsDocument,
@@ -94,6 +97,11 @@ class CourseUploadRequest(BaseModel):
     # Protocol 2's hand-adds, in place of `force_keys`: each names a course
     # in `courses` and is applied by its stamp (`sync/membership.py`).
     adds: list[CourseAdd] = Field(default_factory=list, max_length=50)
+    # The terms whose courses here are the school's whole roster, which the
+    # apps send only from course selection's answer or a final transcript.
+    roster_terms: list[Annotated[str, Field(max_length=16)]] = Field(
+        default_factory=list, max_length=8
+    )
 @router.post("/courses/upload")
 async def upload_courses(
     payload: CourseUploadRequest,
@@ -117,13 +125,12 @@ async def upload_courses(
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
 
-    existing_sources = dict(
-        (await session.execute(
-            select(UserCourse.course_key, UserCourse.source).where(
-                UserCourse.user_id == auth.user_id
-            )
-        )).all()
-    )
+    existing_rows = (await session.execute(
+        select(UserCourse.course_key, UserCourse.source, UserCourse.enrollment_status).where(
+            UserCourse.user_id == auth.user_id
+        )
+    )).all()
+    existing_sources = {r.course_key: r.source for r in existing_rows}
     existing_keys = set(existing_sources)
 
     added_at: dict[str, datetime] = {}
@@ -207,6 +214,12 @@ async def upload_courses(
         # A released app's re-add is stamped when it arrives.
         added_at = dict.fromkeys(payload.force_keys, now)
 
+    # Only a roster or a hand-add sets a course's enrollment: other lists can
+    # be stale or partial, and would bring back a dropped course.
+    roster_terms = set(payload.roster_terms)
+    enrol = set(added_at) | {
+        f"client:{c.semester}:{c.course_no}" for c in payload.courses if c.semester in roster_terms
+    }
     upserted = 0
     skipped = 0
     uploaded_keys: set[str] = set()
@@ -264,11 +277,59 @@ async def upload_courses(
                         else UserCourse.__table__.c.source
                     ),
                     "added_at": added_at.get(course_key, UserCourse.__table__.c.added_at),
+                    "enrollment_status": (
+                        EnrollmentStatus.enrolled.value
+                        if course_key in enrol
+                        else UserCourse.__table__.c.enrollment_status
+                    ),
                 },
             )
         )
         await session.execute(stmt)
         upserted += 1
+
+    # A roster leaves out the term's courses the student dropped or withdrew
+    # from. A course added by hand, or with a tombstone, stays, and a term
+    # the upload lists no school course of is no roster.
+    hand_keys = {a.course_key for a in payload.adds} | set(payload.force_keys)
+    rostered = roster_terms & {
+        c.semester for c in payload.courses
+        if f"client:{c.semester}:{c.course_no}" not in hand_keys
+    }
+    dropped_keys: set[str] = set()
+    if rostered:
+        dropped_keys = set((await session.scalars(
+            update(UserCourse)
+            .where(
+                UserCourse.user_id == auth.user_id,
+                UserCourse.semester.in_(rostered),
+                UserCourse.course_key.not_in(payload_keys),
+                UserCourse.course_key.not_in(
+                    select(UserCourseTombstone.course_key).where(
+                        UserCourseTombstone.user_id == auth.user_id
+                    )
+                ),
+                UserCourse.source == CourseSource.ntust_portal.value,
+                UserCourse.added_at.is_(None),
+                UserCourse.enrollment_status == EnrollmentStatus.enrolled.value,
+            )
+            .values(enrollment_status=EnrollmentStatus.dropped.value)
+            .returning(UserCourse.course_key)
+        )).all())
+        await session.execute(
+            pg_insert(UserCourseRoster)
+            .values([
+                {"user_id": auth.user_id, "semester": term, "received_at": now}
+                for term in sorted(rostered)
+            ])
+            .on_conflict_do_update(
+                index_elements=["user_id", "semester"], set_={"received_at": now}
+            )
+        )
+    re_enrolled = enrol & uploaded_keys & {
+        r.course_key for r in existing_rows
+        if r.enrollment_status != EnrollmentStatus.enrolled.value
+    }
 
     new_keys = uploaded_keys - existing_keys
     # Under protocol 2 an add to a row the server holds changes what the
@@ -278,11 +339,14 @@ async def upload_courses(
             k for k in listed_by_school if existing_sources.get(k) == CourseSource.user_added
         }
         new_keys |= (set(added_at) | by_school) & uploaded_keys
+    # A change of enrollment changes it too: the apps read the status there.
+    new_keys |= dropped_keys | re_enrolled
     logger.info(
         "sync.upload_courses",
         user_id=str(auth.user_id),
         device_id=str(auth.device_id) if auth.device_id else None,
         upserted=upserted,
+        dropped=len(dropped_keys),
         new_keys=sorted(new_keys) if new_keys else [],
         uploaded_keys=sorted(uploaded_keys),
     )
