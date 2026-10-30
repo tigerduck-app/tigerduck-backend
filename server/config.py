@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVER_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SERVER_DIR.parent
+# Every secret in .env.example holds a value with this in it.
+EXAMPLE_PLACEHOLDER = "CHANGE_ME"
 
 
 class Settings(BaseSettings):
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
     # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
-    # (login returns 503) — mirrors the api_shared_secret dev convention.
+    # (login returns 503) in development; production refuses to start.
     auth_jwt_secret: str = ""
     # Separate HMAC-SHA-256 key for refresh-token hashing (key separation:
     # a leaked JWT secret must not let an attacker forge refresh hashes).
@@ -351,11 +353,26 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
-        if self.env == "production" and not self.api_shared_secret:
+        if self.env != "production":
+            return self
+        secrets = {
+            "TIGERDUCK_API_SHARED_SECRET": self.api_shared_secret,
+            "TIGERDUCK_AUTH_JWT_SECRET": self.auth_jwt_secret,
+            "TIGERDUCK_AUTH_REFRESH_HMAC_KEY": self.auth_refresh_hmac_key,
+            "TIGERDUCK_CREDENTIAL_KEYS": "".join(self.credential_keys.values()),
+            "TIGERDUCK_DATABASE_URL": self.database_url,
+        }
+        refused = [
+            name
+            for name, value in secrets.items()
+            if not value or EXAMPLE_PLACEHOLDER in value
+        ]
+        if refused:
             raise ValueError(
-                "TIGERDUCK_API_SHARED_SECRET must be set in production. An "
-                "unset TIGERDUCK_ENV now means production; for local "
-                "development set TIGERDUCK_ENV=development."
+                f"{', '.join(refused)} must be set in production, and not to "
+                f"the {EXAMPLE_PLACEHOLDER} placeholder from .env.example. An "
+                "unset TIGERDUCK_ENV means production; for local development "
+                "set TIGERDUCK_ENV=development."
             )
         return self
 
