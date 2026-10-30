@@ -5,7 +5,10 @@ Root CA has. Name lookups other than 127.0.0.1 are refused."""
 
 from __future__ import annotations
 
+import socket
 import ssl
+import threading
+import time
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +21,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from server import tls_chain
 from server.bulletins import jobs
 from server.bulletins.jobs import (
     NTUST_INTERMEDIATES,
@@ -194,6 +198,51 @@ async def test_an_aia_intermediate_never_becomes_a_trust_anchor(tmp_path, port, 
     with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
         await _get(_aia_client(context, port, _Aia(chain.intermediate)), port)
 
+
+
+@pytest.fixture
+def slow_aia(monkeypatch):
+    """An AIA server on 127.0.0.1 that takes each connection and never
+    answers; every AIA host resolves to it. Yields the connections taken."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.1)
+    taken: list[socket.socket] = []
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                taken.append(listener.accept()[0])
+            except TimeoutError:
+                continue
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    aia_port = listener.getsockname()[1]
+    monkeypatch.setattr(tls_chain, "resolve", lambda _host, _port: [("127.0.0.1", aia_port)])
+    try:
+        yield taken
+    finally:
+        stop.set()
+        thread.join()
+        for conn in taken:
+            conn.close()
+        listener.close()
+
+
+async def test_a_slow_aia_server_holds_a_fetch_no_longer_than_the_deadline(
+    port, chain: Chain, slow_aia, monkeypatch
+):
+    monkeypatch.setattr(jobs, "AIA_FETCH_DEADLINE_SECONDS", 1.0)
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    transport = AiaTransport(context, resolve=lambda _h, _p: [("127.0.0.1", port)])
+    started = time.monotonic()
+
+    with pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"):
+        await _get(httpx.AsyncClient(transport=transport), port)
+
+    assert slow_aia, "the issuer download never reached the AIA server"
+    assert time.monotonic() - started < 3
 
 def test_the_scheduler_builds_its_context_once(monkeypatch):
     built = []

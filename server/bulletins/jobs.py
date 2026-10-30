@@ -20,7 +20,7 @@ import ssl
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 
 import certifi
@@ -93,7 +93,7 @@ class AiaTransport(httpx.AsyncBaseTransport):
         context: ssl.SSLContext,
         *,
         resolve: Callable[[str, int], list[tuple[str, int]]] = resolve_public,
-        fetch: IssuerFetch = fetch_issuer,
+        fetch: IssuerFetch | None = None,
     ) -> None:
         self._context = context
         self._transport = httpx.AsyncHTTPTransport(verify=context)
@@ -114,10 +114,12 @@ class AiaTransport(httpx.AsyncBaseTransport):
         return await self._transport.handle_async_request(request)
 
     def _missing_intermediates(self, url: httpx.URL) -> list[bytes]:
+        # One deadline for the chain read and every issuer download together.
         deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
+        fetch = self._fetch or partial(fetch_issuer, deadline=deadline)
         try:
             addresses = self._resolve(url.host, url.port or 443)
-            return missing_intermediates(url.host, addresses, self._fetch, deadline)
+            return missing_intermediates(url.host, addresses, fetch, deadline)
         except (OSError, ValueError):
             return []
 
