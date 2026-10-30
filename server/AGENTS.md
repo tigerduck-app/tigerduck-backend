@@ -208,12 +208,15 @@ into the backend container via `docker-compose.yml`.
   rows inserted for every user or device go `INSERT_CHUNK_ROWS` (`db.py`)
   at a time.
 - Deleting an account (the portal's deregister) locks its
-  `external_accounts` rows in id order, as `lock_accounts` does for sign-in,
-  sign-out and the sync executor, then its `users` row `FOR UPDATE`, and
-  only then deletes. A retention batch (`delete_in_batches`) locks only its
-  rows' `users` rows, `FOR KEY SHARE` in id order, before deleting them.
-  Any other order deadlocks: with a sign-in, whose session insert needs the
-  `users` row, or with a purge, on a device and its sessions.
+  `external_accounts` rows in id order, as `lock_accounts` does for sign-in
+  and sign-out, then its `users` row `FOR UPDATE`, and only then deletes; a
+  sign-in writes the `users` row only after `lock_accounts`. A retention
+  batch (`delete_in_batches`) locks only its rows' `users` rows, `FOR KEY
+  SHARE` in id order, before deleting them. The sync executor takes no
+  account lock: it locks a job, then needs the `users` row for its run, so
+  a deregister can still deadlock with it. The deregister tries its
+  transaction again on a deadlock (40P01), up to 3 times, and a purge
+  batch likewise, ending the night's run after the third.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index. Pass it as

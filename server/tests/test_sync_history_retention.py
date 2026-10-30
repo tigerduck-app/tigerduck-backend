@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from server import db
 from server.auth.models import ExternalAccount, User
@@ -64,6 +64,56 @@ async def test_a_purge_deletes_one_batch_per_transaction(
 
     assert deleted == 5
     assert batches == [["0", "1"], ["2", "3"], ["4"]]
+
+
+_DEADLOCK = text(
+    "DO $$ BEGIN RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01'; END $$"
+)
+
+
+async def test_a_batch_aborted_as_a_deadlock_is_tried_again(
+    db_session, prepared_engine
+) -> None:
+    await _log(db_session, ("old", OLD), ("recent", RECENT))
+    tries = []
+
+    async def deadlocked_once(session, rows) -> None:
+        tries.append(len(rows))
+        if len(tries) == 1:
+            await session.execute(_DEADLOCK)
+
+    deleted = await db.delete_in_batches(
+        build_session_factory(prepared_engine),
+        SyncLogEntry,
+        SyncLogEntry.ts < NOW - timedelta(days=30),
+        then=deadlocked_once,
+    )
+
+    assert (deleted, tries) == (1, [1, 1])
+    left = (await db_session.execute(select(SyncLogEntry.message))).scalars().all()
+    assert left == ["recent"]
+
+
+async def test_a_batch_deadlocked_every_time_ends_the_run(
+    db_session, prepared_engine
+) -> None:
+    await _log(db_session, ("old", OLD))
+    tries = []
+
+    async def deadlocked(session, rows) -> None:
+        tries.append(len(rows))
+        await session.execute(_DEADLOCK)
+
+    deleted = await db.delete_in_batches(
+        build_session_factory(prepared_engine),
+        SyncLogEntry,
+        SyncLogEntry.ts < NOW - timedelta(days=30),
+        then=deadlocked,
+    )
+
+    assert (deleted, len(tries)) == (0, db.PRUNE_BATCH_ATTEMPTS)
+    left = (await db_session.execute(select(SyncLogEntry.message))).scalars().all()
+    assert left == ["old"]
 
 
 async def test_log_entries_past_the_window_go(db_session, prepared_engine) -> None:

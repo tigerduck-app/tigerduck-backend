@@ -8,8 +8,10 @@ report before anything is deleted.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, UTC
 
+from asyncpg.exceptions import DeadlockDetectedError
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -18,6 +20,11 @@ from ..audit import audit
 from ..db import get_pool
 
 router = APIRouter(prefix="/api/deregister")
+logger = logging.getLogger(__name__)
+
+# The sync executor locks a job before the users row its run needs, the other
+# way round from here, so Postgres may abort this as a deadlock (server/AGENTS.md).
+_ATTEMPTS = 3
 
 
 class DeregisterRequest(BaseModel):
@@ -131,28 +138,14 @@ async def deregister_student(
 
         device_list, counts = await _snapshot(conn, user_id)
 
-        async with conn.transaction():
-            # The order sign-in takes (`lock_accounts`), then the account the retention
-            # purges lock (`delete_in_batches`), before any row of either: see server/AGENTS.md.
-            await conn.execute(
-                "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
-                user_id,
-            )
-            await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
-            await conn.execute(
-                """DELETE FROM external_account_credentials
-                   WHERE external_account_id IN (
-                       SELECT id FROM external_accounts WHERE user_id = $1
-                   )""",
-                user_id,
-            )
-            await conn.execute(
-                "DELETE FROM external_accounts WHERE user_id = $1", user_id
-            )
-            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
-            await audit(
-                conn, request, "user.deregister", user_id=user_id, devices=len(device_list)
-            )
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                await _delete_account(conn, request, user_id, devices=len(device_list))
+                break
+            except DeadlockDetectedError:
+                if attempt == _ATTEMPTS:
+                    raise
+                logger.warning("deregister aborted as a deadlock, attempt %d", attempt)
 
     report = {
         "deleted": True,
@@ -164,6 +157,27 @@ async def deregister_student(
         "deleted_counts": counts,
     }
     return JSONResponse(content=report)
+
+
+async def _delete_account(conn, request: Request, user_id, *, devices: int) -> None:
+    async with conn.transaction():
+        # The order sign-in takes (`lock_accounts`), then the account the retention
+        # purges lock (`delete_in_batches`), before any row of either: see server/AGENTS.md.
+        await conn.execute(
+            "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
+            user_id,
+        )
+        await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
+        await conn.execute(
+            """DELETE FROM external_account_credentials
+               WHERE external_account_id IN (
+                   SELECT id FROM external_accounts WHERE user_id = $1
+               )""",
+            user_id,
+        )
+        await conn.execute("DELETE FROM external_accounts WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+        await audit(conn, request, "user.deregister", user_id=user_id, devices=devices)
 
 
 async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:

@@ -4,7 +4,9 @@ server suite for the reason test_portal_sync_job_retry.py gives."""
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +14,7 @@ from types import SimpleNamespace
 import asyncpg
 import pytest
 import pytest_asyncio
-from sqlalchemy import Table, text
+from sqlalchemy import Table, func, select, text, update
 from sqlalchemy.dialects.postgresql import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -35,6 +37,7 @@ from server.config import Settings  # noqa: E402
 from server.db import Base, build_session_factory  # noqa: E402
 from server.syncjobs.models import SyncJob, SyncLogEntry, SyncRun  # noqa: E402
 from server.syncjobs.retention import prune_sync_history  # noqa: E402
+from server.tests.test_auth_refresh import do_login  # noqa: E402
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -271,3 +274,57 @@ async def test_a_deregister_during_a_sign_in_waits_for_it(
 
     assert (await deregistering).status_code == 200
     assert await portal_pool.fetchval("SELECT count(*) FROM auth_sessions") == 0
+
+
+async def test_a_deregister_deadlocked_with_the_sync_executor_is_tried_again(
+    db_session, portal_pool, prepared_engine, caplog
+):
+    """The executor locks a job and then needs the users row for its run; the
+    deregister holds that row and waits for the job, which its delete of the
+    NTUST account cascades to. Postgres aborts the deregister."""
+    user = await _old_rows(db_session)
+    job_id = await db_session.scalar(select(SyncJob.id).where(SyncJob.user_id == user.id))
+    factory = build_session_factory(prepared_engine)
+    caplog.set_level(logging.WARNING, logger=deregister_route.__name__)
+
+    async with portal_pool.acquire() as executor, executor.transaction():
+        # So that the deregister, waiting first, is the one Postgres aborts.
+        await executor.execute("SET LOCAL deadlock_timeout = '30s'")
+        await executor.execute("SELECT 1 FROM sync_jobs WHERE id = $1 FOR UPDATE", job_id)
+        deregistering = _deregister(portal_pool)
+        await _blocked_by(deregistering, factory, await executor.fetchval("SELECT pg_backend_pid()"))
+        await executor.execute(
+            "INSERT INTO sync_runs (sync_job_id, user_id) VALUES ($1, $2)", job_id, user.id
+        )
+
+    assert (await deregistering).status_code == 200
+    assert "deadlock" in caplog.text
+    assert await portal_pool.fetchval("SELECT count(*) FROM sync_runs") == 0
+
+
+async def test_a_sign_in_writes_the_users_row_after_the_account_lock(
+    client, prepared_engine
+):
+    """Reactivating a deleted account, the sign-in wrote the users row before
+    it took the NTUST account, the other way round from a deregister."""
+    user_id = uuid.UUID((await do_login(client))["user"]["id"])
+    factory = build_session_factory(prepared_engine)
+    async with factory() as session:
+        await session.execute(update(User).where(User.id == user_id).values(deleted_at=func.now()))
+        await session.commit()
+
+    async with prepared_engine.connect() as account_lock:
+        await account_lock.execute(
+            text("SELECT 1 FROM external_accounts WHERE user_id = :u FOR UPDATE"), {"u": user_id}
+        )
+        signing_in = asyncio.create_task(do_login(client))
+        await _blocked_by(
+            signing_in, factory, await account_lock.scalar(text("SELECT pg_backend_pid()"))
+        )
+        await account_lock.execute(
+            text("SELECT 1 FROM users WHERE id = :u FOR UPDATE NOWAIT"), {"u": user_id}
+        )
+        await account_lock.rollback()
+
+    await signing_in
+
