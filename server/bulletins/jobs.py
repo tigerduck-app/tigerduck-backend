@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import ssl
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from functools import cache
 from pathlib import Path
 
 import certifi
@@ -41,7 +43,16 @@ from server.config import Settings
 from server.db import lift_timeouts
 from server.metrics import observe_bulletin_scrape
 from server.push.router import PushRouter
-from server.tls_chain import trust_context
+from server.tls_chain import (
+    AIA_FETCH_DEADLINE_SECONDS,
+    INCOMPLETE_CHAIN_CODES,
+    IssuerFetch,
+    fetch_issuer,
+    missing_intermediates,
+    trust_context,
+    verify_code,
+)
+from server.tls_pins.targets import resolve as resolve_public
 
 logger = structlog.get_logger(__name__)
 
@@ -70,13 +81,62 @@ def resolve_bulletin_verify(
     return ctx
 
 
+class AiaTransport(httpx.AsyncBaseTransport):
+    """Sends over `context`, and a chain that stops short of a root, as a
+    renewal under an intermediate not bundled would, is completed through
+    AIA as server/links/checker.py does: the intermediates join the store,
+    never as anchors, stay there for later requests, and the request is sent
+    once more."""
+
+    def __init__(
+        self,
+        context: ssl.SSLContext,
+        *,
+        resolve: Callable[[str, int], list[tuple[str, int]]] = resolve_public,
+        fetch: IssuerFetch = fetch_issuer,
+    ) -> None:
+        self._context = context
+        self._transport = httpx.AsyncHTTPTransport(verify=context)
+        self._resolve = resolve
+        self._fetch = fetch
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._transport.handle_async_request(request)
+        except httpx.ConnectError as exc:
+            if verify_code(exc) not in INCOMPLETE_CHAIN_CODES:
+                raise
+            extra = await asyncio.to_thread(self._missing_intermediates, request.url)
+            if not extra:
+                raise
+        for der in extra:
+            self._context.load_verify_locations(cadata=der)
+        return await self._transport.handle_async_request(request)
+
+    def _missing_intermediates(self, url: httpx.URL) -> list[bytes]:
+        deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
+        try:
+            addresses = self._resolve(url.host, url.port or 443)
+            return missing_intermediates(url.host, addresses, self._fetch, deadline)
+        except (OSError, ValueError):
+            return []
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+
+@cache
+def _default_context() -> ssl.SSLContext:
+    return resolve_bulletin_verify()
+
+
 def default_http_client_factory() -> httpx.AsyncClient:
     """Each job call builds its own client — simpler than juggling an app-
     wide pool for calls that only happen every minute or so."""
     return httpx.AsyncClient(
+        transport=AiaTransport(_default_context()),
         follow_redirects=True,
         headers={"User-Agent": "TigerDuckBulletinBot/0.1"},
-        verify=resolve_bulletin_verify(),
     )
 
 

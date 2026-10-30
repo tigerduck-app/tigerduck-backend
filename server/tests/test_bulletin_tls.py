@@ -5,6 +5,7 @@ Root CA has. Name lookups other than 127.0.0.1 are refused."""
 
 from __future__ import annotations
 
+import ssl
 import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -17,14 +18,24 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+from server.bulletins import jobs
 from server.bulletins.jobs import (
     NTUST_INTERMEDIATES,
+    AiaTransport,
     default_http_client_factory,
     resolve_bulletin_verify,
 )
 from server.config import Settings
-from server.tests.test_links_transport_tls import _https_server
-from server.tests.test_tls_pin_watcher import _CA_USAGE, HOST, PEM, Authority, _issue, _name
+from server.tests.test_links_transport_tls import _Aia, _https_server
+from server.tests.test_tls_pin_watcher import (
+    _CA_USAGE,
+    AIA_URL,
+    HOST,
+    PEM,
+    Authority,
+    _issue,
+    _name,
+)
 
 
 def _root_without_ski(name: str) -> Authority:
@@ -49,6 +60,7 @@ def _root_without_ski(name: str) -> Authority:
 class Chain:
     roots: Path
     intermediates: Path
+    intermediate: Authority
     leaf: Authority
 
 
@@ -59,7 +71,7 @@ def chain(tmp_path: Path) -> Chain:
     roots, intermediates = tmp_path / "roots.pem", tmp_path / "intermediates.pem"
     roots.write_bytes(root.cert.public_bytes(PEM))
     intermediates.write_bytes(intermediate.cert.public_bytes(PEM))
-    return Chain(roots, intermediates, _issue(HOST, intermediate, ca=False))
+    return Chain(roots, intermediates, intermediate, _issue(HOST, intermediate, ca=False))
 
 
 @pytest.fixture
@@ -142,3 +154,54 @@ def test_the_bundled_intermediates_are_ntusts_and_chain_to_certifi_roots():
         assert cert.not_valid_after_utc > datetime.now(UTC)
         issuer = next(r for r in roots if r.subject == cert.issuer and r.issuer == r.subject)
         cert.verify_directly_issued_by(issuer)
+
+
+# --- An intermediate neither bundled nor sent, completed through AIA ---------
+
+
+def _aia_client(context, port: int, aia: _Aia) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=AiaTransport(context, resolve=lambda _h, _p: [("127.0.0.1", port)], fetch=aia)
+    )
+
+
+async def test_an_intermediate_left_out_is_fetched_through_aia_and_kept(port, chain: Chain):
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    aia = _Aia(chain.intermediate)
+
+    first = await _get(_aia_client(context, port, aia), port)
+    again = await _get(_aia_client(context, port, aia), port)
+
+    assert (first.status_code, again.status_code) == (200, 200)
+    assert aia.asked == [AIA_URL]
+
+
+async def test_a_chain_aia_cannot_complete_is_still_refused(port, chain: Chain):
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    aia = _Aia()
+
+    with pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"):
+        await _get(_aia_client(context, port, aia), port)
+    assert aia.asked == [AIA_URL]
+
+
+async def test_an_aia_intermediate_never_becomes_a_trust_anchor(tmp_path, port, chain: Chain):
+    other = _root_without_ski("Other Root CA")
+    (tmp_path / "other.pem").write_bytes(other.cert.public_bytes(PEM))
+    context = resolve_bulletin_verify(_settings(), cafile=str(tmp_path / "other.pem"))
+
+    with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+        await _get(_aia_client(context, port, _Aia(chain.intermediate)), port)
+
+
+def test_the_scheduler_builds_its_context_once(monkeypatch):
+    built = []
+    monkeypatch.setattr(jobs, "resolve_bulletin_verify", lambda: built.append(1) or ssl.create_default_context())
+    jobs._default_context.cache_clear()
+    try:
+        default_http_client_factory()
+        default_http_client_factory()
+    finally:
+        jobs._default_context.cache_clear()
+    assert built == [1]
+

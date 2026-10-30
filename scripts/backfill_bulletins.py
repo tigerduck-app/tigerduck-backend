@@ -45,6 +45,7 @@ from server import _ssl_compat  # noqa: F401, E402  # relax OpenSSL 3 strict par
 from server.bulletins.dedup import attach_body_and_dedup, upsert_list_rows  # noqa: E402
 from server.bulletins.detail import fetch_detail  # noqa: E402
 from server.bulletins.jobs import (  # noqa: E402
+    AiaTransport,
     claim_pending_bulletins,
     resolve_bulletin_verify,
 )
@@ -347,7 +348,7 @@ async def main_async(args: argparse.Namespace) -> int:
             follow_redirects=True,
             headers={"User-Agent": "TigerDuckBulletinBot/0.1 (backfill)"},
             # Verifies as the scheduler's client does.
-            verify=resolve_bulletin_verify(settings),
+            transport=AiaTransport(resolve_bulletin_verify(settings)),
         ) as http_client:
             if not args.skip_preflight:
                 await _preflight_llm(settings, http_client)
