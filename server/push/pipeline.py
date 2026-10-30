@@ -1076,8 +1076,8 @@ async def _countdown_starts(
     """When the countdown start of reminder `job`'s assignment went out to
     each of `device_ids` it reached at most `window` before the reminder's
     fire time, or since, as `(covered, waiting)`: whether the app there has
-    registered the activity the start created, or not yet (as for a start
-    still being delivered, at its fire time).
+    registered the activity the start created, or not yet (a start still
+    being delivered counts as sent at `now`).
 
     The start is the device's own `/schedule/sync` job for the assignment,
     the one the pre-send check guards, and counts once a delivery of it was
@@ -1113,16 +1113,16 @@ async def _countdown_starts(
     )
     sent = {device_id: at for device_id, at in rows}
     # A start another tick is still delivering has no sent delivery until that
-    # tick commits; the reminder waits for it as for a registration (#114).
-    claimed = await session.execute(
-        select(PushJob.dedupe_key, PushJob.fire_at).where(
+    # tick commits; the reminder waits for it as for one sent now (#114).
+    claimed = await session.scalars(
+        select(PushJob.dedupe_key).where(
             PushJob.user_id == job.user_id,
             PushJob.dedupe_key.in_(list(keys)),
             text("status = 'processing'"),
             PushJob.fire_at >= job.fire_at - window,
         )
     )
-    in_flight = {keys[key]: at for key, at in claimed if keys[key] not in sent}
+    in_flight = {keys[key]: now for key in claimed if keys[key] not in sent}
     if not sent and not in_flight:
         return {}, {}
     registered = await _registered(
