@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
+    # Days an auth_sessions row is kept past its expiry, daily at 03:00
+    # Taipei; with the 90-day token, 120 from issue, past the portal's
+    # 91-day activity chart.
+    auth_session_retention_days: int = 30
     # A token sent again this soon after it was replaced is taken for a late
     # duplicate of the request that replaced it. That changes only how the
     # send is recorded, in the logs and reuse_detected_at, never whether it

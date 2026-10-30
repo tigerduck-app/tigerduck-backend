@@ -24,7 +24,12 @@ from portal.app.routes.deregister import (  # noqa: E402
     DeregisterRequest,
     deregister_student,
 )
-from server.auth.models import AuthSession, User, UserDevice  # noqa: E402
+from server.auth.models import (  # noqa: E402
+    AuthSession,
+    DeviceActiveDay,
+    User,
+    UserDevice,
+)
 from server.db import Base  # noqa: E402
 from server.syncjobs.models import SyncLogEntry  # noqa: E402
 from server.tests.conftest import _alembic  # noqa: E402
@@ -80,6 +85,12 @@ async def test_deregister_leaves_no_row_of_the_account(db_session, portal_pool):
             ),
             SyncLogEntry(
                 user_id=user.id, device_id=phone.id, source="executor", message="m"
+            ),
+            DeviceActiveDay(
+                device_id=phone.id,
+                day=datetime(2026, 6, 1).date(),
+                first_at=datetime(2026, 6, 1, tzinfo=UTC),
+                last_at=datetime(2026, 6, 1, tzinfo=UTC),
             ),
         ]
     )

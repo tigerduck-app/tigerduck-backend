@@ -15,6 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.admin_audit import prune_admin_audit_log
+from server.auth.retention import prune_expired_sessions
 from server.auth.retirement import retire_dead_devices
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
@@ -71,6 +72,8 @@ def build_scheduler(
     * `admin_audit_retention` — prune portal audit rows after 365 days, daily.
     * `sync_history_retention` — prune the sync log and finished sync runs
       after 30 days, daily at 03:00 Taipei.
+    * `auth_session_retention` — prune sessions 30 days past their expiry,
+      daily at 03:00 Taipei.
     * `device_retirement` — deregister the devices that are gone, daily at
       04:00 Taipei.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
@@ -126,6 +129,9 @@ def build_scheduler(
 
     async def sync_history_retention() -> None:
         await prune_sync_history(session_factory, settings)
+
+    async def auth_session_retention() -> None:
+        await prune_expired_sessions(session_factory, settings)
 
     scheduler.add_job(
         bulletin_scrape,
@@ -205,15 +211,16 @@ def build_scheduler(
         coalesce=True,
         misfire_grace_time=3600,
     )
-    scheduler.add_job(
-        sync_history_retention,
-        # Wall-clock, as device_retirement: an interval restarts at every deploy.
-        trigger=CronTrigger(hour=3, timezone="Asia/Taipei"),
-        id="sync_history_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
+    # Wall-clock, as device_retirement: an interval restarts at every deploy.
+    for retention in (sync_history_retention, auth_session_retention):
+        scheduler.add_job(
+            retention,
+            trigger=CronTrigger(hour=3, timezone="Asia/Taipei"),
+            id=retention.__name__,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
     if sync_worker is not None:
 
         async def sync_jobs_tick() -> None:
