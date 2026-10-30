@@ -100,34 +100,46 @@ async def delete_in_batches(
     """Delete `model`'s rows that match `where`, oldest id first and
     `PRUNE_BATCH_ROWS` per transaction, and return how many went.
 
-    Each batch reads on from the last id the one before deleted. `then` runs
-    in each batch's transaction with the rows it deleted: their `id` and the
-    `returning` columns.
+    Each batch reads on from the last id the one before read. `then` runs in
+    each batch's transaction with the rows it deleted: their `id` and the
+    `returning` columns. `model` has a `user_id`: a batch first locks the
+    accounts of its rows, as deleting an account does (the portal's
+    deregister), so the two wait for each other rather than deadlock.
     """
+    from server.auth.models import User  # server.auth.models imports this module
+
     deleted, after = 0, 0
     while True:
         async with session_scope(factory) as session:
             # The last batch reads every row the purge keeps, past the limit.
             await lift_timeouts(session)
-            oldest = (
-                select(model.id)
-                .where(model.id > after, *where)
-                .order_by(model.id)
-                .limit(PRUNE_BATCH_ROWS)
+            batch = (
+                await session.execute(
+                    select(model.id, model.user_id)
+                    .where(model.id > after, *where)
+                    .order_by(model.id)
+                    .limit(PRUNE_BATCH_ROWS)
+                )
+            ).all()
+            await session.execute(
+                select(User.id)
+                .where(in_array(User.id, {row.user_id for row in batch}))
+                .order_by(User.id)
+                .with_for_update(read=True, key_share=True)
             )
             rows = (
                 await session.execute(
                     delete(model)
-                    .where(model.id.in_(oldest))
+                    .where(in_array(model.id, [row.id for row in batch]), *where)
                     .returning(model.id, *returning)
                 )
             ).all()
             if then is not None and rows:
                 await then(session, rows)
         deleted += len(rows)
-        if len(rows) < PRUNE_BATCH_ROWS:
+        if len(batch) < PRUNE_BATCH_ROWS:
             return deleted
-        after = max(row.id for row in rows)
+        after = batch[-1].id
 
 
 @asynccontextmanager

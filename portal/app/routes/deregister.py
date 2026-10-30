@@ -132,6 +132,9 @@ async def deregister_student(
         device_list, counts = await _snapshot(conn, user_id)
 
         async with conn.transaction():
+            # Before any of its rows, as the retention purges lock it (`delete_in_batches`
+            # in server/db.py): otherwise a purge and this deadlock on its device and sessions.
+            await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
             await conn.execute(
                 """DELETE FROM external_account_credentials
                    WHERE external_account_id IN (
