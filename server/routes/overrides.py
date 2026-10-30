@@ -362,7 +362,10 @@ async def _get_assignment_by_moodle_id(
         .first()
     )
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        # Named, as for a course (`_get_course_by_moodle_id`).
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="assignment_not_found"
+        )
     return row
 
 
