@@ -115,43 +115,63 @@ async def test_deregister_leaves_no_row_of_the_account(db_session, portal_pool):
     assert left == {}
 
 
-
-async def _waiting_on_a_lock(task: asyncio.Task, factory) -> None:
+async def _blocked_by(task: asyncio.Task, factory, pid: int) -> str:
+    """Wait until a backend waits on a lock the backend `pid` holds, and
+    return the statement it waits in. `task` ending first fails the test:
+    the race it sets up never happened."""
     async with asyncio.timeout(10), factory() as session:
         while not task.done():
             waiting = await session.scalar(
                 text(
-                    "SELECT count(*) FROM pg_stat_activity"
-                    " WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                )
+                    "SELECT query FROM pg_stat_activity"
+                    " WHERE :pid = ANY(pg_blocking_pids(pid)) LIMIT 1"
+                ),
+                {"pid": pid},
             )
             # pg_stat_activity holds still for the length of a transaction.
             await session.rollback()
-            if waiting:
-                return
+            if waiting is not None:
+                return waiting
             await asyncio.sleep(0.01)
+    raise AssertionError(f"{task!r} ended without waiting on backend {pid}")
 
 
-async def _old_rows(db_session) -> None:
-    """An account with a session and a sync log row past their windows."""
+async def _old_rows(db_session) -> User:
+    """An account with an NTUST account, and a session, a sync log row and a
+    sync run past their windows."""
     user = User(student_id="b1")
     db_session.add(user)
     await db_session.flush()
+    account = ExternalAccount(user_id=user.id, provider="ntust_sso", external_user_id="b1")
     phone = UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
-    db_session.add(phone)
+    db_session.add_all([account, phone])
+    await db_session.flush()
+    job = SyncJob(user_id=user.id, external_account_id=account.id, job_type="ntust_courses")
+    db_session.add(job)
     await db_session.flush()
     gone = datetime.now(UTC) - timedelta(days=31)
-    db_session.add(
-        AuthSession(
-            user_id=user.id,
-            device_id=phone.id,
-            refresh_token_hash="h",
-            issued_at=gone - timedelta(days=90),
-            expires_at=gone,
-        )
+    db_session.add_all(
+        [
+            AuthSession(
+                user_id=user.id,
+                device_id=phone.id,
+                refresh_token_hash="h",
+                issued_at=gone - timedelta(days=90),
+                expires_at=gone,
+            ),
+            SyncLogEntry(user_id=user.id, source="s", message="m", ts=gone),
+            SyncRun(sync_job_id=job.id, user_id=user.id, status="succeeded",
+                    started_at=gone, finished_at=gone),
+        ]
     )
-    db_session.add(SyncLogEntry(user_id=user.id, source="s", message="m", ts=gone))
     await db_session.commit()
+    return user
+
+
+def _deregister(portal_pool) -> asyncio.Task:
+    return asyncio.create_task(
+        deregister_student(DeregisterRequest(student_id="b1"), _REQUEST, pool=portal_pool)
+    )
 
 
 async def test_a_deregister_during_a_session_purge_waits_for_it(
@@ -166,12 +186,9 @@ async def test_a_deregister_during_a_session_purge_waits_for_it(
     deregistering: list[asyncio.Task] = []
 
     async def racing(session, rows) -> None:
-        deregistering.append(
-            asyncio.create_task(
-                deregister_student(DeregisterRequest(student_id="b1"), _REQUEST, pool=portal_pool)
-            )
-        )
-        await _waiting_on_a_lock(deregistering[0], factory)
+        deregistering.append(_deregister(portal_pool))
+        purge_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+        await _blocked_by(deregistering[0], factory, purge_pid)
         await keep_active_days(session, rows)
 
     monkeypatch.setattr(retention, "_keep_active_days", racing)
@@ -181,13 +198,15 @@ async def test_a_deregister_during_a_session_purge_waits_for_it(
     assert await portal_pool.fetchval("SELECT count(*) FROM user_devices") == 0
 
 
-async def test_the_purges_during_a_deregister_wait_for_it(
+async def test_the_purges_during_a_deregister_wait_at_the_account(
     db_session, portal_pool, prepared_engine, monkeypatch
 ):
+    """Each purge batch waits for the account before it locks any row."""
     await _old_rows(db_session)
     factory = build_session_factory(prepared_engine)
     audit = deregister_route.audit
     purging: list[asyncio.Task] = []
+    waited_in: list[str] = []
 
     async def purge() -> tuple[int, int]:
         return (
@@ -197,7 +216,8 @@ async def test_the_purges_during_a_deregister_wait_for_it(
 
     async def racing(conn, request, action, **detail) -> None:
         purging.append(asyncio.create_task(purge()))
-        await _waiting_on_a_lock(purging[0], factory)
+        deregister_pid = await conn.fetchval("SELECT pg_backend_pid()")
+        waited_in.append(await _blocked_by(purging[0], factory, deregister_pid))
         await audit(conn, request, action, **detail)
 
     monkeypatch.setattr(deregister_route, "audit", racing)
@@ -205,34 +225,49 @@ async def test_the_purges_during_a_deregister_wait_for_it(
     result = await deregister_student(DeregisterRequest(student_id="b1"), _REQUEST, pool=portal_pool)
 
     assert result.status_code == 200
+    assert "FOR KEY SHARE" in waited_in[0]
     assert await purging[0] == (0, 0)
 
 
-async def test_a_deregister_takes_the_account_before_its_rows(
+async def test_a_deregister_during_a_purge_batch_locks_no_row_first(
     db_session, portal_pool, prepared_engine
 ):
     """A purge batch holds the account and then deletes its rows. The
     deregister had deleted the sync runs with the NTUST account first, then
     waited for the account: the two deadlocked."""
-    user = User(student_id="b1")
-    db_session.add(user)
-    await db_session.flush()
-    account = ExternalAccount(user_id=user.id, provider="ntust_sso", external_user_id="b1")
-    db_session.add(account)
-    await db_session.flush()
-    job = SyncJob(user_id=user.id, external_account_id=account.id, job_type="ntust_courses")
-    db_session.add(job)
-    await db_session.flush()
-    db_session.add(SyncRun(sync_job_id=job.id, user_id=user.id, status="succeeded"))
-    await db_session.commit()
+    user = await _old_rows(db_session)
     factory = build_session_factory(prepared_engine)
 
     async with portal_pool.acquire() as batch, batch.transaction():
         await batch.execute("SELECT 1 FROM users WHERE id = $1 FOR KEY SHARE", user.id)
-        deregistering = asyncio.create_task(
-            deregister_student(DeregisterRequest(student_id="b1"), _REQUEST, pool=portal_pool)
-        )
-        await _waiting_on_a_lock(deregistering, factory)
+        deregistering = _deregister(portal_pool)
+        await _blocked_by(deregistering, factory, await batch.fetchval("SELECT pg_backend_pid()"))
         await batch.execute("DELETE FROM sync_runs WHERE user_id = $1", user.id)
 
     assert (await deregistering).status_code == 200
+
+
+async def test_a_deregister_during_a_sign_in_waits_for_it(
+    db_session, portal_pool, prepared_engine
+):
+    """A sign-in locks the NTUST account (`lock_accounts`) and then adds a
+    session, which needs the users row. The deregister had locked that row
+    first and then waited for the NTUST account: the two deadlocked."""
+    user = await _old_rows(db_session)
+    factory = build_session_factory(prepared_engine)
+
+    async with portal_pool.acquire() as sign_in, sign_in.transaction():
+        await sign_in.execute(
+            "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
+            user.id,
+        )
+        deregistering = _deregister(portal_pool)
+        await _blocked_by(deregistering, factory, await sign_in.fetchval("SELECT pg_backend_pid()"))
+        await sign_in.execute(
+            "INSERT INTO auth_sessions (user_id, refresh_token_hash, expires_at)"
+            " VALUES ($1, 'new', now() + interval '90 days')",
+            user.id,
+        )
+
+    assert (await deregistering).status_code == 200
+    assert await portal_pool.fetchval("SELECT count(*) FROM auth_sessions") == 0
