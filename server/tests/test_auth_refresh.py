@@ -293,8 +293,9 @@ async def test_a_lost_reply_is_recovered_however_late(client, age) -> None:
     lost = await _refresh(client, token_a)
     assert lost.status_code == 200
     token_b = lost.json()["refresh_token"]
-    # Another session on the same device, which must stay alive.
-    other = await do_login(client)
+    # A session on the student's other device, which must stay alive; a
+    # sign-in on this one would end the chain under test.
+    other = await _login_elsewhere(client)
     await _rotated_ago(client, token_a, age)
 
     recovered = await _refresh(client, token_a)
@@ -337,8 +338,9 @@ async def test_reuse_after_the_successor_was_used_is_refused_and_revokes_nothing
     token_b = rotated.json()["refresh_token"]
     used = await client.get("/v3/devices", headers=_bearer(rotated.json()))
     assert used.status_code == 200
-    # Another session on the same device, which must stay alive.
-    other = await do_login(client)
+    # A session on the student's other device, which must stay alive; a
+    # sign-in on this one would end the chain under test.
+    other = await _login_elsewhere(client)
     await _rotated_ago(client, token_a, timedelta(hours=2))
 
     reuse = await _refresh(client, token_a)
@@ -724,8 +726,11 @@ async def test_the_device_removal_locks_its_sessions_in_id_order(client) -> None
     """A refresh or a first use locks sessions in id order (`lock_contest`).
     A removal waiting for a lower one must not hold a higher one, or the two
     would deadlock."""
-    lower = await do_login(client)
-    higher = await do_login(client)
+    login = await do_login(client)
+    # Two live sessions of the device: a second sign-in would end the first.
+    lower, higher = [
+        (await _refresh(client, login["refresh_token"])).json() for _ in range(2)
+    ]
     other = await _login_elsewhere(client)
     row_lower = await _row(client, lower["refresh_token"])
     row_higher = await _row(client, higher["refresh_token"])

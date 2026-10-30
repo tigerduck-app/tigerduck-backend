@@ -181,9 +181,9 @@ async def test_second_login_reuses_user_and_device(client) -> None:
         assert len(users) == 1
         devices = (await session.execute(select(UserDevice))).scalars().all()
         assert len(devices) == 1
-        # Two live sessions (one per login) is expected.
+        # One session per login, the first ended by the second.
         sessions = (await session.execute(select(AuthSession))).scalars().all()
-        assert len(sessions) == 2
+        assert sorted(s.revoked_reason is None for s in sessions) == [False, True]
 
 
 async def test_a_student_id_in_another_case_signs_in_to_the_same_account(client) -> None:

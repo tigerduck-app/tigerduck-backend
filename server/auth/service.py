@@ -180,6 +180,7 @@ async def login(
             session, user_id=user.id, external_account_id=account.id
         )
         device = await _upsert_device(session, user=user, info=device_info, now=now)
+        ended = await _end_device_sessions(session, device.id, now)
 
         refresh_token = generate_refresh_token()
         auth_session = AuthSession(
@@ -219,6 +220,7 @@ async def login(
         user_id=str(user.id),
         device_id=str(device.id),
         platform=device.platform,
+        ended_session_ids=ended,
     )
     return LoginResult(
         access_token=access_token,
@@ -367,9 +369,9 @@ async def _handle_revoked_reuse(
     attack (#123).
     """
     if auth_session.revoked_reason not in _REPLACED_REASONS:
-        # Logged out, removed with its device, expired or revoked with its
-        # family by an earlier release: revoking the device's sessions would
-        # end the one a relogin has just made.
+        # Logged out or ended by a sign-in on its device, removed with its
+        # device, expired or revoked with its family by an earlier release:
+        # revoking the device's sessions would end the one a relogin made.
         logger.info(
             "auth.refresh.revoked_token",
             session_id=auth_session.id,
@@ -586,6 +588,42 @@ async def _supersede(
         .returning(AuthSession.id)
     )
     return list(rows.scalars())
+
+
+async def _end_device_sessions(
+    session: AsyncSession, device_id: uuid.UUID, now: datetime
+) -> list[int]:
+    """Revoke the live sessions of the device row a sign-in is about to add
+    one to, and return their ids: the app keeps only the new pair, so a
+    copied older token stops working (tigerduck-backend#48). The row is one
+    account's; another student's sessions on the phone stay theirs.
+
+    Locked in id order after the device row, as a device removal takes them.
+    The read takes no lock and repeats until it finds none: a refresh that
+    held a lock commits a new session first, which a locking read would miss.
+    """
+    live = select(AuthSession.id).where(
+        AuthSession.device_id == device_id,
+        AuthSession.revoked_at.is_(None),
+        AuthSession.expires_at > now,
+    )
+    ended: list[int] = []
+    while ids := list((await session.execute(live)).scalars()):
+        await session.execute(
+            select(AuthSession.id)
+            .where(in_array(AuthSession.id, ids))
+            .order_by(AuthSession.id)
+            .with_for_update()
+        )
+        revoked = await session.execute(
+            update(AuthSession)
+            .where(in_array(AuthSession.id, ids), AuthSession.revoked_at.is_(None))
+            # A reason a refresh refuses without taking the token for a reused one.
+            .values(revoked_at=now, revoked_reason=SessionRevokedReason.logout.value)
+            .returning(AuthSession.id)
+        )
+        ended += revoked.scalars()
+    return sorted(ended)
 
 
 async def logout(session: AsyncSession, *, session_id: int) -> None:

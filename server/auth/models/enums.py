@@ -36,6 +36,8 @@ APPLE_HANDHELD_PLATFORMS: tuple[str, ...] = (
 
 
 class SessionRevokedReason(StrEnum):
+    # Also a session that a sign-in on its device ended
+    # (`_end_device_sessions` in server/auth/service.py).
     logout = "logout"
     rotated = "rotated"
     # One of the live sessions that rotating one token again leaves, revoked

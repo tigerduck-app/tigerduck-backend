@@ -32,6 +32,23 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.10.1
+
+- **A sign-in ends the device's older sessions (#48).** Signing in revokes
+  the live sessions the same account holds on that device
+  (`client_device_id`), as `logout`, so a copied older refresh token stops
+  working at the next sign-in. A refresh of one gets `401 session_revoked`,
+  as after a sign-out, and marks no reuse. The apps keep only the pair a
+  sign-in returns. Another account's sessions on the device and the
+  account's other devices are left alone. `auth.login.success` lists the
+  ended sessions in `ended_session_ids`; a refresh of one logs
+  `auth.refresh.revoked_token` with `reason=logout`. Two installs that
+  share a device id and an account now end each other's session at every
+  sign-in.
+- **No migration and no `.env` change.** `logout` is an existing revoked
+  reason. Rollback: check out 3.10.0 and run `./start.sh`; sessions
+  already ended stay ended.
+
 ## Upgrading to 3.10.0
 
 - **Production refuses example or empty secrets (#94).** With
