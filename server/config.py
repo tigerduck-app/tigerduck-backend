@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SERVER_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SERVER_DIR.parent
+# Every secret in .env.example holds a value with this in it.
+EXAMPLE_PLACEHOLDER = "CHANGE_ME"
 
 
 class Settings(BaseSettings):
@@ -19,6 +21,9 @@ class Settings(BaseSettings):
         env_prefix="TIGERDUCK_",
         extra="ignore",
         case_sensitive=False,
+        # A refused setting stops startup, and the error would otherwise
+        # print the settings' values, secrets included, into the logs.
+        hide_input_in_errors=True,
     )
 
     # --- App ---
@@ -54,7 +59,7 @@ class Settings(BaseSettings):
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
     # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
-    # (login returns 503) — mirrors the api_shared_secret dev convention.
+    # (login returns 503) in development; production refuses to start.
     auth_jwt_secret: str = ""
     # Separate HMAC-SHA-256 key for refresh-token hashing (key separation:
     # a leaked JWT secret must not let an attacker forge refresh hashes).
@@ -158,9 +163,14 @@ class Settings(BaseSettings):
     sync_job_tick_seconds: int = 30
     # Max jobs claimed per tick by ONE worker.
     sync_job_batch_size: int = 5
-    # Minimum seconds between individual job executions within a tick.
-    # Effectively rate-limits server-side sync to 1 job per interval.
-    sync_job_min_interval_seconds: int = 60
+    # Jobs one worker runs at once, never two of one user. They share the
+    # request budget below, so more in flight only fills the time a job
+    # spends waiting on a slow Moodle answer.
+    sync_job_concurrency: int = Field(default=2, ge=1)
+    # Moodle requests a minute across the sync worker, evenly spaced, for the
+    # school behind our single egress IP. An HTTP 429 holds every request
+    # back for sync_job_backoff_base_seconds.
+    sync_job_requests_per_minute: int = Field(default=10, ge=1)
     # Maintenance window — no server-side sync during this period.
     # Format: "HH:MM-HH:MM" in UTC, e.g. "02:00-04:00". Empty = no window.
     sync_maintenance_window: str = ""
@@ -308,13 +318,9 @@ class Settings(BaseSettings):
     bulletin_retention_days: int = 365
     # Retention job runs at this cadence. Once a day is plenty.
     bulletin_retention_interval_hours: int = 24
-    # Optional PEM file bundling NTUST's root + intermediates. When set and
-    # readable, the bulletin HTTP client uses it as the trust anchor so
-    # OpenSSL can complete the chain (the NTUST servers themselves ship
-    # incomplete chains). When unset, the client falls back to the MVP
-    # behavior of `verify=False` — still functional, but skips hostname /
-    # chain validation. Obtain the bundle via `openssl s_client -showcerts`
-    # against each NTUST subdomain the pipeline reaches.
+    # More CA certificates for bulletin fetches, PEM, on top of certifi's roots
+    # and server/bulletins/ntust_intermediates.pem: for a CA NTUST moves to
+    # before a release bundles it. A root in it becomes a trust anchor.
     bulletin_ca_bundle: Path | None = None
 
     # --- Links (`/links/{name}`, server/links/) ---
@@ -351,11 +357,26 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
-        if self.env == "production" and not self.api_shared_secret:
+        if self.env != "production":
+            return self
+        secrets = {
+            "TIGERDUCK_API_SHARED_SECRET": self.api_shared_secret,
+            "TIGERDUCK_AUTH_JWT_SECRET": self.auth_jwt_secret,
+            "TIGERDUCK_AUTH_REFRESH_HMAC_KEY": self.auth_refresh_hmac_key,
+            "TIGERDUCK_CREDENTIAL_KEYS": "".join(self.credential_keys.values()),
+            "TIGERDUCK_DATABASE_URL": self.database_url,
+        }
+        refused = [
+            name
+            for name, value in secrets.items()
+            if not value or EXAMPLE_PLACEHOLDER in value
+        ]
+        if refused:
             raise ValueError(
-                "TIGERDUCK_API_SHARED_SECRET must be set in production. An "
-                "unset TIGERDUCK_ENV now means production; for local "
-                "development set TIGERDUCK_ENV=development."
+                f"{', '.join(refused)} must be set in production, and not to "
+                f"the {EXAMPLE_PLACEHOLDER} placeholder from .env.example. An "
+                "unset TIGERDUCK_ENV means production; for local development "
+                "set TIGERDUCK_ENV=development."
             )
         return self
 
@@ -366,3 +387,28 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def require_readable_files(settings: Settings) -> None:
+    """Fails startup on a configured file this process cannot read. A missing
+    key file turns its feature off, but one hidden by its permissions, as
+    after a change of the container's user, must not do that silently."""
+    files = {
+        "TIGERDUCK_APNS_KEY_PATH": settings.apns_key_path,
+        "TIGERDUCK_FCM_CREDENTIALS_PATH": settings.fcm_credentials_path,
+        "TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH": settings.tls_pin_signing_key_path,
+        "TIGERDUCK_BULLETIN_CA_BUNDLE": settings.bulletin_ca_bundle,
+    }
+    for name, path in files.items():
+        if path is None:
+            continue
+        try:
+            path.open("rb").close()
+        except FileNotFoundError:
+            # The bundle has no default, so a missing one was asked for.
+            if name == "TIGERDUCK_BULLETIN_CA_BUNDLE":
+                raise RuntimeError(f"{name} names {path}, which does not exist") from None
+        except OSError as exc:
+            raise RuntimeError(
+                f"{name} names {path}, which this process cannot read: {exc.strerror}"
+            ) from None

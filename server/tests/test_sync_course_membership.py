@@ -257,6 +257,41 @@ async def test_a_removed_hand_add_the_roster_lists_shows_in_either_order(
     assert await tombstones(client, mac) == {"CS1": ("remove", to_clock(at(t, 10)))}
     assert (await delete(client, phone, "CS1", at(t, 5)))["applied"] is False
 
+@pytest.mark.parametrize(
+    ("by_hand", "kind", "source"),
+    [
+        (False, "hide", "ntust_portal"),
+        (False, None, "ntust_portal"),
+        (True, "remove", "user_added"),
+    ],
+    ids=["school course", "school course hidden by a released delete", "hand-added course"],
+)
+async def test_an_add_brings_a_deleted_course_back_as_what_it_was(
+    client, t, by_hand, kind, source
+) -> None:
+    """The phone deletes the course at 09:05 and adds it back at 09:10. A
+    school course comes back as a school row, as `force_keys` brings it
+    back, so a later hide of it still binds the roster."""
+    phone = await login(client)
+    if by_hand:
+        await upload(client, phone, adds={"CS1": at(t, 0)})
+    else:
+        await upload(client, phone, roster=["CS1"])
+    if kind is None:
+        released = {k: v for k, v in phone.items() if k != "X-TigerSync-Protocol"}
+        response = await client.delete(
+            f"/v3/sync/courses/{key('CS1')}", headers=released, params={"hlc": to_clock(at(t, 5))}
+        )
+        assert response.json()["applied"] is True, response.text
+    else:
+        assert (await delete(client, phone, "CS1", at(t, 5), kind=kind))["applied"] is True
+
+    await upload(client, phone, adds={"CS1": at(t, 10)})
+
+    (row,) = (await snapshot(client, phone))["courses"]
+    assert (row["source"], row["added_hlc"]) == (source, to_clock(at(t, 10)))
+
+
 async def test_the_latest_of_two_adds_of_one_key_counts(client, t) -> None:
     phone = await login(client)
     await delete(client, phone, "CS1", at(t, 20))

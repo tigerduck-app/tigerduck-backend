@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 import structlog
@@ -429,10 +429,12 @@ class HttpAssignmentFetcher:
         base_url: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        event_hooks: Mapping[str, list[Callable[..., Any]]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._transport = transport
+        self._event_hooks = event_hooks
 
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]:
         params = {
@@ -446,7 +448,9 @@ class HttpAssignmentFetcher:
         }
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
                 response = await client.get(
                     f"{self._base_url}{_WS_PATH}", params=params
@@ -586,7 +590,9 @@ class HttpAssignmentFetcher:
 
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
                 if userid is None:
                     userid = await _get_moodle_userid(
@@ -772,7 +778,9 @@ class HttpAssignmentFetcher:
         """
         url = f"{self._base_url}{_WS_PATH}"
         async with httpx.AsyncClient(
-            timeout=timeout_seconds, transport=self._transport
+            timeout=timeout_seconds,
+            transport=self._transport,
+            event_hooks=self._event_hooks,
         ) as client:
             site_info = await _checked_call(
                 client,
@@ -806,10 +814,12 @@ class HttpCourseFetcher:
         base_url: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        event_hooks: Mapping[str, list[Callable[..., Any]]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._transport = transport
+        self._event_hooks = event_hooks
 
     async def fetch_courses(
         self,
@@ -822,7 +832,9 @@ class HttpCourseFetcher:
         answers to `on_userid`, so the same run's submission probe skips it."""
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
                 userid = await _get_moodle_userid(
                     client, self._base_url, token, on_fullname

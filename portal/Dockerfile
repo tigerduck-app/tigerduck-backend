@@ -61,9 +61,9 @@ WORKDIR /app
 # Install python deps separately from app code so the layer is cacheable.
 # They come from uv.lock, the lockfile CI runs the portal's tests against,
 # so the image runs the versions the tests ran on. uv is mounted for this
-# step only and does not ship in the image. It is uv:latest, like the
-# backend image and CI: uv.lock's format follows the uv that wrote it, and
-# a pinned older uv may refuse a lockfile a newer one wrote.
+# step only and does not ship in the image. It is uv:latest, like CI:
+# uv.lock's format follows the uv that wrote it, and a pinned older uv may
+# refuse a lockfile a newer one wrote.
 COPY pyproject.toml uv.lock ./
 RUN --mount=from=ghcr.io/astral-sh/uv:latest,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/root/.cache/uv \

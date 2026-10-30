@@ -14,7 +14,6 @@ import functools
 import ipaddress
 import math
 import socket
-import ssl
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -40,6 +39,7 @@ from server.tls_chain import (
     fetch_issuer,
     missing_intermediates,
     trust_context,
+    verify_code,
 )
 
 logger = structlog.get_logger(__name__)
@@ -134,14 +134,6 @@ def _read_capped(response: httpx.Response, deadline: float) -> bytes:
     return bytes(body[:MAX_BODY_BYTES])
 
 
-def _verify_code(exc: BaseException | None) -> int | None:
-    """The X.509 verify code of the failed certificate check behind `exc`."""
-    while exc is not None and not isinstance(exc, ssl.SSLCertVerificationError):
-        # httpcore drops the cause, so the ssl error is only the context.
-        exc = exc.__cause__ or exc.__context__
-    return exc.verify_code if exc is not None else None
-
-
 class _PinnedTransport(httpx.BaseTransport):
     """Sends a request to the address in its `address` extension, with the
     host name in Host and SNI. The request the client sees keeps the host
@@ -211,7 +203,7 @@ class _PinnedTransport(httpx.BaseTransport):
         supplied intermediates for it, now in the store."""
         if (
             self._context is None
-            or _verify_code(error) not in INCOMPLETE_CHAIN_CODES
+            or verify_code(error) not in INCOMPLETE_CHAIN_CODES
             or time.monotonic() > self._deadline
         ):
             return False
