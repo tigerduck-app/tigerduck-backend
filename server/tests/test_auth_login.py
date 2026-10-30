@@ -186,6 +186,19 @@ async def test_second_login_reuses_user_and_device(client) -> None:
         assert len(sessions) == 2
 
 
+async def test_a_student_id_in_another_case_signs_in_to_the_same_account(client) -> None:
+    """Moodle matches the student ID in any case, so the server keys the
+    account by it trimmed and upper-cased (tigerduck-backend#93)."""
+    allow_moodle(client)
+    first = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    second = await client.post(
+        "/v3/auth/login", json=dict(LOGIN_BODY, student_id=" b11015000 ")
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["user"] == first.json()["user"]
+    assert second.json()["user"]["student_id"] == "B11015000"
+
+
 @pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
 async def test_moodle_failure_returns_401_and_creates_nothing(client, error) -> None:
     deny_moodle(client, error=error)
