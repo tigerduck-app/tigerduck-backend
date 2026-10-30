@@ -61,9 +61,10 @@ async def _keep_active_days(session: AsyncSession, rows: Sequence[Row[Any]]) -> 
         key = (row.device_id, row.created_at.astimezone(UTC).date())
         first, last = days.get(key, (row.created_at, row.created_at))
         days[key] = (min(first, row.created_at), max(last, row.created_at))
+    # In key order, so two purges upserting the same days lock them in one order.
     values = [
         {"device_id": device_id, "day": day, "first_at": first, "last_at": last}
-        for (device_id, day), (first, last) in days.items()
+        for (device_id, day), (first, last) in sorted(days.items())
     ]
     for start in range(0, len(values), INSERT_CHUNK_ROWS):
         stmt = insert(DeviceActiveDay).values(values[start : start + INSERT_CHUNK_ROWS])
