@@ -114,6 +114,10 @@ _CLASS_SCENARIOS = frozenset(
     {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
 )
 
+# Channels whose every job is filed for one device: Live Activity starts and
+# ends, and the portal's custom pushes.
+_DEVICE_CHANNELS = frozenset({SCHEDULE_CHANNEL, "custom"})
+
 # A reminder due right after its countdown start went out, to a device whose
 # app has not registered the activity yet, waits once: the app registers within
 # seconds, and the reminder follows the start in the same tick. Only a reminder
@@ -425,6 +429,15 @@ async def _materialize(
 
     now = datetime.now(UTC)
     payload = job.payload or {}
+    if job.device_id is None and job.channel in _DEVICE_CHANNELS:
+        # Its device row was deleted since (ON DELETE SET NULL, as when another
+        # account signs in on that phone), and the token query below would then
+        # reach every device of the user. Rounds already begun only finish.
+        if await _has_deliveries(session, job):
+            return True
+        _settle(job, status=PushJobStatus.cancelled, error="device_gone", now=now)
+        logger.info("push.device_gone", job_id=job.id, channel=job.channel)
+        return False
     is_activity_job = job.channel == SCHEDULE_CHANNEL
     is_activity_end = is_activity_job and payload.get("kind") == "live_activity_end"
     if is_activity_end:
