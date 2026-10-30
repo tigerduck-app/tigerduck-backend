@@ -24,6 +24,7 @@ from server.bulletins.jobs import (
     AiaTransport,
     default_http_client_factory,
     resolve_bulletin_verify,
+    scrape_job,
 )
 from server.config import Settings
 from server.tests.test_links_transport_tls import _Aia, _https_server
@@ -205,3 +206,26 @@ def test_the_scheduler_builds_its_context_once(monkeypatch):
         jobs._default_context.cache_clear()
     assert built == [1]
 
+
+# --- A list page that does not load ------------------------------------------
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.errors: list[tuple[str, dict]] = []
+
+    def error(self, event: str, **fields) -> None:
+        self.errors.append((event, fields))
+
+
+async def test_a_list_page_that_fails_tls_is_logged_as_an_error_and_raised(port, monkeypatch):
+    log = _Log()
+    monkeypatch.setattr(jobs, "logger", log)
+    url = f"https://127.0.0.1:{port}/p/403-1045-1391-1.php"
+
+    with pytest.raises(httpx.ConnectError):
+        await scrape_job(None, _settings(bulletin_list_url=url))
+
+    [(event, fields)] = log.errors
+    assert event == "bulletins.scrape_job.fetch_failed"
+    assert fields["url"] == url and "CERTIFICATE_VERIFY_FAILED" in fields["error"]

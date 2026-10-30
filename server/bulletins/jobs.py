@@ -150,7 +150,17 @@ async def scrape_job(
     """Fetch the list page and reconcile with DB. Returns #inserted."""
     ts = now or datetime.now(timezone.utc)
     async with http_client_factory() as client:
-        rows = await fetch_list(settings.bulletin_list_url, client)
+        try:
+            rows = await fetch_list(settings.bulletin_list_url, client)
+        except httpx.HTTPError as exc:
+            # Raised on, so the scheduler counts the run as failed; with no rows
+            # read, td-bulletin-scrape-empty fires within the hour.
+            logger.error(
+                "bulletins.scrape_job.fetch_failed",
+                url=settings.bulletin_list_url,
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+            raise
 
     async with session_factory() as session:
         outcome = await upsert_list_rows(session, rows, now=ts)
