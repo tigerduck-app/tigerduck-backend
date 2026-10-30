@@ -31,6 +31,7 @@ The push pipeline's pre-send check (`check_submission_status`) adds two:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -241,6 +242,9 @@ def _ts(value: object) -> datetime | None:
 
 _REDACTED = "<token-redacted>"
 
+# Tokens whose Moodle user id is kept; the map starts over past this many.
+_USERID_CACHE_SIZE = 4096
+
 # Any `wstoken=...` still embedded in text, whatever its value. The token we
 # hold is scrubbed by value; this catches a differently-shaped one (a
 # truncation, a stale token from another frame) so the guarantee does not
@@ -425,6 +429,9 @@ class HttpAssignmentFetcher:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._transport = transport
+        # The pre-send check's Moodle user id per token (by its SHA-256): a
+        # token never changes user, and the lookup doubles each check (#98).
+        self._userids: dict[bytes, int] = {}
 
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]:
         params = {
@@ -761,21 +768,27 @@ class HttpAssignmentFetcher:
         whatever this fetcher's own timeout.
         """
         url = f"{self._base_url}{_WS_PATH}"
+        key = hashlib.sha256(token.encode()).digest()
         async with httpx.AsyncClient(
             timeout=timeout_seconds, transport=self._transport
         ) as client:
-            site_info = await _checked_call(
-                client,
-                url,
-                {
-                    "wstoken": token,
-                    "wsfunction": "core_webservice_get_site_info",
-                    "moodlewsrestformat": "json",
-                },
-            )
-            userid = site_info.get("userid")
-            if type(userid) is not int:
-                raise MoodleRefused("missing_userid_in_site_info")
+            userid = self._userids.get(key)
+            if userid is None:
+                site_info = await _checked_call(
+                    client,
+                    url,
+                    {
+                        "wstoken": token,
+                        "wsfunction": "core_webservice_get_site_info",
+                        "moodlewsrestformat": "json",
+                    },
+                )
+                userid = site_info.get("userid")
+                if type(userid) is not int:
+                    raise MoodleRefused("missing_userid_in_site_info")
+                if len(self._userids) >= _USERID_CACHE_SIZE:
+                    self._userids.clear()
+                self._userids[key] = userid
             body = await _checked_call(
                 client,
                 url,
