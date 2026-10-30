@@ -134,12 +134,21 @@ async def test_a_device_behind_the_pruned_feed_gets_a_full_resync(client) -> Non
     assert (await client.get("/v3/sync/full", headers=bearer(login))).status_code == 200
 
 
-async def test_the_job_runs_at_three_in_the_morning_at_school(test_settings) -> None:
+async def test_every_retention_job_runs_at_its_own_time_in_the_night_at_school(
+    test_settings,
+) -> None:
+    """At wall-clock times: an interval would start over at every deploy."""
     scheduler = build_scheduler(object(), object(), test_settings, llm=object())
     scheduler.start(paused=True)
     try:
-        run_at = scheduler.get_job("sync_history_retention").next_run_time
+        runs = {
+            job.id: job.next_run_time.astimezone(ZoneInfo("Asia/Taipei"))
+            for job in scheduler.get_jobs()
+            if job.id.endswith("_retention")
+        }
     finally:
         scheduler.shutdown(wait=False)
-    local = run_at.astimezone(ZoneInfo("Asia/Taipei"))
-    assert (local.hour, local.minute) == (3, 0)
+    assert len(runs) == 6
+    assert {at.hour for at in runs.values()} == {3}
+    assert len({at.minute for at in runs.values()}) == 6
+    assert all(at - datetime.now(UTC) <= timedelta(days=1) for at in runs.values())

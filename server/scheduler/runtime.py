@@ -66,14 +66,13 @@ def build_scheduler(
     * `bulletin_scrape` — fetch NTUST bulletin list every 10 min.
     * `bulletin_process` — drain pending bulletins through the LLM every 60s.
     * `bulletin_dispatch` — fan out alert pushes every 60s.
-    * `bulletin_retention` — prune aged-out soft-deleted bulletins daily.
-    * `sync_changelog_retention` — purge aged changelog entries daily.
-    * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
-    * `admin_audit_retention` — prune portal audit rows after 365 days, daily.
-    * `sync_history_retention` — prune the sync log and finished sync runs
-      after 30 days, daily at 03:00 Taipei.
-    * `auth_session_retention` — prune sessions 30 days past their expiry,
-      daily at 03:00 Taipei.
+    * The retention jobs, daily from 03:00 Taipei, five minutes apart:
+      `bulletin_retention` prunes aged-out soft-deleted bulletins,
+      `sync_changelog_retention` aged changelog entries, `push_job_retention`
+      terminal push_jobs (+ cascade deliveries) after 7 days,
+      `admin_audit_retention` portal audit rows after 365 days,
+      `sync_history_retention` the sync log and finished sync runs after 30
+      days, and `auth_session_retention` sessions 30 days past their expiry.
     * `device_retirement` — deregister the devices that are gone, daily at
       04:00 Taipei.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
@@ -166,42 +165,6 @@ def build_scheduler(
         misfire_grace_time=30,
     )
     scheduler.add_job(
-        bulletin_retention,
-        trigger=IntervalTrigger(hours=settings.bulletin_retention_interval_hours),
-        id="bulletin_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        sync_changelog_retention,
-        trigger=IntervalTrigger(
-            hours=settings.sync_changelog_retention_interval_hours
-        ),
-        id="sync_changelog_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        push_job_retention,
-        trigger=IntervalTrigger(
-            hours=settings.push_job_retention_interval_hours
-        ),
-        id="push_job_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        admin_audit_retention,
-        trigger=IntervalTrigger(hours=24),
-        id="admin_audit_retention",
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
         device_retirement,
         # A wall-clock time, so a deploy cannot keep putting the run off a day;
         # before the host's 04:30 backup (deploy/launchd/ai.tigerduck.backup.plist).
@@ -212,10 +175,19 @@ def build_scheduler(
         misfire_grace_time=3600,
     )
     # Wall-clock, as device_retirement: an interval restarts at every deploy.
-    for retention in (sync_history_retention, auth_session_retention):
+    # Apart, so the purges do not all take a connection of the pool at once.
+    retention_jobs = (
+        bulletin_retention,
+        sync_changelog_retention,
+        push_job_retention,
+        admin_audit_retention,
+        sync_history_retention,
+        auth_session_retention,
+    )
+    for order, retention in enumerate(retention_jobs):
         scheduler.add_job(
             retention,
-            trigger=CronTrigger(hour=3, timezone="Asia/Taipei"),
+            trigger=CronTrigger(hour=3, minute=5 * order, timezone="Asia/Taipei"),
             id=retention.__name__,
             max_instances=1,
             coalesce=True,

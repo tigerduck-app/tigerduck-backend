@@ -61,9 +61,9 @@ class Settings(BaseSettings):
     auth_refresh_hmac_key: str = ""
     auth_access_token_ttl_seconds: int = 900  # 15 min
     auth_refresh_token_ttl_days: int = 90
-    # Days an auth_sessions row is kept past its expiry, daily at 03:00
-    # Taipei; with the 90-day token, 120 from issue, past the portal's
-    # 91-day activity chart.
+    # Days an auth_sessions row is kept past its expiry, pruned nightly; with
+    # the 90-day token, 120 from issue, past the portal's 91-day activity
+    # chart.
     auth_session_retention_days: int = 30
     # A token sent again this soon after it was replaced is taken for a late
     # duplicate of the request that replaced it. That changes only how the
@@ -156,9 +156,8 @@ class Settings(BaseSettings):
     # Entries older than this are purged; clients further behind than the
     # purge watermark get HTTP 410 and full-sync.
     sync_changelog_retention_days: int = 30
-    sync_changelog_retention_interval_hours: int = 24
     # sync_log_entries and finished sync_runs older than this are deleted
-    # daily. Only operators read them; Loki keeps the logs as long.
+    # nightly. Only operators read them; Loki keeps the logs as long.
     sync_history_retention_days: int = 30
 
     # --- Server-side sync jobs (Phase 3) ---
@@ -200,7 +199,6 @@ class Settings(BaseSettings):
     # Delay before a job with still-pending deliveries gets another round.
     push_retry_round_delay_seconds: int = 60
     push_job_retention_days: int = 7
-    push_job_retention_interval_hours: int = 24
     # Portal audit rows (admin_audit.py) older than this are deleted daily.
     admin_audit_retention_days: int = 365
     # Pre-send check (push/presend.py). An assignment reminder or countdown
@@ -314,7 +312,6 @@ class Settings(BaseSettings):
     # stay forever; only the ones that fell off the list and aged out go.
     bulletin_retention_days: int = 365
     # Retention job runs at this cadence. Once a day is plenty.
-    bulletin_retention_interval_hours: int = 24
     # Optional PEM file bundling NTUST's root + intermediates. When set and
     # readable, the bulletin HTTP client uses it as the trust anchor so
     # OpenSSL can complete the chain (the NTUST servers themselves ship

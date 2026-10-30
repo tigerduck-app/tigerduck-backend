@@ -37,11 +37,12 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **Deleting an account deletes its sync log (#90).**
   `sync_log_entries.user_id` gets a foreign key to `users` that deletes the
   log with the account, as every other table of an account does. Migration
-  `8178548f185e` first deletes the log rows of accounts deleted before,
-  which the key would refuse. The portal's audit log still names a deleted
+  `8178548f185e` adds the key without checking the rows, deletes the log
+  rows of accounts deleted before, then validates the key with nothing
+  blocked meanwhile. The portal's audit log still names a deleted
   account by its id, and the device's anonymous registration stays,
   unlinked, as it did.
-- **Pruning (#95).** Daily at 03:00 Taipei, 5,000 rows per transaction:
+- **Pruning (#95).** Nightly, 5,000 rows per transaction:
   - `sync_log_entries` and finished `sync_runs` older than
     `TIGERDUCK_SYNC_HISTORY_RETENTION_DAYS` (default 30) are deleted;
   - `auth_sessions` rows more than `TIGERDUCK_AUTH_SESSION_RETENTION_DAYS`
@@ -52,11 +53,21 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
     `device_active_days` table (migration `4f13b23279f1`), which the Userbase
     dashboard reads, so its history still reaches back to launch.
 
-  The first night deletes everything already past the windows.
+  Migration `8184b299cf8e` indexes `auth_sessions.replaced_by_session_id`
+  without blocking writes; deleting a session sets that column null on the
+  rows pointing at it, which read the whole table per row before. The first
+  night deletes everything already past the windows.
+- **The retention jobs run at fixed times.** Every retention job now runs
+  daily from 03:00 Taipei, five minutes apart, rather than 24 hours after
+  the backend started, which each deploy put off again.
+  `TIGERDUCK_BULLETIN_RETENTION_INTERVAL_HOURS`,
+  `TIGERDUCK_PUSH_JOB_RETENTION_INTERVAL_HOURS` and
+  `TIGERDUCK_SYNC_CHANGELOG_RETENTION_INTERVAL_HOURS` are gone and ignored
+  if set.
 - **No `.env` change.** Rollback: run
   `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
-  out 3.9.0 and run `./start.sh`. The downgrade drops the key and
-  `device_active_days`, and with it the Userbase dashboard's activity
+  out 3.9.0 and run `./start.sh`. The downgrade drops the key, the index
+  and `device_active_days`, and with it the Userbase dashboard's activity
   before the window; rows already deleted stay deleted.
 
 ## Upgrading to 3.9.0
