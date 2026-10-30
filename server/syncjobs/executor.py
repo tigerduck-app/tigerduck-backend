@@ -451,9 +451,6 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     session, job=job, run=run, policy=policy, stats=stats, now=now
                 )
 
-        if course_error is not None:
-            # The run fails as a failed fetch would, so the job backs off.
-            raise course_error
         if probe_submissions:
             # Only once the list sync above has committed; see
             # `_refresh_submission_status`. The run stays `running` until the
@@ -474,14 +471,18 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
-            await _finish_after_probe(
-                worker, job_id=job_id, run_id=run_id, stats=stats, now=now
-            )
+            if course_error is None:
+                await _finish_after_probe(
+                    worker, job_id=job_id, run_id=run_id, stats=stats, now=now
+                )
         # Last, once the fetched data is stored: a user who does not sign in
         # again still gets a name, and a failed write costs nothing else.
         await try_store_display_name(
             worker.session_factory, user_id, names[-1] if names else None
         )
+        if course_error is not None:
+            # The run fails as a failed fetch would, so the job backs off.
+            raise course_error
     except CredentialInvalid as exc:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,

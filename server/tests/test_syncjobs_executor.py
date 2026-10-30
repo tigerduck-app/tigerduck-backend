@@ -720,6 +720,48 @@ async def test_a_course_list_failure_keeps_the_assignment_fetch(
     ]
 
 
+async def test_a_course_list_failure_still_probes_and_names_the_user(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A course list that keeps failing must not hold back the submission
+    probe or the user's name; the run fails after both."""
+    user, _, job = await _setup_user_job(db_session)
+    user_id = user.id
+
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
+        on_fullname("Test Student")
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=True,
+                submitted_at=datetime.now(UTC),
+            )
+        }
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=fetcher,
+        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
+    )
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    assert await _display_name(db_session, user) == "Test Student"
+    assignment = await db_session.scalar(
+        select(UserAssignment).where(UserAssignment.user_id == user_id)
+    )
+    assert assignment.provider_is_submitted is True
+    await db_session.refresh(job)
+    assert job.last_error == "school_rate_limited"
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "failed"
+
+
 async def test_a_run_asks_moodle_who_the_user_is_once(
     db_session, prepared_engine, test_settings
 ):
