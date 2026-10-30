@@ -309,6 +309,8 @@ into the backend container via `docker-compose.yml`.
   the next. Before each round the pipeline puts a trigger back until 20
   minutes after the user's last recorded sync trigger send
   (`_last_sync_trigger_sent`), so downtime or a retry cannot bunch them.
+  The check sees only committed sends: a forced tick and the scheduler's
+  sending two of one user's triggers in the same round can both go out.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
