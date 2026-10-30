@@ -862,15 +862,26 @@ async def test_a_course_list_failure_keeps_the_assignment_fetch(
     ]
 
 
+@pytest.mark.parametrize(
+    ("error", "last_error", "probed"),
+    [
+        (MoodleUnreachable("http_503"), "sync_failed:http_503", True),
+        (MoodleRateLimited("http_429"), "school_rate_limited", False),
+    ],
+    ids=["unreachable", "rate-limited"],
+)
 async def test_a_course_list_failure_still_probes_and_names_the_user(
-    db_session, prepared_engine, test_settings, monkeypatch
+    db_session, prepared_engine, test_settings, monkeypatch, error, last_error, probed
 ):
     """A course list that keeps failing must not hold back the submission
-    probe or the user's name; the run fails after both."""
+    probe or the user's name; the run fails after both. After the school's
+    429 the probe waits for the worker's pause instead."""
     user, _, job = await _setup_user_job(db_session)
     user_id = user.id
+    calls: list[list[int]] = []
 
     async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
+        calls.append(assignment_ids)
         on_fullname("Test Student")
         return {
             1: FetchedSubmission(
@@ -887,19 +898,21 @@ async def test_a_course_list_failure_still_probes_and_names_the_user(
         prepared_engine,
         test_settings,
         fetcher=fetcher,
-        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
+        course_fetcher=StubCourseFetcher(errors=[error]),
     )
     monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
 
     await run_sync_tick(worker)
 
-    assert await _display_name(db_session, user) == "Test Student"
+    # Only the probe's site info answered with the name here.
+    expected_name = "Test Student" if probed else None
+    assert await _display_name(db_session, user) == expected_name
     assignment = await db_session.scalar(
         select(UserAssignment).where(UserAssignment.user_id == user_id)
     )
-    assert assignment.provider_is_submitted is True
+    assert (bool(calls), assignment.provider_is_submitted) == (probed, probed)
     await db_session.refresh(job)
-    assert job.last_error == "school_rate_limited"
+    assert job.last_error == last_error
     run = await db_session.scalar(select(SyncRun))
     assert run.status == "failed"
 

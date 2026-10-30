@@ -490,7 +490,8 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     session, job=job, run=run, policy=policy, stats=stats, now=now
                 )
 
-        if probe_submissions:
+        # After the school's 429 the worker pauses; the probe would not wait.
+        if probe_submissions and not isinstance(course_error, MoodleRateLimited):
             # Only once the list sync above has committed; see
             # `_refresh_submission_status`. The run stays `running` until the
             # probe is done, so an escalation from it fails the run and backs
