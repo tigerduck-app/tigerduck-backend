@@ -260,7 +260,9 @@ into the backend container via `docker-compose.yml`.
   closed: one nobody can confirm still open is not sent, but retried until
   `push_presend_grace_minutes` past its fire time and then cancelled
   (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
-  rather than costing a timeout per job.
+  rather than costing a timeout per job. A claimed batch's checks start
+  ahead of its sends, one at a time until Moodle answers in the tick, then
+  four at a time.
 - An assignment reminder leaves out a device that the assignment's
   `assignmentUrgent` start went to (a sent delivery) from
   `push_countdown_dedupe_window_seconds` (0, off, by default; 300 on) before the

@@ -976,7 +976,8 @@ async def test_a_rate_limiting_moodle_is_asked_once_a_tick(
     await db_session.commit()
     await run_push_tick(worker)
 
-    assert moodle.asked == [41, 41, 42, 43]
+    # Once Moodle has answered, the rest of the batch is asked side by side.
+    assert (moodle.asked[:2], sorted(moodle.asked[2:])) == ([41, 41], [42, 43])
     for job in jobs:
         assert (await _reload(db_session, job)).status == "sent"
 
