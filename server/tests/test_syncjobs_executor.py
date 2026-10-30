@@ -661,6 +661,35 @@ async def test_two_workers_at_once_run_each_job_once(
     assert {status for _, status in runs} == {"succeeded"}
 
 
+async def test_a_429_holds_the_whole_worker_back_until_its_pause_ends(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: the school's 429 now stops every job, not only
+    the one it answered."""
+    await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
+    await _setup_user_job(
+        db_session,
+        student_id="b00000002",
+        token="tok-2",
+        job_kwargs={"run_after": datetime.now(UTC) - timedelta(seconds=30)},
+    )
+    fetcher = StubFetcher(results=[], errors=[MoodleRateLimited("http_429")])
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert await run_sync_tick(worker) == 0
+    assert fetcher.calls == ["tok-1"]
+
+    clock.now += worker.settings.sync_job_backoff_base_seconds
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1", "tok-2"]
+
+
 async def test_successful_run_upserts_and_reschedules(
     db_session, prepared_engine, test_settings
 ):
@@ -948,6 +977,10 @@ async def test_a_token_stored_right_after_the_run_read_its_own_stays_valid(
     assert job.status == "pending"
 
 
+# Longer than the pause a 429 starts (sync_job_backoff_base_seconds).
+_PAST_ANY_PAUSE = 3600
+
+
 async def _run_when_due(db_session, worker, job) -> None:
     job.run_after = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
@@ -976,7 +1009,8 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     it."""
     _, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
     fetcher = StubFetcher(errors=[outage] * (job.max_attempts + 1))
-    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
     interval, priority = (
         await db_session.execute(
             select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
@@ -987,10 +1021,12 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     assert priority != 1
 
     for _ in range(job.max_attempts):
+        clock.now += _PAST_ANY_PAUSE
         await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.priority) == ("pending", 0, priority)
     assert job.last_error == last_error
     assert job.run_after - job.last_failure_at == timedelta(seconds=interval)
+    clock.now += _PAST_ANY_PAUSE
     assert await run_sync_tick(worker) == 0
 
     # Still down when the interval is up: back on the backoff.
@@ -1000,6 +1036,7 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
         seconds=worker.settings.sync_job_backoff_base_seconds
     )
 
+    clock.now += _PAST_ANY_PAUSE
     await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
     assert job.last_success_at is not None
@@ -1464,6 +1501,7 @@ async def test_submission_probe_rate_limit_reaches_backoff(
 
     await run_sync_tick(worker)
 
+    assert worker.budget.paused
     await db_session.refresh(job)
     assert job.status == "pending"
     assert job.last_error == "school_rate_limited"

@@ -17,7 +17,8 @@ Failure taxonomy → outcome:
 * `CredentialInvalid`            → account invalidated, ALL user jobs
                                    disabled, reauth push queued. No retry.
 * `MoodleRateLimited`            → retriable, backoff, last_error
-                                   'school_rate_limited'.
+                                   'school_rate_limited'; the whole
+                                   worker pauses for the backoff's base.
 * `MoodleUnreachable`/`SsoUnavailable`
                                  → retriable, backoff, last_error
                                    'sync_failed:<detail>'. An answer
@@ -478,6 +479,9 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             is_token_invalid=True, credential_nonce=credential_nonce,
         )
     except MoodleRateLimited:
+        pause = worker.settings.sync_job_backoff_base_seconds
+        worker.budget.pause(pause)
+        logger.warning("syncjobs.rate_limited_pause", job_id=job_id, seconds=pause)
         await _record_failure(
             worker, job_id=job_id, run_id=run_id, error=ERROR_SCHOOL_RATE_LIMITED,
             keep_retrying=True,
