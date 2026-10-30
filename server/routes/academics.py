@@ -325,20 +325,17 @@ async def list_assignments(auth: CurrentAuthDep, session: SessionDep):
         .all()
     )
     overrides = (
-        (
-            await session.execute(
-                select(UserAssignmentOverride).where(
-                    UserAssignmentOverride.user_id == auth.user_id
-                )
-            )
+        await session.execute(
+            select(UserAssignmentOverride, UserAssignment.moodle_assignment_id)
+            .join(UserAssignment, UserAssignment.id == UserAssignmentOverride.user_assignment_id)
+            .where(UserAssignmentOverride.user_id == auth.user_id)
         )
-        .scalars()
-        .all()
-    )
+    ).all()
     return {
         "assignments": [serializers.assignment_to_dict(a) for a in assignments],
         "overrides": [
-            serializers.assignment_override_to_dict(o) for o in overrides
+            serializers.assignment_override_to_dict(o, moodle_assignment_id=moodle_id)
+            for o, moodle_id in overrides
         ],
     }
 
@@ -415,4 +412,8 @@ async def put_assignment_override(
             device_id=auth.device_id,
             locked_state=state,
         )
-    return {"override": serializers.assignment_override_to_dict(override)}
+    return {
+        "override": serializers.assignment_override_to_dict(
+            override, moodle_assignment_id=assignment.moodle_assignment_id
+        )
+    }

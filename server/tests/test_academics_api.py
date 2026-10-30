@@ -437,12 +437,15 @@ async def test_get_assignments_with_override(client) -> None:
     )
     assert put.status_code == 200
     assert put.json()["override"]["local_status"] == "locally_completed"
+    # As `/sync/full` keys it (tigerduck-backend#62).
+    assert put.json()["override"]["moodle_assignment_id"] == 9001
 
     response = await client.get("/v3/assignments", headers=bearer(login))
     body = response.json()
     assert len(body["assignments"]) == 1
     assert len(body["overrides"]) == 1
     assert body["overrides"][0]["local_status"] == "locally_completed"
+    assert body["overrides"][0]["moodle_assignment_id"] == 9001
 
 
 async def test_override_writes_changelog(client) -> None:
