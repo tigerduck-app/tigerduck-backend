@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, Request
-from sqlalchemy import ColumnElement, any_, literal, text
+from sqlalchemy import ColumnElement, Row, any_, delete, literal, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -84,6 +84,50 @@ async def lift_timeouts(session: AsyncSession) -> None:
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+#: Rows a retention purge deletes per transaction, so none holds its locks long.
+PRUNE_BATCH_ROWS = 5000
+
+
+async def delete_in_batches(
+    factory: async_sessionmaker[AsyncSession],
+    model: Any,
+    *where: ColumnElement[bool],
+    returning: Sequence[Any] = (),
+    then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None = None,
+) -> int:
+    """Delete `model`'s rows that match `where`, oldest id first and
+    `PRUNE_BATCH_ROWS` per transaction, and return how many went.
+
+    Each batch reads on from the last id the one before deleted. `then` runs
+    in each batch's transaction with the rows it deleted: their `id` and the
+    `returning` columns.
+    """
+    deleted, after = 0, 0
+    while True:
+        async with session_scope(factory) as session:
+            # The last batch reads every row the purge keeps, past the limit.
+            await lift_timeouts(session)
+            oldest = (
+                select(model.id)
+                .where(model.id > after, *where)
+                .order_by(model.id)
+                .limit(PRUNE_BATCH_ROWS)
+            )
+            rows = (
+                await session.execute(
+                    delete(model)
+                    .where(model.id.in_(oldest))
+                    .returning(model.id, *returning)
+                )
+            ).all()
+            if then is not None and rows:
+                await then(session, rows)
+        deleted += len(rows)
+        if len(rows) < PRUNE_BATCH_ROWS:
+            return deleted
+        after = max(row.id for row in rows)
 
 
 @asynccontextmanager

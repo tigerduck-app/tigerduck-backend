@@ -33,6 +33,7 @@ from server.push.reminders import scan_assignment_reminders
 from server.push.session_reauth import scan_sessionless_devices
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
+from server.syncjobs.retention import prune_sync_history
 from server.db import session_scope
 from server.tls_pins.document import PinSigner, ensure_current_document
 from server.tls_pins.watcher import run_pin_watch
@@ -68,6 +69,8 @@ def build_scheduler(
     * `sync_changelog_retention` — purge aged changelog entries daily.
     * `push_job_retention` — prune terminal push_jobs (+ cascade deliveries) after 7 days.
     * `admin_audit_retention` — prune portal audit rows after 365 days, daily.
+    * `sync_history_retention` — prune the sync log and finished sync runs
+      after 30 days, daily at 03:00 Taipei.
     * `device_retirement` — deregister the devices that are gone, daily at
       04:00 Taipei.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
@@ -120,6 +123,9 @@ def build_scheduler(
 
     async def device_retirement() -> None:
         await retire_dead_devices(session_factory)
+
+    async def sync_history_retention() -> None:
+        await prune_sync_history(session_factory, settings)
 
     scheduler.add_job(
         bulletin_scrape,
@@ -195,6 +201,15 @@ def build_scheduler(
         # before the host's 04:30 backup (deploy/launchd/ai.tigerduck.backup.plist).
         trigger=CronTrigger(hour=4, timezone="Asia/Taipei"),
         id="device_retirement",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        sync_history_retention,
+        # Wall-clock, as device_retirement: an interval restarts at every deploy.
+        trigger=CronTrigger(hour=3, timezone="Asia/Taipei"),
+        id="sync_history_retention",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,

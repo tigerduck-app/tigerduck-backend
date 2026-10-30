@@ -153,6 +153,9 @@ class Settings(BaseSettings):
     # purge watermark get HTTP 410 and full-sync.
     sync_changelog_retention_days: int = 30
     sync_changelog_retention_interval_hours: int = 24
+    # sync_log_entries and finished sync_runs older than this are deleted
+    # daily. Only operators read them; Loki keeps the logs as long.
+    sync_history_retention_days: int = 30
 
     # --- Server-side sync jobs (Phase 3) ---
     sync_job_tick_seconds: int = 30
