@@ -10,7 +10,14 @@ import re
 import pytest
 from sqlalchemy import event
 
-from server.tests.test_sync_overrides import LOGIN_BODY, bearer, do_login, seed_course
+from server.tests.test_holiday_overrides import seed_holiday
+from server.tests.test_sync_overrides import (
+    LOGIN_BODY,
+    bearer,
+    do_login,
+    seed_assignment,
+    seed_course,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -170,4 +177,79 @@ async def test_a_protocol_2_writer_reads_its_rows_under_the_sync_lock(client, re
         for i, s in enumerate(statements)
         if any(table in SYNC_TABLES for table in _TOUCH.findall(s))
     )
+    assert lock < first
+
+
+@pytest.mark.parametrize(
+    ("request_for", "table"),
+    [
+        (
+            lambda c, h, ids: c.put(
+                f"/v3/courses/{ids['course']}/override",
+                headers=h,
+                json={"color_hex": "#FF0000", "color_hex_updated_at": "2026-10-26T00:00:00Z"},
+            ),
+            "user_course_overrides",
+        ),
+        (
+            lambda c, h, ids: c.put(
+                f"/v3/assignments/{ids['assignment']}/override",
+                headers=h,
+                json={"note": "Lab", "note_updated_at": "2026-10-26T00:00:00Z"},
+            ),
+            "user_assignment_overrides",
+        ),
+        (
+            lambda c, h, ids: c.put(
+                f"/v3/courses/{ids['course']}/skipped-dates/2026-10-26", headers=h, json={}
+            ),
+            "user_course_skipped_dates",
+        ),
+        (
+            lambda c, h, ids: c.patch(
+                "/v3/sync/courses/1141CS3001301/override", headers=h, json={"color_hex": "#FF0000"}
+            ),
+            "user_course_overrides",
+        ),
+        (
+            lambda c, h, ids: c.patch(
+                "/v3/sync/assignments/9001/override", headers=h, json={"local_status": "ignored"}
+            ),
+            "user_assignment_overrides",
+        ),
+        (
+            lambda c, h, ids: c.put(
+                f"/v3/sync/holiday-overrides/{ids['holiday']}", headers=h, json={"notify": True}
+            ),
+            "user_holiday_overrides",
+        ),
+    ],
+    ids=[
+        "course override PUT",
+        "assignment override PUT",
+        "skipped date",
+        "course override PATCH",
+        "assignment override PATCH",
+        "holiday override",
+    ],
+)
+async def test_a_first_write_looks_for_its_row_under_the_sync_lock(
+    client, request_for, table
+) -> None:
+    """Two first writes at once then insert one row between them, not one
+    each, which failed on the unique index with a 500 (tigerduck-backend#93)."""
+    login = await do_login(client)
+    user_id = login["user"]["id"]
+    ids = {
+        "course": await seed_course(
+            client, user_id, semester="1141", course_key=KEY, moodle_id="1141CS3001301"
+        ),
+        "assignment": await seed_assignment(client, user_id, moodle_course_id=101),
+        "holiday": await seed_holiday(client),
+    }
+    statements = await _statements(client, lambda: request_for(client, bearer(login), ids))
+    lock = next(
+        i for i, s in enumerate(statements) if "FROM user_sync_state" in s and "FOR UPDATE" in s
+    )
+    first = next(i for i, s in enumerate(statements) if table in _TOUCH.findall(s))
     assert lock < first
