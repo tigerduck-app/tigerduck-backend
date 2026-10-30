@@ -96,7 +96,9 @@ export function TermStrip({
               const change = dayChanges.find((c) => c.kind !== "note") ?? dayChanges[0];
               const past = iso < today;
               const actionable = !past && (isClass || change !== undefined);
-              const pick = actionable && dayChanges.length > 1;
+              // A class day adds a change, since a day can hold one of each kind; the
+              // changes table edits them. Only a day off with changes opens one.
+              const pick = actionable && !isClass && dayChanges.length > 1;
               const title = [
                 dayDate(iso),
                 ...(holiday ? [holiday] : []),
@@ -109,7 +111,7 @@ export function TermStrip({
                   title={title}
                   aria-label={title}
                   disabled={!actionable}
-                  onClick={pick ? undefined : () => (change ? onEdit(change) : onAdd(iso))}
+                  onClick={pick ? undefined : () => (isClass || !change ? onAdd(iso) : onEdit(change))}
                   style={{ gridColumn: w + 2, gridRow: r + 3 }}
                   className={cn(
                     "flex h-7 w-full items-center justify-center rounded-[5px] text-[10px] tabular-nums disabled:cursor-default",
