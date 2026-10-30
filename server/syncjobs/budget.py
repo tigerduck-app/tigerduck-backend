@@ -33,7 +33,7 @@ class RequestBudget:
         self._spacing = 60.0 / per_minute
         self._clock = clock
         self._sleep = sleep
-        self._next_at = float("-inf")
+        self._last_at = float("-inf")
         self._resume_at = float("-inf")
         self.event_hooks = {"request": [self._before_request]}
 
@@ -45,20 +45,15 @@ class RequestBudget:
         self._resume_at = max(self._resume_at, self._clock() + seconds)
 
     async def acquire(self) -> None:
+        # Measured from when the last request went, and checked again on
+        # waking: a stalled event loop wakes several waiters at once.
         while True:
             now = self._clock()
-            if now < self._resume_at:
-                await self._sleep(self._resume_at - now)
-                continue
-            slot = max(now, self._next_at)
-            self._next_at = slot + self._spacing
-            if slot <= now:
+            ready_at = max(self._resume_at, self._last_at + self._spacing)
+            if now >= ready_at:
+                self._last_at = now
                 return
-            await self._sleep(slot - now)
-            # A pause that began while this request waited for its turn
-            # holds it too; it then takes a fresh turn after the pause.
-            if not self.paused:
-                return
+            await self._sleep(ready_at - now)
 
     async def _before_request(self, _request: httpx.Request) -> None:
         await self.acquire()

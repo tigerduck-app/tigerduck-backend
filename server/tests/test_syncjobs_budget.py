@@ -83,6 +83,28 @@ async def test_jobs_in_flight_share_one_evenly_spaced_budget():
     assert sent == [0.0, 6.0, 12.0, 18.0, 24.0, 30.0, 36.0, 42.0]
 
 
+async def test_requests_woken_together_after_a_stall_still_go_spaced():
+    """An event loop stalled past several turns wakes their waiters at
+    once; requests that each held a turn then left together."""
+    clock = VirtualClock()
+    budget = RequestBudget(10, clock=clock, sleep=clock.sleep)
+    went: list[float] = []
+
+    async def request():
+        await budget.acquire()
+        went.append(clock.now)
+
+    async def scenario():
+        waiting = [asyncio.ensure_future(request()) for _ in range(4)]
+        await asyncio.sleep(0)
+        clock.now = 30.0
+        await asyncio.gather(*waiting)
+
+    await clock.run(scenario())
+
+    assert went == [0.0, 30.0, 36.0, 42.0]
+
+
 async def test_a_pause_holds_back_requests_already_waiting_and_new_ones():
     clock = VirtualClock()
     budget = RequestBudget(60, clock=clock, sleep=clock.sleep)
