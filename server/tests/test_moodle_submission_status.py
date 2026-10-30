@@ -25,6 +25,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnavailable,
     MoodleUnreachable,
 )
+from server.tests.conftest import PRODUCTION_SECRETS
 
 BASE = "https://moodle.example.test"
 
@@ -1205,16 +1206,10 @@ def production_log_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        # Production settings refuse to load without a shared secret. Name
-        # one here rather than leave it to a local `.env`, which neither a
+        # Production settings refuse to load without their secrets. Name
+        # them here rather than leave them to a local `.env`, which neither a
         # clean checkout nor CI has.
-        configure(
-            Settings(
-                env="production",
-                log_level="INFO",
-                api_shared_secret="test-shared-secret",
-            )
-        )
+        configure(Settings(env="production", log_level="INFO", **PRODUCTION_SECRETS))
         monkeypatch.setattr(
             moodle_client,
             "logger",

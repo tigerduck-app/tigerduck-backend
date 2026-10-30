@@ -47,6 +47,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnreachable,
     SsoUnavailable,
 )
+from server.tests.conftest import PRODUCTION_SECRETS
 from server.syncjobs.policies import DEFAULT_POLICIES, ensure_default_policies
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -1654,16 +1655,10 @@ def executor_logs_through_the_production_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        # Production settings refuse to load without a shared secret. Name
-        # one here rather than leave it to a local `.env`, which neither a
+        # Production settings refuse to load without their secrets. Name
+        # them here rather than leave them to a local `.env`, which neither a
         # clean checkout nor CI has.
-        configure(
-            Settings(
-                env="production",
-                log_level="INFO",
-                api_shared_secret="test-shared-secret",
-            )
-        )
+        configure(Settings(env="production", log_level="INFO", **PRODUCTION_SECRETS))
         monkeypatch.setattr(
             executor_module,
             "logger",

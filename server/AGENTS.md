@@ -95,6 +95,7 @@ server/
 │   └── retention.py           # prune terminal push_jobs
 ├── bulletins/
 │   ├── scraper.py             # NTUST HTML → metadata
+│   ├── ntust_intermediates.pem  # TWCA intermediates the scrape's TLS check adds
 │   ├── dedup.py               # content_hash gating
 │   ├── detail.py / models.py / schemas.py / taxonomy.py
 │   ├── matcher.py             # subscription-rule evaluation
