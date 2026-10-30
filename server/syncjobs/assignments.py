@@ -158,8 +158,9 @@ async def apply_fetched_assignments(
     `enrolled` is the student's Moodle courses, None when they could not be
     read. A row of a course the iPhone app lists in the current term
     (`listed_courses`) is linked to the class table's course of that number,
-    if there is one, and any other row is not. Without `enrolled` the rows
-    keep their links and a new row stays unclassified.
+    if there is one, and any other row is not. Without `enrolled`, or with
+    none beside assignments, the rows keep their links and a new row stays
+    unclassified.
 
     `refused_course_ids` are the courses an answer that lost every course
     refused (`MoodleNoCourseAccess`). It says nothing about them, so their
@@ -195,7 +196,10 @@ async def apply_fetched_assignments(
 
     class_table: dict[str, UserCourse] = {}
     listed: dict[int, str] = {}
-    term = await current_term_code(session, now) if enrolled else None
+    if not enrolled:
+        # No course beside assignments contradicts them, so it decides nothing.
+        enrolled = None
+    term = await current_term_code(session, now) if enrolled is not None else None
     if term is not None:
         class_table = {
             c.course_no: c
@@ -209,7 +213,8 @@ async def apply_fetched_assignments(
         listed = listed_courses(enrolled, set(class_table), term)
     # "" marks a row classified as of no term; None, one no fetch classified.
     semester_by_course = {
-        c.moodle_course_id: moodle_semester(c.idnumber) or "" for c in enrolled or ()
+        c.moodle_course_id: moodle_semester(c.idnumber) or ""
+        for c in enrolled or ()
     }
 
     changed = 0

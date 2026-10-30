@@ -375,7 +375,12 @@ async def test_links_an_assignment_to_the_class_table_course_the_app_files_it_un
     ]
 
 
-async def test_without_the_course_list_a_fetch_leaves_the_links_alone(db_session):
+@pytest.mark.parametrize("enrolled", [None, []], ids=["failed", "empty"])
+async def test_without_the_course_list_a_fetch_leaves_the_links_alone(
+    db_session, enrolled
+):
+    """A course list that failed, or that names no course while Moodle lists
+    assignments, cannot classify the rows."""
     user = await _make_user(db_session)
     await _publish_term(db_session)
     course = await _class_table_course(db_session, user, "CS2006301")
@@ -389,7 +394,11 @@ async def test_without_the_course_list_a_fetch_leaves_the_links_alone(db_session
     await db_session.commit()
 
     await apply_fetched_assignments(
-        db_session, user_id=user.id, fetched=[_fa(1), _fa(2)], now=NOW
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1), _fa(2)],
+        now=NOW,
+        enrolled=enrolled,
     )
     await db_session.commit()
 
