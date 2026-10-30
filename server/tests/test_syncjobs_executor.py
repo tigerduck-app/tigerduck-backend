@@ -862,6 +862,32 @@ async def test_a_course_list_failure_keeps_the_assignment_fetch(
     ]
 
 
+async def test_a_course_list_429_pauses_the_worker_before_storing(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The other job in flight must stop sending as soon as the school says
+    429, even while this one's writes wait, and even if they fail."""
+    await _setup_user_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=[_fa(1)]),
+        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
+    )
+    paused_at_store = []
+
+    async def failing_store(*args, **kwargs):
+        paused_at_store.append(worker.budget.paused)
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(executor_module, "apply_fetched_assignments", failing_store)
+
+    await run_sync_tick(worker)
+
+    assert paused_at_store == [True]
+    assert worker.budget.paused
+
+
 @pytest.mark.parametrize(
     ("error", "last_error", "probed"),
     [
