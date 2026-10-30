@@ -335,14 +335,16 @@ into the backend container via `docker-compose.yml`.
 - With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
   writes the tombstone even for a course the server lacks; a removal of a
   school row (`source` other than `user_added`) keeps the row and only
-  clears its add. An upload's `adds` replace `force_keys`; the rest of
-  its `courses` is the school's roster, which marks a listed course as a
-  school row, skips a hidden key, lifts a reset tombstone and shows a
-  removed key beside its removal tombstone, which keeps refusing older
-  edits. A reset clears only the term's choices stamped at or before it:
-  a row with a later add stays, and so does a school row with a later
-  override value, with its older choices emptied and stamped at the reset
-  (a name as ""), so every writer refuses an older value. After a term
+  clears its add. An upload's `adds` replace `force_keys`, and as with
+  them a course an add brings back from a tombstone not marked
+  `user_added` is stored as a school row; the rest of its `courses` is
+  the school's roster, which marks a listed course as a school row, skips
+  a hidden key, lifts a reset tombstone and shows a removed key beside
+  its removal tombstone, which keeps refusing older edits. A reset clears
+  only the term's choices stamped at or before it: a row with a later add
+  stays, and so does a school row with a later override value, with its
+  older choices emptied and stamped at the reset (a name as ""), so every
+  writer refuses an older value. After a term
   reset each row that goes, and each key with an older tombstone and no
   row left, has a reset tombstone. The course override PATCH and the
   academics PUT refuse edits stamped at or before the term's reset, and
