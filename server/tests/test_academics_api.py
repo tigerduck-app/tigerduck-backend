@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -464,3 +465,34 @@ async def test_override_writes_changelog(client) -> None:
         ).scalar_one()
         assert entry.entity_id == str(course_id)
         assert entry.payload == {"fields": ["color_hex"]}
+
+
+async def test_only_a_mark_edit_moves_when_the_mark_reached_the_server(client) -> None:
+    """`/sync/full` compares a mark's arrival with a fetch's soft-delete
+    (`_hidden_since_received`), so a note edit must leave it alone
+    (tigerduck-backend#71)."""
+    login = await do_login(client)
+    assignment_id = await seed_assignment(client, login["user"]["id"])
+    path = f"/v3/assignments/{assignment_id}/override"
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    async def received_at() -> datetime | None:
+        factory = build_session_factory(client.app.state.engine)
+        async with factory() as session:
+            return (
+                await session.execute(select(UserAssignmentOverride.local_status_received_at))
+            ).scalar_one()
+
+    note_only = {"note": "Bring the lab sheet", "note_updated_at": t.isoformat()}
+    assert (await client.put(path, headers=bearer(login), json=note_only)).status_code == 200
+    assert await received_at() is None
+
+    before = datetime.now(UTC)
+    mark = {"local_status": "ignored", "local_status_updated_at": t.isoformat()}
+    assert (await client.put(path, headers=bearer(login), json=mark)).status_code == 200
+    received = await received_at()
+    assert received is not None and received >= before
+
+    note_only["note_updated_at"] = (t + timedelta(minutes=1)).isoformat()
+    assert (await client.put(path, headers=bearer(login), json=note_only)).status_code == 200
+    assert await received_at() == received
