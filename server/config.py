@@ -164,6 +164,9 @@ class Settings(BaseSettings):
     # sync_log_entries and finished sync_runs older than this are deleted
     # nightly. Only operators read them; Loki keeps the logs as long.
     sync_history_retention_days: int = 30
+    # /sync/full asks for the current term's roster when none arrived for
+    # this long: only the apps can read course selection.
+    sync_roster_request_days: int = Field(default=7, ge=1)
 
     # --- Server-side sync jobs (Phase 3) ---
     sync_job_tick_seconds: int = 30

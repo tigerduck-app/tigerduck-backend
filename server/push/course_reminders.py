@@ -212,7 +212,7 @@ async def recheck_class_reminder(
 ) -> dict | None:
     """The class reminder's payload as its course and the school's course
     changes stand now, or None when its class no longer starts at the time
-    it was filed for: cancelled, moved, or the course gone.
+    it was filed for: cancelled, moved, or the course gone or dropped.
 
     The pipeline asks right before the first delivery; a moved class has a
     reminder of its own from the scan. A job filed before copy moved to send
@@ -223,7 +223,7 @@ async def recheck_class_reminder(
     if type(user_course_id) is not int or type(start_epoch) is not int:
         return None
     course = await session.get(UserCourse, user_course_id)
-    if course is None:
+    if course is None or course.enrollment_status != "enrolled":
         return None
     start = datetime.fromtimestamp(start_epoch, UTC)
     midnight = datetime.combine(start.astimezone(tz).date(), time(0), tzinfo=tz)

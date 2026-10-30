@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import delete, event, func, insert, literal, select
+from sqlalchemy import delete, event, func, insert, literal, select, update
 
 from server.academic_calendar.models import CourseChange, SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
@@ -1350,15 +1350,19 @@ async def test_a_reminder_is_dropped_when_its_check_fails(
     assert (job.status, job.last_error) == ("cancelled", "unverified_before_send")
 
 
+@pytest.mark.parametrize("gone", ["removed", "dropped"])
 async def test_a_reminder_for_a_removed_course_is_dropped_at_send(
-    db_session, prepared_engine, test_settings
+    db_session, prepared_engine, test_settings, gone
 ):
     local, schedule = _occurrence_in(0.5)
     user = await _course_with_change(db_session, local, schedule)
     factory = build_session_factory(prepared_engine)
     settings = _scan_settings(test_settings, local)
     assert await scan_course_reminders(factory, settings) == 1
-    await db_session.execute(delete(UserCourse))
+    if gone == "removed":
+        await db_session.execute(delete(UserCourse))
+    else:
+        await db_session.execute(update(UserCourse).values(enrollment_status="dropped"))
     await db_session.commit()
 
     apple = await _send_due(factory, settings, db_session, user)
