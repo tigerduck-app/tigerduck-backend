@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.terms import current_term_code
 from server.sync.changelog import append_change, lock_sync_state
-from server.sync.models import ChangeEntityType, UserAssignment, UserCourse
+from server.sync.models import ChangeEntityType, EnrollmentStatus, UserAssignment, UserCourse
 from server.syncjobs.moodle_client import FetchedAssignment, FetchedCourse
 
 logger = structlog.get_logger(__name__)
@@ -205,7 +205,9 @@ async def apply_fetched_assignments(
             c.course_no: c
             for c in await session.scalars(
                 select(UserCourse).where(
-                    UserCourse.user_id == user_id, UserCourse.semester == term
+                    UserCourse.user_id == user_id,
+                    UserCourse.semester == term,
+                    UserCourse.enrollment_status == EnrollmentStatus.enrolled.value,
                 )
             )
             if c.course_no
