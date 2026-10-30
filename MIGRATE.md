@@ -55,8 +55,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
   Migration `8184b299cf8e` indexes `auth_sessions.replaced_by_session_id`
   without blocking writes; deleting a session sets that column null on the
-  rows pointing at it, which read the whole table per row before. The first
-  night deletes everything already past the windows.
+  rows pointing at it, which read the whole table per row before. Do not
+  deploy during the 04:30 backup or another long transaction: the
+  concurrent build waits for it, and past the 10-second lock timeout the
+  upgrade fails and restarts with the container. The first night deletes
+  everything already past the windows.
 - **The retention jobs run at fixed times.** Every retention job now runs
   daily from 03:00 Taipei, five minutes apart, rather than 24 hours after
   the backend started, which each deploy put off again.
