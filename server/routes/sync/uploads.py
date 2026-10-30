@@ -126,10 +126,12 @@ async def upload_courses(
     added_at: dict[str, datetime] = {}
     add_answers: list[dict] = []
     if speaks_clock:
-        tombstoned_keys, added_at, add_answers = await _roster_by_stamp(
+        tombstoned_keys, added_at, add_answers, school_back = await _roster_by_stamp(
             session, auth.user_id, payload, payload_keys, adds
         )
-        added_by_hand = set(added_at)
+        # An add that brings back a course deleted while it was not added by
+        # hand brings back a school row, as `force_keys` does below.
+        added_by_hand = set(added_at) - school_back
         back_by_hand: set[str] = set()
         # Under protocol 2 `courses` outside `adds` is the school's roster,
         # so a hand-added course it lists becomes a school row.
@@ -428,8 +430,9 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
     resets, and lifts the tombstone. The roster is base data: it skips a
     hidden key, lifts a reset tombstone, and shows a removed key beside its
     removal tombstone, whose stamp keeps refusing older edits. Answers the
-    keys to skip, the winning adds' stamps and one answer per add. `adds`
-    holds each add's stamp. The caller holds the user's sync lock.
+    keys to skip, the winning adds' stamps, one answer per add and the
+    winning adds that lift a tombstone not `user_added`. `adds` holds each
+    add's stamp. The caller holds the user's sync lock.
     """
     rows = {
         r.course_key: r
@@ -456,6 +459,7 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
     skip: set[str] = set()
     lifted: set[str] = set()
     won: dict[str, datetime] = {}
+    school_back: set[str] = set()
     answers: list[dict] = []
     for c in payload.courses:
         key = f"client:{c.semester}:{c.course_no}"
@@ -466,6 +470,8 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
             if applied:
                 won[key] = adds[key]
                 lifted.add(key)
+                if tombstone is not None and not tombstone.user_added:
+                    school_back.add(key)
             else:
                 skip.add(key)
             winner = adds[key] if applied else stored
@@ -483,4 +489,4 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
                 UserCourseTombstone.course_key.in_(lifted),
             )
         )
-    return skip, won, answers
+    return skip, won, answers, school_back

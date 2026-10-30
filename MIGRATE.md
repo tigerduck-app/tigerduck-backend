@@ -32,6 +32,62 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.10.0
+
+- **Production refuses example or empty secrets (#94).** With
+  `TIGERDUCK_ENV=production`, or unset, the backend stops at startup and
+  names each setting when `TIGERDUCK_API_SHARED_SECRET`,
+  `TIGERDUCK_AUTH_JWT_SECRET`, `TIGERDUCK_AUTH_REFRESH_HMAC_KEY` or
+  `TIGERDUCK_CREDENTIAL_KEYS` is empty, or when one of them or
+  `TIGERDUCK_DATABASE_URL` still holds a `CHANGE_ME` placeholder from
+  `.env.example`. The error prints no values.
+- **No API docs in production (#94).** `/docs`, `/redoc` and
+  `/openapi.json` answer 404 unless `TIGERDUCK_ENV=development`.
+- **The backend runs as an unprivileged user (#94).** The image runs as
+  `tigerduck`, uid and gid 10001, and writes no files. It reads the
+  bind-mounted `server/secrets` and `server/signing`. On OrbStack, the
+  production host's engine, a bind-mounted file is read with the macOS
+  user's access whatever the container's uid, so nothing changes. On a
+  Linux host the files keep their host owner and mode; make them the
+  container user's (the portal runs as root and still reads them):
+
+  ```bash
+  sudo chown -R 10001:10001 server/secrets server/signing
+  ```
+
+  A configured key or CA file the backend cannot read now stops it at
+  startup, naming its setting (`TIGERDUCK_APNS_KEY_PATH`,
+  `TIGERDUCK_FCM_CREDENTIALS_PATH`, `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH`,
+  `TIGERDUCK_BULLETIN_CA_BUNDLE`); a missing key file still turns its
+  feature off.
+- **Bulletin scraping verifies TLS (#94).** It checks against certifi's
+  roots and the TWCA intermediates NTUST's certificates come from, bundled
+  in `server/bulletins/ntust_intermediates.pem`, and fetches an intermediate
+  neither bundled nor sent through the certificate's AIA URL; it no longer
+  falls back to `verify=False`. A list page that fails to load logs
+  `bulletins.scrape_job.fetch_failed` at error level, and the "Bulletin
+  scrape reads nothing" alert fires within the hour. A detail page whose
+  chain cannot be completed fails its fetch (`detail fetch:` in
+  `processing_error`).
+  `TIGERDUCK_BULLETIN_CA_BUNDLE` now adds certificates to those instead of
+  replacing them, and when set, its file must exist. Leave it unset unless
+  NTUST moves to a CA the bundle lacks.
+- **uv pinned (#94).** The image builds with uv 0.12.24, pinned by digest;
+  Renovate bumps it.
+- **Check before deploying.** Build the image and run the startup checks
+  with the real `.env` and mounts, as the new user, beside the running
+  stack:
+
+  ```bash
+  docker compose build backend
+  docker compose run --rm --no-deps backend python -c \
+    "from server.config import Settings, require_readable_files; require_readable_files(Settings()); print('ok')"
+  ```
+
+  It prints `ok`, or the settings to fix.
+- **No migration.** A `.env` change only for a setting the check names.
+  Rollback: check out 3.9.0 and run `./start.sh`.
+
 ## Upgrading to 3.9.0
 
 - **Course changes feed (#192).** `GET /v3/calendar/course-changes?term=`

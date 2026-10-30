@@ -95,6 +95,7 @@ server/
 │   └── retention.py           # prune terminal push_jobs
 ├── bulletins/
 │   ├── scraper.py             # NTUST HTML → metadata
+│   ├── ntust_intermediates.pem  # TWCA intermediates the scrape's TLS check adds
 │   ├── dedup.py               # content_hash gating
 │   ├── detail.py / models.py / schemas.py / taxonomy.py
 │   ├── matcher.py             # subscription-rule evaluation
@@ -307,11 +308,18 @@ into the backend container via `docker-compose.yml`.
   calls). A change while one has yet to go out rides on it, locked so the
   claim skips it until the change commits; a change after it waits for
   the next. Before each round the pipeline puts a trigger, except the
-  portal's forced one, back until 20
-  minutes after the user's last recorded sync trigger send
-  (`_last_sync_trigger_sent`), so downtime or a retry cannot bunch them.
+  portal's forced one, back until 20 minutes after the user's last
+  recorded sync trigger send (`_last_sync_trigger_sent`), so downtime or
+  a retry cannot bunch them.
   The check sees only committed sends: a forced tick and the scheduler's
   sending two of one user's triggers in the same round can both go out.
+- The sync worker runs `sync_job_concurrency` (2) jobs at once, never two
+  of one user, and every Moodle request it sends waits its turn in one
+  `RequestBudget` (`syncjobs/budget.py`, `sync_job_requests_per_minute`,
+  10): the fetchers it is built with send through the budget's
+  `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
+  pauses the whole worker for `sync_job_backoff_base_seconds`. The push
+  pipeline's pre-send check has a fetcher of its own, outside the budget.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
@@ -349,14 +357,16 @@ into the backend container via `docker-compose.yml`.
 - With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
   writes the tombstone even for a course the server lacks; a removal of a
   school row (`source` other than `user_added`) keeps the row and only
-  clears its add. An upload's `adds` replace `force_keys`; the rest of
-  its `courses` is the school's roster, which marks a listed course as a
-  school row, skips a hidden key, lifts a reset tombstone and shows a
-  removed key beside its removal tombstone, which keeps refusing older
-  edits. A reset clears only the term's choices stamped at or before it:
-  a row with a later add stays, and so does a school row with a later
-  override value, with its older choices emptied and stamped at the reset
-  (a name as ""), so every writer refuses an older value. After a term
+  clears its add. An upload's `adds` replace `force_keys`, and as with
+  them a course an add brings back from a tombstone not marked
+  `user_added` is stored as a school row; the rest of its `courses` is
+  the school's roster, which marks a listed course as a school row, skips
+  a hidden key, lifts a reset tombstone and shows a removed key beside
+  its removal tombstone, which keeps refusing older edits. A reset clears
+  only the term's choices stamped at or before it: a row with a later add
+  stays, and so does a school row with a later override value, with its
+  older choices emptied and stamped at the reset (a name as ""), so every
+  writer refuses an older value. After a term
   reset each row that goes, and each key with an older tombstone and no
   row left, has a reset tombstone. The course override PATCH and the
   academics PUT refuse edits stamped at or before the term's reset, and

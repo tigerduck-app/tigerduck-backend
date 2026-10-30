@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import json
@@ -35,6 +36,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs import executor as executor_module
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
@@ -47,6 +49,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnreachable,
     SsoUnavailable,
 )
+from server.tests.conftest import PRODUCTION_SECRETS
 from server.syncjobs.policies import DEFAULT_POLICIES, ensure_default_policies
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -85,8 +88,18 @@ class StubCourseFetcher:
         return self.results
 
 
+class _Clock:
+    """The budget's clock: still unless a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def _worker(
-    prepared_engine, test_settings, fetcher=None, course_fetcher=None
+    prepared_engine, test_settings, fetcher=None, course_fetcher=None, clock=None
 ) -> SyncWorker:
     # Neutralise the Moodle maintenance window (defaults to 00:00–05:00
     # Taipei): during the window _handle_moodle_failure reschedules instead
@@ -105,6 +118,10 @@ def _worker(
         fetcher=fetcher if fetcher is not None else StubFetcher(),
         course_fetcher=course_fetcher if course_fetcher is not None else StubCourseFetcher(),
         worker_id="test-worker",
+        budget=RequestBudget(
+            settings.sync_job_requests_per_minute,
+            clock=clock if clock is not None else _Clock(),
+        ),
     )
 
 
@@ -518,7 +535,7 @@ async def test_a_suspended_sync_claims_nothing(
     assert job.status == "pending"
 
 
-async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
+async def test_a_suspend_during_a_tick_starts_no_further_job(
     db_session, prepared_engine, test_settings
 ):
     await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
@@ -534,7 +551,7 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     worker = dataclasses.replace(
         worker,
-        settings=worker.settings.model_copy(update={"sync_job_min_interval_seconds": 0}),
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
     )
 
     assert await run_sync_tick(worker) == 1
@@ -546,7 +563,132 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
         ("pending", 0, None, True),
     ]
     runs = (await db_session.execute(select(SyncRun.status, SyncRun.error))).all()
-    assert sorted(runs) == [("cancelled", "sync_suspended"), ("succeeded", None)]
+    assert runs == [("succeeded", None)]
+
+
+class _OverlapFetcher(StubFetcher):
+    """Holds each fetch until a second one is in flight, or for `patience`
+    seconds, and records the most it saw at once."""
+
+    def __init__(self, patience=5.0):
+        super().__init__(results=[])
+        self.patience = patience
+        self.in_flight = 0
+        self.most = 0
+        self._overlap = asyncio.Event()
+
+    async def fetch_assignments(self, *, token):
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        if self.in_flight > 1:
+            self._overlap.set()
+        try:
+            await asyncio.wait_for(self._overlap.wait(), self.patience)
+        except TimeoutError:
+            pass
+        finally:
+            self.in_flight -= 1
+        return await super().fetch_assignments(token=token)
+
+
+async def test_a_tick_runs_the_jobs_of_several_users_at_once(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: one job at a time, a minute apart, could not
+    keep up with the 8-hour policy; the request budget now sets the pace."""
+    for n in range(3):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    assert worker.settings.sync_job_concurrency == 2
+
+    assert await run_sync_tick(worker) == 3
+
+    assert fetcher.most == 2
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2"]
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 3
+
+
+async def test_a_tick_never_runs_two_jobs_of_one_user_at_once(
+    db_session, prepared_engine, test_settings
+):
+    user = await _setup_course_job(db_session)
+    db_session.add(
+        SyncJob(
+            user_id=user.id,
+            external_account_id=(
+                await db_session.scalar(select(SyncJob.external_account_id))
+            ),
+            job_type=SyncJobType.moodle_assignments.value,
+            run_after=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    )
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    course_fetcher = StubCourseFetcher(results=[])
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, course_fetcher=course_fetcher
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+    assert (await db_session.execute(select(func.count(SyncRun.id)))).scalar_one() == 1
+
+    assert await run_sync_tick(worker) == 1
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 2
+
+
+async def test_two_workers_at_once_run_each_job_once(
+    db_session, prepared_engine, test_settings
+):
+    for n in range(4):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher(patience=0.05)
+    workers = [
+        dataclasses.replace(
+            _worker(prepared_engine, test_settings, fetcher=fetcher), worker_id=name
+        )
+        for name in ("worker-a", "worker-b")
+    ]
+
+    started = await asyncio.gather(*(run_sync_tick(w) for w in workers))
+
+    assert sum(started) == 4
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2", "tok-3"]
+    runs = (await db_session.execute(select(SyncRun.sync_job_id, SyncRun.status))).all()
+    assert len({job_id for job_id, _ in runs}) == 4
+    assert {status for _, status in runs} == {"succeeded"}
+
+
+async def test_a_429_holds_the_whole_worker_back_until_its_pause_ends(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: the school's 429 now stops every job, not only
+    the one it answered."""
+    await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
+    await _setup_user_job(
+        db_session,
+        student_id="b00000002",
+        token="tok-2",
+        job_kwargs={"run_after": datetime.now(UTC) - timedelta(seconds=30)},
+    )
+    fetcher = StubFetcher(results=[], errors=[MoodleRateLimited("http_429")])
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert await run_sync_tick(worker) == 0
+    assert fetcher.calls == ["tok-1"]
+
+    clock.now += worker.settings.sync_job_backoff_base_seconds
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1", "tok-2"]
 
 
 async def test_successful_run_upserts_and_reschedules(
@@ -681,6 +823,83 @@ async def test_a_job_taken_back_while_the_list_fetch_ran_stores_nothing(
         )
     )
     assert stored == 0
+
+
+async def test_a_run_taken_back_and_claimed_again_by_the_same_worker_stores_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """A worker id is host and pid, so a claim made again on the same host
+    and pid matched the old run's while that run still waited on Moodle."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def recover_and_claim_again():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob)
+                .where(SyncJob.id == job.id)
+                .values(locked_at=datetime.now(UTC) - timedelta(hours=1))
+            )
+        await executor_module._recover_stale_jobs(worker)
+        assert await executor_module._claim_due_job(worker) is not None
+
+    fetcher = _ObservingFetcher(recover_and_claim_again, results=[_fa(1)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    runs = (
+        await db_session.execute(select(SyncRun.status, SyncRun.error).order_by(SyncRun.id))
+    ).all()
+    assert runs == [("failed", "stale_lock_recovered"), ("running", None)]
+    assert (job.status, job.last_success_at) == ("running", None)
+    stored = await db_session.scalar(
+        select(func.count()).select_from(UserAssignment).where(
+            UserAssignment.user_id == user.id
+        )
+    )
+    assert stored == 0
+
+
+async def test_a_job_waiting_long_on_its_turns_keeps_its_lock_fresh(
+    db_session, prepared_engine, test_settings
+):
+    """Its requests queue in the shared budget, and a 429 pauses them, so a
+    live job can outlast the stale-lock limit without its worker being gone."""
+    _, _, job = await _setup_user_job(db_session)
+    stale = datetime.now(UTC) - timedelta(hours=1)
+
+    async def wait_out_a_long_turn():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob).where(SyncJob.id == job.id).values(locked_at=stale)
+            )
+        async with asyncio.timeout(5):
+            while True:
+                async with prepared_engine.connect() as conn:
+                    locked_at = await conn.scalar(
+                        select(SyncJob.locked_at).where(SyncJob.id == job.id)
+                    )
+                if locked_at > stale:
+                    return
+                await asyncio.sleep(0.01)
+
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=_ObservingFetcher(wait_out_a_long_turn, results=[]),
+    )
+    # model_copy skips validation: a fraction of a minute keeps the refresh quick.
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_stale_lock_minutes": 0.001}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+    assert job.last_success_at is not None
 
 
 async def test_a_failure_after_the_job_was_reclaimed_leaves_the_new_owner_alone(
@@ -836,6 +1055,10 @@ async def test_a_token_stored_right_after_the_run_read_its_own_stays_valid(
     assert job.status == "pending"
 
 
+# Longer than the pause a 429 starts (sync_job_backoff_base_seconds).
+_PAST_ANY_PAUSE = 3600
+
+
 async def _run_when_due(db_session, worker, job) -> None:
     job.run_after = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
@@ -864,7 +1087,8 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     it."""
     _, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
     fetcher = StubFetcher(errors=[outage] * (job.max_attempts + 1))
-    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
     interval, priority = (
         await db_session.execute(
             select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
@@ -875,10 +1099,12 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     assert priority != 1
 
     for _ in range(job.max_attempts):
+        clock.now += _PAST_ANY_PAUSE
         await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.priority) == ("pending", 0, priority)
     assert job.last_error == last_error
     assert job.run_after - job.last_failure_at == timedelta(seconds=interval)
+    clock.now += _PAST_ANY_PAUSE
     assert await run_sync_tick(worker) == 0
 
     # Still down when the interval is up: back on the backoff.
@@ -888,6 +1114,7 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
         seconds=worker.settings.sync_job_backoff_base_seconds
     )
 
+    clock.now += _PAST_ANY_PAUSE
     await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
     assert job.last_success_at is not None
@@ -1352,6 +1579,7 @@ async def test_submission_probe_rate_limit_reaches_backoff(
 
     await run_sync_tick(worker)
 
+    assert worker.budget.paused
     await db_session.refresh(job)
     assert job.status == "pending"
     assert job.last_error == "school_rate_limited"
@@ -1654,16 +1882,10 @@ def executor_logs_through_the_production_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        # Production settings refuse to load without a shared secret. Name
-        # one here rather than leave it to a local `.env`, which neither a
+        # Production settings refuse to load without their secrets. Name
+        # them here rather than leave them to a local `.env`, which neither a
         # clean checkout nor CI has.
-        configure(
-            Settings(
-                env="production",
-                log_level="INFO",
-                api_shared_secret="test-shared-secret",
-            )
-        )
+        configure(Settings(env="production", log_level="INFO", **PRODUCTION_SECRETS))
         monkeypatch.setattr(
             executor_module,
             "logger",

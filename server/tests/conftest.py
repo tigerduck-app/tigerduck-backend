@@ -42,6 +42,15 @@ _ADMIN_DB = "tigerduck"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# What production settings refuse to load without, for a test that builds them.
+PRODUCTION_SECRETS = {
+    "api_shared_secret": "test-shared-secret",
+    "auth_jwt_secret": "test-jwt-secret-0123456789abcdef0123456789abcdef",
+    "auth_refresh_hmac_key": "test-hmac-key-0123456789abcdef0123456789abcdef",
+    "credential_keys": {"v1": base64.b64encode(b"0" * 32).decode()},
+    "credential_active_key_id": "v1",
+}
+
 
 def _assert_safe_ident(db_name: str) -> None:
     if not _SAFE_IDENT.fullmatch(db_name):

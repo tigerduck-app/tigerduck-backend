@@ -1,0 +1,280 @@
+"""Bulletin fetches verify TLS. The server is on 127.0.0.1 with certificates
+the test makes: it sends its leaf without the intermediate, as NTUST's
+servers may, under a root with no Subject Key Identifier, as TWCA Global
+Root CA has. Name lookups other than 127.0.0.1 are refused."""
+
+from __future__ import annotations
+
+import socket
+import ssl
+import threading
+import time
+import warnings
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import certifi
+import httpx
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from server import tls_chain
+from server.bulletins import jobs
+from server.bulletins.jobs import (
+    NTUST_INTERMEDIATES,
+    AiaTransport,
+    default_http_client_factory,
+    resolve_bulletin_verify,
+    scrape_job,
+)
+from server.config import Settings
+from server.tests.test_links_transport_tls import _Aia, _https_server
+from server.tests.test_tls_pin_watcher import (
+    _CA_USAGE,
+    AIA_URL,
+    HOST,
+    PEM,
+    Authority,
+    _issue,
+    _name,
+)
+
+
+def _root_without_ski(name: str) -> Authority:
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(_name(name))
+        .issuer_name(_name(name))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=90))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(_CA_USAGE, critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return Authority(cert, key)
+
+
+@dataclass(frozen=True)
+class Chain:
+    roots: Path
+    intermediates: Path
+    intermediate: Authority
+    leaf: Authority
+
+
+@pytest.fixture
+def chain(tmp_path: Path) -> Chain:
+    root = _root_without_ski("Test Global Root CA")
+    intermediate = _issue("Test Secure SSL CA", root, ca=True)
+    roots, intermediates = tmp_path / "roots.pem", tmp_path / "intermediates.pem"
+    roots.write_bytes(root.cert.public_bytes(PEM))
+    intermediates.write_bytes(intermediate.cert.public_bytes(PEM))
+    return Chain(roots, intermediates, intermediate, _issue(HOST, intermediate, ca=False))
+
+
+@pytest.fixture
+def port(tmp_path, monkeypatch, chain: Chain):
+    key = chain.leaf.key.private_bytes(
+        PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    with _https_server(tmp_path, monkeypatch, chain.leaf.cert.public_bytes(PEM), key) as (
+        port,
+        _seen,
+    ):
+        yield port
+
+
+def _settings(**overrides) -> Settings:
+    return Settings(_env_file=None, env="development", **overrides)
+
+
+async def _get(client: httpx.AsyncClient, port: int, host: str = HOST) -> httpx.Response:
+    async with client:
+        return await client.get(f"https://127.0.0.1:{port}/", extensions={"sni_hostname": host})
+
+
+async def test_the_scheduler_client_refuses_a_chain_no_public_root_vouches_for(port):
+    with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+        await _get(default_http_client_factory(), port)
+
+
+async def test_a_leaf_sent_without_its_intermediate_verifies_with_the_bundled_one(
+    port, chain: Chain
+):
+    verify = resolve_bulletin_verify(
+        _settings(), cafile=str(chain.roots), intermediates=chain.intermediates
+    )
+
+    response = await _get(httpx.AsyncClient(verify=verify), port)
+
+    assert (response.status_code, response.content) == (200, b"ok")
+
+
+async def test_a_name_the_certificate_lacks_is_refused(port, chain: Chain):
+    verify = resolve_bulletin_verify(
+        _settings(), cafile=str(chain.roots), intermediates=chain.intermediates
+    )
+
+    with pytest.raises(httpx.ConnectError, match="Hostname mismatch"):
+        await _get(httpx.AsyncClient(verify=verify), port, host="other.tls.test")
+
+
+async def test_without_the_intermediate_the_chain_is_refused(port, chain: Chain):
+    verify = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+
+    with pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"):
+        await _get(httpx.AsyncClient(verify=verify), port)
+
+
+async def test_the_operator_bundle_adds_its_certificates(port, chain: Chain):
+    settings = _settings(bulletin_ca_bundle=chain.intermediates)
+    verify = resolve_bulletin_verify(settings, cafile=str(chain.roots))
+
+    response = await _get(httpx.AsyncClient(verify=verify), port)
+
+    assert response.status_code == 200
+
+
+def test_the_bundled_intermediates_are_ntusts_and_chain_to_certifi_roots():
+    bundled = x509.load_pem_x509_certificates(NTUST_INTERMEDIATES.read_bytes())
+    with warnings.catch_warnings():
+        # certifi has a root with a negative serial number.
+        warnings.simplefilter("ignore")
+        roots = x509.load_pem_x509_certificates(Path(certifi.where()).read_bytes())
+
+    names = {c.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value for c in bundled}
+    assert names == {
+        "TWCA Secure SSL Certification Authority",
+        "TWCA SSL Certification Authority",
+    }
+    for cert in bundled:
+        assert cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+        assert cert.not_valid_after_utc > datetime.now(UTC)
+        issuer = next(r for r in roots if r.subject == cert.issuer and r.issuer == r.subject)
+        cert.verify_directly_issued_by(issuer)
+
+
+# --- An intermediate neither bundled nor sent, completed through AIA ---------
+
+
+def _aia_client(context, port: int, aia: _Aia) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=AiaTransport(context, resolve=lambda _h, _p: [("127.0.0.1", port)], fetch=aia)
+    )
+
+
+async def test_an_intermediate_left_out_is_fetched_through_aia_and_kept(port, chain: Chain):
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    aia = _Aia(chain.intermediate)
+
+    first = await _get(_aia_client(context, port, aia), port)
+    again = await _get(_aia_client(context, port, aia), port)
+
+    assert (first.status_code, again.status_code) == (200, 200)
+    assert aia.asked == [AIA_URL]
+
+
+async def test_a_chain_aia_cannot_complete_is_still_refused(port, chain: Chain):
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    aia = _Aia()
+
+    with pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"):
+        await _get(_aia_client(context, port, aia), port)
+    assert aia.asked == [AIA_URL]
+
+
+async def test_an_aia_intermediate_never_becomes_a_trust_anchor(tmp_path, port, chain: Chain):
+    other = _root_without_ski("Other Root CA")
+    (tmp_path / "other.pem").write_bytes(other.cert.public_bytes(PEM))
+    context = resolve_bulletin_verify(_settings(), cafile=str(tmp_path / "other.pem"))
+
+    with pytest.raises(httpx.ConnectError, match="CERTIFICATE_VERIFY_FAILED"):
+        await _get(_aia_client(context, port, _Aia(chain.intermediate)), port)
+
+
+
+@pytest.fixture
+def slow_aia(monkeypatch):
+    """An AIA server on 127.0.0.1 that takes each connection and never
+    answers; every AIA host resolves to it. Yields the connections taken."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.1)
+    taken: list[socket.socket] = []
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                taken.append(listener.accept()[0])
+            except TimeoutError:
+                continue
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    aia_port = listener.getsockname()[1]
+    monkeypatch.setattr(tls_chain, "resolve", lambda _host, _port: [("127.0.0.1", aia_port)])
+    try:
+        yield taken
+    finally:
+        stop.set()
+        thread.join()
+        for conn in taken:
+            conn.close()
+        listener.close()
+
+
+async def test_a_slow_aia_server_holds_a_fetch_no_longer_than_the_deadline(
+    port, chain: Chain, slow_aia, monkeypatch
+):
+    monkeypatch.setattr(jobs, "AIA_FETCH_DEADLINE_SECONDS", 1.0)
+    context = resolve_bulletin_verify(_settings(), cafile=str(chain.roots))
+    transport = AiaTransport(context, resolve=lambda _h, _p: [("127.0.0.1", port)])
+    started = time.monotonic()
+
+    with pytest.raises(httpx.ConnectError, match="unable to get local issuer certificate"):
+        await _get(httpx.AsyncClient(transport=transport), port)
+
+    assert slow_aia, "the issuer download never reached the AIA server"
+    assert time.monotonic() - started < 3
+
+def test_the_scheduler_builds_its_context_once(monkeypatch):
+    built = []
+    monkeypatch.setattr(jobs, "resolve_bulletin_verify", lambda: built.append(1) or ssl.create_default_context())
+    jobs._default_context.cache_clear()
+    try:
+        default_http_client_factory()
+        default_http_client_factory()
+    finally:
+        jobs._default_context.cache_clear()
+    assert built == [1]
+
+
+# --- A list page that does not load ------------------------------------------
+
+
+class _Log:
+    def __init__(self) -> None:
+        self.errors: list[tuple[str, dict]] = []
+
+    def error(self, event: str, **fields) -> None:
+        self.errors.append((event, fields))
+
+
+async def test_a_list_page_that_fails_tls_is_logged_as_an_error_and_raised(port, monkeypatch):
+    log = _Log()
+    monkeypatch.setattr(jobs, "logger", log)
+    url = f"https://127.0.0.1:{port}/p/403-1045-1391-1.php"
+
+    with pytest.raises(httpx.ConnectError):
+        await scrape_job(None, _settings(bulletin_list_url=url))
+
+    [(event, fields)] = log.errors
+    assert event == "bulletins.scrape_job.fetch_failed"
+    assert fields["url"] == url and "CERTIFICATE_VERIFY_FAILED" in fields["error"]

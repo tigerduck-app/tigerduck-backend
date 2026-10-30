@@ -308,7 +308,7 @@ groups:
         annotations:
           __dashboardUid__: tigerduck-bulletins
           __panelId__: '6'
-          summary: No bulletin scrape has parsed a row for over an hour; NTUST may have changed the page.
+          summary: No bulletin scrape has parsed a row for over an hour; the list page failed to load (bulletins.scrape_job.fetch_failed in the logs) or NTUST changed it.
 
       # Every 2 hours, so failures stay below the scheduler error rule's
       # threshold. 6.5 hours is three missed runs and the third one's own time.
