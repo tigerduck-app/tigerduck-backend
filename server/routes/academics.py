@@ -325,17 +325,26 @@ async def list_assignments(auth: CurrentAuthDep, session: SessionDep):
         .all()
     )
     overrides = (
-        await session.execute(
-            select(UserAssignmentOverride, UserAssignment.moodle_assignment_id)
-            .join(UserAssignment, UserAssignment.id == UserAssignmentOverride.user_assignment_id)
-            .where(UserAssignmentOverride.user_id == auth.user_id)
+        (
+            await session.execute(
+                select(UserAssignmentOverride).where(
+                    UserAssignmentOverride.user_id == auth.user_id
+                )
+            )
         )
-    ).all()
+        .scalars()
+        .all()
+    )
+    # Keyed by the live rows listed, as `/sync/full` keys them: a key on a
+    # soft-deleted row's mark could bring back one it leaves hidden.
+    moodle_ids = {a.id: a.moodle_assignment_id for a in assignments}
     return {
         "assignments": [serializers.assignment_to_dict(a) for a in assignments],
         "overrides": [
-            serializers.assignment_override_to_dict(o, moodle_assignment_id=moodle_id)
-            for o, moodle_id in overrides
+            serializers.assignment_override_to_dict(
+                o, moodle_assignment_id=moodle_ids.get(o.user_assignment_id)
+            )
+            for o in overrides
         ],
     }
 

@@ -448,6 +448,30 @@ async def test_get_assignments_with_override(client) -> None:
     assert body["overrides"][0]["moodle_assignment_id"] == 9001
 
 
+async def test_an_override_on_a_removed_row_is_listed_unkeyed(client) -> None:
+    """`/sync/full` leaves some marks on soft-deleted rows unkeyed so the apps
+    drop them (tigerduck-backend#42), so the list keys only the rows it lists."""
+    login = await do_login(client)
+    assignment_id = await seed_assignment(client, login["user"]["id"])
+    put = await client.put(
+        f"/v3/assignments/{assignment_id}/override",
+        headers=bearer(login),
+        json={"local_status": "ignored", "local_status_updated_at": "2026-06-10T10:00:00Z"},
+    )
+    assert put.status_code == 200
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = await session.get(UserAssignment, assignment_id)
+        row.deleted_at = datetime.now(UTC)
+        await session.commit()
+
+    body = (await client.get("/v3/assignments", headers=bearer(login))).json()
+    assert body["assignments"] == []
+    assert [(o["local_status"], o["moodle_assignment_id"]) for o in body["overrides"]] == [
+        ("ignored", None)
+    ]
+
+
 async def test_override_writes_changelog(client) -> None:
     login = await do_login(client)
     course_id = await seed_course(client, login["user"]["id"])
