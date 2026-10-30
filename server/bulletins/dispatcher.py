@@ -38,7 +38,6 @@ from server.push.custom_push_targeting import (
 from server.push.fcm_client import is_dead_fcm_token
 from server.push.payload import (
     ApnsRequest,
-    FcmRequest,
     build_alert_request,
     build_fcm_alert_request,
 )
