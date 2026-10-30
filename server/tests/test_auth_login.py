@@ -492,3 +492,24 @@ async def test_a_refused_sign_in_stores_no_name(client, error) -> None:
     response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 401
     assert await _stored_display_name(client) == "Test Student"
+
+
+async def test_an_invalid_body_is_refused_without_echoing_its_input(client) -> None:
+    """A lone UTF-16 surrogate cannot be encoded back into the answer, so a
+    422 that echoed the input failed with a 500 (tigerduck-backend#65)."""
+    response = await client.post(
+        "/v3/auth/login",
+        content=b'{"student_id": "\\ud800", "moodle_token": "moodle-tok-1",'
+        b' "device_info": {"client_device_id": "iphone-abc", "platform": "ios"}}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "string_unicode",
+                "loc": ["body", "student_id"],
+                "msg": "Input should be a valid string, unable to parse raw data as a unicode string",
+            }
+        ]
+    }
