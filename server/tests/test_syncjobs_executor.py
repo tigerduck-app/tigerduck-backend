@@ -860,6 +860,47 @@ async def test_a_run_taken_back_and_claimed_again_by_the_same_worker_stores_noth
     assert stored == 0
 
 
+async def test_a_job_waiting_long_on_its_turns_keeps_its_lock_fresh(
+    db_session, prepared_engine, test_settings
+):
+    """Its requests queue in the shared budget, and a 429 pauses them, so a
+    live job can outlast the stale-lock limit without its worker being gone."""
+    _, _, job = await _setup_user_job(db_session)
+    stale = datetime.now(UTC) - timedelta(hours=1)
+
+    async def wait_out_a_long_turn():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob).where(SyncJob.id == job.id).values(locked_at=stale)
+            )
+        async with asyncio.timeout(5):
+            while True:
+                async with prepared_engine.connect() as conn:
+                    locked_at = await conn.scalar(
+                        select(SyncJob.locked_at).where(SyncJob.id == job.id)
+                    )
+                if locked_at > stale:
+                    return
+                await asyncio.sleep(0.01)
+
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=_ObservingFetcher(wait_out_a_long_turn, results=[]),
+    )
+    # model_copy skips validation: a fraction of a minute keeps the refresh quick.
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_stale_lock_minutes": 0.001}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+    assert job.last_success_at is not None
+
+
 async def test_a_failure_after_the_job_was_reclaimed_leaves_the_new_owner_alone(
     db_session, prepared_engine, test_settings
 ):

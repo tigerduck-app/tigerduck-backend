@@ -214,10 +214,39 @@ async def _claim_next(worker: SyncWorker) -> tuple[int, int] | None:
 async def _execute_in_slot(
     worker: SyncWorker, claimed: tuple[int, int], slots: asyncio.Semaphore
 ) -> None:
+    job_id, run_id = claimed
+    keep_fresh = asyncio.create_task(
+        _keep_lock_fresh(worker, job_id=job_id, run_id=run_id)
+    )
     try:
-        await _execute_job(worker, job_id=claimed[0], run_id=claimed[1])
+        await _execute_job(worker, job_id=job_id, run_id=run_id)
     finally:
+        keep_fresh.cancel()
         slots.release()
+        await asyncio.gather(keep_fresh, return_exceptions=True)
+
+
+async def _keep_lock_fresh(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
+    """Move a running job's `locked_at` on while it waits on the request
+    budget or on Moodle, so stale-lock recovery takes back only a job whose
+    worker is gone, however long its turns take."""
+    # A third of the limit: two refreshes can fail before the lock goes stale.
+    interval = worker.settings.sync_job_stale_lock_minutes * 20
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with session_scope(worker.session_factory) as session:
+                await session.execute(
+                    update(SyncJob)
+                    .where(
+                        SyncJob.id == job_id,
+                        SyncJob.status == SyncJobStatus.running.value,
+                        SyncJob.locked_by == _lock_token(worker, run_id),
+                    )
+                    .values(locked_at=datetime.now(UTC))
+                )
+        except Exception:
+            logger.warning("syncjobs.lock_refresh_failed", job_id=job_id, exc_info=True)
 
 
 async def _suspended(worker: SyncWorker) -> bool:
