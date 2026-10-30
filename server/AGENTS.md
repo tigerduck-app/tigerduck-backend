@@ -320,6 +320,14 @@ into the backend container via `docker-compose.yml`.
   soft-deleted, its active push tokens invalidated, one `device.deregister`
   audit row with actor `system` and the token ids. Signing in on it brings
   it back.
+- A sign-in revokes, as `logout`, the live sessions of its own device row
+  (one account, one `client_device_id`) before it adds its own
+  (`_end_device_sessions` in `auth/service.py`); another account's sessions
+  on the phone and the account's other devices keep theirs. It takes them
+  after `lock_accounts` and the device row, in id order as a refresh does
+  (`lock_contest`), and reads them without a lock until a read finds none:
+  a locking read that waited on a refresh would miss the session it made.
+  It takes only unexpired sessions, which no retention batch deletes.
 - A user's sync jobs are claimed only while a device with TigerSync on was
   seen within `sync_job_device_active_days` (90, the refresh token's
   lifetime, so a device that can still sign in counts) or took a standard
