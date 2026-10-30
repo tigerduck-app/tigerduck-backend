@@ -62,8 +62,10 @@ async def initial_upload(
     }
 class CourseUploadItem(BaseModel):
     # The columns' lengths, so a longer value gets a 422, not a 500 from the database.
+    # A course number stops at 48, so the moodle_id an upload without one derives,
+    # the term and the number, fits its 64; NTUST's are 9 or 10 characters.
     semester: str = Field(max_length=16)
-    course_no: str = Field(max_length=64)
+    course_no: str = Field(max_length=48)
     course_name: str = Field(max_length=256)
     course_name_en: str | None = Field(default=None, max_length=256)
     moodle_id: str | None = Field(default=None, max_length=64)

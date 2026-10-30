@@ -1080,6 +1080,10 @@ async def test_full_sync_lists_course_overrides_in_creation_order(client) -> Non
             {"courses": [{"semester": "1" * 17, "course_no": "CS3001301", "course_name": "OS"}]},
         ),
         (
+            "/v3/sync/courses/upload",
+            {"courses": [{"semester": "1141", "course_no": "C" * 61, "course_name": "OS"}]},
+        ),
+        (
             "/v3/sync/initial-upload",
             {
                 "assignments": [
@@ -1093,10 +1097,25 @@ async def test_full_sync_lists_course_overrides_in_creation_order(client) -> Non
             },
         ),
     ],
-    ids=["assignment title", "course term", "initial upload course name"],
+    ids=["assignment title", "course term", "course number", "initial upload course name"],
 )
 async def test_a_field_longer_than_its_column_is_refused(client, path, body) -> None:
     """It failed at the database with a 500 (tigerduck-backend#93)."""
     login = await do_login(client)
     response = await client.post(path, headers=bearer(login), json=body)
     assert response.status_code == 422, response.text
+
+
+async def test_the_longest_term_and_course_number_fit_the_derived_moodle_id(client) -> None:
+    """An upload without a moodle_id stores the term and the course number
+    joined, in a 64-character column."""
+    login = await do_login(client)
+    course = {"semester": "1" * 16, "course_no": "C" * 48, "course_name": "OS"}
+    response = await client.post(
+        "/v3/sync/courses/upload", headers=bearer(login), json={"courses": [course]}
+    )
+    assert response.status_code == 200, response.text
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        stored = (await session.execute(select(UserCourse.moodle_id))).scalar_one()
+    assert stored == "1" * 16 + "C" * 48
