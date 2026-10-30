@@ -140,7 +140,12 @@ async def deregister_student(
 
         for attempt in range(1, _ATTEMPTS + 1):
             try:
-                await _delete_account(conn, request, user_id, devices=len(device_list))
+                async with conn.transaction():
+                    await _delete_account(conn, user_id)
+                    await audit(
+                        conn, request, "user.deregister",
+                        user_id=user_id, devices=len(device_list),
+                    )
                 break
             except DeadlockDetectedError:
                 if attempt == _ATTEMPTS:
@@ -159,25 +164,23 @@ async def deregister_student(
     return JSONResponse(content=report)
 
 
-async def _delete_account(conn, request: Request, user_id, *, devices: int) -> None:
-    async with conn.transaction():
-        # The order sign-in takes (`lock_accounts`), then the account the retention
-        # purges lock (`delete_in_batches`), before any row of either: see server/AGENTS.md.
-        await conn.execute(
-            "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
-            user_id,
-        )
-        await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
-        await conn.execute(
-            """DELETE FROM external_account_credentials
-               WHERE external_account_id IN (
-                   SELECT id FROM external_accounts WHERE user_id = $1
-               )""",
-            user_id,
-        )
-        await conn.execute("DELETE FROM external_accounts WHERE user_id = $1", user_id)
-        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
-        await audit(conn, request, "user.deregister", user_id=user_id, devices=devices)
+async def _delete_account(conn, user_id) -> None:
+    # The order sign-in takes (`lock_accounts`), then the account the retention
+    # purges lock (`delete_in_batches`), before any row of either: see server/AGENTS.md.
+    await conn.execute(
+        "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
+        user_id,
+    )
+    await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
+    await conn.execute(
+        """DELETE FROM external_account_credentials
+           WHERE external_account_id IN (
+               SELECT id FROM external_accounts WHERE user_id = $1
+           )""",
+        user_id,
+    )
+    await conn.execute("DELETE FROM external_accounts WHERE user_id = $1", user_id)
+    await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 
 
 async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
