@@ -21,16 +21,21 @@ _FK = "sync_log_entries_user_id_fkey"
 
 def upgrade() -> None:
     """A second run changes nothing."""
-    # The log of accounts deleted before the key existed (tigerduck-backend#90).
-    op.execute(
-        "DELETE FROM sync_log_entries e"
-        " WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = e.user_id)"
-    )
+    # NOT VALID takes its lock on users and sync_log_entries only briefly, and
+    # from then on no new row can lose its user.
     op.execute(
         f"ALTER TABLE sync_log_entries DROP CONSTRAINT IF EXISTS {_FK},"
         f" ADD CONSTRAINT {_FK} FOREIGN KEY (user_id)"
-        " REFERENCES users (id) ON DELETE CASCADE"
+        " REFERENCES users (id) ON DELETE CASCADE NOT VALID"
     )
+    # Committed first, so validating blocks neither writes nor sign-ins.
+    with op.get_context().autocommit_block():
+        # The log of accounts deleted before the key existed (tigerduck-backend#90).
+        op.execute(
+            "DELETE FROM sync_log_entries e"
+            " WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = e.user_id)"
+        )
+        op.execute(f"ALTER TABLE sync_log_entries VALIDATE CONSTRAINT {_FK}")
 
 
 def downgrade() -> None:

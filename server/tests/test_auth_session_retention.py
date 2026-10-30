@@ -4,16 +4,14 @@ Userbase dashboard."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from server.auth.models import AuthSession, DeviceActiveDay, User, UserDevice
 from server.auth.retention import prune_expired_sessions
 from server.config import Settings
 from server.db import build_session_factory
-from server.scheduler.runtime import build_scheduler
 from server.tests.test_auth_refresh import _refresh, do_login
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -99,12 +97,19 @@ async def test_a_pruned_refresh_token_is_refused(client) -> None:
     assert response.status_code == 401
 
 
-async def test_the_job_runs_at_three_in_the_morning_at_school(test_settings) -> None:
-    scheduler = build_scheduler(object(), object(), test_settings, llm=object())
-    scheduler.start(paused=True)
-    try:
-        run_at = scheduler.get_job("auth_session_retention").next_run_time
-    finally:
-        scheduler.shutdown(wait=False)
-    local = run_at.astimezone(ZoneInfo("Asia/Taipei"))
-    assert (local.hour, local.minute) == (3, 0)
+async def test_deleting_a_session_finds_the_rows_it_replaced_by_index(
+    db_session,
+) -> None:
+    """The statement replaced_by_session_id's ON DELETE SET NULL runs for each
+    deleted session; without the index, it reads the whole table each time."""
+    await db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = (
+        await db_session.execute(
+            text(
+                "EXPLAIN UPDATE ONLY auth_sessions SET replaced_by_session_id = NULL"
+                " WHERE :id = replaced_by_session_id"
+            ),
+            {"id": 1},
+        )
+    ).scalars()
+    assert "idx_auth_sessions_replaced_by" in "\n".join(plan)

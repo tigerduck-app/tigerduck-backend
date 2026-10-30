@@ -218,6 +218,13 @@ class AuthSession(Base):
         # A device's newest session, which push/session_reauth.py reads for
         # each device it looks at; every refresh adds a row.
         Index("idx_auth_sessions_device", "device_id", "id"),
+        # Deleting a session sets null on the rows replaced by it
+        # (server/auth/retention.py); without it, a read of the table per row.
+        Index(
+            "idx_auth_sessions_replaced_by",
+            "replaced_by_session_id",
+            postgresql_where=sa.text("replaced_by_session_id IS NOT NULL"),
+        ),
     )
 
 
