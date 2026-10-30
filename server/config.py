@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         env_prefix="TIGERDUCK_",
         extra="ignore",
         case_sensitive=False,
+        # A refused setting stops startup, and the error would otherwise
+        # print the settings' values, secrets included, into the logs.
+        hide_input_in_errors=True,
     )
 
     # --- App ---

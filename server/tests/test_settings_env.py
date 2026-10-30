@@ -65,3 +65,10 @@ def test_production_refuses_every_secret_left_at_its_env_example_value():
 def test_development_still_starts_from_env_example():
     settings = Settings(_env_file=BACKEND_DIR / ".env.example")
     assert settings.env == "development"
+
+
+def test_the_refusal_prints_no_setting_values():
+    secrets = {**PRODUCTION_SECRETS, "api_shared_secret": "", "auth_jwt_secret": "jwt-value-x"}
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, database_url="postgresql://u:db-value-x@h/d", **secrets)
+    assert "value-x" not in str(caught.value)
