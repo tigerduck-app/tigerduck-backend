@@ -357,11 +357,11 @@ async def _claim_due_job(worker: SyncWorker) -> tuple[int, int] | None:
         if job is None:
             return None
         job.status = SyncJobStatus.running.value
-        job.locked_by = worker.worker_id
         job.locked_at = now
         run = SyncRun(sync_job_id=job.id, user_id=job.user_id)
         session.add(run)
         await session.flush()
+        job.locked_by = _lock_token(worker, run.id)
         return job.id, run.id
 
 
@@ -509,21 +509,28 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         )
 
 
-def _owned(job: SyncJob | None, worker: SyncWorker) -> bool:
-    """Whether `job` is still this worker's run: stale recovery may have
-    taken it back, and another worker claimed it, while Moodle answered."""
+def _lock_token(worker: SyncWorker, run_id: int) -> str:
+    """A claim's `locked_by`. The run id makes every claim's token new, so a
+    run taken back and claimed again, even by a worker with this host and
+    pid, is no longer this one's."""
+    return f"{worker.worker_id}#{run_id}"
+
+
+def _owned(job: SyncJob | None, worker: SyncWorker, run_id: int) -> bool:
+    """Whether `job` is still this run's: stale recovery may have taken it
+    back, and a worker claimed it again, while Moodle answered."""
     return (
         job is not None
         and job.status == SyncJobStatus.running.value
-        and job.locked_by == worker.worker_id
+        and job.locked_by == _lock_token(worker, run_id)
     )
 
 
 async def _lock_owned_job(
     session: AsyncSession, worker: SyncWorker, *, job_id: int, run_id: int
 ) -> tuple[SyncJob, SyncRun | None] | None:
-    """Lock the job and its run, or None if this worker no longer holds it:
-    stale-recovered, and possibly reclaimed by another worker, since the
+    """Lock the job and its run, or None if this run no longer holds it:
+    stale-recovered, and possibly claimed again by any worker, since the
     claim. Never double-execute."""
     job = (
         await session.execute(
@@ -531,7 +538,7 @@ async def _lock_owned_job(
         )
     ).scalar_one_or_none()
     run = await session.get(SyncRun, run_id)
-    if not _owned(job, worker):
+    if not _owned(job, worker, run_id):
         if run is not None and run.status == SyncRunStatus.running.value:
             run.status = SyncRunStatus.cancelled.value
             run.finished_at = datetime.now(UTC)
@@ -672,11 +679,7 @@ async def _finish_after_probe(
                 select(SyncJob).where(SyncJob.id == job_id).with_for_update()
             )
         ).scalar_one_or_none()
-        if (
-            job is None
-            or job.status != SyncJobStatus.running.value
-            or job.locked_by != worker.worker_id
-        ):
+        if not _owned(job, worker, run_id):
             logger.warning(
                 "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
             )
@@ -845,7 +848,7 @@ async def _handle_moodle_failure(
                     select(SyncJob).where(SyncJob.id == job_id).with_for_update()
                 )
             ).scalar_one_or_none()
-            if _owned(job, worker):
+            if _owned(job, worker, run_id):
                 run = await session.get(SyncRun, run_id)
                 if run is not None and run.status == SyncRunStatus.running.value:
                     run.status = SyncRunStatus.failed.value
@@ -918,7 +921,7 @@ async def _record_failure(
                 select(SyncJob).where(SyncJob.id == job_id).with_for_update()
             )
         ).scalar_one_or_none()
-        if not _owned(job, worker):
+        if not _owned(job, worker, run_id):
             logger.warning(
                 "syncjobs.job_reclaimed", job_id=job_id, worker=worker.worker_id
             )

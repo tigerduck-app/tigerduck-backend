@@ -824,6 +824,42 @@ async def test_a_job_taken_back_while_the_list_fetch_ran_stores_nothing(
     assert stored == 0
 
 
+async def test_a_run_taken_back_and_claimed_again_by_the_same_worker_stores_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """A worker id is host and pid, so a claim made again on the same host
+    and pid matched the old run's while that run still waited on Moodle."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def recover_and_claim_again():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob)
+                .where(SyncJob.id == job.id)
+                .values(locked_at=datetime.now(UTC) - timedelta(hours=1))
+            )
+        await executor_module._recover_stale_jobs(worker)
+        assert await executor_module._claim_due_job(worker) is not None
+
+    fetcher = _ObservingFetcher(recover_and_claim_again, results=[_fa(1)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    runs = (
+        await db_session.execute(select(SyncRun.status, SyncRun.error).order_by(SyncRun.id))
+    ).all()
+    assert runs == [("failed", "stale_lock_recovered"), ("running", None)]
+    assert (job.status, job.last_success_at) == ("running", None)
+    stored = await db_session.scalar(
+        select(func.count()).select_from(UserAssignment).where(
+            UserAssignment.user_id == user.id
+        )
+    )
+    assert stored == 0
+
+
 async def test_a_failure_after_the_job_was_reclaimed_leaves_the_new_owner_alone(
     db_session, prepared_engine, test_settings
 ):
