@@ -32,6 +32,34 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.10.1
+
+- **Enrollment follows the school's roster.** A course upload names in
+  `roster_terms` the terms whose courses it carries are the school's whole
+  roster; the apps send a term there only from course selection's answer,
+  or on iOS from a past term rebuilt from the final transcript. For each
+  such term the backend sets the listed school courses `enrolled` and the
+  term's other school courses `dropped`, unless the user added one by hand
+  or it has a tombstone. A roster term the upload lists no school course
+  of changes nothing. Any other upload keeps each existing course's status;
+  a hand-add sets `enrolled`, and a new course starts `enrolled`. Released
+  apps send no `roster_terms`, so their uploads drop nothing.
+- **Dropped courses stop ringing.** Class reminders, the check right
+  before one goes out, the course changes and the assignment sync's class
+  table read enrolled courses only.
+- **Roster requests.** `/v3/sync/full` returns `roster_requests`: the
+  current term when no roster of it arrived in the last
+  `TIGERDUCK_SYNC_ROSTER_REQUEST_DAYS` days (default 7), otherwise `[]`.
+  An app that reads it fetches course selection and uploads the roster.
+- **Rows already stale.** On 2026-10-30, before this release, the operator
+  marked the current term's stale rows `dropped` by hand. Earlier terms get
+  no class reminders and are left as they are.
+- **Migration `9f599ff4ebb6`** adds `user_course_rosters`, when each
+  user's roster of a term last arrived. No `.env` change. Rollback: run
+  `docker compose exec backend alembic downgrade 8184b299cf8e`, then check
+  out 3.10.0 and run `./start.sh`. 3.10.0 ignores `roster_terms` and keeps
+  every course's status as it is.
+
 ## Upgrading to 3.10.0
 
 - **Production refuses example or empty secrets (#94).** With
