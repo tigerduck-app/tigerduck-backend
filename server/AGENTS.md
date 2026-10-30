@@ -255,6 +255,14 @@ into the backend container via `docker-compose.yml`.
   cancel what they filed. A device whose token is gone for now (APNs
   dropped it, the app has not registered a new one) keeps its filed
   reminders; only new ones wait for a token.
+- The assignment reminder scan files only for what the iPhone app lists in
+  the current term (`current_term_code`). A fetch with the student's Moodle
+  courses classifies each row as the app files it
+  (`syncjobs/assignments.listed_courses`): `moodle_semester` is its course's
+  term, "" for none, and `user_course_id` links the term's class-table
+  course. A classified row counts when either names the current term. A
+  row no fetch classified (`moodle_semester` NULL), such as an app's upload,
+  counts as listed until one does.
 - Before its first delivery, an assignment reminder or `assignmentUrgent`
   start is checked against the user's rows of the assignment (any course
   id, deleted or not) and then Moodle (`push/presend.py`). It fails

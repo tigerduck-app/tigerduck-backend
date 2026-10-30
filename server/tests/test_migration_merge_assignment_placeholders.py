@@ -189,11 +189,12 @@ async def _state(conn: AsyncConnection, user: uuid.UUID) -> dict[int, list[tuple
 
 
 async def _add_extension_column(conn: AsyncConnection) -> None:
-    """Today's models read a column a later migration adds."""
+    """Today's models read columns later migrations add."""
     await conn.execute(
         text(
             "ALTER TABLE user_assignments"
-            " ADD COLUMN IF NOT EXISTS extension_due_at TIMESTAMP WITH TIME ZONE"
+            " ADD COLUMN IF NOT EXISTS extension_due_at TIMESTAMP WITH TIME ZONE,"
+            " ADD COLUMN IF NOT EXISTS moodle_semester VARCHAR(16)"
         )
     )
 

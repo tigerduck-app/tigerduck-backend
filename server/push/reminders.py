@@ -1,6 +1,7 @@
 """Phase 4a: generate assignment due-date reminder push_jobs.
 
 Scan-based (default every 300s): eligible = not deleted, not submitted,
+listed by the iPhone app in the current term (`_listed_in`),
 local_status not in (locally_completed/ignored/archived), not in a course
 whose assignments the user ignores (`ignored_courses`), due within the
 scan window, the user's `notification` settings document has
@@ -25,7 +26,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -207,6 +208,25 @@ def in_ignored_course(
     return assignment.moodle_course_id == 0 and assignment.course_no in course_nos
 
 
+def _listed_in(term: str | None) -> ColumnElement[bool]:
+    """Whether the iPhone app lists an assignment in `term`, the current one.
+
+    A row no fetch has classified (`moodle_semester` NULL), an app's upload
+    or one from before the column, counts as listed until the user's next
+    sync. A classified row counts when its Moodle course is of the term or
+    the sync linked it to the term's class-table course
+    (`syncjobs/assignments.listed_courses`); without a term, none does.
+    """
+    unclassified = UserAssignment.moodle_semester.is_(None)
+    if term is None:
+        return unclassified
+    return or_(
+        unclassified,
+        UserAssignment.moodle_semester == term,
+        UserCourse.semester == term,
+    )
+
+
 async def _users_with_a_recipient(
     session: AsyncSession,
     user_ids: set[uuid.UUID],
@@ -270,6 +290,7 @@ async def scan_assignment_reminders(
     upgraded = 0
 
     async with session_scope(session_factory) as session:
+        term = await current_term_code(session, now)
         rows = (
             await session.execute(
                 select(UserAssignment, UserAssignmentOverride)
@@ -277,7 +298,9 @@ async def scan_assignment_reminders(
                     UserAssignmentOverride,
                     UserAssignmentOverride.user_assignment_id == UserAssignment.id,
                 )
+                .outerjoin(UserCourse, UserCourse.id == UserAssignment.user_course_id)
                 .where(
+                    _listed_in(term),
                     UserAssignment.deleted_at.is_(None),
                     UserAssignment.provider_is_submitted.is_(False),
                     UserAssignment.due_at.is_not(None),

@@ -85,8 +85,22 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   ```
 
   It prints `ok`, or the settings to fix.
-- **No migration.** A `.env` change only for a setting the check names.
-  Rollback: check out 3.9.0 and run `./start.sh`.
+- **Assignment reminders follow the iPhone app's list (#81).** The server's
+  sync also reads the student's Moodle courses now, one more Moodle request
+  per run, and classifies each fetched assignment as the iPhone app files
+  it. The reminder scan then files only for an assignment of a course of
+  the term in progress or of the term's class table. Another term's course
+  still open on Moodle, or a course without a term, gets none. When the
+  course list fails, the run still stores the assignments, keeps the rows'
+  links and backs off.
+- **Rows are classified at each user's next sync.** Migration
+  `9ba5a424fff6` adds `user_assignments.moodle_semester`, which no stored
+  data can fill. A row no fetch has classified, every existing row and
+  every row an app uploads, is reminded of as before until then.
+- **Migration `9ba5a424fff6`.** A `.env` change only for a setting the
+  check names. Rollback: run
+  `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
+  out 3.9.0 and run `./start.sh`.
 
 ## Upgrading to 3.9.0
 

@@ -40,6 +40,10 @@ class UserAssignment(Base):
     )
     moodle_course_id: Mapped[int] = mapped_column(BigInteger)
     moodle_assignment_id: Mapped[int] = mapped_column(BigInteger)
+    # The term in the Moodle course's idnumber as a fetch last read it, "" for
+    # none; None until a fetch with the course list classifies the row, which
+    # the reminder scan counts as listed (`server/push/reminders.py`).
+    moodle_semester: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Snapshot fields — survive even if the user_course mapping fails.
     course_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
     course_name: Mapped[str | None] = mapped_column(String(256), nullable=True)

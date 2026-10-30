@@ -170,6 +170,9 @@ class FetchedCourse:
     full_name: str
     category_id: int | None
     enrolled_user_count: int | None
+    # Term and course number, "1151CS1001301"; the apps' course rows carry the same.
+    idnumber: str = ""
+    start_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +198,7 @@ class AssignmentFetcher(Protocol):
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]: ...
 
 
@@ -206,7 +210,11 @@ class SubmissionStatusChecker(Protocol):
 
 class CourseFetcher(Protocol):
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]: ...
 
 
@@ -215,6 +223,15 @@ def _ts(value: object) -> datetime | None:
     if not isinstance(value, (int, float)) or value <= 0:
         return None
     return datetime.fromtimestamp(value, tz=UTC)
+
+
+def _start(value: object) -> datetime | None:
+    """A course's start date, None past what `datetime` holds: it only
+    orders a retaken course's runs, so one bad date must not fail the list."""
+    try:
+        return _ts(value)
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 _REDACTED = "<token-redacted>"
@@ -305,18 +322,22 @@ async def _get_moodle_userid(
     response = await client.get(f"{base_url}{_WS_PATH}", params=params)
     if response.status_code == 429:
         raise MoodleRateLimited("http_429")
-    body = response.json()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise MoodleUnreachable("invalid_json") from exc
     if isinstance(body, dict) and "exception" in body:
         errorcode = str(body.get("errorcode", ""))
         if errorcode == "invalidtoken":
             raise MoodleTokenInvalid(errorcode)
         raise MoodleUnreachable(errorcode or "moodle_exception")
-    if not isinstance(body, dict) or "userid" not in body:
+    userid = body.get("userid") if isinstance(body, dict) else None
+    if type(userid) is not int:
         raise MoodleUnreachable("missing_userid_in_site_info")
     fullname = body.get("fullname")
     if on_fullname is not None and isinstance(fullname, str):
         on_fullname(fullname)
-    return int(body["userid"])
+    return userid
 
 
 async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> dict:
@@ -509,6 +530,7 @@ class HttpAssignmentFetcher:
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]:
         """Submission state for the given assignments, keyed by assignment id.
 
@@ -569,9 +591,10 @@ class HttpAssignmentFetcher:
                 transport=self._transport,
                 event_hooks=self._event_hooks,
             ) as client:
-                userid = await _get_moodle_userid(
-                    client, self._base_url, token, on_fullname
-                )
+                if userid is None:
+                    userid = await _get_moodle_userid(
+                        client, self._base_url, token, on_fullname
+                    )
 
                 async def probe(assignment_id: int) -> None:
                     # This `try` wraps `probe`'s *whole body*, not just the
@@ -802,8 +825,14 @@ class HttpCourseFetcher:
         self._event_hooks = event_hooks
 
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]:
+        """The user's Moodle courses, handing the user id the site info
+        answers to `on_userid`, so the same run's submission probe skips it."""
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout,
@@ -813,6 +842,8 @@ class HttpCourseFetcher:
                 userid = await _get_moodle_userid(
                     client, self._base_url, token, on_fullname
                 )
+                if on_userid is not None:
+                    on_userid(userid)
                 params = {
                     "wstoken": token,
                     "wsfunction": "core_enrol_get_users_courses",
@@ -847,8 +878,10 @@ class HttpCourseFetcher:
                 full_name=str(c.get("fullname") or c.get("shortname") or ""),
                 category_id=c.get("categoryid"),
                 enrolled_user_count=c.get("enrolledusercount"),
+                idnumber=str(c.get("idnumber") or ""),
+                start_at=_start(c.get("startdate")),
             )
             for c in body
-            if isinstance(c.get("id"), int)
+            if isinstance(c, dict) and isinstance(c.get("id"), int)
         ]
 

@@ -406,6 +406,8 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         job_type, user_id, token, credential_nonce = started
         now = datetime.now(UTC)
         names: list[str] = []
+        userids: list[int] = []
+        course_error: MoodleClientError | None = None
         probe_submissions = job_type != SyncJobType.ntust_courses.value
         if not probe_submissions:
             try:
@@ -434,6 +436,16 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                         now=now,
                     )
                 raise
+            # The course list only links the rows, so its failure still
+            # stores the assignments, leaving the links as they are.
+            try:
+                enrolled = await worker.course_fetcher.fetch_courses(
+                    token=token, on_fullname=names.append, on_userid=userids.append
+                )
+            except MoodleTokenInvalid:
+                raise CredentialInvalid("moodle_token_invalid")
+            except (MoodleRateLimited, MoodleUnreachable) as exc:
+                enrolled, course_error = None, exc
 
         from .log_entries import log_sync
 
@@ -448,7 +460,11 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 await log_sync(session, user_id=user_id, source="executor",
                                message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
-                    session, user_id=user_id, fetched=fetched, now=now
+                    session,
+                    user_id=user_id,
+                    fetched=fetched,
+                    now=now,
+                    enrolled=enrolled,
                 )
             else:
                 await log_sync(session, user_id=user_id, source="executor",
@@ -474,7 +490,8 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     session, job=job, run=run, policy=policy, stats=stats, now=now
                 )
 
-        if probe_submissions:
+        # After the school's 429 the worker pauses; the probe would not wait.
+        if probe_submissions and not isinstance(course_error, MoodleRateLimited):
             # Only once the list sync above has committed; see
             # `_refresh_submission_status`. The run stays `running` until the
             # probe is done, so an escalation from it fails the run and backs
@@ -490,17 +507,22 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     listed={a.moodle_assignment_id: a for a in fetched},
                     recheck_ids=stats.recheck_ids,
                     on_fullname=names.append,
+                    userid=userids[-1] if userids else None,
                 )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
-            await _finish_after_probe(
-                worker, job_id=job_id, run_id=run_id, stats=stats, now=now
-            )
+            if course_error is None:
+                await _finish_after_probe(
+                    worker, job_id=job_id, run_id=run_id, stats=stats, now=now
+                )
         # Last, once the fetched data is stored: a user who does not sign in
         # again still gets a name, and a failed write costs nothing else.
         await try_store_display_name(
             worker.session_factory, user_id, names[-1] if names else None
         )
+        if course_error is not None:
+            # The run fails as a failed fetch would, so the job backs off.
+            raise course_error
     except CredentialInvalid as exc:
         await _handle_moodle_failure(
             worker, job_id=job_id, run_id=run_id,
@@ -733,6 +755,7 @@ async def _refresh_submission_status(
     listed: dict[int, FetchedAssignment],
     recheck_ids: frozenset[int],
     on_fullname: Callable[[str], None],
+    userid: int | None = None,
 ) -> None:
     """Best-effort probe of assignments near their due date, or with an
     extension, and of those whose due date the list sync just moved back
@@ -802,6 +825,7 @@ async def _refresh_submission_status(
                 assignment_ids=assignment_ids,
                 max_concurrency=settings.submission_status_max_concurrency,
                 on_fullname=on_fullname,
+                userid=userid,
             )
         except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
             raise
