@@ -9,7 +9,8 @@ from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
-from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
+from server.push.sync_trigger import enqueue_sync_trigger
+from server.auth.models import PushDelivery, PushDeliveryStatus, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync import membership
@@ -304,25 +305,11 @@ async def upload_courses(
                 device_id=auth.device_id,
                 locked_state=state,
             )
-        now = datetime.now(UTC)
-        dedupe = f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}"
-        push_result = await session.execute(
-            pg_insert(PushJob)
-            .values(
-                user_id=auth.user_id,
-                dedupe_key=dedupe,
-                channel="system",
-                scenario="sync_trigger",
-                fire_at=now,
-                payload={
-                    "kind": "sync_trigger",
-                    "source_device_id": str(auth.device_id) if auth.device_id else None,
-                },
-            )
-            .on_conflict_do_nothing()
-            .returning(PushJob.id)
+        push_row = await enqueue_sync_trigger(
+            session,
+            auth.user_id,
+            source_device_id=str(auth.device_id) if auth.device_id else None,
         )
-        push_row = push_result.scalar_one_or_none()
         if push_row:
             await log_sync(
                 session, user_id=auth.user_id, source="push",

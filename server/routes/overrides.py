@@ -18,12 +18,11 @@ import structlog
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, StrictBool, StrictInt
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import CurrentAuthDep
-from server.auth.models import PushJob
 from server.db import SessionDep
+from server.push.sync_trigger import enqueue_sync_trigger
 from server.sync import membership, serializers
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import (
@@ -47,20 +46,9 @@ logger = structlog.get_logger(__name__)
 
 
 async def _enqueue_sync_trigger(session: AsyncSession, user_id, device_id) -> None:
-    now = datetime.now(UTC)
-    stmt = (
-        pg_insert(PushJob)
-        .values(
-            user_id=user_id,
-            dedupe_key=f"sync_trigger:{user_id}:{int(now.timestamp()) // 300}",
-            channel="system",
-            scenario="sync_trigger",
-            fire_at=now,
-            payload={"kind": "sync_trigger", "source_device_id": str(device_id) if device_id else None},
-        )
-        .on_conflict_do_nothing()
+    await enqueue_sync_trigger(
+        session, user_id, source_device_id=str(device_id) if device_id else None
     )
-    await session.execute(stmt)
 
 
 # The edit's TigerSync clock value. Strict, or true would be stamp 1.

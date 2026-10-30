@@ -11,6 +11,7 @@ from sqlalchemy import func, insert, literal, select
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
+from server.push import reminders as reminders_module
 from server.push.reminders import (
     _dedupe_key,
     reminder_key_prefix,
@@ -158,6 +159,37 @@ async def test_excluded_assignments_get_no_jobs(
         build_session_factory(prepared_engine), test_settings
     )
     assert created == 0
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({}, (True, [24.0])),
+        ({"enabled": "false"}, (False, [24.0])),
+        ({"enabled": 1}, (False, [24.0])),
+        ({"reminder_offsets_hours": [True, 8, "2"]}, (True, [8.0])),
+        ({"reminder_offsets_minutes": [True, 30]}, (True, [0.5])),
+    ],
+)
+async def test_settings_take_only_a_boolean_switch_and_numeric_offsets(
+    db_session, test_settings, section, expected
+):
+    """The rule class reminders follow (#104): the string "false" does not
+    turn reminders on, and a JSON true is not a 1-hour offset."""
+    user = await _make_user(db_session)
+    db_session.add(
+        UserSettingsDocument(
+            user_id=user.id, namespace="notification", document={"assignments": section}
+        )
+    )
+    await db_session.flush()
+    settings = test_settings.model_copy(
+        update={"assignment_reminder_default_offsets_hours": [24]}
+    )
+
+    prefs = await reminders_module._notification_prefs(db_session, {user.id}, settings)
+
+    assert prefs[user.id] == expected
 
 
 async def test_user_settings_control_offsets_and_enabled(

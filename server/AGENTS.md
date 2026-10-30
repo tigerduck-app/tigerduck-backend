@@ -261,7 +261,9 @@ into the backend container via `docker-compose.yml`.
   closed: one nobody can confirm still open is not sent, but retried until
   `push_presend_grace_minutes` past its fire time and then cancelled
   (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
-  rather than costing a timeout per job.
+  rather than costing a timeout per job. A claimed batch's checks start
+  ahead of its sends, one at a time until Moodle answers in the tick, then
+  four at a time.
 - An assignment reminder leaves out a device that the assignment's
   `assignmentUrgent` start went to (a sent delivery) from
   `push_countdown_dedupe_window_seconds` (0, off, by default; 300 on) before the
@@ -269,7 +271,8 @@ into the backend container via `docker-compose.yml`.
   started (its pending `la_end` job, as `_activity_already_registered`
   reads): the start's alert already rang there. A start iOS cannot show, or
   one the app ends on arrival, never registers. A reminder due within 30 s
-  of such a start's send waits once, 60 s, for the registration, when the
+  of such a start's send waits once, 60 s, for the registration (as for a
+  start another tick is still delivering), when the
   pre-send grace leaves room for the next round; a device still
   unregistered then gets it, as does one whose start did not go out. A
   reminder left out on every device ends `cancelled` (`countdown_start_sent`).
@@ -299,6 +302,17 @@ into the backend container via `docker-compose.yml`.
   push within `sync_job_device_push_days` (14); a run-now marks its device
   seen. Until then they stay pending, and the first tick after a device
   comes back runs one already due.
+- A user's `sync_trigger` jobs fire at least 20 minutes apart, Apple's
+  budget for background pushes (`enqueue_sync_trigger` in
+  `push/sync_trigger.py`, which every writer but the portal's forced one
+  calls). A change while one has yet to go out rides on it, locked so the
+  claim skips it until the change commits; a change after it waits for
+  the next. Before each round the pipeline puts a trigger, except the
+  portal's forced one, back until 20 minutes after the user's last
+  recorded sync trigger send (`_last_sync_trigger_sent`), so downtime or
+  a retry cannot bunch them.
+  The check sees only committed sends: a forced tick and the scheduler's
+  sending two of one user's triggers in the same round can both go out.
 - The sync worker runs `sync_job_concurrency` (2) jobs at once, never two
   of one user, and every Moodle request it sends waits its turn in one
   `RequestBudget` (`syncjobs/budget.py`, `sync_job_requests_per_minute`,

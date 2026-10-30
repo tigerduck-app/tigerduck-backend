@@ -347,6 +347,28 @@ async def test_the_pre_send_check_reads_one_assignment(body, expected):
 
 
 @pytest.mark.asyncio
+async def test_the_pre_send_check_asks_for_a_tokens_user_id_once():
+    """The user id lookup doubled every check's calls to Moodle, which at the
+    23:59 deadline rush slows the whole drain (#98)."""
+    asked = []
+
+    def site_info(request):
+        asked.append(request.url.params["wstoken"])
+        return _ok(request)
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(_checking(site_info))
+    )
+
+    for token, assignment_id in (("tok-a", 77), ("tok-a", 78), ("tok-b", 77)):
+        await fetcher.check_submission_status(
+            token=token, assignment_id=assignment_id, timeout_seconds=5.0
+        )
+
+    assert asked == ["tok-a", "tok-b"]
+
+
+@pytest.mark.asyncio
 async def test_the_pre_send_check_times_its_requests_by_its_own_budget(monkeypatch):
     """Not by the fetcher's timeout: whichever of the two settings is
     shorter, a request that runs out of time is a timeout of the check."""

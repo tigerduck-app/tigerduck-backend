@@ -35,9 +35,9 @@ from server.push.custom_push_targeting import (
     TargetFilter,
     resolve_target_device_ids,
 )
+from server.push.fcm_client import is_dead_fcm_token
 from server.push.payload import (
     ApnsRequest,
-    FcmRequest,
     build_alert_request,
     build_fcm_alert_request,
 )
@@ -46,6 +46,8 @@ from server.push.router import PushRouter
 logger = structlog.get_logger(__name__)
 
 MAX_DISPATCH_ATTEMPTS = 3
+# Google caps a `send_each` call at 500 messages.
+FCM_BATCH = 500
 
 
 @dataclass(frozen=True)
@@ -203,8 +205,10 @@ async def _dispatch_one(
             )
         await session.commit()
 
-    # Step 2: for each pending dispatch, join the device row and send.
-    sent_count = failed_count = cancelled_count = 0
+    # Step 2: send each pending dispatch and commit its outcome before the
+    # next send, so a restart mid-fan-out resends to no device already
+    # reached (#91).
+    counts = {"sent": 0, "failed": 0, "cancelled": 0, "retry": 0}
     async with session_factory() as session:
         await lift_timeouts(session)
         pending_rows = (
@@ -223,142 +227,81 @@ async def _dispatch_one(
             )
         ).all()
 
-        # Pre-pass: collapse all Android sends for this bulletin into one
-        # batched FCM call. Apple stays on its original per-row code path
-        # (no equivalent multicast helper on APNs and per-row payloads
-        # diverge by `attrs_type` etc.). Android sends share
-        # title/body/data within a bulletin and only differ by token, so
-        # we can collapse N TLS handshakes into ceil(N/500).
-        android_requests: list[FcmRequest] = []
-        android_dispatch_ids: list[int] = []
-        for dispatch, device, bulletin in pending_rows:
-            if device.platform != DevicePlatform.android.value:
-                continue
-            if not device.pts_token_hex:
-                continue  # handled in the main loop below
-            title = bulletin.title_clean or bulletin.title
-            body = bulletin.summary or bulletin.title_clean or bulletin.title
-            kind, force_ring = _kind_and_force_ring(bulletin)
-            android_requests.append(
-                build_fcm_alert_request(
-                    fcm_token=device.pts_token_hex,
-                    title=title,
-                    body=body,
-                    bulletin_id=bulletin.id,
-                    source_url=bulletin.source_url,
-                    canonical_org=bulletin.canonical_org or "",
-                    kind=kind,
-                    force_ring=force_ring,
+        # Android sends share title/body/data within a bulletin and differ
+        # only by token, so they go out FCM_BATCH at a time, each batch
+        # recorded before the next. Apple stays one request per row.
+        android_rows = [
+            row
+            for row in pending_rows
+            if row[1].platform == DevicePlatform.android.value and row[1].pts_token_hex
+        ]
+        for chunk in batched(android_rows, FCM_BATCH):
+            requests = []
+            for _dispatch, device, bulletin in chunk:
+                kind, force_ring = _kind_and_force_ring(bulletin)
+                requests.append(
+                    build_fcm_alert_request(
+                        fcm_token=device.pts_token_hex,
+                        title=bulletin.title_clean or bulletin.title,
+                        body=bulletin.summary or bulletin.title_clean or bulletin.title,
+                        bulletin_id=bulletin.id,
+                        source_url=bulletin.source_url,
+                        canonical_org=bulletin.canonical_org or "",
+                        kind=kind,
+                        force_ring=force_ring,
+                    )
                 )
-            )
-            android_dispatch_ids.append(dispatch.id)
-
-        try:
-            android_results = await router.send_android_multi(android_requests)
-        except Exception as exc:  # firebase-admin can still raise on init/auth
-            android_results = [
-                SendResult(success=False, status="exception", description=str(exc))
-                for _ in android_requests
-            ]
-        android_results_by_dispatch: dict[int, SendResult] = dict(
-            zip(android_dispatch_ids, android_results)
-        )
+            try:
+                results = await router.send_android_multi(requests)
+            except Exception as exc:  # firebase-admin can still raise on init/auth
+                results = [
+                    SendResult(success=False, status="exception", description=str(exc))
+                    for _ in requests
+                ]
+            for (dispatch, device, _bulletin), result in zip(chunk, results):
+                counts[await _record(session, dispatch, device, result, ts)] += 1
+            await session.commit()
 
         for dispatch, device, bulletin in pending_rows:
-            # Bulletins arrive here in `processed` state, so `title_clean`
-            # has already been normalized by the LLM (prefix stripped,
-            # de-shouted). Fall back to the raw title when classification
-            # left it NULL — mirrors iOS `BulletinAPIDTO.displayTitle`.
-            title = bulletin.title_clean or bulletin.title
-            body = bulletin.summary or bulletin.title_clean or bulletin.title
-
             if device.platform == DevicePlatform.android.value:
                 # Android stores the FCM registration token in
                 # `pts_token_hex` (the column is platform-overloaded so we
                 # don't need a schema change for the second channel).
-                if not device.pts_token_hex:
-                    await _cancel_dispatch(
-                        session, dispatch.id, "android device has no FCM token"
-                    )
-                    cancelled_count += 1
-                    continue
-                # Result was filled by the batched send above.
-                result = android_results_by_dispatch[dispatch.id]
-            else:
-                if not device.device_token_hex:
-                    await _cancel_dispatch(
-                        session, dispatch.id, "device has no standard APNs token"
-                    )
-                    cancelled_count += 1
-                    continue
-                kind, force_ring = _kind_and_force_ring(bulletin)
-                apns_req = build_alert_request(
-                    device_token=device.device_token_hex,
-                    bundle_id=device.bundle_id,
-                    title=title,
-                    body=body,
-                    bulletin_id=bulletin.id,
-                    source_url=bulletin.source_url,
-                    canonical_org=bulletin.canonical_org or "",
-                    now=ts,
-                    kind=kind,
-                    force_ring=force_ring,
+                if device.pts_token_hex:
+                    continue  # sent above
+                await _cancel_dispatch(
+                    session, dispatch.id, "android device has no FCM token"
                 )
-                result = await _send_apple_safely(router, apns_req)
-
-            classification = _classify(result, platform=device.platform)
-
-            # Each per-row update below skips the session sync: it would check every dispatch row
-            # this session holds, quadratic in the bulletin's devices (#63). Nothing reads them back.
-            if classification == "sent":
-                await session.execute(
-                    update(BulletinDispatch)
-                    .execution_options(synchronize_session=False)
-                    .where(BulletinDispatch.id == dispatch.id)
-                    .values(
-                        status=BulletinDispatchStatus.sent.value,
-                        attempts=dispatch.attempts + 1,
-                        sent_at=ts,
-                        last_error=None,
-                    )
+                counts["cancelled"] += 1
+                await session.commit()
+                continue
+            if not device.device_token_hex:
+                await _cancel_dispatch(
+                    session, dispatch.id, "device has no standard APNs token"
                 )
-                sent_count += 1
-            elif classification == "bad_token":
-                await session.execute(
-                    update(BulletinDispatch)
-                    .execution_options(synchronize_session=False)
-                    .where(BulletinDispatch.id == dispatch.id)
-                    .values(
-                        status=BulletinDispatchStatus.cancelled.value,
-                        attempts=dispatch.attempts + 1,
-                        last_error=result.description or "bad_token",
-                    )
-                )
-                cancelled_count += 1
-            else:
-                next_attempts = dispatch.attempts + 1
-                if next_attempts >= MAX_DISPATCH_ATTEMPTS:
-                    await session.execute(
-                        update(BulletinDispatch)
-                        .execution_options(synchronize_session=False)
-                        .where(BulletinDispatch.id == dispatch.id)
-                        .values(
-                            status=BulletinDispatchStatus.failed.value,
-                            attempts=next_attempts,
-                            last_error=f"status={result.status} desc={result.description}",
-                        )
-                    )
-                    failed_count += 1
-                else:
-                    await session.execute(
-                        update(BulletinDispatch)
-                        .execution_options(synchronize_session=False)
-                        .where(BulletinDispatch.id == dispatch.id)
-                        .values(
-                            attempts=next_attempts,
-                            last_error=f"status={result.status} desc={result.description}",
-                        )
-                    )
+                counts["cancelled"] += 1
+                await session.commit()
+                continue
+            # Bulletins arrive here in `processed` state, so `title_clean`
+            # has already been normalized by the LLM (prefix stripped,
+            # de-shouted). Fall back to the raw title when classification
+            # left it NULL — mirrors iOS `BulletinAPIDTO.displayTitle`.
+            kind, force_ring = _kind_and_force_ring(bulletin)
+            apns_req = build_alert_request(
+                device_token=device.device_token_hex,
+                bundle_id=device.bundle_id,
+                title=bulletin.title_clean or bulletin.title,
+                body=bulletin.summary or bulletin.title_clean or bulletin.title,
+                bulletin_id=bulletin.id,
+                source_url=bulletin.source_url,
+                canonical_org=bulletin.canonical_org or "",
+                now=ts,
+                kind=kind,
+                force_ring=force_ring,
+            )
+            result = await _send_apple_safely(router, apns_req)
+            counts[await _record(session, dispatch, device, result, ts)] += 1
+            await session.commit()
 
         # Step 3: if every dispatch row for this bulletin is terminal
         # (sent/failed/cancelled), stamp notified_at so the next tick
@@ -383,7 +326,77 @@ async def _dispatch_one(
 
         await session.commit()
 
-    return (sent_count, failed_count, cancelled_count, len(pending_rows))
+    return (counts["sent"], counts["failed"], counts["cancelled"], len(pending_rows))
+
+
+async def _record(
+    session: AsyncSession,
+    dispatch: BulletinDispatch,
+    device: DeviceRegistration,
+    result: SendResult,
+    ts: datetime,
+) -> str:
+    """Write one send's outcome to its dispatch row: `sent`, `cancelled` for a
+    dead token, `failed` once out of attempts, else `retry`."""
+    classification = _classify(result, platform=device.platform)
+    attempts = dispatch.attempts + 1
+    # Each update skips the session sync: it would check every dispatch row
+    # this session holds, quadratic in the bulletin's devices (#63).
+    row = (
+        update(BulletinDispatch)
+        .execution_options(synchronize_session=False)
+        .where(BulletinDispatch.id == dispatch.id)
+    )
+    if classification == "sent":
+        await session.execute(
+            row.values(
+                status=BulletinDispatchStatus.sent.value,
+                attempts=attempts,
+                sent_at=ts,
+                last_error=None,
+            )
+        )
+        return "sent"
+    if classification == "bad_token":
+        await session.execute(
+            row.values(
+                status=BulletinDispatchStatus.cancelled.value,
+                attempts=attempts,
+                last_error=result.description or "bad_token",
+            )
+        )
+        await _forget_dead_token(session, device)
+        return "cancelled"
+    error = f"status={result.status} desc={result.description}"
+    if attempts >= MAX_DISPATCH_ATTEMPTS:
+        await session.execute(
+            row.values(
+                status=BulletinDispatchStatus.failed.value,
+                attempts=attempts,
+                last_error=error,
+            )
+        )
+        return "failed"
+    await session.execute(row.values(attempts=attempts, last_error=error))
+    return "retry"
+
+
+async def _forget_dead_token(session: AsyncSession, device: DeviceRegistration) -> None:
+    """Drop the token the provider refused, so no later bulletin targets it.
+    Left alone when the app registered another meanwhile; its next launch
+    registers a working one (`POST /v3/devices/anonymous`)."""
+    if device.platform == DevicePlatform.android.value:
+        column, cleared = DeviceRegistration.pts_token_hex, ""
+        refused = device.pts_token_hex
+    else:
+        column, cleared = DeviceRegistration.device_token_hex, None
+        refused = device.device_token_hex
+    await session.execute(
+        update(DeviceRegistration)
+        .execution_options(synchronize_session=False)
+        .where(DeviceRegistration.device_id == device.device_id, column == refused)
+        .values({column: cleared})
+    )
 
 
 def _kind_and_force_ring(bulletin: Bulletin) -> tuple[str, bool]:
@@ -433,10 +446,7 @@ def _classify(result: SendResult, *, platform: str) -> str:
     desc = (result.description or "").lower()
 
     if platform == DevicePlatform.android.value:
-        # firebase-admin maps these to dedicated exception types we surface
-        # via SendResult.status in `FcmSender.send`.
-        android_bad_token = ("unregistered", "sender_id_mismatch", "invalid_argument")
-        if any(m in status for m in android_bad_token):
+        if is_dead_fcm_token(result.status, result.description):
             return "bad_token"
         return "transient"
 

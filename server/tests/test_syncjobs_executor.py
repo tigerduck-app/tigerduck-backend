@@ -1355,7 +1355,7 @@ async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothin
     db_session.add(ta_row)
     await db_session.commit()
 
-    async def failing_trigger(session, user_id, *, source=None):
+    async def failing_trigger(session, user_id, *, source_device_id=None):
         await session.execute(text("SELECT 1/0"))
 
     monkeypatch.setattr(executor_module, "enqueue_sync_trigger", failing_trigger)
@@ -2010,12 +2010,11 @@ async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
     assert reminder.status == "cancelled"
 
 
-async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
+async def test_a_submission_the_probe_finds_rides_on_the_waiting_trigger(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
-    """The list sync's trigger can go out before the probe commits, so the
-    probe's flip gets a trigger of its own rather than sharing that one's
-    dedupe key and being dropped as a duplicate of it."""
+    """The list sync's trigger has yet to go out, and the claim skips it
+    until the probe commits, so it carries the probe's flip too (#107)."""
     user, _, _ = await _setup_user_job(db_session)
     due_at = datetime.now(UTC) + timedelta(hours=10)
 
@@ -2042,9 +2041,7 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
             )
         )
     ).scalars().all()
-    # One from the list sync (it inserted the assignment), one from the probe.
-    assert len(keys) == 2
-    assert [k for k in keys if k.endswith(":submissions")] != []
+    assert len(keys) == 1
 
 
 async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_probe_fails(
@@ -2096,7 +2093,7 @@ async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_
             )
         )
     ).scalars().all()
-    assert [k for k in keys if k.endswith(":submissions")] != []
+    assert keys != []
 
     await _run_when_due(db_session, worker, job)
     assert answers == []

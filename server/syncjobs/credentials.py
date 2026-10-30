@@ -187,6 +187,12 @@ async def mark_credentials_invalid(
     ).first() is not None
 
     if has_eligible_device:
+        # Keyed by when the failing credential was stored: a sent prompt keeps
+        # its key for days, and the next credential's failure must prompt again.
+        stored = account.last_auth_success_at
+        key = f"system:account:{account.id}:{REAUTH_SCENARIO}"
+        if stored is not None:
+            key = f"{key}:{stored.astimezone(UTC).isoformat()}"
         # Copy is NOT resolved here. One job fans out to every device on the
         # account, and those devices can be in different languages, so the
         # title/body are built per recipient in `push.pipeline._send_one`
@@ -196,7 +202,7 @@ async def mark_credentials_invalid(
             pg_insert(PushJob)
             .values(
                 user_id=user_id,
-                dedupe_key=f"system:account:{account.id}:{REAUTH_SCENARIO}",
+                dedupe_key=key,
                 channel="system",
                 scenario=REAUTH_SCENARIO,
                 fire_at=now,
