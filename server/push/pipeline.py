@@ -75,6 +75,7 @@ from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.course_reminders import recheck_class_reminder
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
 from server.push.dedupe import activity_id as _activity_id
+from server.push.fcm_client import is_dead_fcm_token
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
@@ -138,7 +139,11 @@ class PushPipelineWorker:
 def _is_unregistered(status: str | None, description: str | None) -> bool:
     s = (status or "").lower()
     d = (description or "").lower()
-    return s in {"410", "unregistered"} or d in _UNREGISTERED_APNS_DESCRIPTIONS
+    return (
+        s == "410"
+        or d in _UNREGISTERED_APNS_DESCRIPTIONS
+        or is_dead_fcm_token(status, description)
+    )
 
 
 def _has_copy(payload: dict) -> bool:

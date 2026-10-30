@@ -601,6 +601,39 @@ async def test_unregistered_token_invalidated(
     assert delivery.failure_code == "unregistered"
 
 
+@pytest.mark.parametrize(
+    ("status", "description", "dead"),
+    [
+        ("SENDER_ID_MISMATCH", "SenderId mismatch", True),
+        (
+            "INVALID_ARGUMENT",
+            "The registration token is not a valid FCM registration token",
+            True,
+        ),
+        ("INVALID_ARGUMENT", "Message is too big", False),
+    ],
+)
+async def test_an_fcm_token_fcm_calls_dead_is_invalidated(
+    db_session, prepared_engine, test_settings, status, description, dead
+):
+    """Not retried on every later push (#91). An INVALID_ARGUMENT about the
+    payload says nothing about the token."""
+    user, _, token = await _setup_user_device_token(
+        db_session, platform="android", provider="fcm"
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    android = ScriptedSender(
+        [SendResult(success=False, status=status, description=description)]
+    )
+    await run_push_tick(_worker(prepared_engine, test_settings, android=android))
+
+    await db_session.refresh(token)
+    assert token.status == ("invalidated" if dead else "active")
+
+
 async def test_no_active_tokens_fails_job(
     db_session, prepared_engine, test_settings
 ):

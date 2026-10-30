@@ -35,6 +35,7 @@ from server.push.custom_push_targeting import (
     TargetFilter,
     resolve_target_device_ids,
 )
+from server.push.fcm_client import is_dead_fcm_token
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -433,10 +434,7 @@ def _classify(result: SendResult, *, platform: str) -> str:
     desc = (result.description or "").lower()
 
     if platform == DevicePlatform.android.value:
-        # firebase-admin maps these to dedicated exception types we surface
-        # via SendResult.status in `FcmSender.send`.
-        android_bad_token = ("unregistered", "sender_id_mismatch", "invalid_argument")
-        if any(m in status for m in android_bad_token):
+        if is_dead_fcm_token(result.status, result.description):
             return "bad_token"
         return "transient"
 
