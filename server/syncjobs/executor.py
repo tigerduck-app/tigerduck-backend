@@ -445,6 +445,10 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
             except (MoodleRateLimited, MoodleUnreachable) as exc:
+                if isinstance(exc, MoodleRateLimited):
+                    # Before the writes below, which can wait or fail, so the
+                    # other job in flight stops sending now.
+                    worker.budget.pause(worker.settings.sync_job_backoff_base_seconds)
                 enrolled, course_error = None, exc
 
         from .log_entries import log_sync
