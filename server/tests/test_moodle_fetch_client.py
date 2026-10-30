@@ -1,21 +1,19 @@
-"""HttpAssignmentFetcher / HttpTokenObtainer against httpx.MockTransport."""
+"""HttpAssignmentFetcher against httpx.MockTransport."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
 
 from server.syncjobs.moodle_client import (
     HttpAssignmentFetcher,
-    HttpTokenObtainer,
     MoodleNoCourseAccess,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
-    SsoAuthFailed,
-    SsoUnavailable,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -57,14 +55,6 @@ ASSIGNMENTS_BODY = {
 
 def _fetcher(handler) -> HttpAssignmentFetcher:
     return HttpAssignmentFetcher(
-        base_url=BASE,
-        timeout_seconds=5.0,
-        transport=httpx.MockTransport(handler),
-    )
-
-
-def _obtainer(handler) -> HttpTokenObtainer:
-    return HttpTokenObtainer(
         base_url=BASE,
         timeout_seconds=5.0,
         transport=httpx.MockTransport(handler),
@@ -217,47 +207,15 @@ async def test_fetch_assignments_network_error():
         await _fetcher(handler).fetch_assignments(token="tok")
 
 
-async def test_obtain_token_success():
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = dict(
-            pair.split("=", 1)
-            for pair in request.read().decode().split("&")
-        )
-        assert body["username"] == "b11203058"
-        assert body["service"] == "moodle_mobile_app"
-        return httpx.Response(
-            200, json={"token": "new-tok", "privatetoken": "new-priv"}
-        )
-
-    got = await _obtainer(handler).obtain_token(
-        username="b11203058", password="pw"
-    )
-    assert got.token == "new-tok"
-    assert got.private_token == "new-priv"
 
 
-async def test_obtain_token_auth_failure():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={"error": "Invalid login", "errorcode": "invalidlogin"},
-        )
-
-    with pytest.raises(SsoAuthFailed):
-        await _obtainer(handler).obtain_token(username="u", password="bad")
-
-
-async def test_obtain_token_network_failure_is_not_auth_failure():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectTimeout("timeout")
-
-    with pytest.raises(SsoUnavailable):
-        await _obtainer(handler).obtain_token(username="u", password="pw")
-
-
-async def test_obtain_token_server_error_is_unavailable():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, text="maintenance")
-
-    with pytest.raises(SsoUnavailable):
-        await _obtainer(handler).obtain_token(username="u", password="pw")
+def test_no_server_code_signs_in_to_moodle_with_a_password():
+    """Moodle's /login/token.php takes a student's password, and wrong ones
+    sent there can lock the student's school account (tigerduck-backend#83)."""
+    server = Path(__file__).resolve().parents[1]
+    callers = [
+        path.relative_to(server).as_posix()
+        for path in server.rglob("*.py")
+        if "tests" not in path.parts and "login/token.php" in path.read_text()
+    ]
+    assert callers == []

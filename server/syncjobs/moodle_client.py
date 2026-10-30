@@ -7,10 +7,8 @@ offline via MockTransport.
 Error taxonomy is the load-bearing part — the executor's retry policy
 hangs off it:
 
-* `MoodleTokenInvalid`  → cached token died; try ONE SSO re-obtain.
-* `SsoAuthFailed`       → auth-class: credentials rejected. NEVER retried.
-* `SsoUnavailable`      → network-class: SSO never evaluated the password,
-                          safe to retry with backoff.
+* `MoodleTokenInvalid`  → the stored token died; the app must send a new one.
+* `SsoUnavailable`      → nothing raises it now; the executor still retries it.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → a transport or parse error, or an answer that
                           cannot list the user's courses; retry.
@@ -43,8 +41,6 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 _WS_PATH = "/webservice/rest/server.php"
-_TOKEN_PATH = "/login/token.php"
-_TOKEN_SERVICE = "moodle_mobile_app"
 
 
 class MoodleClientError(Exception):
@@ -72,10 +68,6 @@ class MoodleNoCourseAccess(MoodleUnreachable):
     def __init__(self, refused_course_ids: frozenset[int]) -> None:
         super().__init__("no_course_access")
         self.refused_course_ids = refused_course_ids
-
-
-class SsoAuthFailed(MoodleClientError):
-    pass
 
 
 class SsoUnavailable(MoodleClientError):
@@ -129,13 +121,10 @@ class MoodleRefused(MoodleClientError):
 # `str(exc)` into `last_error`, and a fixed code there is greppable and
 # cannot carry anything sensitive.
 #
-# Deliberately absent: `SsoAuthFailed` / `SsoUnavailable`, which describe a
-# password login this code path never performs (only `HttpTokenObtainer`
-# raises them), and the bare `MoodleClientError` base. None of the three
+# Deliberately absent: `SsoUnavailable`, which describes a password login
+# the backend never performs, and the bare `MoodleClientError` base. Neither
 # describes the endpoint a probe calls, so one raised inside a probe is no
-# grounds to cancel the batch -- and `SsoAuthFailed` specifically means
-# "credentials rejected, NEVER retried", a verdict a single assignment's
-# probe has no business delivering. They count as unexpected and skip one
+# grounds to cancel the batch. They count as unexpected and skip one
 # assignment like anything else unrecognised.
 _PROBE_ESCALATIONS: tuple[tuple[type[MoodleClientError], str], ...] = (
     (MoodleTokenInvalid, "invalidtoken"),
@@ -171,12 +160,6 @@ class FetchedAssignment:
     allow_from_at: datetime | None
     moodle_url: str | None
     intro_html: str | None
-
-
-@dataclass(frozen=True)
-class ObtainedToken:
-    token: str
-    private_token: str | None
 
 
 @dataclass(frozen=True)
@@ -224,12 +207,6 @@ class CourseFetcher(Protocol):
     async def fetch_courses(
         self, *, token: str, on_fullname: Callable[[str], None] | None = None
     ) -> list[FetchedCourse]: ...
-
-
-class TokenObtainer(Protocol):
-    async def obtain_token(
-        self, *, username: str, password: str
-    ) -> ObtainedToken: ...
 
 
 def _ts(value: object) -> datetime | None:
@@ -850,58 +827,3 @@ class HttpCourseFetcher:
             if isinstance(c.get("id"), int)
         ]
 
-
-class HttpTokenObtainer:
-    """Re-obtains a Moodle webservice token from a username/password via
-    `/login/token.php`. Called by the sync worker only when the cached
-    token has expired — and at most once per run (iron rule lives in
-    `server/syncjobs/credentials.py`)."""
-
-    def __init__(
-        self,
-        base_url: str,
-        timeout_seconds: float,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._timeout = timeout_seconds
-        self._transport = transport
-
-    async def obtain_token(
-        self, *, username: str, password: str
-    ) -> ObtainedToken:
-        data = {
-            "username": username,
-            "password": password,
-            "service": _TOKEN_SERVICE,
-        }
-        try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
-            ) as client:
-                response = await client.post(
-                    f"{self._base_url}{_TOKEN_PATH}", data=data
-                )
-        except httpx.HTTPError as exc:
-            logger.warning("syncjobs.sso.unreachable", error=str(exc)[:200])
-            raise SsoUnavailable(str(exc)[:200]) from exc
-
-        if response.status_code >= 500 or response.status_code == 429:
-            raise SsoUnavailable(f"http_{response.status_code}")
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise SsoUnavailable("invalid_json") from exc
-        if not isinstance(body, dict):
-            raise SsoUnavailable("invalid_body")
-
-        token = body.get("token")
-        if isinstance(token, str) and token:
-            return ObtainedToken(
-                token=token, private_token=body.get("privatetoken") or None
-            )
-        errorcode = str(body.get("errorcode", ""))
-        if errorcode == "invalidlogin":
-            logger.warning("syncjobs.sso.auth_failed", username=username)
-            raise SsoAuthFailed(errorcode)
-        raise SsoUnavailable(errorcode or f"http_{response.status_code}")
