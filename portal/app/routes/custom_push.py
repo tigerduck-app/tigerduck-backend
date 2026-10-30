@@ -429,7 +429,7 @@ async def send(
             "request_id": request_id,
             "kind": kind,
             "matched": matched,
-            "queued": matched,
+            "queued": reached,
         }
     )
 
