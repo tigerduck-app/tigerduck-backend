@@ -134,21 +134,30 @@ async def test_a_device_behind_the_pruned_feed_gets_a_full_resync(client) -> Non
     assert (await client.get("/v3/sync/full", headers=bearer(login))).status_code == 200
 
 
-async def test_every_retention_job_runs_at_its_own_time_in_the_night_at_school(
-    test_settings,
-) -> None:
+async def test_the_nightly_jobs_run_at_their_times_at_school(test_settings) -> None:
     """At wall-clock times: an interval would start over at every deploy."""
     scheduler = build_scheduler(object(), object(), test_settings, llm=object())
     scheduler.start(paused=True)
     try:
+        started = datetime.now(UTC)
         runs = {
-            job.id: job.next_run_time.astimezone(ZoneInfo("Asia/Taipei"))
+            job.id: job.next_run_time
             for job in scheduler.get_jobs()
-            if job.id.endswith("_retention")
+            if job.id.endswith("_retention") or job.id == "device_retirement"
         }
     finally:
         scheduler.shutdown(wait=False)
-    assert len(runs) == 6
-    assert {at.hour for at in runs.values()} == {3}
-    assert len({at.minute for at in runs.values()}) == 6
-    assert all(at - datetime.now(UTC) <= timedelta(days=1) for at in runs.values())
+    local = {
+        job_id: at.astimezone(ZoneInfo("Asia/Taipei")).time().isoformat()
+        for job_id, at in runs.items()
+    }
+    assert local == {
+        "bulletin_retention": "03:00:00",
+        "sync_changelog_retention": "03:05:00",
+        "push_job_retention": "03:10:00",
+        "admin_audit_retention": "03:15:00",
+        "sync_history_retention": "03:20:00",
+        "auth_session_retention": "03:25:00",
+        "device_retirement": "04:00:00",
+    }
+    assert all(timedelta(0) < at - started <= timedelta(days=1) for at in runs.values())

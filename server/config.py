@@ -311,7 +311,6 @@ class Settings(BaseSettings):
     # still visible on the bulletin board keep refreshing last_seen_at and
     # stay forever; only the ones that fell off the list and aged out go.
     bulletin_retention_days: int = 365
-    # Retention job runs at this cadence. Once a day is plenty.
     # Optional PEM file bundling NTUST's root + intermediates. When set and
     # readable, the bulletin HTTP client uses it as the trust anchor so
     # OpenSSL can complete the chain (the NTUST servers themselves ship
