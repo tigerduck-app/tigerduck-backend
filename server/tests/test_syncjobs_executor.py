@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import json
@@ -13,6 +14,7 @@ import pytest
 import structlog
 from sqlalchemy import func, select, text, update
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
     DevicePushToken,
@@ -35,6 +37,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs import executor as executor_module
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
@@ -42,11 +45,13 @@ from server.syncjobs.moodle_client import (
     FetchedCourse,
     FetchedSubmission,
     HttpAssignmentFetcher,
+    HttpCourseFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
     SsoUnavailable,
 )
+from server.tests.conftest import PRODUCTION_SECRETS
 from server.syncjobs.policies import DEFAULT_POLICIES, ensure_default_policies
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -77,7 +82,7 @@ class StubCourseFetcher:
         self.errors = list(errors)
         self.fullname = fullname
 
-    async def fetch_courses(self, *, token, on_fullname=None):
+    async def fetch_courses(self, *, token, on_fullname=None, on_userid=None):
         if self.errors:
             raise self.errors.pop(0)
         if on_fullname is not None and self.fullname is not None:
@@ -85,8 +90,31 @@ class StubCourseFetcher:
         return self.results
 
 
+async def _publish_term(session, code="1151"):
+    """A term in progress: the scan reminds of its courses only."""
+    today = datetime.now(UTC).date()
+    session.add(
+        SemesterTerm(
+            code=code,
+            start_date=today - timedelta(days=30),
+            end_date=today + timedelta(days=90),
+        )
+    )
+    await session.flush()
+
+
+class _Clock:
+    """The budget's clock: still unless a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def _worker(
-    prepared_engine, test_settings, fetcher=None, course_fetcher=None
+    prepared_engine, test_settings, fetcher=None, course_fetcher=None, clock=None
 ) -> SyncWorker:
     # Neutralise the Moodle maintenance window (defaults to 00:00–05:00
     # Taipei): during the window _handle_moodle_failure reschedules instead
@@ -105,6 +133,10 @@ def _worker(
         fetcher=fetcher if fetcher is not None else StubFetcher(),
         course_fetcher=course_fetcher if course_fetcher is not None else StubCourseFetcher(),
         worker_id="test-worker",
+        budget=RequestBudget(
+            settings.sync_job_requests_per_minute,
+            clock=clock if clock is not None else _Clock(),
+        ),
     )
 
 
@@ -518,7 +550,7 @@ async def test_a_suspended_sync_claims_nothing(
     assert job.status == "pending"
 
 
-async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
+async def test_a_suspend_during_a_tick_starts_no_further_job(
     db_session, prepared_engine, test_settings
 ):
     await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
@@ -534,7 +566,7 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     worker = dataclasses.replace(
         worker,
-        settings=worker.settings.model_copy(update={"sync_job_min_interval_seconds": 0}),
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
     )
 
     assert await run_sync_tick(worker) == 1
@@ -546,7 +578,132 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
         ("pending", 0, None, True),
     ]
     runs = (await db_session.execute(select(SyncRun.status, SyncRun.error))).all()
-    assert sorted(runs) == [("cancelled", "sync_suspended"), ("succeeded", None)]
+    assert runs == [("succeeded", None)]
+
+
+class _OverlapFetcher(StubFetcher):
+    """Holds each fetch until a second one is in flight, or for `patience`
+    seconds, and records the most it saw at once."""
+
+    def __init__(self, patience=5.0):
+        super().__init__(results=[])
+        self.patience = patience
+        self.in_flight = 0
+        self.most = 0
+        self._overlap = asyncio.Event()
+
+    async def fetch_assignments(self, *, token):
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        if self.in_flight > 1:
+            self._overlap.set()
+        try:
+            await asyncio.wait_for(self._overlap.wait(), self.patience)
+        except TimeoutError:
+            pass
+        finally:
+            self.in_flight -= 1
+        return await super().fetch_assignments(token=token)
+
+
+async def test_a_tick_runs_the_jobs_of_several_users_at_once(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: one job at a time, a minute apart, could not
+    keep up with the 8-hour policy; the request budget now sets the pace."""
+    for n in range(3):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    assert worker.settings.sync_job_concurrency == 2
+
+    assert await run_sync_tick(worker) == 3
+
+    assert fetcher.most == 2
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2"]
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 3
+
+
+async def test_a_tick_never_runs_two_jobs_of_one_user_at_once(
+    db_session, prepared_engine, test_settings
+):
+    user = await _setup_course_job(db_session)
+    db_session.add(
+        SyncJob(
+            user_id=user.id,
+            external_account_id=(
+                await db_session.scalar(select(SyncJob.external_account_id))
+            ),
+            job_type=SyncJobType.moodle_assignments.value,
+            run_after=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    )
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    course_fetcher = StubCourseFetcher(results=[])
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, course_fetcher=course_fetcher
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+    assert (await db_session.execute(select(func.count(SyncRun.id)))).scalar_one() == 1
+
+    assert await run_sync_tick(worker) == 1
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 2
+
+
+async def test_two_workers_at_once_run_each_job_once(
+    db_session, prepared_engine, test_settings
+):
+    for n in range(4):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher(patience=0.05)
+    workers = [
+        dataclasses.replace(
+            _worker(prepared_engine, test_settings, fetcher=fetcher), worker_id=name
+        )
+        for name in ("worker-a", "worker-b")
+    ]
+
+    started = await asyncio.gather(*(run_sync_tick(w) for w in workers))
+
+    assert sum(started) == 4
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2", "tok-3"]
+    runs = (await db_session.execute(select(SyncRun.sync_job_id, SyncRun.status))).all()
+    assert len({job_id for job_id, _ in runs}) == 4
+    assert {status for _, status in runs} == {"succeeded"}
+
+
+async def test_a_429_holds_the_whole_worker_back_until_its_pause_ends(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: the school's 429 now stops every job, not only
+    the one it answered."""
+    await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
+    await _setup_user_job(
+        db_session,
+        student_id="b00000002",
+        token="tok-2",
+        job_kwargs={"run_after": datetime.now(UTC) - timedelta(seconds=30)},
+    )
+    fetcher = StubFetcher(results=[], errors=[MoodleRateLimited("http_429")])
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert await run_sync_tick(worker) == 0
+    assert fetcher.calls == ["tok-1"]
+
+    clock.now += worker.settings.sync_job_backoff_base_seconds
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1", "tok-2"]
 
 
 async def test_successful_run_upserts_and_reschedules(
@@ -596,6 +753,267 @@ async def test_successful_run_upserts_and_reschedules(
         .all()
     )
     assert len(entries) == 2
+
+
+async def test_a_run_links_the_assignments_to_the_class_table_by_the_enrolment(
+    db_session, prepared_engine, test_settings
+):
+    """The assignment list names a course by its numeric id; the run reads
+    the student's Moodle courses for their idnumbers, which name the term
+    and the course number the class table holds."""
+    user, _, _ = await _setup_user_job(db_session)
+    await _publish_term(db_session)
+    course = UserCourse(
+        user_id=user.id,
+        semester="1151",
+        course_key="client:1151:CS2006301",
+        course_no="CS2006301",
+        course_name="資料結構",
+    )
+    db_session.add(course)
+    await db_session.commit()
+    enrolled = [
+        FetchedCourse(
+            moodle_course_id=course_id,
+            short_name=None,
+            full_name="Course",
+            category_id=None,
+            enrolled_user_count=None,
+            idnumber=idnumber,
+        )
+        for course_id, idnumber in ((7001, "1151CS2006301"), (7002, "1142GE1001301"))
+    ]
+    fetched = [_fa(1), dataclasses.replace(_fa(2), moodle_course_id=7002)]
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=fetched),
+        course_fetcher=StubCourseFetcher(results=enrolled),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    rows = await db_session.execute(
+        select(
+            UserAssignment.moodle_assignment_id,
+            UserAssignment.user_course_id,
+            UserAssignment.moodle_semester,
+        ).where(UserAssignment.user_id == user.id)
+    )
+    assert sorted(rows.all()) == [(1, course.id, "1151"), (2, None, "1142")]
+
+
+async def test_a_course_list_failure_keeps_the_assignment_fetch(
+    db_session, prepared_engine, test_settings
+):
+    """The course list only links the rows. When it fails, the assignments
+    Moodle listed are still stored and the rows it left out deleted, the links
+    stay as they were, and the run fails so the job backs off."""
+    user, _, job = await _setup_user_job(db_session)
+    course = UserCourse(
+        user_id=user.id,
+        semester="1151",
+        course_key="client:1151:CS2006301",
+        course_no="CS2006301",
+        course_name="資料結構",
+    )
+    db_session.add(course)
+    await db_session.flush()
+    for aid in (2, 3):
+        db_session.add(
+            UserAssignment(
+                user_id=user.id,
+                moodle_course_id=7001,
+                moodle_assignment_id=aid,
+                moodle_semester="1151",
+                user_course_id=course.id,
+                course_no="CS2006301",
+                title=f"HW{aid}",
+            )
+        )
+    await db_session.commit()
+    due_at = datetime.now(UTC) + timedelta(days=3)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=[_fa(1, due_at=due_at), _fa(3, due_at=due_at)]),
+        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert (job.status, job.last_error) == ("pending", "school_rate_limited")
+    rows = await db_session.execute(
+        select(
+            UserAssignment.moodle_assignment_id,
+            UserAssignment.deleted_at.is_not(None),
+            UserAssignment.due_at,
+            UserAssignment.user_course_id,
+            UserAssignment.moodle_semester,
+        )
+        .where(UserAssignment.user_id == user.id)
+        .order_by(UserAssignment.moodle_assignment_id)
+    )
+    assert [tuple(row) for row in rows] == [
+        (1, False, due_at, None, None),
+        (2, True, None, course.id, "1151"),
+        (3, False, due_at, course.id, "1151"),
+    ]
+
+
+async def test_a_course_list_429_pauses_the_worker_before_storing(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """The other job in flight must stop sending as soon as the school says
+    429, even while this one's writes wait, and even if they fail."""
+    await _setup_user_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=[_fa(1)]),
+        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
+    )
+    paused_at_store = []
+
+    async def failing_store(*args, **kwargs):
+        paused_at_store.append(worker.budget.paused)
+        raise RuntimeError("store failed")
+
+    monkeypatch.setattr(executor_module, "apply_fetched_assignments", failing_store)
+
+    await run_sync_tick(worker)
+
+    assert paused_at_store == [True]
+    assert worker.budget.paused
+
+
+@pytest.mark.parametrize(
+    ("error", "last_error", "probed"),
+    [
+        (MoodleUnreachable("http_503"), "sync_failed:http_503", True),
+        (MoodleRateLimited("http_429"), "school_rate_limited", False),
+    ],
+    ids=["unreachable", "rate-limited"],
+)
+async def test_a_course_list_failure_still_probes_and_names_the_user(
+    db_session, prepared_engine, test_settings, monkeypatch, error, last_error, probed
+):
+    """A course list that keeps failing must not hold back the submission
+    probe or the user's name; the run fails after both. After the school's
+    429 the probe waits for the worker's pause instead."""
+    user, _, job = await _setup_user_job(db_session)
+    user_id = user.id
+    calls: list[list[int]] = []
+
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
+        calls.append(assignment_ids)
+        on_fullname("Test Student")
+        return {
+            1: FetchedSubmission(
+                moodle_assignment_id=1,
+                is_submitted=True,
+                submitted_at=datetime.now(UTC),
+            )
+        }
+
+    fetcher = StubFetcher(
+        results=[_fa(1, due_at=datetime.now(UTC) + timedelta(hours=10))]
+    )
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=fetcher,
+        course_fetcher=StubCourseFetcher(errors=[error]),
+    )
+    monkeypatch.setattr(worker.fetcher, "fetch_submission_status", probe, raising=False)
+
+    await run_sync_tick(worker)
+
+    # Only the probe's site info answered with the name here.
+    expected_name = "Test Student" if probed else None
+    assert await _display_name(db_session, user) == expected_name
+    assignment = await db_session.scalar(
+        select(UserAssignment).where(UserAssignment.user_id == user_id)
+    )
+    assert (bool(calls), assignment.provider_is_submitted) == (probed, probed)
+    await db_session.refresh(job)
+    assert job.last_error == last_error
+    run = await db_session.scalar(select(SyncRun))
+    assert run.status == "failed"
+
+
+async def test_a_run_asks_moodle_who_the_user_is_once(
+    db_session, prepared_engine, test_settings
+):
+    """The course list and the submission probe both need the user's Moodle
+    id; the probe takes the one the course list asked for."""
+    await _setup_user_job(db_session)
+    due = int((datetime.now(UTC) + timedelta(hours=10)).timestamp())
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        function = request.url.params["wsfunction"]
+        asked.append(function)
+        if function == "mod_assign_get_assignments":
+            course = {"id": 7001, "fullname": "DS", "assignments": [
+                {"id": 1, "cmid": 11, "name": "HW1", "duedate": due}
+            ]}
+            return httpx.Response(200, json={"courses": [course], "warnings": []})
+        if function == "core_webservice_get_site_info":
+            return httpx.Response(200, json={"userid": 42, "fullname": "Student"})
+        if function == "core_enrol_get_users_courses":
+            return httpx.Response(200, json=[{"id": 7001, "idnumber": "1151CS2006301"}])
+        return httpx.Response(200, json={"lastattempt": {}})
+
+    transport = httpx.MockTransport(handler)
+    base = "https://moodle.example.edu"
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=HttpAssignmentFetcher(base, 5.0, transport=transport),
+        course_fetcher=HttpCourseFetcher(base, 5.0, transport=transport),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert "mod_assign_get_submission_status" in asked
+    assert asked.count("core_webservice_get_site_info") == 1
+
+
+async def test_a_site_info_page_moodle_cannot_answer_keeps_the_assignments(
+    db_session, prepared_engine, test_settings
+):
+    """In an outage the site info can come back as an HTML page. The
+    assignments are still stored and the job keeps retrying."""
+    user, _, job = await _setup_user_job(db_session)
+    due = int((datetime.now(UTC) + timedelta(days=3)).timestamp())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["wsfunction"] == "mod_assign_get_assignments":
+            course = {"id": 7001, "fullname": "DS", "assignments": [
+                {"id": 1, "cmid": 11, "name": "HW1", "duedate": due}
+            ]}
+            return httpx.Response(200, json={"courses": [course], "warnings": []})
+        return httpx.Response(503, text="<html>Moodle is unavailable</html>")
+
+    transport = httpx.MockTransport(handler)
+    base = "https://moodle.example.edu"
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=HttpAssignmentFetcher(base, 5.0, transport=transport),
+        course_fetcher=HttpCourseFetcher(base, 5.0, transport=transport),
+    )
+
+    await run_sync_tick(worker)
+
+    titles = await db_session.scalars(
+        select(UserAssignment.title).where(UserAssignment.user_id == user.id)
+    )
+    assert list(titles) == ["HW1"]
+    await db_session.refresh(job)
+    assert (job.status, job.last_error) == ("pending", "sync_failed:invalid_json")
 
 
 class _ObservingFetcher(StubFetcher):
@@ -681,6 +1099,83 @@ async def test_a_job_taken_back_while_the_list_fetch_ran_stores_nothing(
         )
     )
     assert stored == 0
+
+
+async def test_a_run_taken_back_and_claimed_again_by_the_same_worker_stores_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """A worker id is host and pid, so a claim made again on the same host
+    and pid matched the old run's while that run still waited on Moodle."""
+    user, _, job = await _setup_user_job(db_session)
+
+    async def recover_and_claim_again():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob)
+                .where(SyncJob.id == job.id)
+                .values(locked_at=datetime.now(UTC) - timedelta(hours=1))
+            )
+        await executor_module._recover_stale_jobs(worker)
+        assert await executor_module._claim_due_job(worker) is not None
+
+    fetcher = _ObservingFetcher(recover_and_claim_again, results=[_fa(1)])
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    runs = (
+        await db_session.execute(select(SyncRun.status, SyncRun.error).order_by(SyncRun.id))
+    ).all()
+    assert runs == [("failed", "stale_lock_recovered"), ("running", None)]
+    assert (job.status, job.last_success_at) == ("running", None)
+    stored = await db_session.scalar(
+        select(func.count()).select_from(UserAssignment).where(
+            UserAssignment.user_id == user.id
+        )
+    )
+    assert stored == 0
+
+
+async def test_a_job_waiting_long_on_its_turns_keeps_its_lock_fresh(
+    db_session, prepared_engine, test_settings
+):
+    """Its requests queue in the shared budget, and a 429 pauses them, so a
+    live job can outlast the stale-lock limit without its worker being gone."""
+    _, _, job = await _setup_user_job(db_session)
+    stale = datetime.now(UTC) - timedelta(hours=1)
+
+    async def wait_out_a_long_turn():
+        async with prepared_engine.begin() as conn:
+            await conn.execute(
+                update(SyncJob).where(SyncJob.id == job.id).values(locked_at=stale)
+            )
+        async with asyncio.timeout(5):
+            while True:
+                async with prepared_engine.connect() as conn:
+                    locked_at = await conn.scalar(
+                        select(SyncJob.locked_at).where(SyncJob.id == job.id)
+                    )
+                if locked_at > stale:
+                    return
+                await asyncio.sleep(0.01)
+
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=_ObservingFetcher(wait_out_a_long_turn, results=[]),
+    )
+    # model_copy skips validation: a fraction of a minute keeps the refresh quick.
+    worker = dataclasses.replace(
+        worker,
+        settings=worker.settings.model_copy(update={"sync_job_stale_lock_minutes": 0.001}),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    await db_session.refresh(job)
+    assert (job.status, job.attempts) == ("pending", 0)
+    assert job.last_success_at is not None
 
 
 async def test_a_failure_after_the_job_was_reclaimed_leaves_the_new_owner_alone(
@@ -836,6 +1331,10 @@ async def test_a_token_stored_right_after_the_run_read_its_own_stays_valid(
     assert job.status == "pending"
 
 
+# Longer than the pause a 429 starts (sync_job_backoff_base_seconds).
+_PAST_ANY_PAUSE = 3600
+
+
 async def _run_when_due(db_session, worker, job) -> None:
     job.run_after = datetime.now(UTC) - timedelta(seconds=1)
     await db_session.commit()
@@ -864,7 +1363,8 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     it."""
     _, _, job = await _setup_user_job(db_session, job_kwargs={"priority": 1})
     fetcher = StubFetcher(errors=[outage] * (job.max_attempts + 1))
-    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    clock = _Clock()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher, clock=clock)
     interval, priority = (
         await db_session.execute(
             select(SyncPolicy.default_interval_seconds, SyncPolicy.priority).where(
@@ -875,10 +1375,12 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
     assert priority != 1
 
     for _ in range(job.max_attempts):
+        clock.now += _PAST_ANY_PAUSE
         await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.priority) == ("pending", 0, priority)
     assert job.last_error == last_error
     assert job.run_after - job.last_failure_at == timedelta(seconds=interval)
+    clock.now += _PAST_ANY_PAUSE
     assert await run_sync_tick(worker) == 0
 
     # Still down when the interval is up: back on the backoff.
@@ -888,6 +1390,7 @@ async def test_an_outage_longer_than_the_retries_never_fails_the_job_for_good(
         seconds=worker.settings.sync_job_backoff_base_seconds
     )
 
+    clock.now += _PAST_ANY_PAUSE
     await _run_when_due(db_session, worker, job)
     assert (job.status, job.attempts, job.last_error) == ("pending", 0, None)
     assert job.last_success_at is not None
@@ -1128,7 +1631,7 @@ async def test_a_database_error_while_dropping_the_courses_left_out_drops_nothin
     db_session.add(ta_row)
     await db_session.commit()
 
-    async def failing_trigger(session, user_id, *, source=None):
+    async def failing_trigger(session, user_id, *, source_device_id=None):
         await session.execute(text("SELECT 1/0"))
 
     monkeypatch.setattr(executor_module, "enqueue_sync_trigger", failing_trigger)
@@ -1352,6 +1855,7 @@ async def test_submission_probe_rate_limit_reaches_backoff(
 
     await run_sync_tick(worker)
 
+    assert worker.budget.paused
     await db_session.refresh(job)
     assert job.status == "pending"
     assert job.last_error == "school_rate_limited"
@@ -1654,16 +2158,10 @@ def executor_logs_through_the_production_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        # Production settings refuse to load without a shared secret. Name
-        # one here rather than leave it to a local `.env`, which neither a
+        # Production settings refuse to load without their secrets. Name
+        # them here rather than leave them to a local `.env`, which neither a
         # clean checkout nor CI has.
-        configure(
-            Settings(
-                env="production",
-                log_level="INFO",
-                api_shared_secret="test-shared-secret",
-            )
-        )
+        configure(Settings(env="production", log_level="INFO", **PRODUCTION_SECRETS))
         monkeypatch.setattr(
             executor_module,
             "logger",
@@ -1788,12 +2286,11 @@ async def test_a_submission_the_probe_finds_cancels_the_pending_reminder(
     assert reminder.status == "cancelled"
 
 
-async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
+async def test_a_submission_the_probe_finds_rides_on_the_waiting_trigger(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
-    """The list sync's trigger can go out before the probe commits, so the
-    probe's flip gets a trigger of its own rather than sharing that one's
-    dedupe key and being dropped as a duplicate of it."""
+    """The list sync's trigger has yet to go out, and the claim skips it
+    until the probe commits, so it carries the probe's flip too (#107)."""
     user, _, _ = await _setup_user_job(db_session)
     due_at = datetime.now(UTC) + timedelta(hours=10)
 
@@ -1820,9 +2317,7 @@ async def test_a_submission_the_probe_finds_triggers_a_sync_of_its_own(
             )
         )
     ).scalars().all()
-    # One from the list sync (it inserted the assignment), one from the probe.
-    assert len(keys) == 2
-    assert [k for k in keys if k.endswith(":submissions")] != []
+    assert len(keys) == 1
 
 
 async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_probe_fails(
@@ -1874,7 +2369,7 @@ async def test_a_sync_reminds_from_the_students_extension_and_keeps_it_when_the_
             )
         )
     ).scalars().all()
-    assert [k for k in keys if k.endswith(":submissions")] != []
+    assert keys != []
 
     await _run_when_due(db_session, worker, job)
     assert answers == []
@@ -1993,7 +2488,7 @@ async def test_the_submission_probe_fills_in_a_missing_name(
 ):
     user, _, _ = await _setup_user_job(db_session)
 
-    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
         on_fullname("Test Student")
         return {}
 
@@ -2053,7 +2548,7 @@ async def test_a_name_the_database_refuses_keeps_the_probe_result(
     user, _, _ = await _setup_user_job(db_session)
     user_id = user.id
 
-    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
         on_fullname(_REFUSED_NAME)
         return {
             1: FetchedSubmission(

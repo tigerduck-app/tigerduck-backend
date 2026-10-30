@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from ...audit import audit
 from ...db import get_pool
+from ...student_ids import student_id_key
 from ._shared import logger
 
 router = APIRouter(prefix="/api/moodle")
@@ -104,7 +105,7 @@ async def clear_push_queue(
     """Cancel all pending/processing push jobs for a user."""
     async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if not user:
             return JSONResponse({"ok": False, "error": "user not found"}, 404)
@@ -127,7 +128,7 @@ async def force_sync_trigger(
     """Create a fresh sync_trigger push job and execute immediately."""
     async with pool.acquire() as conn, conn.transaction():
         user = await conn.fetchrow(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if not user:
             return JSONResponse({"ok": False, "error": "user not found"}, 404)

@@ -11,6 +11,7 @@ from sqlalchemy import func, insert, literal, select
 from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
+from server.push import reminders as reminders_module
 from server.push.reminders import (
     _dedupe_key,
     reminder_key_prefix,
@@ -158,6 +159,37 @@ async def test_excluded_assignments_get_no_jobs(
         build_session_factory(prepared_engine), test_settings
     )
     assert created == 0
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({}, (True, [24.0])),
+        ({"enabled": "false"}, (False, [24.0])),
+        ({"enabled": 1}, (False, [24.0])),
+        ({"reminder_offsets_hours": [True, 8, "2"]}, (True, [8.0])),
+        ({"reminder_offsets_minutes": [True, 30]}, (True, [0.5])),
+    ],
+)
+async def test_settings_take_only_a_boolean_switch_and_numeric_offsets(
+    db_session, test_settings, section, expected
+):
+    """The rule class reminders follow (#104): the string "false" does not
+    turn reminders on, and a JSON true is not a 1-hour offset."""
+    user = await _make_user(db_session)
+    db_session.add(
+        UserSettingsDocument(
+            user_id=user.id, namespace="notification", document={"assignments": section}
+        )
+    )
+    await db_session.flush()
+    settings = test_settings.model_copy(
+        update={"assignment_reminder_default_offsets_hours": [24]}
+    )
+
+    prefs = await reminders_module._notification_prefs(db_session, {user.id}, settings)
+
+    assert prefs[user.id] == expected
 
 
 async def test_user_settings_control_offsets_and_enabled(
@@ -760,6 +792,111 @@ async def test_with_no_term_published_placeholders_match_every_terms_ignores(
     await _publish_terms(db_session)
     await db_session.commit()
     assert await scan_assignment_reminders(factory, test_settings) == 2
+
+
+async def _class_table_course(session, user, course_no, semester):
+    course = UserCourse(
+        user_id=user.id,
+        semester=semester,
+        course_key=f"client:{semester}:{course_no}",
+        course_no=course_no,
+        course_name="資料結構",
+    )
+    session.add(course)
+    await session.flush()
+    return course
+
+
+async def test_reminds_only_of_assignments_the_app_lists_this_term(
+    db_session, prepared_engine, test_settings
+):
+    """The iPhone app lists the courses of the term in progress and the class
+    table's, not another term's course still open on Moodle or a course
+    without a term (https://github.com/tigerduck-app/tigerduck-backend/issues/81)."""
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    this_term = await _class_table_course(db_session, user, "CS1001301", CURRENT_TERM)
+    earlier = await _class_table_course(db_session, user, "CS2002301", EARLIER_TERM)
+    db_session.add_all(
+        [
+            _assignment(user, aid=1, moodle_semester=CURRENT_TERM),
+            _assignment(user, aid=2, moodle_semester=EARLIER_TERM),
+            _assignment(
+                user, aid=3, moodle_semester=EARLIER_TERM, user_course_id=this_term.id
+            ),
+            _assignment(
+                user, aid=4, moodle_semester=EARLIER_TERM, user_course_id=earlier.id
+            ),
+            _assignment(user, aid=5, moodle_semester=""),
+            _placeholder(user, 6, "CS3003301"),
+        ]
+    )
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {1, 3, 6}
+
+
+async def test_a_row_no_fetch_has_classified_keeps_its_reminders(
+    db_session, prepared_engine, test_settings
+):
+    """A row from before the upgrade, or from an app's snapshot, waits for the
+    user's next sync to be classified. Until then it is reminded of as before,
+    or a reminder due meanwhile would be cancelled for good."""
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    db_session.add(_assignment(user, aid=1))
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {1}
+
+
+async def test_with_no_term_published_only_unclassified_rows_are_reminded(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    db_session.add_all(
+        [
+            _assignment(user, aid=1, moodle_semester=CURRENT_TERM),
+            _placeholder(user, 2, "CS1001301"),
+            _assignment(user, aid=3),
+        ]
+    )
+    await db_session.commit()
+
+    await scan_assignment_reminders(
+        build_session_factory(prepared_engine), test_settings
+    )
+
+    assert await _reminded(db_session, user) == {2, 3}
+
+
+async def test_an_assignment_the_app_stops_listing_loses_its_reminders(
+    db_session, prepared_engine, test_settings
+):
+    user = await _make_user(db_session)
+    await _publish_terms(db_session)
+    course = await _class_table_course(db_session, user, "CS1001301", CURRENT_TERM)
+    db_session.add(
+        _assignment(user, moodle_semester=EARLIER_TERM, user_course_id=course.id)
+    )
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+    assert await scan_assignment_reminders(factory, test_settings) == 2
+
+    # The class table drops the course; its rows lose the link.
+    await db_session.delete(course)
+    await db_session.commit()
+    await scan_assignment_reminders(factory, test_settings)
+
+    assert [j.status for j in await _jobs(db_session, user.id)] == ["cancelled"] * 2
 
 
 async def test_a_scan_files_more_reminders_than_one_statement_can_carry(

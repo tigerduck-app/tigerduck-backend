@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Iterable
+import asyncio
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+import structlog
 from fastapi import Depends, Request
-from sqlalchemy import ColumnElement, any_, literal, text
+from sqlalchemy import ColumnElement, Row, any_, delete, literal, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,6 +22,8 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, QueryableAttribute
 
 from server.config import Settings
+
+logger = structlog.get_logger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -84,6 +90,113 @@ async def lift_timeouts(session: AsyncSession) -> None:
 
 def build_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
+
+
+#: Rows a retention purge deletes per transaction, so none holds its locks long.
+PRUNE_BATCH_ROWS = 5000
+#: Tries of one purge batch that Postgres aborts as a deadlock before the run ends.
+PRUNE_BATCH_ATTEMPTS = 3
+_DEADLOCK = "40P01"
+
+
+async def delete_in_batches(
+    factory: async_sessionmaker[AsyncSession],
+    model: Any,
+    *where: ColumnElement[bool],
+    returning: Sequence[Any] = (),
+    then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None = None,
+    lock_devices: bool = False,
+) -> tuple[int, bool]:
+    """Delete `model`'s rows that match `where`, oldest id first and
+    `PRUNE_BATCH_ROWS` per transaction; return how many went and whether it
+    stopped early.
+
+    Each batch reads on from the last id the one before read. `then` runs in
+    each batch's transaction with the rows it deleted: their `id` and the
+    `returning` columns. `model` has a `user_id`: a batch first locks the
+    accounts of its rows, then with `lock_devices` their `device_id` devices
+    (server/AGENTS.md has the order). A batch aborted as
+    a deadlock is tried again; after `PRUNE_BATCH_ATTEMPTS` it stops early, and
+    the next night's run picks up the rest.
+    """
+    deleted, after = 0, 0
+    while True:
+        for attempt in range(1, PRUNE_BATCH_ATTEMPTS + 1):
+            try:
+                batch, rows = await _delete_batch(
+                    factory, model, where, after, returning, then, lock_devices
+                )
+                break
+            except DBAPIError as exc:
+                if getattr(exc.orig, "sqlstate", None) != _DEADLOCK:
+                    raise
+                logger.warning(
+                    "retention.batch.deadlock",
+                    table=model.__tablename__,
+                    after_id=after,
+                    attempt=attempt,
+                )
+                if attempt < PRUNE_BATCH_ATTEMPTS:
+                    # Jittered, so the transaction it lost to can finish first.
+                    await asyncio.sleep(random.uniform(0.1, 0.5))
+        else:
+            logger.error(
+                "retention.batch.gave_up",
+                table=model.__tablename__,
+                after_id=after,
+                deleted=deleted,
+            )
+            return deleted, True
+        deleted += len(rows)
+        if len(batch) < PRUNE_BATCH_ROWS:
+            return deleted, False
+        after = batch[-1].id
+
+
+async def _delete_batch(
+    factory: async_sessionmaker[AsyncSession],
+    model: Any,
+    where: Sequence[ColumnElement[bool]],
+    after: int,
+    returning: Sequence[Any],
+    then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None,
+    lock_devices: bool,
+) -> tuple[Sequence[Row[Any]], Sequence[Row[Any]]]:
+    """One batch of `delete_in_batches`: the rows it read, and those it deleted."""
+    # server.auth.models imports this module.
+    from server.auth.models import User, UserDevice
+
+    async with session_scope(factory) as session:
+        # The last batch reads every row the purge keeps, past the limit.
+        await lift_timeouts(session)
+        batch = (
+            await session.execute(
+                select(model.id, model.user_id, *([model.device_id] if lock_devices else []))
+                .where(model.id > after, *where)
+                .order_by(model.id)
+                .limit(PRUNE_BATCH_ROWS)
+            )
+        ).all()
+        locks = [(User.id, {row.user_id for row in batch})]
+        if lock_devices:
+            locks.append((UserDevice.id, {row.device_id for row in batch} - {None}))
+        for key, ids in locks:
+            await session.execute(
+                select(key)
+                .where(in_array(key, ids))
+                .order_by(key)
+                .with_for_update(read=True, key_share=True)
+            )
+        rows = (
+            await session.execute(
+                delete(model)
+                .where(in_array(model.id, [row.id for row in batch]), *where)
+                .returning(model.id, *returning)
+            )
+        ).all()
+        if then is not None and rows:
+            await then(session, rows)
+    return batch, rows
 
 
 @asynccontextmanager

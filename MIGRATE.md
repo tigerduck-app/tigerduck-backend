@@ -32,6 +32,147 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 3.10.0
+
+- **Production refuses example or empty secrets (#94).** With
+  `TIGERDUCK_ENV=production`, or unset, the backend stops at startup and
+  names each setting when `TIGERDUCK_API_SHARED_SECRET`,
+  `TIGERDUCK_AUTH_JWT_SECRET`, `TIGERDUCK_AUTH_REFRESH_HMAC_KEY` or
+  `TIGERDUCK_CREDENTIAL_KEYS` is empty, or when one of them or
+  `TIGERDUCK_DATABASE_URL` still holds a `CHANGE_ME` placeholder from
+  `.env.example`. The error prints no values.
+- **No API docs in production (#94).** `/docs`, `/redoc` and
+  `/openapi.json` answer 404 unless `TIGERDUCK_ENV=development`.
+- **The backend runs as an unprivileged user (#94).** The image runs as
+  `tigerduck`, uid and gid 10001, and writes no files. It reads the
+  bind-mounted `server/secrets` and `server/signing`. On OrbStack, the
+  production host's engine, a bind-mounted file is read with the macOS
+  user's access whatever the container's uid, so nothing changes. On a
+  Linux host the files keep their host owner and mode; make them the
+  container user's (the portal runs as root and still reads them):
+
+  ```bash
+  sudo chown -R 10001:10001 server/secrets server/signing
+  ```
+
+  A configured key or CA file the backend cannot read now stops it at
+  startup, naming its setting (`TIGERDUCK_APNS_KEY_PATH`,
+  `TIGERDUCK_FCM_CREDENTIALS_PATH`, `TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH`,
+  `TIGERDUCK_BULLETIN_CA_BUNDLE`); a missing key file still turns its
+  feature off.
+- **Bulletin scraping verifies TLS (#94).** It checks against certifi's
+  roots and the TWCA intermediates NTUST's certificates come from, bundled
+  in `server/bulletins/ntust_intermediates.pem`, and fetches an intermediate
+  neither bundled nor sent through the certificate's AIA URL; it no longer
+  falls back to `verify=False`. A list page that fails to load logs
+  `bulletins.scrape_job.fetch_failed` at error level, and the "Bulletin
+  scrape reads nothing" alert fires within the hour. A detail page whose
+  chain cannot be completed fails its fetch (`detail fetch:` in
+  `processing_error`).
+  `TIGERDUCK_BULLETIN_CA_BUNDLE` now adds certificates to those instead of
+  replacing them, and when set, its file must exist. Leave it unset unless
+  NTUST moves to a CA the bundle lacks.
+- **uv pinned (#94).** The image builds with uv 0.12.24, pinned by digest;
+  Renovate bumps it.
+- **Check before deploying.** Build the image and run the startup checks
+  with the real `.env` and mounts, as the new user, beside the running
+  stack:
+
+  ```bash
+  docker compose build backend
+  docker compose run --rm --no-deps backend python -c \
+    "from server.config import Settings, require_readable_files; require_readable_files(Settings()); print('ok')"
+  ```
+
+  It prints `ok`, or the settings to fix.
+- **Assignment reminders follow the iPhone app's list (#81).** The server's
+  sync also reads the student's Moodle courses now, one more Moodle request
+  per run, and classifies each fetched assignment as the iPhone app files
+  it. The reminder scan then files only for an assignment of a course of
+  the term in progress or of the term's class table. Another term's course
+  still open on Moodle, or a course without a term, gets none. When the
+  course list fails, the run still stores the assignments, keeps the rows'
+  links and backs off.
+- **Rows are classified at each user's next sync.** Migration
+  `9ba5a424fff6` adds `user_assignments.moodle_semester`, which no stored
+  data can fill. A row no fetch has classified, every existing row and
+  every row an app uploads, is reminded of as before until then.
+- **Deleting an account deletes its sync log (#90).**
+  `sync_log_entries.user_id` gets a foreign key to `users` that deletes the
+  log with the account, as every other table of an account does. Migration
+  `8178548f185e` adds the key without checking the rows, deletes the log
+  rows of accounts deleted before, then validates the key with nothing
+  blocked meanwhile. The portal's audit log still names a deleted
+  account by its id, and the device's anonymous registration stays,
+  unlinked, as it did.
+- **Pruning (#95).** Nightly, 5,000 rows per transaction:
+  - `sync_log_entries` and finished `sync_runs` older than
+    `TIGERDUCK_SYNC_HISTORY_RETENTION_DAYS` (default 30) are deleted;
+  - `auth_sessions` rows more than `TIGERDUCK_AUTH_SESSION_RETENTION_DAYS`
+    (default 30) past their expiry are deleted, about 120 days after their
+    token was issued. A token of a deleted row is answered 401
+    `invalid_refresh_token` rather than `refresh_token_expired`. Each
+    device's first and last session of a UTC day stays in the new
+    `device_active_days` table (migration `4f13b23279f1`), which the Userbase
+    dashboard reads, so its history still reaches back to launch.
+
+  Migration `8184b299cf8e` indexes `auth_sessions.replaced_by_session_id`
+  without blocking writes; deleting a session sets that column null on the
+  rows pointing at it, which read the whole table per row before. Do not
+  deploy during the 04:30 backup or another long transaction: the
+  concurrent build waits for it, and past the 10-second lock timeout the
+  upgrade fails and restarts with the container. The first night deletes
+  everything already past the windows.
+- **The retention jobs run at fixed times.** Every retention job now runs
+  daily from 03:00 Taipei, five minutes apart, rather than 24 hours after
+  the backend started, which each deploy put off again.
+  `TIGERDUCK_BULLETIN_RETENTION_INTERVAL_HOURS`,
+  `TIGERDUCK_PUSH_JOB_RETENTION_INTERVAL_HOURS` and
+  `TIGERDUCK_SYNC_CHANGELOG_RETENTION_INTERVAL_HOURS` are gone and ignored
+  if set.
+- **The Moodle sync runs jobs side by side under a request budget (#80).**
+  Two jobs at once (`TIGERDUCK_SYNC_JOB_CONCURRENCY`, default 2), and never
+  more than `TIGERDUCK_SYNC_JOB_REQUESTS_PER_MINUTE` (default 10) Moodle
+  requests a minute across them. `TIGERDUCK_SYNC_JOB_MIN_INTERVAL_SECONDS`
+  is no longer read. An HTTP 429 pauses the whole worker for
+  `TIGERDUCK_SYNC_JOB_BACKOFF_BASE_SECONDS`, logged as
+  `syncjobs.rate_limited_pause`. While the overdue jobs drain, the worker
+  runs at the ceiling for an hour or two; watch
+  `tigerduck_sync_moodle_requests_total` and
+  `tigerduck_sync_jobs_overdue{job_type="moodle_assignments"}`.
+- **Push follow-ups (#91).** The anonymous bulletin fan-out records each
+  device, or each FCM batch of 500, before the next, so a restart no longer
+  resends to everyone reached; a token APNs or FCM reports dead is cleared
+  until the app registers again. A user's background sync triggers go out
+  at least 20 minutes apart, counted from actual sends (the portal's force
+  button excepted). A second re-login prompt for a newer failing credential
+  is no longer held back for a week.
+- **Sign-in and uploads (#48, #62, #65, #93).** Login trims and upper-cases
+  the student ID before matching the account. Before deploying, check that
+  `SELECT count(*) FROM external_accounts WHERE provider = 'ntust_sso' AND
+  external_user_id <> upper(btrim(external_user_id))` and
+  `SELECT count(*) FROM users WHERE student_id <> upper(btrim(student_id))`
+  are 0. A refused
+  request body answers 422 with only `type`, `loc` and `msg` per error,
+  and an upload field longer than its column answers 422 rather than 500.
+  The assignment override PATCH answers 404 `assignment_not_found` for an
+  unknown assignment. The unused password token obtainer is removed.
+- **School course re-added on a stamped upload (#202).** A protocol-2 add
+  of a school course whose hide was not the user's own comes back as a
+  school row.
+- **Portal (#209).** Clicking a class day in a course's term strip opens
+  Add change for that day; existing changes are edited from the table.
+- **Migrations `9ba5a424fff6`, `8178548f185e`, `4f13b23279f1` and
+  `8184b299cf8e`, in that order.** A `.env` change only for a setting the
+  check names. Rollback: run
+  `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
+  out 3.9.0 and run `./start.sh`. If the backend is not running (it
+  migrates before the startup checks, so a refused start leaves the schema
+  at head), run the downgrade as
+  `docker compose run --rm --no-deps backend alembic downgrade 199cfb4bbb49`. The downgrade drops the sync log key, the
+  index and `device_active_days`, and with it the Userbase dashboard's
+  activity before the window; rows already deleted stay deleted.
+
 ## Upgrading to 3.9.0
 
 - **Course changes feed (#192).** `GET /v3/calendar/course-changes?term=`
@@ -442,9 +583,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   Until then the job stays `pending` and is left alone, and it runs at the
   next tick once a device signs in or turns sync on. Signing out of the
   last device (the apps delete it) also deletes the stored Moodle token;
-  the next sign-in stores a new one. The portal's deregister keeps it: it
-  leaves the device's sessions live, and the app's next request brings the
-  device back.
+  the next sign-in stores a new one. Until 3.8.0 the portal's deregister
+  kept it: it left the device's sessions live, and the app's next request
+  brought the device back. From 3.8.0 it signs the devices out and drops
+  the token as well (#176).
   The overdue metric and the Moodle sync dashboard's Overdue panel leave
   such jobs out: restart `sql-exporter` after `./start.sh`, which reads
   its collectors only at start.

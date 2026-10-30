@@ -9,7 +9,8 @@ from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
-from server.auth.models import PushDelivery, PushDeliveryStatus, PushJob, PushJobStatus, User, UserDevice
+from server.push.sync_trigger import enqueue_sync_trigger
+from server.auth.models import PushDelivery, PushDeliveryStatus, PushJobStatus, User, UserDevice
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync import membership
@@ -61,13 +62,16 @@ async def initial_upload(
         "current_revision": result.current_revision,
     }
 class CourseUploadItem(BaseModel):
-    semester: str
-    course_no: str
-    course_name: str
-    course_name_en: str | None = None
-    moodle_id: str | None = None
+    # The columns' lengths, so a longer value gets a 422, not a 500 from the database.
+    # A course number stops at 48, so the moodle_id an upload without one derives,
+    # the term and the number, fits its 64; NTUST's are 9 or 10 characters.
+    semester: str = Field(max_length=16)
+    course_no: str = Field(max_length=48)
+    course_name: str = Field(max_length=256)
+    course_name_en: str | None = Field(default=None, max_length=256)
+    moodle_id: str | None = Field(default=None, max_length=64)
     credits: float | None = None
-    classroom: str | None = None
+    classroom: str | None = Field(default=None, max_length=128)
     instructors: list[str] = []
     schedule_json: dict | list = {}
     classroom_map: dict = {}
@@ -125,10 +129,12 @@ async def upload_courses(
     added_at: dict[str, datetime] = {}
     add_answers: list[dict] = []
     if speaks_clock:
-        tombstoned_keys, added_at, add_answers = await _roster_by_stamp(
+        tombstoned_keys, added_at, add_answers, school_back = await _roster_by_stamp(
             session, auth.user_id, payload, payload_keys, adds
         )
-        added_by_hand = set(added_at)
+        # An add that brings back a course deleted while it was not added by
+        # hand brings back a school row, as `force_keys` does below.
+        added_by_hand = set(added_at) - school_back
         back_by_hand: set[str] = set()
         # Under protocol 2 `courses` outside `adds` is the school's roster,
         # so a hand-added course it lists becomes a school row.
@@ -299,25 +305,11 @@ async def upload_courses(
                 device_id=auth.device_id,
                 locked_state=state,
             )
-        now = datetime.now(UTC)
-        dedupe = f"sync_trigger:{auth.user_id}:{int(now.timestamp()) // 300}"
-        push_result = await session.execute(
-            pg_insert(PushJob)
-            .values(
-                user_id=auth.user_id,
-                dedupe_key=dedupe,
-                channel="system",
-                scenario="sync_trigger",
-                fire_at=now,
-                payload={
-                    "kind": "sync_trigger",
-                    "source_device_id": str(auth.device_id) if auth.device_id else None,
-                },
-            )
-            .on_conflict_do_nothing()
-            .returning(PushJob.id)
+        push_row = await enqueue_sync_trigger(
+            session,
+            auth.user_id,
+            source_device_id=str(auth.device_id) if auth.device_id else None,
         )
-        push_row = push_result.scalar_one_or_none()
         if push_row:
             await log_sync(
                 session, user_id=auth.user_id, source="push",
@@ -441,8 +433,9 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
     resets, and lifts the tombstone. The roster is base data: it skips a
     hidden key, lifts a reset tombstone, and shows a removed key beside its
     removal tombstone, whose stamp keeps refusing older edits. Answers the
-    keys to skip, the winning adds' stamps and one answer per add. `adds`
-    holds each add's stamp. The caller holds the user's sync lock.
+    keys to skip, the winning adds' stamps, one answer per add and the
+    winning adds that lift a tombstone not `user_added`. `adds` holds each
+    add's stamp. The caller holds the user's sync lock.
     """
     rows = {
         r.course_key: r
@@ -469,6 +462,7 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
     skip: set[str] = set()
     lifted: set[str] = set()
     won: dict[str, datetime] = {}
+    school_back: set[str] = set()
     answers: list[dict] = []
     for c in payload.courses:
         key = f"client:{c.semester}:{c.course_no}"
@@ -479,6 +473,8 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
             if applied:
                 won[key] = adds[key]
                 lifted.add(key)
+                if tombstone is not None and not tombstone.user_added:
+                    school_back.add(key)
             else:
                 skip.add(key)
             winner = adds[key] if applied else stored
@@ -496,4 +492,4 @@ async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):
                 UserCourseTombstone.course_key.in_(lifted),
             )
         )
-    return skip, won, answers
+    return skip, won, answers, school_back

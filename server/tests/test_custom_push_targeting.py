@@ -2,7 +2,7 @@
 and the custom-push dispatcher."""
 
 import pytest
-from sqlalchemy import insert
+from sqlalchemy import func, insert, literal, select
 
 from server.auth.models import User, UserDevice
 from server.models import DeviceList, DeviceListMember, DeviceRegistration
@@ -267,3 +267,28 @@ async def test_legacy_android_row_counts_as_unspecified_when_ambiguous(db_sessio
         db_session, TargetFilter(target_classes=["android"])
     )
     assert only_phones["android"] == 1
+
+
+async def test_the_preview_counts_more_devices_than_one_statement_binds(db_session):
+    """asyncpg allows 32,767 bind parameters per statement, and the count's
+    filter on the targeted devices bound one per device (#67)."""
+    n = func.generate_series(1, 32_768).column_valued("n")
+    columns = {
+        "device_id": literal("bulk-") + func.cast(n, DeviceRegistration.device_id.type),
+        "user_id": literal("u"),
+        "platform": literal("apple"),
+        "pts_token_hex": literal(""),
+        "device_token_hex": literal("alert-tok"),
+        "bundle_id": literal("org.ntust.app.TigerDuck"),
+        "attrs_type": literal(""),
+        "apns_env": literal(""),
+        "device_class": literal("iphone"),
+    }
+    await db_session.execute(
+        insert(DeviceRegistration).from_select(list(columns), select(*columns.values()))
+    )
+    await db_session.commit()
+
+    counts = await count_by_class(db_session, TargetFilter(target_classes=["iphone"]))
+
+    assert counts == {"iphone": 32_768, "total": 32_768}

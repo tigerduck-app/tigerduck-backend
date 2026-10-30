@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -217,7 +218,33 @@ class AuthSession(Base):
         # A device's newest session, which push/session_reauth.py reads for
         # each device it looks at; every refresh adds a row.
         Index("idx_auth_sessions_device", "device_id", "id"),
+        # Deleting a session sets null on the rows replaced by it
+        # (server/auth/retention.py); without it, a read of the table per row.
+        Index(
+            "idx_auth_sessions_replaced_by",
+            "replaced_by_session_id",
+            postgresql_where=sa.text("replaced_by_session_id IS NOT NULL"),
+        ),
     )
+
+
+class DeviceActiveDay(Base):
+    """A UTC day a device started a session on, with the first and last it
+    started, kept once those auth_sessions rows are pruned
+    (server/auth/retention.py) for the Userbase dashboard's history."""
+
+    __tablename__ = "device_active_days"
+
+    device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("user_devices.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    first_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class DevicePushToken(Base):
     __tablename__ = "device_push_tokens"
 

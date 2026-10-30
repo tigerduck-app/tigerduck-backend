@@ -24,9 +24,10 @@ FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
-from collections.abc import Collection
+from collections.abc import Awaitable, Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -75,6 +76,7 @@ from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.course_reminders import recheck_class_reminder
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
 from server.push.dedupe import activity_id as _activity_id
+from server.push.fcm_client import is_dead_fcm_token
 from server.push.job_payloads import build_apns_for_job, build_fcm_for_job
 from server.push.notification_copy import (
     REAUTH_SCENARIO,
@@ -96,6 +98,7 @@ from server.push.presend import (
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 from server.push.session_reauth import announced_while_sessionless, send_after
+from server.push.sync_trigger import MIN_GAP as SYNC_TRIGGER_GAP
 from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
@@ -113,6 +116,10 @@ _CLASS_SCENARIOS = frozenset(
     {ScheduleScenario.class_preparing.value, ScheduleScenario.in_class.value}
 )
 
+# Channels whose every job is filed for one device: Live Activity starts and
+# ends, and the portal's custom pushes.
+_DEVICE_CHANNELS = frozenset({SCHEDULE_CHANNEL, "custom"})
+
 # A reminder due right after its countdown start went out, to a device whose
 # app has not registered the activity yet, waits once: the app registers within
 # seconds, and the reminder follows the start in the same tick. Only a reminder
@@ -121,6 +128,9 @@ _CLASS_SCENARIOS = frozenset(
 # delivery asks Moodle again.
 _COUNTDOWN_WAIT_UNTIL = timedelta(seconds=30)
 _COUNTDOWN_WAIT = timedelta(seconds=60)
+
+# Pre-send checks of a batch out to Moodle at once.
+_PRESEND_CONCURRENCY = 4
 
 
 @dataclass(frozen=True)
@@ -138,7 +148,11 @@ class PushPipelineWorker:
 def _is_unregistered(status: str | None, description: str | None) -> bool:
     s = (status or "").lower()
     d = (description or "").lower()
-    return s in {"410", "unregistered"} or d in _UNREGISTERED_APNS_DESCRIPTIONS
+    return (
+        s == "410"
+        or d in _UNREGISTERED_APNS_DESCRIPTIONS
+        or is_dead_fcm_token(status, description)
+    )
 
 
 def _has_copy(payload: dict) -> bool:
@@ -184,13 +198,53 @@ async def run_push_tick(worker: PushPipelineWorker) -> int:
         claimed = await _claim_due_jobs(worker, skip=processed)
         if not claimed:
             break
-        for index, (job_id, priority) in enumerate(claimed):
-            if index and await _outranked(worker, priority, skip=processed):
-                await _release_claimed(worker, [jid for jid, _ in claimed[index:]])
-                break
-            await _process_job(worker, job_id=job_id, breaker=breaker)
-            processed.add(job_id)
+        checks = _start_checks(worker, claimed, breaker)
+        try:
+            for index, (job_id, priority, _) in enumerate(claimed):
+                if index and await _outranked(worker, priority, skip=processed):
+                    await _release_claimed(
+                        worker, [jid for jid, _, _ in claimed[index:]]
+                    )
+                    break
+                await _process_job(
+                    worker, job_id=job_id, pending_check=checks.pop(job_id, None)
+                )
+                processed.add(job_id)
+        finally:
+            for task in checks.values():
+                task.cancel()
+            await asyncio.gather(*checks.values(), return_exceptions=True)
     return len(processed)
+
+
+def _start_checks(
+    worker: PushPipelineWorker,
+    claimed: list[tuple[int, int, bool]],
+    breaker: MoodleBreaker,
+) -> dict[int, asyncio.Task[PresendCheck | None]]:
+    """Start the pre-send checks of a claimed batch, a few at a time, ahead
+    of its sends: one by one, a deadline rush's Moodle calls held every job
+    behind them (#98)."""
+    limit = asyncio.Semaphore(_PRESEND_CONCURRENCY)
+    alone = asyncio.Lock()
+
+    async def check(job_id: int) -> PresendCheck | None:
+        # In claim order until Moodle answers in this tick, so an outage still
+        # costs one call (`MoodleBreaker`).
+        if not breaker.answered:
+            async with alone:
+                if not breaker.answered:
+                    return await check_before_send(
+                        worker, job_id=job_id, breaker=breaker
+                    )
+        async with limit:
+            return await check_before_send(worker, job_id=job_id, breaker=breaker)
+
+    return {
+        job_id: asyncio.create_task(check(job_id))
+        for job_id, _, checked in claimed
+        if checked
+    }
 
 
 async def _recover_stale_jobs(worker: PushPipelineWorker) -> None:
@@ -248,9 +302,10 @@ def _due(now: datetime, skip: Collection[int]) -> tuple[ColumnElement[bool], ...
 
 async def _claim_due_jobs(
     worker: PushPipelineWorker, *, skip: Collection[int] = ()
-) -> list[tuple[int, int]]:
+) -> list[tuple[int, int, bool]]:
     """Claim up to a batch of due jobs, leaving out the ids in `skip`.
-    Returns (id, priority) pairs, most urgent first."""
+    Returns (id, priority, whether the pre-send check guards it), most
+    urgent first."""
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
         await session.execute(select(func.pg_advisory_xact_lock(_CLAIM_LOCK_KEY)))
@@ -271,7 +326,7 @@ async def _claim_due_jobs(
             job.status = PushJobStatus.processing.value
             job.locked_by = worker.worker_id
             job.locked_at = now
-        return [(job.id, job.priority) for job in jobs]
+        return [(job.id, job.priority, needs_check(job)) for job in jobs]
 
 
 async def _outranked(
@@ -318,12 +373,15 @@ async def _release_claimed(worker: PushPipelineWorker, job_ids: list[int]) -> No
 
 
 async def _process_job(
-    worker: PushPipelineWorker, *, job_id: int, breaker: MoodleBreaker
+    worker: PushPipelineWorker,
+    *,
+    job_id: int,
+    pending_check: Awaitable[PresendCheck | None] | None,
 ) -> None:
     try:
         # Asked before the job's row lock is taken: the check may wait on
         # Moodle, and no transaction stays open while it does.
-        check = await check_before_send(worker, job_id=job_id, breaker=breaker)
+        check = await pending_check if pending_check is not None else None
         async with session_scope(worker.session_factory) as session:
             await lift_timeouts(session)
             job = (
@@ -420,6 +478,15 @@ async def _materialize(
 
     now = datetime.now(UTC)
     payload = job.payload or {}
+    if job.device_id is None and job.channel in _DEVICE_CHANNELS:
+        # Its device row was deleted since (ON DELETE SET NULL, as when another
+        # account signs in on that phone), and the token query below would then
+        # reach every device of the user. Rounds already begun only finish.
+        if await _has_deliveries(session, job):
+            return True
+        _settle(job, status=PushJobStatus.cancelled, error="device_gone", now=now)
+        logger.info("push.device_gone", job_id=job.id, channel=job.channel)
+        return False
     is_activity_job = job.channel == SCHEDULE_CHANNEL
     is_activity_end = is_activity_job and payload.get("kind") == "live_activity_end"
     if is_activity_end:
@@ -579,6 +646,19 @@ async def _materialize(
     is_sync_trigger = job.scenario == "sync_trigger"
     source_device_id: str | None = None
     if is_sync_trigger:
+        # Paced from the last send, not the planned time: downtime or a retry
+        # can leave triggers due together (#107). The portal's force button is not.
+        forced = (job.payload or {}).get("source") == "portal_force"
+        last = (
+            None if forced else await _last_sync_trigger_sent(session, job, now=now)
+        )
+        if last:
+            job.status = PushJobStatus.pending.value
+            job.available_at = last + SYNC_TRIGGER_GAP
+            job.locked_by = None
+            job.locked_at = None
+            logger.info("push.sync_trigger_paced", job_id=job.id)
+            return False
         token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
         source_device_id = (job.payload or {}).get("source_device_id")
 
@@ -936,6 +1016,29 @@ async def _classes_quiet(
     return "holiday" if opted_in is None else None
 
 
+async def _last_sync_trigger_sent(
+    session: AsyncSession, job: PushJob, *, now: datetime
+) -> datetime | None:
+    """When another of the user's sync triggers reached a device within the
+    gap, or None."""
+    return await session.scalar(
+        select(func.max(PushDelivery.sent_at)).where(
+            PushDelivery.push_job_id.in_(
+                select(PushJob.id).where(
+                    PushJob.user_id == job.user_id,
+                    PushJob.scenario == "sync_trigger",
+                    PushJob.id != job.id,
+                    # A job with a sent delivery has one of these statuses;
+                    # as SQL text the user's jobs come from its index.
+                    PUSH_JOB_DEDUPE_ACTIVE_WHERE,
+                )
+            ),
+            PushDelivery.status == PushDeliveryStatus.sent.value,
+            PushDelivery.sent_at > now - SYNC_TRIGGER_GAP,
+        )
+    )
+
+
 async def _has_deliveries(session: AsyncSession, job: PushJob) -> bool:
     row = (
         await session.execute(
@@ -1010,7 +1113,8 @@ async def _countdown_starts(
     """When the countdown start of reminder `job`'s assignment went out to
     each of `device_ids` it reached at most `window` before the reminder's
     fire time, or since, as `(covered, waiting)`: whether the app there has
-    registered the activity the start created, or not yet.
+    registered the activity the start created, or not yet (a start still
+    being delivered counts as sent at `now`).
 
     The start is the device's own `/schedule/sync` job for the assignment,
     the one the pre-send check guards, and counts once a delivery of it was
@@ -1026,11 +1130,13 @@ async def _countdown_starts(
         return {}, {}
     source_id = str(assignment_id)
     scenario = ScheduleScenario.assignment_urgent.value
+    keys = {
+        schedule_key(device_id, source_id, scenario): device_id
+        for device_id in device_ids
+    }
     starts = select(PushJob.id).where(
         PushJob.user_id == job.user_id,
-        PushJob.dedupe_key.in_(
-            [schedule_key(device_id, source_id, scenario) for device_id in device_ids]
-        ),
+        PushJob.dedupe_key.in_(list(keys)),
         # SQL text, so a generic plan still reads ux_push_jobs_dedupe_active:
         # a start that went out is sent, partial_failed or still retrying.
         PUSH_JOB_DEDUPE_ACTIVE_WHERE,
@@ -1043,7 +1149,18 @@ async def _countdown_starts(
         )
     )
     sent = {device_id: at for device_id, at in rows}
-    if not sent:
+    # A start another tick is still delivering has no sent delivery until that
+    # tick commits; the reminder waits for it as for one sent now (#114).
+    claimed = await session.scalars(
+        select(PushJob.dedupe_key).where(
+            PushJob.user_id == job.user_id,
+            PushJob.dedupe_key.in_(list(keys)),
+            text("status = 'processing'"),
+            PushJob.fire_at >= job.fire_at - window,
+        )
+    )
+    in_flight = {keys[key]: now for key in claimed if keys[key] not in sent}
+    if not sent and not in_flight:
         return {}, {}
     registered = await _registered(
         session,
@@ -1053,7 +1170,7 @@ async def _countdown_starts(
         now=now,
     )
     covered = {d: at for d, at in sent.items() if d in registered}
-    waiting = {d: at for d, at in sent.items() if d not in registered}
+    waiting = {d: at for d, at in sent.items() if d not in registered} | in_flight
     return covered, waiting
 
 

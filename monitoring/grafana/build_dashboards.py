@@ -441,6 +441,11 @@ GROUP BY 1
 ORDER BY 1
 """, fmt="time_series")], bars=True,
     desc="Logins plus refresh-token rotations. Access tokens last 15 minutes, so an app in use rotates a few times an hour: a rough activity signal."), 8, 8)
+L.add(series("Replaced refresh tokens sent again", LOKI, [loki(
+    'sum by (event) (count_over_time({service="backend"} |= "auth.refresh." | json event="event"'
+    ' | event=~"auth.refresh.(grace_retry|lost_rotation_recovered|duplicate_refused|reuse_detected)" [$__auto]))',
+    "{{event}}")], bars=True, stacked=True,
+    desc="From the backend log. grace_retry and lost_rotation_recovered rotated the token again for an app that lost the reply, within or after the 60-second grace; duplicate_refused and reuse_detected refused it. Not affected by the filters."), 24, 8)
 
 L.row("Breakdown")
 L.add(pie("Platform", PG, [sql(f"SELECT ud.platform AS \"platform\", count(*) AS \"devices\" {FROM_DEV} WHERE {DEV_FILTER} GROUP BY 1 ORDER BY 2 DESC")]), 6, 8)
@@ -1135,13 +1140,17 @@ USERBASE_SQL = f"""WITH points AS (
     SELECT now()
 ),
 seen AS (
-    -- Activity: logins and access-token refreshes (auth_sessions keeps every
-    -- one, and an app in use refreshes every 15 minutes), plus each
-    -- device's latest request.
+    -- Activity: logins and access-token refreshes (an app in use refreshes
+    -- every 15 minutes), each device's first and last of a day once
+    -- auth_sessions has pruned them, plus each device's latest request.
     SELECT device_id, created_at AS at
     FROM auth_sessions
     WHERE device_id IS NOT NULL
       AND created_at > $__timeFrom()::timestamptz - interval '14 days'
+    UNION ALL
+    SELECT device_id, unnest(ARRAY[first_at, last_at])
+    FROM device_active_days
+    WHERE last_at > $__timeFrom()::timestamptz - interval '14 days'
     UNION ALL
     SELECT id, last_seen_at
     FROM user_devices
@@ -1244,7 +1253,8 @@ def wide_graph(panel):
 
 
 ACTIVE_DESC = ("A device is active for 14 days after any login, token refresh or request. Apps in use refresh "
-               "their token every 15 minutes, and every refresh is kept, so the history reaches back to launch.")
+               "their token every 15 minutes, and each device's first and last refresh of a day is kept, so the "
+               "history reaches back to launch.")
 
 L = Layout()
 L.row("Users")

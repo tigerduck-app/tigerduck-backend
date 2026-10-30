@@ -8,6 +8,7 @@ from server import _ssl_compat  # noqa: F401, E402
 
 import asyncio  # noqa: E402
 import contextlib  # noqa: E402
+import json  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
@@ -18,16 +19,17 @@ import httpx  # noqa: E402
 import structlog  # noqa: E402
 import uvicorn  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
-from fastapi.responses import JSONResponse, PlainTextResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse, Response  # noqa: E402
 
 from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
-from server.config import Settings, get_settings
+from server.config import Settings, get_settings, require_readable_files
 from server.db import build_engine, build_session_factory, session_scope
 from server.i18n import require_fallback_bundle
 from server.logging_setup import configure as configure_logging
@@ -58,6 +60,7 @@ from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
 from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, default_worker_id
 from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetcher
 from server.syncjobs.policies import ensure_default_policies
@@ -263,6 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and the sync worker both run in this process (the scheduler below),
     # so this one check covers every sender.
     require_fallback_bundle()
+    require_readable_files(settings)
 
     if settings.skip_llm_probe:
         logger.info("llm.skipped", base_url=settings.llm_base_url)
@@ -284,23 +288,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await restore_host_gauges(pin_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
-    # Read by the sync worker and by the push pipeline's pre-send check.
+    # The push pipeline's pre-send check, outside the sync worker's request
+    # budget: a reminder due now cannot queue behind a sync backlog.
     assignment_fetcher = HttpAssignmentFetcher(
         base_url=settings.moodle_base_url,
         timeout_seconds=settings.moodle_fetch_timeout_seconds,
     )
     sync_worker = None
     if cipher is not None:
+        budget = RequestBudget(settings.sync_job_requests_per_minute)
         sync_worker = SyncWorker(
             session_factory=jobs_session_factory,
             settings=settings,
             cipher=cipher,
-            fetcher=assignment_fetcher,
+            fetcher=HttpAssignmentFetcher(
+                base_url=settings.moodle_base_url,
+                timeout_seconds=settings.moodle_fetch_timeout_seconds,
+                event_hooks=budget.event_hooks,
+            ),
             course_fetcher=HttpCourseFetcher(
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
+                event_hooks=budget.event_hooks,
             ),
             worker_id=default_worker_id(),
+            budget=budget,
         )
     else:
         logger.warning("syncjobs.disabled_no_credential_keys")
@@ -367,10 +379,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings)
 
+    # The schema, and the docs pages built on it, list every route to anyone,
+    # so only development serves them.
     app = FastAPI(
         title="TigerDuck Push Server",
         version=__version__,
         lifespan=lifespan,
+        openapi_url="/openapi.json" if settings.env == "development" else None,
     )
     app.state.settings = settings
 
@@ -413,6 +428,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _unhandled_error(request, _exc):
         return _with_clock(
             request, PlainTextResponse("Internal Server Error", status_code=500)
+        )
+
+    # Without the input: echoed back, a lone UTF-16 surrogate in it failed to
+    # encode and turned the 422 into a 500 (tigerduck-backend#65). ASCII JSON,
+    # since a dict key in `loc` can carry one too.
+    @app.exception_handler(RequestValidationError)
+    async def _invalid_request(_request, exc: RequestValidationError):
+        errors = [{"type": e["type"], "loc": e["loc"], "msg": e["msg"]} for e in exc.errors()]
+        return Response(
+            json.dumps({"detail": errors}), status_code=422, media_type="application/json"
         )
 
     # Added after the 410 middleware so it wraps it (Starlette runs the

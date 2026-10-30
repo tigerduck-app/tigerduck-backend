@@ -7,10 +7,8 @@ offline via MockTransport.
 Error taxonomy is the load-bearing part — the executor's retry policy
 hangs off it:
 
-* `MoodleTokenInvalid`  → cached token died; try ONE SSO re-obtain.
-* `SsoAuthFailed`       → auth-class: credentials rejected. NEVER retried.
-* `SsoUnavailable`      → network-class: SSO never evaluated the password,
-                          safe to retry with backoff.
+* `MoodleTokenInvalid`  → the stored token died; the app must send a new one.
+* `SsoUnavailable`      → raised by nothing; the executor still retries it.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → a transport or parse error, or an answer that
                           cannot list the user's courses; retry.
@@ -31,11 +29,12 @@ The push pipeline's pre-send check (`check_submission_status`) adds two:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 import structlog
@@ -43,8 +42,6 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 _WS_PATH = "/webservice/rest/server.php"
-_TOKEN_PATH = "/login/token.php"
-_TOKEN_SERVICE = "moodle_mobile_app"
 
 
 class MoodleClientError(Exception):
@@ -72,10 +69,6 @@ class MoodleNoCourseAccess(MoodleUnreachable):
     def __init__(self, refused_course_ids: frozenset[int]) -> None:
         super().__init__("no_course_access")
         self.refused_course_ids = refused_course_ids
-
-
-class SsoAuthFailed(MoodleClientError):
-    pass
 
 
 class SsoUnavailable(MoodleClientError):
@@ -129,13 +122,10 @@ class MoodleRefused(MoodleClientError):
 # `str(exc)` into `last_error`, and a fixed code there is greppable and
 # cannot carry anything sensitive.
 #
-# Deliberately absent: `SsoAuthFailed` / `SsoUnavailable`, which describe a
-# password login this code path never performs (only `HttpTokenObtainer`
-# raises them), and the bare `MoodleClientError` base. None of the three
+# Deliberately absent: `SsoUnavailable`, which describes a password login
+# the backend never performs, and the bare `MoodleClientError` base. Neither
 # describes the endpoint a probe calls, so one raised inside a probe is no
-# grounds to cancel the batch -- and `SsoAuthFailed` specifically means
-# "credentials rejected, NEVER retried", a verdict a single assignment's
-# probe has no business delivering. They count as unexpected and skip one
+# grounds to cancel the batch. They count as unexpected and skip one
 # assignment like anything else unrecognised.
 _PROBE_ESCALATIONS: tuple[tuple[type[MoodleClientError], str], ...] = (
     (MoodleTokenInvalid, "invalidtoken"),
@@ -174,18 +164,15 @@ class FetchedAssignment:
 
 
 @dataclass(frozen=True)
-class ObtainedToken:
-    token: str
-    private_token: str | None
-
-
-@dataclass(frozen=True)
 class FetchedCourse:
     moodle_course_id: int
     short_name: str | None
     full_name: str
     category_id: int | None
     enrolled_user_count: int | None
+    # Term and course number, "1151CS1001301"; the apps' course rows carry the same.
+    idnumber: str = ""
+    start_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +198,7 @@ class AssignmentFetcher(Protocol):
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]: ...
 
 
@@ -222,14 +210,12 @@ class SubmissionStatusChecker(Protocol):
 
 class CourseFetcher(Protocol):
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]: ...
-
-
-class TokenObtainer(Protocol):
-    async def obtain_token(
-        self, *, username: str, password: str
-    ) -> ObtainedToken: ...
 
 
 def _ts(value: object) -> datetime | None:
@@ -239,7 +225,19 @@ def _ts(value: object) -> datetime | None:
     return datetime.fromtimestamp(value, tz=UTC)
 
 
+def _start(value: object) -> datetime | None:
+    """A course's start date, None past what `datetime` holds: it only
+    orders a retaken course's runs, so one bad date must not fail the list."""
+    try:
+        return _ts(value)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 _REDACTED = "<token-redacted>"
+
+# Tokens whose Moodle user id is kept; the map starts over past this many.
+_USERID_CACHE_SIZE = 4096
 
 # Any `wstoken=...` still embedded in text, whatever its value. The token we
 # hold is scrubbed by value; this catches a differently-shaped one (a
@@ -324,18 +322,22 @@ async def _get_moodle_userid(
     response = await client.get(f"{base_url}{_WS_PATH}", params=params)
     if response.status_code == 429:
         raise MoodleRateLimited("http_429")
-    body = response.json()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise MoodleUnreachable("invalid_json") from exc
     if isinstance(body, dict) and "exception" in body:
         errorcode = str(body.get("errorcode", ""))
         if errorcode == "invalidtoken":
             raise MoodleTokenInvalid(errorcode)
         raise MoodleUnreachable(errorcode or "moodle_exception")
-    if not isinstance(body, dict) or "userid" not in body:
+    userid = body.get("userid") if isinstance(body, dict) else None
+    if type(userid) is not int:
         raise MoodleUnreachable("missing_userid_in_site_info")
     fullname = body.get("fullname")
     if on_fullname is not None and isinstance(fullname, str):
         on_fullname(fullname)
-    return int(body["userid"])
+    return userid
 
 
 async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> dict:
@@ -421,10 +423,15 @@ class HttpAssignmentFetcher:
         base_url: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        event_hooks: Mapping[str, list[Callable[..., Any]]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._transport = transport
+        self._event_hooks = event_hooks
+        # The pre-send check's Moodle user id per token (by its SHA-256): a
+        # token never changes user, and the lookup doubles each check (#98).
+        self._userids: dict[bytes, int] = {}
 
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]:
         params = {
@@ -438,7 +445,9 @@ class HttpAssignmentFetcher:
         }
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
                 response = await client.get(
                     f"{self._base_url}{_WS_PATH}", params=params
@@ -521,6 +530,7 @@ class HttpAssignmentFetcher:
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]:
         """Submission state for the given assignments, keyed by assignment id.
 
@@ -577,11 +587,14 @@ class HttpAssignmentFetcher:
 
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
-                userid = await _get_moodle_userid(
-                    client, self._base_url, token, on_fullname
-                )
+                if userid is None:
+                    userid = await _get_moodle_userid(
+                        client, self._base_url, token, on_fullname
+                    )
 
                 async def probe(assignment_id: int) -> None:
                     # This `try` wraps `probe`'s *whole body*, not just the
@@ -761,21 +774,29 @@ class HttpAssignmentFetcher:
         whatever this fetcher's own timeout.
         """
         url = f"{self._base_url}{_WS_PATH}"
+        key = hashlib.sha256(token.encode()).digest()
         async with httpx.AsyncClient(
-            timeout=timeout_seconds, transport=self._transport
+            timeout=timeout_seconds,
+            transport=self._transport,
+            event_hooks=self._event_hooks,
         ) as client:
-            site_info = await _checked_call(
-                client,
-                url,
-                {
-                    "wstoken": token,
-                    "wsfunction": "core_webservice_get_site_info",
-                    "moodlewsrestformat": "json",
-                },
-            )
-            userid = site_info.get("userid")
-            if type(userid) is not int:
-                raise MoodleRefused("missing_userid_in_site_info")
+            userid = self._userids.get(key)
+            if userid is None:
+                site_info = await _checked_call(
+                    client,
+                    url,
+                    {
+                        "wstoken": token,
+                        "wsfunction": "core_webservice_get_site_info",
+                        "moodlewsrestformat": "json",
+                    },
+                )
+                userid = site_info.get("userid")
+                if type(userid) is not int:
+                    raise MoodleRefused("missing_userid_in_site_info")
+                if len(self._userids) >= _USERID_CACHE_SIZE:
+                    self._userids.clear()
+                self._userids[key] = userid
             body = await _checked_call(
                 client,
                 url,
@@ -796,21 +817,33 @@ class HttpCourseFetcher:
         base_url: str,
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
+        event_hooks: Mapping[str, list[Callable[..., Any]]] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout_seconds
         self._transport = transport
+        self._event_hooks = event_hooks
 
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]:
+        """The user's Moodle courses, handing the user id the site info
+        answers to `on_userid`, so the same run's submission probe skips it."""
         try:
             async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
             ) as client:
                 userid = await _get_moodle_userid(
                     client, self._base_url, token, on_fullname
                 )
+                if on_userid is not None:
+                    on_userid(userid)
                 params = {
                     "wstoken": token,
                     "wsfunction": "core_enrol_get_users_courses",
@@ -845,63 +878,10 @@ class HttpCourseFetcher:
                 full_name=str(c.get("fullname") or c.get("shortname") or ""),
                 category_id=c.get("categoryid"),
                 enrolled_user_count=c.get("enrolledusercount"),
+                idnumber=str(c.get("idnumber") or ""),
+                start_at=_start(c.get("startdate")),
             )
             for c in body
-            if isinstance(c.get("id"), int)
+            if isinstance(c, dict) and isinstance(c.get("id"), int)
         ]
 
-
-class HttpTokenObtainer:
-    """Re-obtains a Moodle webservice token from a username/password via
-    `/login/token.php`. Called by the sync worker only when the cached
-    token has expired — and at most once per run (iron rule lives in
-    `server/syncjobs/credentials.py`)."""
-
-    def __init__(
-        self,
-        base_url: str,
-        timeout_seconds: float,
-        transport: httpx.AsyncBaseTransport | None = None,
-    ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._timeout = timeout_seconds
-        self._transport = transport
-
-    async def obtain_token(
-        self, *, username: str, password: str
-    ) -> ObtainedToken:
-        data = {
-            "username": username,
-            "password": password,
-            "service": _TOKEN_SERVICE,
-        }
-        try:
-            async with httpx.AsyncClient(
-                timeout=self._timeout, transport=self._transport
-            ) as client:
-                response = await client.post(
-                    f"{self._base_url}{_TOKEN_PATH}", data=data
-                )
-        except httpx.HTTPError as exc:
-            logger.warning("syncjobs.sso.unreachable", error=str(exc)[:200])
-            raise SsoUnavailable(str(exc)[:200]) from exc
-
-        if response.status_code >= 500 or response.status_code == 429:
-            raise SsoUnavailable(f"http_{response.status_code}")
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise SsoUnavailable("invalid_json") from exc
-        if not isinstance(body, dict):
-            raise SsoUnavailable("invalid_body")
-
-        token = body.get("token")
-        if isinstance(token, str) and token:
-            return ObtainedToken(
-                token=token, private_token=body.get("privatetoken") or None
-            )
-        errorcode = str(body.get("errorcode", ""))
-        if errorcode == "invalidlogin":
-            logger.warning("syncjobs.sso.auth_failed", username=username)
-            raise SsoAuthFailed(errorcode)
-        raise SsoUnavailable(errorcode or f"http_{response.status_code}")

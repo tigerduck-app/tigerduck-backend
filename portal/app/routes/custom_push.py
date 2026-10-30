@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..audit import audit
 from ..db import get_pool
+from ..student_ids import student_id_key
 
 router = APIRouter(prefix="/api/custom-push")
 
@@ -177,8 +178,8 @@ def _targeting_where(filt: _TargetFilter, term: str | None) -> tuple[str, list]:
         ),
     ]
     if filt.user_id is not None:
-        params.append(filt.user_id)
-        clauses.append(f"(u.student_id = ${len(params)} OR u.id::text = ${len(params)})")
+        params += [student_id_key(filt.user_id), filt.user_id]
+        clauses.append(f"(u.student_id = ${len(params) - 1} OR u.id::text = ${len(params)})")
     if filt.device_id is not None:
         params.append(filt.device_id)
         clauses.append(f"ud.id::text = ${len(params)}")
@@ -429,7 +430,7 @@ async def send(
             "request_id": request_id,
             "kind": kind,
             "matched": matched,
-            "queued": matched,
+            "queued": reached,
         }
     )
 

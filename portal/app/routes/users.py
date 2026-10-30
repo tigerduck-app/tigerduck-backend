@@ -3,7 +3,7 @@
 Read from the v3 tables, as `devices.py` does. Days and weeks are Taipei
 ones, the school's. Daily activity is a user's session renewals: the apps
 renew their 15-minute access token while open, and every renewal adds an
-`auth_sessions` row that nothing prunes.
+`auth_sessions` row, kept about 120 days (server/auth/retention.py).
 """
 from __future__ import annotations
 

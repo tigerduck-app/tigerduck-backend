@@ -8,16 +8,26 @@ report before anything is deleted.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import random
 from datetime import datetime, UTC
 
+from asyncpg.exceptions import DeadlockDetectedError
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..audit import audit
 from ..db import get_pool
+from ..student_ids import student_id_key
 
 router = APIRouter(prefix="/api/deregister")
+logger = logging.getLogger(__name__)
+
+# The sync executor locks a job before the users row its run needs, the other
+# way round from here, so Postgres may abort this as a deadlock (server/AGENTS.md).
+_ATTEMPTS = 3
 
 
 class DeregisterRequest(BaseModel):
@@ -28,10 +38,10 @@ def _iso(ts) -> str | None:
     return ts.isoformat() if ts else None
 
 
-# A student id matches whole and in any case; anything else is part of a name.
+# A student id matches whole, as login keys it ($2); anything else is part of a name.
 _LOOKUP_SQL = """
 WITH found AS (
-    SELECT id FROM users WHERE lower(student_id) = lower($1)
+    SELECT id FROM users WHERE student_id = $2
 ), named AS (
     SELECT id FROM users
     WHERE NOT EXISTS (SELECT 1 FROM found)
@@ -58,7 +68,7 @@ async def lookup_students(
     if not q.strip():
         return JSONResponse(content={"students": []})
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_LOOKUP_SQL, q.strip())
+        rows = await conn.fetch(_LOOKUP_SQL, q.strip(), student_id_key(q))
         await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
@@ -86,8 +96,8 @@ async def preview_student(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, student_id, display_name, created_at FROM users"
-            " WHERE lower(student_id) = lower($1)",
-            student_id.strip(),
+            " WHERE student_id = $1",
+            student_id_key(student_id),
         )
         if row is None:
             return JSONResponse(content={"error": "user_not_found"}, status_code=404)
@@ -112,7 +122,7 @@ async def deregister_student(
     request: Request,
     pool=Depends(get_pool),
 ) -> JSONResponse:
-    student_id = body.student_id.strip()
+    student_id = student_id_key(body.student_id)
     if not student_id:
         return JSONResponse(
             content={"error": "student_id_required"}, status_code=400
@@ -129,23 +139,21 @@ async def deregister_student(
             )
         user_id = row["id"]
 
-        device_list, counts = await _snapshot(conn, user_id)
-
-        async with conn.transaction():
-            await conn.execute(
-                """DELETE FROM external_account_credentials
-                   WHERE external_account_id IN (
-                       SELECT id FROM external_accounts WHERE user_id = $1
-                   )""",
-                user_id,
-            )
-            await conn.execute(
-                "DELETE FROM external_accounts WHERE user_id = $1", user_id
-            )
-            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
-            await audit(
-                conn, request, "user.deregister", user_id=user_id, devices=len(device_list)
-            )
+        for attempt in range(1, _ATTEMPTS + 1):
+            try:
+                async with conn.transaction():
+                    device_list, counts = await _delete_account(conn, user_id)
+                    await audit(
+                        conn, request, "user.deregister",
+                        user_id=user_id, devices=len(device_list),
+                    )
+                break
+            except DeadlockDetectedError:
+                if attempt == _ATTEMPTS:
+                    raise
+                logger.warning("deregister aborted as a deadlock, attempt %d", attempt)
+                # Jittered, so the transaction it lost to can finish first.
+                await asyncio.sleep(random.uniform(0.1, 0.5))
 
     report = {
         "deleted": True,
@@ -157,6 +165,28 @@ async def deregister_student(
         "deleted_counts": counts,
     }
     return JSONResponse(content=report)
+
+
+async def _delete_account(conn, user_id) -> tuple[list[dict], dict]:
+    """Delete the account and return `_snapshot` of what went."""
+    # The order sign-in takes (`lock_accounts`), then the account the retention
+    # purges lock (`delete_in_batches`), before any row of either: see server/AGENTS.md.
+    await conn.execute(
+        "SELECT 1 FROM external_accounts WHERE user_id = $1 ORDER BY id FOR UPDATE",
+        user_id,
+    )
+    await conn.execute("SELECT 1 FROM users WHERE id = $1 FOR UPDATE", user_id)
+    snapshot = await _snapshot(conn, user_id)
+    await conn.execute(
+        """DELETE FROM external_account_credentials
+           WHERE external_account_id IN (
+               SELECT id FROM external_accounts WHERE user_id = $1
+           )""",
+        user_id,
+    )
+    await conn.execute("DELETE FROM external_accounts WHERE user_id = $1", user_id)
+    await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+    return snapshot
 
 
 async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
@@ -196,9 +226,11 @@ async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
         "user_sync_state",
     ]:
         try:
-            c = await conn.fetchval(
-                f"SELECT count(*) FROM {table} WHERE user_id = $1", user_id
-            )
+            # A savepoint: in a deregister's transaction a failed count would end it.
+            async with conn.transaction():
+                c = await conn.fetchval(
+                    f"SELECT count(*) FROM {table} WHERE user_id = $1", user_id
+                )
             counts[table] = c
         except Exception:
             counts[table] = "table_not_found"

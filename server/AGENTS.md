@@ -27,7 +27,8 @@ server/
 ├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
 ├── db.py                      # Base, async engine/session, SessionDep;
-│                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
+│                              #   in_array and INSERT_CHUNK_ROWS (bind limit);
+│                              #   delete_in_batches for the retention purges
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
@@ -40,9 +41,12 @@ server/
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
-│                              #   retirement.py deregisters gone devices daily
+│                              #   retirement.py deregisters gone devices daily;
+│                              #   retention.py prunes expired sessions, keeping
+│                              #   each device's active days
 ├── sync/                      # v3 sync models + changelog retention
-├── syncjobs/                  # server-side academic sync executor
+├── syncjobs/                  # server-side academic sync executor; retention.py
+│                              #   prunes the sync log and finished runs
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
 ├── course_catalog/            # NTUST's course list per term and language: models
@@ -95,6 +99,7 @@ server/
 │   └── retention.py           # prune terminal push_jobs
 ├── bulletins/
 │   ├── scraper.py             # NTUST HTML → metadata
+│   ├── ntust_intermediates.pem  # TWCA intermediates the scrape's TLS check adds
 │   ├── dedup.py               # content_hash gating
 │   ├── detail.py / models.py / schemas.py / taxonomy.py
 │   ├── matcher.py             # subscription-rule evaluation
@@ -203,6 +208,18 @@ into the backend container via `docker-compose.yml`.
   one array parameter, rather than `in_()`, which binds one per value, and
   rows inserted for every user or device go `INSERT_CHUNK_ROWS` (`db.py`)
   at a time.
+- Deleting an account (the portal's deregister) locks its
+  `external_accounts` rows in id order, as `lock_accounts` does for sign-in
+  and sign-out, then its `users` row `FOR UPDATE`, and only then deletes; a
+  sign-in writes the `users` row only after `lock_accounts`. A retention
+  batch (`delete_in_batches`) locks its rows' `users` rows and then, for
+  `auth_sessions`, their `user_devices` rows, each `FOR KEY SHARE` in id
+  order, before deleting them, so a sign-in deleting the device of
+  another account waits for the batch. The sync executor takes no
+  account lock: it locks a job, then needs the `users` row for its run, so
+  a deregister can still deadlock with it. The deregister tries its
+  transaction again on a deadlock (40P01), up to 3 times, and a purge
+  batch likewise, ending the night's run after the third.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index. Pass it as
@@ -254,13 +271,23 @@ into the backend container via `docker-compose.yml`.
   cancel what they filed. A device whose token is gone for now (APNs
   dropped it, the app has not registered a new one) keeps its filed
   reminders; only new ones wait for a token.
+- The assignment reminder scan files only for what the iPhone app lists in
+  the current term (`current_term_code`). A fetch with the student's Moodle
+  courses classifies each row as the app files it
+  (`syncjobs/assignments.listed_courses`): `moodle_semester` is its course's
+  term, "" for none, and `user_course_id` links the term's class-table
+  course. A classified row counts when either names the current term. A
+  row no fetch classified (`moodle_semester` NULL), such as an app's upload,
+  counts as listed until one does.
 - Before its first delivery, an assignment reminder or `assignmentUrgent`
   start is checked against the user's rows of the assignment (any course
   id, deleted or not) and then Moodle (`push/presend.py`). It fails
   closed: one nobody can confirm still open is not sent, but retried until
   `push_presend_grace_minutes` past its fire time and then cancelled
   (`unverified_before_send`), and a Moodle outage opens a per-tick breaker
-  rather than costing a timeout per job.
+  rather than costing a timeout per job. A claimed batch's checks start
+  ahead of its sends, one at a time until Moodle answers in the tick, then
+  four at a time.
 - An assignment reminder leaves out a device that the assignment's
   `assignmentUrgent` start went to (a sent delivery) from
   `push_countdown_dedupe_window_seconds` (0, off, by default; 300 on) before the
@@ -268,7 +295,8 @@ into the backend container via `docker-compose.yml`.
   started (its pending `la_end` job, as `_activity_already_registered`
   reads): the start's alert already rang there. A start iOS cannot show, or
   one the app ends on arrival, never registers. A reminder due within 30 s
-  of such a start's send waits once, 60 s, for the registration, when the
+  of such a start's send waits once, 60 s, for the registration (as for a
+  start another tick is still delivering), when the
   pre-send grace leaves room for the next round; a device still
   unregistered then gets it, as does one whose start did not go out. A
   reminder left out on every device ends `cancelled` (`countdown_start_sent`).
@@ -298,6 +326,24 @@ into the backend container via `docker-compose.yml`.
   push within `sync_job_device_push_days` (14); a run-now marks its device
   seen. Until then they stay pending, and the first tick after a device
   comes back runs one already due.
+- A user's `sync_trigger` jobs fire at least 20 minutes apart, Apple's
+  budget for background pushes (`enqueue_sync_trigger` in
+  `push/sync_trigger.py`, which every writer but the portal's forced one
+  calls). A change while one has yet to go out rides on it, locked so the
+  claim skips it until the change commits; a change after it waits for
+  the next. Before each round the pipeline puts a trigger, except the
+  portal's forced one, back until 20 minutes after the user's last
+  recorded sync trigger send (`_last_sync_trigger_sent`), so downtime or
+  a retry cannot bunch them.
+  The check sees only committed sends: a forced tick and the scheduler's
+  sending two of one user's triggers in the same round can both go out.
+- The sync worker runs `sync_job_concurrency` (2) jobs at once, never two
+  of one user, and every Moodle request it sends waits its turn in one
+  `RequestBudget` (`syncjobs/budget.py`, `sync_job_requests_per_minute`,
+  10): the fetchers it is built with send through the budget's
+  `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
+  pauses the whole worker for `sync_job_backoff_base_seconds`. The push
+  pipeline's pre-send check has a fetcher of its own, outside the budget.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
@@ -335,14 +381,16 @@ into the backend container via `docker-compose.yml`.
 - With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
   writes the tombstone even for a course the server lacks; a removal of a
   school row (`source` other than `user_added`) keeps the row and only
-  clears its add. An upload's `adds` replace `force_keys`; the rest of
-  its `courses` is the school's roster, which marks a listed course as a
-  school row, skips a hidden key, lifts a reset tombstone and shows a
-  removed key beside its removal tombstone, which keeps refusing older
-  edits. A reset clears only the term's choices stamped at or before it:
-  a row with a later add stays, and so does a school row with a later
-  override value, with its older choices emptied and stamped at the reset
-  (a name as ""), so every writer refuses an older value. After a term
+  clears its add. An upload's `adds` replace `force_keys`, and as with
+  them a course an add brings back from a tombstone not marked
+  `user_added` is stored as a school row; the rest of its `courses` is
+  the school's roster, which marks a listed course as a school row, skips
+  a hidden key, lifts a reset tombstone and shows a removed key beside
+  its removal tombstone, which keeps refusing older edits. A reset clears
+  only the term's choices stamped at or before it: a row with a later add
+  stays, and so does a school row with a later override value, with its
+  older choices emptied and stamped at the reset (a name as ""), so every
+  writer refuses an older value. After a term
   reset each row that goes, and each key with an older tombstone and no
   row left, has a reset tombstone. The course override PATCH and the
   academics PUT refuse edits stamped at or before the term's reset, and
