@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, text, update
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.models import DevicePushToken, PushJob, UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
@@ -28,9 +29,12 @@ from server.sync.upload import (
     process_initial_upload,
 )
 from server.syncjobs.assignments import apply_fetched_assignments
-from server.syncjobs.moodle_client import FetchedAssignment
+from server.syncjobs.moodle_client import FetchedAssignment, FetchedCourse
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+# The term `make_reachable` publishes, and the term of every course `fetch` lists.
+TERM = "1151"
 
 LOGIN_BODY = {
     "student_id": "B11015000",
@@ -442,7 +446,8 @@ async def fetch(
     client, login, *keys: tuple[int, int], due_at: datetime | None = None
 ) -> None:
     """A server fetch that returns these (course, assignment) keys and
-    soft-deletes every other live row, placeholders included."""
+    soft-deletes every other live row, placeholders included. Each course is
+    one of the current term, if `make_reachable` published it."""
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         await apply_fetched_assignments(
@@ -450,15 +455,35 @@ async def fetch(
             user_id=uuid.UUID(login["user"]["id"]),
             fetched=[_fetched(*key, due_at=due_at) for key in keys],
             now=datetime.now(UTC),
+            enrolled=[
+                FetchedCourse(
+                    moodle_course_id=course,
+                    short_name=None,
+                    full_name="資料結構",
+                    category_id=None,
+                    enrolled_user_count=None,
+                    idnumber=f"{TERM}CS{course}01",
+                )
+                for course in {course for course, _ in keys}
+            ],
         )
         await session.commit()
 
 
 async def make_reachable(client, login) -> None:
     """Let the reminder scan file for the login's iPhone: a release that
-    leaves assignment reminders to the server, and a push token."""
+    leaves assignment reminders to the server, a push token, and a term in
+    progress."""
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
+        today = datetime.now(UTC).date()
+        session.add(
+            SemesterTerm(
+                code=TERM,
+                start_date=today - timedelta(days=30),
+                end_date=today + timedelta(days=90),
+            )
+        )
         device = await session.get(UserDevice, uuid.UUID(login["device_id"]))
         device.app_version = "2.6.1"
         session.add(

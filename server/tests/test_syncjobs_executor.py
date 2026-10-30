@@ -13,6 +13,7 @@ import pytest
 import structlog
 from sqlalchemy import func, select, text, update
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import (
     DevicePushToken,
@@ -83,6 +84,19 @@ class StubCourseFetcher:
         if on_fullname is not None and self.fullname is not None:
             on_fullname(self.fullname)
         return self.results
+
+
+async def _publish_term(session, code="1151"):
+    """A term in progress: the scan reminds of its courses only."""
+    today = datetime.now(UTC).date()
+    session.add(
+        SemesterTerm(
+            code=code,
+            start_date=today - timedelta(days=30),
+            end_date=today + timedelta(days=90),
+        )
+    )
+    await session.flush()
 
 
 def _worker(
@@ -598,6 +612,77 @@ async def test_successful_run_upserts_and_reschedules(
     assert len(entries) == 2
 
 
+async def test_a_run_links_the_assignments_to_the_class_table_by_the_enrolment(
+    db_session, prepared_engine, test_settings
+):
+    """The assignment list names a course by its numeric id; the run reads
+    the student's Moodle courses for their idnumbers, which name the term
+    and the course number the class table holds."""
+    user, _, _ = await _setup_user_job(db_session)
+    await _publish_term(db_session)
+    course = UserCourse(
+        user_id=user.id,
+        semester="1151",
+        course_key="client:1151:CS2006301",
+        course_no="CS2006301",
+        course_name="資料結構",
+    )
+    db_session.add(course)
+    await db_session.commit()
+    enrolled = [
+        FetchedCourse(
+            moodle_course_id=course_id,
+            short_name=None,
+            full_name="Course",
+            category_id=None,
+            enrolled_user_count=None,
+            idnumber=idnumber,
+        )
+        for course_id, idnumber in ((7001, "1151CS2006301"), (7002, "1142GE1001301"))
+    ]
+    fetched = [_fa(1), dataclasses.replace(_fa(2), moodle_course_id=7002)]
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=fetched),
+        course_fetcher=StubCourseFetcher(results=enrolled),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    rows = await db_session.execute(
+        select(
+            UserAssignment.moodle_assignment_id,
+            UserAssignment.user_course_id,
+            UserAssignment.moodle_semester,
+        ).where(UserAssignment.user_id == user.id)
+    )
+    assert sorted(rows.all()) == [(1, course.id, "1151"), (2, None, "1142")]
+
+
+async def test_a_run_whose_enrolment_fetch_fails_stores_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """Without the courses no row can be linked, so the run fails and is
+    retried like a failed list fetch."""
+    user, _, job = await _setup_user_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=StubFetcher(results=[_fa(1)]),
+        course_fetcher=StubCourseFetcher(errors=[MoodleUnreachable("http_503")]),
+    )
+
+    await run_sync_tick(worker)
+
+    await db_session.refresh(job)
+    assert (job.status, job.last_error) == ("pending", "sync_failed:http_503")
+    stored = await db_session.scalars(
+        select(UserAssignment).where(UserAssignment.user_id == user.id)
+    )
+    assert stored.all() == []
+
+
 class _ObservingFetcher(StubFetcher):
     """Runs `observe()` from inside the Moodle call, then answers."""
 
@@ -1007,11 +1092,13 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
         )
     )
     due_at = datetime.now(UTC) + timedelta(hours=30)
+    await _publish_term(db_session)
     rows = {
         "refused": UserAssignment(
             user_id=user.id,
             moodle_course_id=7001,
             moodle_assignment_id=1,
+            moodle_semester="1151",
             title="HW1",
             due_at=due_at,
         ),
@@ -1019,6 +1106,7 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
             user_id=user.id,
             moodle_course_id=7003,
             moodle_assignment_id=2,
+            moodle_semester="1151",
             title="HW2",
             due_at=due_at,
         ),

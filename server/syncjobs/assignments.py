@@ -4,7 +4,9 @@ A successful fetch is treated as the authoritative snapshot of the
 account's assignments: new rows insert, changed provider fields update,
 rows absent from the fetch soft-delete, previously-deleted rows that
 reappear resurrect, and an app's placeholder (course id 0) for an
-assignment the fetch lists becomes its row, one row per assignment.
+assignment the fetch lists becomes its row, one row per assignment. Each
+row is linked to the class table as the iPhone app files it, which is what
+the reminder scan selects by.
 Submission state is not written *here* — the
 assignment list endpoint does not carry it. `submissions.py` refreshes
 it separately for assignments about to enter a reminder window, and
@@ -17,17 +19,20 @@ Changelog appends run under the per-user sync-state lock
 
 from __future__ import annotations
 
+import re
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.academic_calendar.terms import current_term_code
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import ChangeEntityType, UserAssignment, UserCourse
-from server.syncjobs.moodle_client import FetchedAssignment
+from server.syncjobs.moodle_client import FetchedAssignment, FetchedCourse
 
 logger = structlog.get_logger(__name__)
 
@@ -68,6 +73,69 @@ def kept_extension(
     return extension
 
 
+# A course number in a co-listed course's full name, as the iPhone app's
+# `MoodleEnrolledCourse.courseNos` finds it.
+_COURSE_NO = re.compile(r"(?:3?[A-Z]{2,3}|3[A-Z])[0-9][A-Z0-9]{5,6}")
+_WORD = re.compile(r"[^\W_]+")
+_NEVER = datetime.min.replace(tzinfo=UTC)
+
+
+def moodle_semester(idnumber: str) -> str | None:
+    """The term a Moodle idnumber starts with, upper-cased as NTUST spells a
+    summer term ("114h" is "114H"), or None; `SDCourse.semesterPrefix`."""
+    prefix = idnumber[:4]
+    if len(idnumber) <= 4 or not prefix[:3].isnumeric():
+        return None
+    return prefix.upper() if prefix[3].isnumeric() or prefix[3].isalpha() else None
+
+
+def _course_nos(course: FetchedCourse) -> list[str]:
+    """The idnumber's course number, then the others in the full name."""
+    if moodle_semester(course.idnumber) is None:
+        return []
+    nos = [course.idnumber[4:]]
+    for word in _WORD.findall(course.full_name):
+        if _COURSE_NO.fullmatch(word) and word not in nos:
+            nos.append(word)
+    return nos
+
+
+def listed_courses(
+    enrolled: Sequence[FetchedCourse], class_nos: set[str], term: str
+) -> dict[int, str]:
+    """The Moodle courses whose assignments the iPhone app lists in `term`,
+    each with the course number it files them under, by Moodle course id.
+
+    The app's assignment round, `runAssignmentRound` in tigerduck-app's
+    swift/TigerDuck/Bridge/AppServiceBridge+Assignments.swift: every course
+    of the term and every class-table course, one Moodle course per number.
+    """
+    nos = {course.moodle_course_id: _course_nos(course) for course in enrolled}
+
+    def primary(course: FetchedCourse) -> str:
+        return (nos[course.moodle_course_id] or [""])[0]
+
+    wanted = class_nos | {
+        primary(c) for c in enrolled if moodle_semester(c.idnumber) == term
+    }
+    candidates = [c for c in enrolled if primary(c) and primary(c) in wanted]
+    siblings: dict[str, list[FetchedCourse]] = {}
+    for course in candidates:
+        siblings.setdefault(primary(course), []).append(course)
+    listed: dict[int, str] = {}
+    for course in candidates:
+        same = siblings[primary(course)]
+        this_term = [c for c in same if moodle_semester(c.idnumber) == term]
+        # A retaken course: this term's Moodle course, else the latest begun.
+        latest = max(same, key=lambda c: (c.start_at or _NEVER, c.moodle_course_id))
+        if course in (this_term or [latest]):
+            listed[course.moodle_course_id] = next(
+                (no for no in nos[course.moodle_course_id] if no in class_nos),
+                primary(course),
+            )
+    return listed
+
+
 @dataclass(frozen=True)
 class AssignmentSyncStats:
     fetched_count: int
@@ -82,9 +150,14 @@ async def apply_fetched_assignments(
     user_id: uuid.UUID,
     fetched: list[FetchedAssignment],
     now: datetime,
+    enrolled: Sequence[FetchedCourse] = (),
     refused_course_ids: frozenset[int] = frozenset(),
 ) -> AssignmentSyncStats:
     """Apply one Moodle answer, soft-deleting the stored rows it leaves out.
+
+    `enrolled` is the student's Moodle courses. A row of a course the iPhone
+    app lists in the current term (`listed_courses`) is linked to the class
+    table's course of that number, if there is one; any other row is not.
 
     `refused_course_ids` are the courses an answer that lost every course
     refused (`MoodleNoCourseAccess`). It says nothing about them, so their
@@ -118,19 +191,20 @@ async def apply_fetched_assignments(
         (r.moodle_course_id, r.moodle_assignment_id): r for r in existing_rows
     }
 
-    courses = (
-        (
-            await session.execute(
-                select(UserCourse).where(
-                    UserCourse.user_id == user_id,
-                    UserCourse.moodle_id.is_not(None),
-                )
+    term = await current_term_code(session, now)
+    class_table = {
+        c.course_no: c
+        for c in await session.scalars(
+            select(UserCourse).where(
+                UserCourse.user_id == user_id, UserCourse.semester == term
             )
         )
-        .scalars()
-        .all()
-    )
-    course_by_moodle_id = {c.moodle_id: c for c in courses}
+        if c.course_no
+    }
+    listed = listed_courses(enrolled, set(class_table), term) if term else {}
+    semester_by_course = {
+        c.moodle_course_id: moodle_semester(c.idnumber) for c in enrolled
+    }
 
     changed = 0
     seen: set[tuple[int, int]] = set()
@@ -139,7 +213,8 @@ async def apply_fetched_assignments(
     for item in fetched:
         key = (item.moodle_course_id, item.moodle_assignment_id)
         seen.add(key)
-        linked_course = course_by_moodle_id.get(str(item.moodle_course_id))
+        course_no = listed.get(item.moodle_course_id)
+        linked_course = class_table.get(course_no) if course_no else None
         row = existing.get(key)
         fields: list[str] = []
         placeholder_key = (0, item.moodle_assignment_id)
@@ -160,7 +235,8 @@ async def apply_fetched_assignments(
                 user_course_id=linked_course.id if linked_course else None,
                 moodle_course_id=item.moodle_course_id,
                 moodle_assignment_id=item.moodle_assignment_id,
-                course_no=linked_course.course_no if linked_course else None,
+                moodle_semester=semester_by_course.get(item.moodle_course_id),
+                course_no=course_no,
                 course_name=item.course_name,
                 title=item.title,
                 due_at=item.due_at,
@@ -188,10 +264,14 @@ async def apply_fetched_assignments(
             if getattr(row, field_name) != new_value:
                 setattr(row, field_name, new_value)
                 fields.append(field_name)
-        if linked_course is not None and row.user_course_id != linked_course.id:
-            row.user_course_id = linked_course.id
-            row.course_no = linked_course.course_no
+        linked_id = linked_course.id if linked_course else None
+        if row.user_course_id != linked_id:
+            row.user_course_id = linked_id
             fields.append("user_course_id")
+        if course_no is not None and row.course_no != course_no:
+            row.course_no = course_no
+            fields.append("course_no")
+        row.moodle_semester = semester_by_course.get(item.moodle_course_id)
         if row.deleted_at is not None:
             row.deleted_at = None
             fields.append("deleted_at")

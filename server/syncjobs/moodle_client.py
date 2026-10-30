@@ -186,6 +186,9 @@ class FetchedCourse:
     full_name: str
     category_id: int | None
     enrolled_user_count: int | None
+    # Term and course number, "1151CS1001301"; the apps' course rows carry the same.
+    idnumber: str = ""
+    start_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -845,6 +848,8 @@ class HttpCourseFetcher:
                 full_name=str(c.get("fullname") or c.get("shortname") or ""),
                 category_id=c.get("categoryid"),
                 enrolled_user_count=c.get("enrolledusercount"),
+                idnumber=str(c.get("idnumber") or ""),
+                start_at=_ts(c.get("startdate")),
             )
             for c in body
             if isinstance(c.get("id"), int)

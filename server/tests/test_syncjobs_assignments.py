@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.models import User
 from server.sync.models import (
     UserAssignment,
@@ -14,8 +16,16 @@ from server.sync.models import (
     UserChangeLog,
     UserCourse,
 )
-from server.syncjobs.assignments import apply_fetched_assignments
-from server.syncjobs.moodle_client import FetchedAssignment
+from server.syncjobs.assignments import (
+    apply_fetched_assignments,
+    listed_courses,
+    moodle_semester,
+)
+from server.syncjobs.moodle_client import (
+    FetchedAssignment,
+    FetchedCourse,
+    HttpCourseFetcher,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -178,31 +188,222 @@ async def test_absent_assignment_soft_deleted_then_resurrected(db_session):
     assert entries[-1].operation == "upsert"
 
 
-async def test_links_assignment_to_course_by_moodle_id(db_session):
-    user = await _make_user(db_session)
+def _course(course_id, idnumber, fullname="", start=None) -> FetchedCourse:
+    return FetchedCourse(
+        moodle_course_id=course_id,
+        short_name="",
+        full_name=fullname or f"{idnumber} Course",
+        category_id=None,
+        enrolled_user_count=None,
+        idnumber=idnumber,
+        start_at=start,
+    )
+
+
+@pytest.mark.parametrize(
+    ("idnumber", "semester"),
+    [
+        ("1142EC1013701", "1142"),
+        ("114hGD3115301", "114H"),
+        ("11413CS3003302", "1141"),
+        ("1142", None),
+        ("", None),
+        ("TRAINING-2026", None),
+    ],
+)
+async def test_the_term_of_a_moodle_idnumber(idnumber, semester):
+    assert moodle_semester(idnumber) == semester
+
+
+async def test_the_app_lists_this_terms_courses_and_the_class_tables():
+    """Moodle keeps past enrolments open. The app lists every course of the
+    term and a class-table course whose Moodle course is another term's, not
+    an older course or a course without a term."""
+    enrolled = [
+        _course(1, "1151CS1001301"),
+        _course(2, "1151EE2005301"),
+        _course(3, "1142PE1001301"),
+        _course(4, "1142CS2006301"),
+        _course(5, ""),
+    ]
+    assert listed_courses(enrolled, {"CS1001301", "PE1001301"}, "1151") == {
+        1: "CS1001301",
+        2: "EE2005301",
+        3: "PE1001301",
+    }
+
+
+async def test_a_retaken_course_is_listed_in_its_latest_moodle_course():
+    """One Moodle course per course number: this term's, else the one that
+    began last."""
+    failed = _course(10, "1132CS1001301", start=datetime(2025, 2, 1, tzinfo=UTC))
+    older = _course(20, "1131EE2005301", start=datetime(2024, 9, 1, tzinfo=UTC))
+    newer = _course(30, "1141EE2005301", start=datetime(2025, 9, 1, tzinfo=UTC))
+    retaken = _course(40, "1151CS1001301", start=datetime(2026, 9, 1, tzinfo=UTC))
+    listed = listed_courses(
+        [failed, older, newer, retaken], {"CS1001301", "EE2005301"}, "1151"
+    )
+    assert listed == {30: "EE2005301", 40: "CS1001301"}
+
+
+async def test_a_co_listed_course_is_filed_under_the_class_tables_code():
+    """A co-listed course's idnumber carries one department's code and its
+    full name the other's; the class table holds the student's own."""
+    co_listed = _course(
+        19739,
+        "1151AS5140701",
+        fullname="115.1【半導體研究所】AS5140701 電腦輔助晶片系統設計"
+        " / 【資工系】CS5140701 電腦輔助晶片系統設計",
+    )
+    assert listed_courses([co_listed], {"CS5140701"}, "1151") == {19739: "CS5140701"}
+    assert listed_courses([co_listed], set(), "1151") == {19739: "AS5140701"}
+
+
+async def test_the_course_fetch_reads_each_courses_idnumber_and_start():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["wsfunction"] == "core_webservice_get_site_info":
+            return httpx.Response(200, json={"userid": 42})
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 7001, "fullname": "DS", "idnumber": "1151CS2006301",
+                 "startdate": 1788220800},
+                {"id": 7002, "fullname": "Training", "idnumber": "", "startdate": 0},
+            ],
+        )
+
+    fetcher = HttpCourseFetcher(
+        base_url="https://moodle.example.edu",
+        timeout_seconds=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    courses = await fetcher.fetch_courses(token="tok")
+
+    assert [(c.idnumber, c.start_at) for c in courses] == [
+        ("1151CS2006301", datetime(2026, 9, 1, 0, 0, tzinfo=UTC)),
+        ("", None),
+    ]
+
+
+async def _publish_term(session, code="1151"):
+    today = NOW.date()
+    session.add(
+        SemesterTerm(
+            code=code,
+            start_date=today - timedelta(days=30),
+            end_date=today + timedelta(days=90),
+        )
+    )
+    await session.flush()
+
+
+async def _class_table_course(session, user, course_no, semester="1151"):
     course = UserCourse(
         user_id=user.id,
-        semester="1142",
-        course_key="CS2006301",
-        course_no="CS2006301",
+        semester=semester,
+        course_key=f"client:{semester}:{course_no}",
+        course_no=course_no,
         course_name="資料結構",
-        moodle_id="7001",
+        moodle_id=f"{semester}{course_no}",
     )
-    db_session.add(course)
-    await db_session.flush()
+    session.add(course)
+    await session.flush()
+    return course
+
+
+async def _rows(session, user):
+    return {
+        r.moodle_assignment_id: r
+        for r in await session.scalars(
+            select(UserAssignment)
+            .where(UserAssignment.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+    }
+
+
+async def test_links_an_assignment_to_the_class_table_course_the_app_files_it_under(
+    db_session,
+):
+    """The apps send a course's term and number; Moodle's assignment list
+    names the course by its numeric id, which only the enrolment list ties to
+    the idnumber, the term and the number."""
+    user = await _make_user(db_session)
+    await _publish_term(db_session)
+    course = await _class_table_course(db_session, user, "CS2006301")
+    await _class_table_course(db_session, user, "CS2006301", semester="1142")
+    enrolled = [
+        _course(7001, "1151CS2006301"),
+        _course(7002, "1151GE1001301"),
+        _course(7003, "1141MA1001301"),
+    ]
 
     await apply_fetched_assignments(
-        db_session, user_id=user.id, fetched=[_fa(1)], now=NOW
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1), _fa(2, moodle_course_id=7002), _fa(3, moodle_course_id=7003)],
+        now=NOW,
+        enrolled=enrolled,
     )
     await db_session.commit()
 
-    row = (
-        await db_session.execute(
-            select(UserAssignment).where(UserAssignment.user_id == user.id)
-        )
-    ).scalar_one()
-    assert row.user_course_id == course.id
-    assert row.course_no == "CS2006301"
+    rows = await _rows(db_session, user)
+    assert [
+        (rows[i].user_course_id, rows[i].course_no, rows[i].moodle_semester)
+        for i in (1, 2, 3)
+    ] == [
+        (course.id, "CS2006301", "1151"),
+        (None, "GE1001301", "1151"),
+        (None, None, "1141"),
+    ]
+
+
+async def test_a_course_no_longer_listed_loses_its_link(db_session):
+    user = await _make_user(db_session)
+    await _publish_term(db_session)
+    course = await _class_table_course(db_session, user, "CS1001301")
+    old = _course(7001, "1142CS1001301", start=datetime(2026, 2, 1, tzinfo=UTC))
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1)], now=NOW, enrolled=[old]
+    )
+    await db_session.commit()
+    assert (await _rows(db_session, user))[1].user_course_id == course.id
+
+    # This term's Moodle course of the number opens; the app drops the old one.
+    retaken = _course(7101, "1151CS1001301", start=datetime(2026, 9, 1, tzinfo=UTC))
+    stats = await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1), _fa(2, moodle_course_id=7101)],
+        now=NOW,
+        enrolled=[old, retaken],
+    )
+    await db_session.commit()
+
+    rows = await _rows(db_session, user)
+    assert (rows[1].user_course_id, rows[2].user_course_id) == (None, course.id)
+    assert stats.changed_count == 2
+    assert (await _changelog(db_session, user.id))[-2].payload == {
+        "fields": ["user_course_id"]
+    }
+
+
+async def test_with_no_term_published_nothing_is_linked(db_session):
+    user = await _make_user(db_session)
+    await _class_table_course(db_session, user, "CS2006301")
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1)],
+        now=NOW,
+        enrolled=[_course(7001, "1151CS2006301")],
+    )
+    await db_session.commit()
+
+    row = (await _rows(db_session, user))[1]
+    assert (row.user_course_id, row.moodle_semester) == (None, "1151")
 
 
 async def test_never_touches_provider_submission_fields(db_session):

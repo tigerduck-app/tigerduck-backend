@@ -378,6 +378,9 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
         else:
             try:
                 fetched = await worker.fetcher.fetch_assignments(token=token)
+                enrolled = await worker.course_fetcher.fetch_courses(
+                    token=token, on_fullname=names.append
+                )
             except MoodleTokenInvalid:
                 raise CredentialInvalid("moodle_token_invalid")
             except MoodleNoCourseAccess as exc:
@@ -409,7 +412,11 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                 await log_sync(session, user_id=user_id, source="executor",
                                message=f"Fetched {len(fetched)} assignments from Moodle")
                 stats = await apply_fetched_assignments(
-                    session, user_id=user_id, fetched=fetched, now=now
+                    session,
+                    user_id=user_id,
+                    fetched=fetched,
+                    now=now,
+                    enrolled=enrolled,
                 )
             else:
                 await log_sync(session, user_id=user_id, source="executor",
