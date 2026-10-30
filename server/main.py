@@ -27,7 +27,7 @@ from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
-from server.config import Settings, get_settings
+from server.config import Settings, get_settings, require_readable_files
 from server.db import build_engine, build_session_factory, session_scope
 from server.i18n import require_fallback_bundle
 from server.logging_setup import configure as configure_logging
@@ -263,6 +263,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # and the sync worker both run in this process (the scheduler below),
     # so this one check covers every sender.
     require_fallback_bundle()
+    require_readable_files(settings)
 
     if settings.skip_llm_probe:
         logger.info("llm.skipped", base_url=settings.llm_base_url)

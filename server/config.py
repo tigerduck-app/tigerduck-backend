@@ -379,3 +379,28 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
+
+
+def require_readable_files(settings: Settings) -> None:
+    """Fails startup on a configured file this process cannot read. A missing
+    key file turns its feature off, but one hidden by its permissions, as
+    after a change of the container's user, must not do that silently."""
+    files = {
+        "TIGERDUCK_APNS_KEY_PATH": settings.apns_key_path,
+        "TIGERDUCK_FCM_CREDENTIALS_PATH": settings.fcm_credentials_path,
+        "TIGERDUCK_TLS_PIN_SIGNING_KEY_PATH": settings.tls_pin_signing_key_path,
+        "TIGERDUCK_BULLETIN_CA_BUNDLE": settings.bulletin_ca_bundle,
+    }
+    for name, path in files.items():
+        if path is None:
+            continue
+        try:
+            path.open("rb").close()
+        except FileNotFoundError:
+            # The bundle has no default, so a missing one was asked for.
+            if name == "TIGERDUCK_BULLETIN_CA_BUNDLE":
+                raise RuntimeError(f"{name} names {path}, which does not exist") from None
+        except OSError as exc:
+            raise RuntimeError(
+                f"{name} names {path}, which this process cannot read: {exc.strerror}"
+            ) from None
