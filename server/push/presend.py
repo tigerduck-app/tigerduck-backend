@@ -91,9 +91,11 @@ class MoodleBreaker:
     `unverified` without asking: an outage then costs one failed call a
     tick, not one a job. Moodle's own refusal in a JSON answer, such as a
     dead token or a suspended account, is one user's and leaves it shut.
+    The pipeline runs checks side by side only once `answered`.
     """
 
     opened_by: str | None = None
+    answered: bool = False
 
 
 def needs_check(job: PushJob) -> bool:
@@ -148,7 +150,7 @@ async def check_before_send(
             )
         except CredentialInvalid as exc:
             return _unverified(exc.reason)
-    return await _ask_moodle(
+    verdict = await _ask_moodle(
         fetcher,
         timeout=worker.settings.push_presend_timeout_seconds,
         token=token,
@@ -157,6 +159,8 @@ async def check_before_send(
         extended=extended,
         breaker=breaker,
     )
+    breaker.answered = breaker.answered or breaker.opened_by is None
+    return verdict
 
 
 async def recheck_rows(

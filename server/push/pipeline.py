@@ -24,9 +24,10 @@ FOR UPDATE SKIP LOCKED, then each job runs in its own transaction:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
-from collections.abc import Collection
+from collections.abc import Awaitable, Collection
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -127,6 +128,9 @@ _DEVICE_CHANNELS = frozenset({SCHEDULE_CHANNEL, "custom"})
 _COUNTDOWN_WAIT_UNTIL = timedelta(seconds=30)
 _COUNTDOWN_WAIT = timedelta(seconds=60)
 
+# Pre-send checks of a batch out to Moodle at once.
+_PRESEND_CONCURRENCY = 4
+
 
 @dataclass(frozen=True)
 class PushPipelineWorker:
@@ -193,13 +197,53 @@ async def run_push_tick(worker: PushPipelineWorker) -> int:
         claimed = await _claim_due_jobs(worker, skip=processed)
         if not claimed:
             break
-        for index, (job_id, priority) in enumerate(claimed):
-            if index and await _outranked(worker, priority, skip=processed):
-                await _release_claimed(worker, [jid for jid, _ in claimed[index:]])
-                break
-            await _process_job(worker, job_id=job_id, breaker=breaker)
-            processed.add(job_id)
+        checks = _start_checks(worker, claimed, breaker)
+        try:
+            for index, (job_id, priority, _) in enumerate(claimed):
+                if index and await _outranked(worker, priority, skip=processed):
+                    await _release_claimed(
+                        worker, [jid for jid, _, _ in claimed[index:]]
+                    )
+                    break
+                await _process_job(
+                    worker, job_id=job_id, pending_check=checks.pop(job_id, None)
+                )
+                processed.add(job_id)
+        finally:
+            for task in checks.values():
+                task.cancel()
+            await asyncio.gather(*checks.values(), return_exceptions=True)
     return len(processed)
+
+
+def _start_checks(
+    worker: PushPipelineWorker,
+    claimed: list[tuple[int, int, bool]],
+    breaker: MoodleBreaker,
+) -> dict[int, asyncio.Task[PresendCheck | None]]:
+    """Start the pre-send checks of a claimed batch, a few at a time, ahead
+    of its sends: one by one, a deadline rush's Moodle calls held every job
+    behind them (#98)."""
+    limit = asyncio.Semaphore(_PRESEND_CONCURRENCY)
+    alone = asyncio.Lock()
+
+    async def check(job_id: int) -> PresendCheck | None:
+        # In claim order until Moodle answers in this tick, so an outage still
+        # costs one call (`MoodleBreaker`).
+        if not breaker.answered:
+            async with alone:
+                if not breaker.answered:
+                    return await check_before_send(
+                        worker, job_id=job_id, breaker=breaker
+                    )
+        async with limit:
+            return await check_before_send(worker, job_id=job_id, breaker=breaker)
+
+    return {
+        job_id: asyncio.create_task(check(job_id))
+        for job_id, _, checked in claimed
+        if checked
+    }
 
 
 async def _recover_stale_jobs(worker: PushPipelineWorker) -> None:
@@ -257,9 +301,10 @@ def _due(now: datetime, skip: Collection[int]) -> tuple[ColumnElement[bool], ...
 
 async def _claim_due_jobs(
     worker: PushPipelineWorker, *, skip: Collection[int] = ()
-) -> list[tuple[int, int]]:
+) -> list[tuple[int, int, bool]]:
     """Claim up to a batch of due jobs, leaving out the ids in `skip`.
-    Returns (id, priority) pairs, most urgent first."""
+    Returns (id, priority, whether the pre-send check guards it), most
+    urgent first."""
     now = datetime.now(UTC)
     async with session_scope(worker.session_factory) as session:
         await session.execute(select(func.pg_advisory_xact_lock(_CLAIM_LOCK_KEY)))
@@ -280,7 +325,7 @@ async def _claim_due_jobs(
             job.status = PushJobStatus.processing.value
             job.locked_by = worker.worker_id
             job.locked_at = now
-        return [(job.id, job.priority) for job in jobs]
+        return [(job.id, job.priority, needs_check(job)) for job in jobs]
 
 
 async def _outranked(
@@ -327,12 +372,15 @@ async def _release_claimed(worker: PushPipelineWorker, job_ids: list[int]) -> No
 
 
 async def _process_job(
-    worker: PushPipelineWorker, *, job_id: int, breaker: MoodleBreaker
+    worker: PushPipelineWorker,
+    *,
+    job_id: int,
+    pending_check: Awaitable[PresendCheck | None] | None,
 ) -> None:
     try:
         # Asked before the job's row lock is taken: the check may wait on
         # Moodle, and no transaction stays open while it does.
-        check = await check_before_send(worker, job_id=job_id, breaker=breaker)
+        check = await pending_check if pending_check is not None else None
         async with session_scope(worker.session_factory) as session:
             await lift_timeouts(session)
             job = (
