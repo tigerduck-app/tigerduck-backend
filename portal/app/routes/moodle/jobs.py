@@ -37,15 +37,21 @@ async def _waiting_to_sign_in(conn) -> list:
 async def _notify_expired(conn, user_ids: list) -> int:
     if not user_ids:
         return 0
+    # Keyed by when the failing credential was stored, as the server keys its
+    # own prompt: a sent one keeps its key for days, and the next must go.
     result = await conn.execute("""
         INSERT INTO push_jobs (user_id, dedupe_key, channel, scenario, fire_at, payload)
         SELECT u,
-               'system:moodle_expired:' || u::text,
+               'system:moodle_expired:' || u::text || coalesce(
+                   ':' || (extract(epoch FROM ea.last_auth_success_at) * 1000000)::bigint,
+                   ''
+               ),
                'system',
                'reauth_required',
                now(),
                '{"reason": "operator_retry", "provider": "ntust_sso"}'::jsonb
         FROM unnest($1::uuid[]) AS u
+        LEFT JOIN external_accounts ea ON ea.user_id = u AND ea.provider = 'ntust_sso'
         ON CONFLICT DO NOTHING
     """, user_ids)
     return int(result.split()[-1]) if result else 0
