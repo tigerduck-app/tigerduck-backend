@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
@@ -233,10 +234,20 @@ async def _user_with_assignment(
     if with_iphone:
         # The scan files reminders only for a user something can receive.
         await _iphone(session, user, "iphone-default", "zh-Hant-TW")
+    # A course of the term in progress, which the scan reminds of.
+    today = datetime.now(UTC).date()
+    session.add(
+        SemesterTerm(
+            code="1151",
+            start_date=today - timedelta(days=30),
+            end_date=today + timedelta(days=90),
+        )
+    )
     assignment = UserAssignment(
         user_id=user.id,
         moodle_course_id=7001,
         moodle_assignment_id=3,
+        moodle_semester="1151",
         course_name=COURSE,
         title=ASSIGNMENT,
         due_at=datetime.now(UTC) + timedelta(hours=due_in_hours),
