@@ -120,7 +120,9 @@ async def _notification_prefs(
     )
     for doc in docs:
         section = (doc.document or {}).get("assignments") or {}
-        enabled = bool(section.get("enabled", True))
+        # Absent means on; anything but a JSON boolean is malformed and counts
+        # as off, as for class reminders (#104).
+        enabled = section.get("enabled", True) is True
         prefs[doc.user_id] = (enabled, _offsets_hours(section, default[1]))
     return prefs
 
@@ -147,7 +149,11 @@ def _offsets_hours(section: dict, default: list[float]) -> list[float]:
 
 
 def _numbers(raw: list) -> list[float]:
-    return [float(value) for value in raw if isinstance(value, (int, float))]
+    return [
+        float(value)
+        for value in raw
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
 
 
 async def ignored_courses(
