@@ -149,17 +149,20 @@ async def login(
             )
         )
         user = await _find_or_create_user(session, student_id=student_id, now=now)
-        # Also the accounts of other students on this device, whose rows
-        # `_upsert_device` deletes.
-        previous_owners = (
-            await session.execute(
-                select(UserDevice.user_id).where(
-                    UserDevice.client_device_id == device_info.client_device_id,
-                    UserDevice.user_id != user.id,
+        # A change it made to the users row is written after the account lock,
+        # the order a deregister takes them in (server/AGENTS.md).
+        with session.no_autoflush:
+            # Also the accounts of other students on this device, whose rows
+            # `_upsert_device` deletes.
+            previous_owners = (
+                await session.execute(
+                    select(UserDevice.user_id).where(
+                        UserDevice.client_device_id == device_info.client_device_id,
+                        UserDevice.user_id != user.id,
+                    )
                 )
-            )
-        ).scalars().all()
-        await lock_accounts(session, user.id, *previous_owners)
+            ).scalars().all()
+            await lock_accounts(session, user.id, *previous_owners)
         account = await _upsert_external_account(
             session, user=user, student_id=student_id
         )
