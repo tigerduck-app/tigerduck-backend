@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -103,15 +105,16 @@ async def delete_in_batches(
     *where: ColumnElement[bool],
     returning: Sequence[Any] = (),
     then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None = None,
-) -> int:
+) -> tuple[int, bool]:
     """Delete `model`'s rows that match `where`, oldest id first and
-    `PRUNE_BATCH_ROWS` per transaction, and return how many went.
+    `PRUNE_BATCH_ROWS` per transaction; return how many went and whether it
+    stopped early.
 
     Each batch reads on from the last id the one before read. `then` runs in
     each batch's transaction with the rows it deleted: their `id` and the
     `returning` columns. `model` has a `user_id`: a batch first locks the
     accounts of its rows (server/AGENTS.md has the order). A batch aborted as
-    a deadlock is tried again; after `PRUNE_BATCH_ATTEMPTS` the run ends, and
+    a deadlock is tried again; after `PRUNE_BATCH_ATTEMPTS` it stops early, and
     the next night's run picks up the rest.
     """
     deleted, after = 0, 0
@@ -131,11 +134,20 @@ async def delete_in_batches(
                     after_id=after,
                     attempt=attempt,
                 )
+                if attempt < PRUNE_BATCH_ATTEMPTS:
+                    # Jittered, so the transaction it lost to can finish first.
+                    await asyncio.sleep(random.uniform(0.1, 0.5))
         else:
-            return deleted
+            logger.error(
+                "retention.batch.gave_up",
+                table=model.__tablename__,
+                after_id=after,
+                deleted=deleted,
+            )
+            return deleted, True
         deleted += len(rows)
         if len(batch) < PRUNE_BATCH_ROWS:
-            return deleted
+            return deleted, False
         after = batch[-1].id
 
 

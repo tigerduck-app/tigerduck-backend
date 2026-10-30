@@ -31,7 +31,7 @@ async def prune_expired_sessions(
     settings: Settings,
 ) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=settings.auth_session_retention_days)
-    deleted = await delete_in_batches(
+    deleted, stopped_early = await delete_in_batches(
         session_factory,
         AuthSession,
         AuthSession.expires_at < cutoff,
@@ -47,6 +47,7 @@ async def prune_expired_sessions(
     logger.info(
         "auth.sessions.retention.done",
         deleted=deleted,
+        stopped_early=stopped_early,
         cutoff=cutoff.isoformat(),
         retention_days=settings.auth_session_retention_days,
     )

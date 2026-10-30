@@ -24,15 +24,20 @@ async def prune_sync_history(
     settings: Settings,
 ) -> int:
     cutoff = datetime.now(UTC) - timedelta(days=settings.sync_history_retention_days)
-    entries = await delete_in_batches(
+    entries, stopped_early = await delete_in_batches(
         session_factory, SyncLogEntry, SyncLogEntry.ts < cutoff
     )
-    # A run still going has no finished_at, and the executor still writes it.
-    runs = await delete_in_batches(session_factory, SyncRun, SyncRun.finished_at < cutoff)
+    runs = 0
+    if not stopped_early:
+        # A run still going has no finished_at, and the executor still writes it.
+        runs, stopped_early = await delete_in_batches(
+            session_factory, SyncRun, SyncRun.finished_at < cutoff
+        )
     logger.info(
         "syncjobs.retention.done",
         log_entries=entries,
         runs=runs,
+        stopped_early=stopped_early,
         cutoff=cutoff.isoformat(),
         retention_days=settings.sync_history_retention_days,
     )

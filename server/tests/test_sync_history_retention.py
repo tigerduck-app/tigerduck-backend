@@ -8,7 +8,9 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+import structlog
 from sqlalchemy import select, text, update
+from structlog.testing import capture_logs
 
 from server import db
 from server.auth.models import ExternalAccount, User
@@ -18,6 +20,7 @@ from server.scheduler.runtime import build_scheduler
 from server.sync.models import UserChangeLog
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.models import SyncJob, SyncLogEntry, SyncRun
+from server.syncjobs import retention as sync_retention
 from server.syncjobs.retention import prune_sync_history
 from server.tests.test_sync_api import bearer, do_login, seed_changes
 
@@ -62,7 +65,7 @@ async def test_a_purge_deletes_one_batch_per_transaction(
         then=record,
     )
 
-    assert deleted == 5
+    assert deleted == (5, False)
     assert batches == [["0", "1"], ["2", "3"], ["4"]]
 
 
@@ -89,13 +92,13 @@ async def test_a_batch_aborted_as_a_deadlock_is_tried_again(
         then=deadlocked_once,
     )
 
-    assert (deleted, tries) == (1, [1, 1])
+    assert (deleted, tries) == ((1, False), [1, 1])
     left = (await db_session.execute(select(SyncLogEntry.message))).scalars().all()
     assert left == ["recent"]
 
 
 async def test_a_batch_deadlocked_every_time_ends_the_run(
-    db_session, prepared_engine
+    db_session, prepared_engine, monkeypatch
 ) -> None:
     await _log(db_session, ("old", OLD))
     tries = []
@@ -104,16 +107,38 @@ async def test_a_batch_deadlocked_every_time_ends_the_run(
         tries.append(len(rows))
         await session.execute(_DEADLOCK)
 
-    deleted = await db.delete_in_batches(
-        build_session_factory(prepared_engine),
-        SyncLogEntry,
-        SyncLogEntry.ts < NOW - timedelta(days=30),
-        then=deadlocked,
-    )
+    # A cached logger keeps an earlier app's processors, out of capture_logs' reach.
+    monkeypatch.setattr(db, "logger", structlog.get_logger(db.__name__))
+    with capture_logs() as logs:
+        deleted = await db.delete_in_batches(
+            build_session_factory(prepared_engine),
+            SyncLogEntry,
+            SyncLogEntry.ts < NOW - timedelta(days=30),
+            then=deadlocked,
+        )
 
-    assert (deleted, len(tries)) == (0, db.PRUNE_BATCH_ATTEMPTS)
+    assert (deleted, len(tries)) == ((0, True), db.PRUNE_BATCH_ATTEMPTS)
+    assert [log["table"] for log in logs if log["event"] == "retention.batch.gave_up"] == [
+        "sync_log_entries"
+    ]
     left = (await db_session.execute(select(SyncLogEntry.message))).scalars().all()
     assert left == ["old"]
+
+
+async def test_the_night_ends_when_the_log_purge_stops_early(monkeypatch) -> None:
+    purged = []
+
+    async def gave_up(factory, model, *where):
+        purged.append(model)
+        return 3, True
+
+    monkeypatch.setattr(sync_retention, "delete_in_batches", gave_up)
+    monkeypatch.setattr(sync_retention, "logger", structlog.get_logger(sync_retention.__name__))
+    with capture_logs() as logs:
+        deleted = await prune_sync_history(None, SETTINGS)
+
+    assert (deleted, purged) == (3, [SyncLogEntry])
+    assert [log["stopped_early"] for log in logs] == [True]
 
 
 async def test_log_entries_past_the_window_go(db_session, prepared_engine) -> None:
