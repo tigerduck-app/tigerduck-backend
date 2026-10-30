@@ -214,6 +214,7 @@ class AssignmentFetcher(Protocol):
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]: ...
 
 
@@ -225,7 +226,11 @@ class SubmissionStatusChecker(Protocol):
 
 class CourseFetcher(Protocol):
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]: ...
 
 
@@ -524,6 +529,7 @@ class HttpAssignmentFetcher:
         assignment_ids: list[int],
         max_concurrency: int,
         on_fullname: Callable[[str], None] | None = None,
+        userid: int | None = None,
     ) -> dict[int, FetchedSubmission]:
         """Submission state for the given assignments, keyed by assignment id.
 
@@ -582,9 +588,10 @@ class HttpAssignmentFetcher:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
             ) as client:
-                userid = await _get_moodle_userid(
-                    client, self._base_url, token, on_fullname
-                )
+                if userid is None:
+                    userid = await _get_moodle_userid(
+                        client, self._base_url, token, on_fullname
+                    )
 
                 async def probe(assignment_id: int) -> None:
                     # This `try` wraps `probe`'s *whole body*, not just the
@@ -805,8 +812,14 @@ class HttpCourseFetcher:
         self._transport = transport
 
     async def fetch_courses(
-        self, *, token: str, on_fullname: Callable[[str], None] | None = None
+        self,
+        *,
+        token: str,
+        on_fullname: Callable[[str], None] | None = None,
+        on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]:
+        """The user's Moodle courses, handing the user id the site info
+        answers to `on_userid`, so the same run's submission probe skips it."""
         try:
             async with httpx.AsyncClient(
                 timeout=self._timeout, transport=self._transport
@@ -814,6 +827,8 @@ class HttpCourseFetcher:
                 userid = await _get_moodle_userid(
                     client, self._base_url, token, on_fullname
                 )
+                if on_userid is not None:
+                    on_userid(userid)
                 params = {
                     "wstoken": token,
                     "wsfunction": "core_enrol_get_users_courses",

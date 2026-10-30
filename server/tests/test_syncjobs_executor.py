@@ -43,6 +43,7 @@ from server.syncjobs.moodle_client import (
     FetchedCourse,
     FetchedSubmission,
     HttpAssignmentFetcher,
+    HttpCourseFetcher,
     MoodleRateLimited,
     MoodleTokenInvalid,
     MoodleUnreachable,
@@ -78,7 +79,7 @@ class StubCourseFetcher:
         self.errors = list(errors)
         self.fullname = fullname
 
-    async def fetch_courses(self, *, token, on_fullname=None):
+    async def fetch_courses(self, *, token, on_fullname=None, on_userid=None):
         if self.errors:
             raise self.errors.pop(0)
         if on_fullname is not None and self.fullname is not None:
@@ -660,27 +661,101 @@ async def test_a_run_links_the_assignments_to_the_class_table_by_the_enrolment(
     assert sorted(rows.all()) == [(1, course.id, "1151"), (2, None, "1142")]
 
 
-async def test_a_run_whose_enrolment_fetch_fails_stores_nothing(
+async def test_a_course_list_failure_keeps_the_assignment_fetch(
     db_session, prepared_engine, test_settings
 ):
-    """Without the courses no row can be linked, so the run fails and is
-    retried like a failed list fetch."""
+    """The course list only links the rows. When it fails, the assignments
+    Moodle listed are still stored and the rows it left out deleted, the links
+    stay as they were, and the run fails so the job backs off."""
     user, _, job = await _setup_user_job(db_session)
+    course = UserCourse(
+        user_id=user.id,
+        semester="1151",
+        course_key="client:1151:CS2006301",
+        course_no="CS2006301",
+        course_name="資料結構",
+    )
+    db_session.add(course)
+    await db_session.flush()
+    for aid in (2, 3):
+        db_session.add(
+            UserAssignment(
+                user_id=user.id,
+                moodle_course_id=7001,
+                moodle_assignment_id=aid,
+                moodle_semester="1151",
+                user_course_id=course.id,
+                course_no="CS2006301",
+                title=f"HW{aid}",
+            )
+        )
+    await db_session.commit()
+    due_at = datetime.now(UTC) + timedelta(days=3)
     worker = _worker(
         prepared_engine,
         test_settings,
-        fetcher=StubFetcher(results=[_fa(1)]),
-        course_fetcher=StubCourseFetcher(errors=[MoodleUnreachable("http_503")]),
+        fetcher=StubFetcher(results=[_fa(1, due_at=due_at), _fa(3, due_at=due_at)]),
+        course_fetcher=StubCourseFetcher(errors=[MoodleRateLimited("http_429")]),
     )
 
     await run_sync_tick(worker)
 
     await db_session.refresh(job)
-    assert (job.status, job.last_error) == ("pending", "sync_failed:http_503")
-    stored = await db_session.scalars(
-        select(UserAssignment).where(UserAssignment.user_id == user.id)
+    assert (job.status, job.last_error) == ("pending", "school_rate_limited")
+    rows = await db_session.execute(
+        select(
+            UserAssignment.moodle_assignment_id,
+            UserAssignment.deleted_at.is_not(None),
+            UserAssignment.due_at,
+            UserAssignment.user_course_id,
+            UserAssignment.moodle_semester,
+        )
+        .where(UserAssignment.user_id == user.id)
+        .order_by(UserAssignment.moodle_assignment_id)
     )
-    assert stored.all() == []
+    assert [tuple(row) for row in rows] == [
+        (1, False, due_at, None, None),
+        (2, True, None, course.id, "1151"),
+        (3, False, due_at, course.id, "1151"),
+    ]
+
+
+async def test_a_run_asks_moodle_who_the_user_is_once(
+    db_session, prepared_engine, test_settings
+):
+    """The course list and the submission probe both need the user's Moodle
+    id; the probe takes the one the course list asked for."""
+    await _setup_user_job(db_session)
+    due = int((datetime.now(UTC) + timedelta(hours=10)).timestamp())
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        function = request.url.params["wsfunction"]
+        asked.append(function)
+        if function == "mod_assign_get_assignments":
+            course = {"id": 7001, "fullname": "DS", "assignments": [
+                {"id": 1, "cmid": 11, "name": "HW1", "duedate": due}
+            ]}
+            return httpx.Response(200, json={"courses": [course], "warnings": []})
+        if function == "core_webservice_get_site_info":
+            return httpx.Response(200, json={"userid": 42, "fullname": "Student"})
+        if function == "core_enrol_get_users_courses":
+            return httpx.Response(200, json=[{"id": 7001, "idnumber": "1151CS2006301"}])
+        return httpx.Response(200, json={"lastattempt": {}})
+
+    transport = httpx.MockTransport(handler)
+    base = "https://moodle.example.edu"
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=HttpAssignmentFetcher(base, 5.0, transport=transport),
+        course_fetcher=HttpCourseFetcher(base, 5.0, transport=transport),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert "mod_assign_get_submission_status" in asked
+    assert asked.count("core_webservice_get_site_info") == 1
 
 
 class _ObservingFetcher(StubFetcher):
@@ -1092,13 +1167,11 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
         )
     )
     due_at = datetime.now(UTC) + timedelta(hours=30)
-    await _publish_term(db_session)
     rows = {
         "refused": UserAssignment(
             user_id=user.id,
             moodle_course_id=7001,
             moodle_assignment_id=1,
-            moodle_semester="1151",
             title="HW1",
             due_at=due_at,
         ),
@@ -1106,7 +1179,6 @@ async def test_an_answer_that_lost_every_course_withdraws_a_course_it_left_out(
             user_id=user.id,
             moodle_course_id=7003,
             moodle_assignment_id=2,
-            moodle_semester="1151",
             title="HW2",
             due_at=due_at,
         ),
@@ -2081,7 +2153,7 @@ async def test_the_submission_probe_fills_in_a_missing_name(
 ):
     user, _, _ = await _setup_user_job(db_session)
 
-    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
         on_fullname("Test Student")
         return {}
 
@@ -2141,7 +2213,7 @@ async def test_a_name_the_database_refuses_keeps_the_probe_result(
     user, _, _ = await _setup_user_job(db_session)
     user_id = user.id
 
-    async def probe(*, token, assignment_ids, max_concurrency, on_fullname):
+    async def probe(*, token, assignment_ids, max_concurrency, on_fullname, **_):
         on_fullname(_REFUSED_NAME)
         return {
             1: FetchedSubmission(
