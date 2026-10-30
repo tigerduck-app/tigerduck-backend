@@ -58,6 +58,7 @@ from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
 from server.push.pipeline import PushPipelineWorker
 from server.scheduler.runtime import build_scheduler
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, default_worker_id
 from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpCourseFetcher
 from server.syncjobs.policies import ensure_default_policies
@@ -285,23 +286,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await restore_host_gauges(pin_session)
     router = build_router(settings)
     cipher = app.state.credential_cipher
-    # Read by the sync worker and by the push pipeline's pre-send check.
+    # The push pipeline's pre-send check, outside the sync worker's request
+    # budget: a reminder due now cannot queue behind a sync backlog.
     assignment_fetcher = HttpAssignmentFetcher(
         base_url=settings.moodle_base_url,
         timeout_seconds=settings.moodle_fetch_timeout_seconds,
     )
     sync_worker = None
     if cipher is not None:
+        budget = RequestBudget(settings.sync_job_requests_per_minute)
         sync_worker = SyncWorker(
             session_factory=jobs_session_factory,
             settings=settings,
             cipher=cipher,
-            fetcher=assignment_fetcher,
+            fetcher=HttpAssignmentFetcher(
+                base_url=settings.moodle_base_url,
+                timeout_seconds=settings.moodle_fetch_timeout_seconds,
+                event_hooks=budget.event_hooks,
+            ),
             course_fetcher=HttpCourseFetcher(
                 base_url=settings.moodle_base_url,
                 timeout_seconds=settings.moodle_fetch_timeout_seconds,
+                event_hooks=budget.event_hooks,
             ),
             worker_id=default_worker_id(),
+            budget=budget,
         )
     else:
         logger.warning("syncjobs.disabled_no_credential_keys")

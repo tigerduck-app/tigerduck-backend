@@ -419,6 +419,19 @@ def observe_bulletin_scrape(rows: int) -> None:
         BULLETIN_LAST_NONEMPTY_SCRAPE.set_to_current_time()
 
 
+# --- Server-side Moodle sync (syncjobs/budget.py) ---
+
+SYNC_MOODLE_REQUESTS = Counter(
+    "tigerduck_sync_moodle_requests_total",
+    "Moodle requests the sync worker sent, each counted once its request "
+    "budget let it go.",
+)
+
+
+def observe_sync_moodle_request() -> None:
+    SYNC_MOODLE_REQUESTS.inc()
+
+
 # --- Push providers ---
 
 PUSH_SEND_DURATION = Histogram(

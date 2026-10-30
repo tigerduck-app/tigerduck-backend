@@ -299,6 +299,13 @@ into the backend container via `docker-compose.yml`.
   push within `sync_job_device_push_days` (14); a run-now marks its device
   seen. Until then they stay pending, and the first tick after a device
   comes back runs one already due.
+- The sync worker runs `sync_job_concurrency` (2) jobs at once, never two
+  of one user, and every Moodle request it sends waits its turn in one
+  `RequestBudget` (`syncjobs/budget.py`, `sync_job_requests_per_minute`,
+  10): the fetchers it is built with send through the budget's
+  `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
+  pauses the whole worker for `sync_job_backoff_base_seconds`. The push
+  pipeline's pre-send check has a fetcher of its own, outside the budget.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
