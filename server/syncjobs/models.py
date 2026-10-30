@@ -206,17 +206,16 @@ class SyncLogEntry(Base):
     learned about it from the migration either. Mapping it here is what stops
     autogenerate proposing `op.drop_table("sync_log_entries")` -- it diffs the
     database against `Base.metadata`, and a table absent from the metadata
-    reads as one the models want gone.
-
-    Deliberately un-modelled details, kept as-is so the mapping matches the
-    live schema: `user_id` carries no foreign key (a log outlives the rows it
-    describes), and the retention sweep in `portal/app/routes/deregister.py`
-    deletes by `user_id` directly."""
+    reads as one the models want gone. `8178548f185e` gave `user_id` its
+    foreign key, so a deleted account takes its log with it
+    (tigerduck-backend#90)."""
 
     __tablename__ = "sync_log_entries"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE")
+    )
     device_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )
