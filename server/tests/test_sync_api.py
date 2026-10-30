@@ -1057,3 +1057,46 @@ async def test_full_sync_lists_course_overrides_in_creation_order(client) -> Non
         "",
         "1132",
     ]
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/v3/sync/assignments/upload",
+            {
+                "assignments": [
+                    {
+                        "moodle_assignment_id": 5,
+                        "course_no": "CS3001301",
+                        "course_name": "資料結構",
+                        "title": "H" * 513,
+                    }
+                ]
+            },
+        ),
+        (
+            "/v3/sync/courses/upload",
+            {"courses": [{"semester": "1" * 17, "course_no": "CS3001301", "course_name": "OS"}]},
+        ),
+        (
+            "/v3/sync/initial-upload",
+            {
+                "assignments": [
+                    {
+                        "moodle_course_id": 7002,
+                        "moodle_assignment_id": 5,
+                        "course_name": "資" * 257,
+                        "title": "HW5",
+                    }
+                ]
+            },
+        ),
+    ],
+    ids=["assignment title", "course term", "initial upload course name"],
+)
+async def test_a_field_longer_than_its_column_is_refused(client, path, body) -> None:
+    """It failed at the database with a 500 (tigerduck-backend#93)."""
+    login = await do_login(client)
+    response = await client.post(path, headers=bearer(login), json=body)
+    assert response.status_code == 422, response.text

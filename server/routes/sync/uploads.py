@@ -61,13 +61,14 @@ async def initial_upload(
         "current_revision": result.current_revision,
     }
 class CourseUploadItem(BaseModel):
-    semester: str
-    course_no: str
-    course_name: str
-    course_name_en: str | None = None
-    moodle_id: str | None = None
+    # The lengths are the columns'; a longer value failed with a 500.
+    semester: str = Field(max_length=16)
+    course_no: str = Field(max_length=64)
+    course_name: str = Field(max_length=256)
+    course_name_en: str | None = Field(default=None, max_length=256)
+    moodle_id: str | None = Field(default=None, max_length=64)
     credits: float | None = None
-    classroom: str | None = None
+    classroom: str | None = Field(default=None, max_length=128)
     instructors: list[str] = []
     schedule_json: dict | list = {}
     classroom_map: dict = {}
