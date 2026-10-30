@@ -367,10 +367,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings)
 
+    # The schema, and the docs pages built on it, list every route to anyone,
+    # so only development serves them.
     app = FastAPI(
         title="TigerDuck Push Server",
         version=__version__,
         lifespan=lifespan,
+        openapi_url="/openapi.json" if settings.env == "development" else None,
     )
     app.state.settings = settings
 
