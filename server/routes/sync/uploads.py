@@ -313,7 +313,12 @@ async def upload_courses(
                 UserCourse.added_at.is_(None),
                 UserCourse.enrollment_status == EnrollmentStatus.enrolled.value,
             )
-            .values(enrollment_status=EnrollmentStatus.dropped.value)
+            .values(
+                enrollment_status=EnrollmentStatus.dropped.value,
+                updated_at=now,
+                version=UserCourse.version + 1,
+                updated_by_device_id=auth.device_id,
+            )
             .returning(UserCourse.course_key)
         )).all())
         await session.execute(
