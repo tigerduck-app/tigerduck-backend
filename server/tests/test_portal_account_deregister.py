@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -88,7 +88,7 @@ async def test_deregister_leaves_no_row_of_the_account(db_session, portal_pool):
             ),
             DeviceActiveDay(
                 device_id=phone.id,
-                day=datetime(2026, 6, 1).date(),
+                day=date(2026, 6, 1),
                 first_at=datetime(2026, 6, 1, tzinfo=UTC),
                 last_at=datetime(2026, 6, 1, tzinfo=UTC),
             ),
