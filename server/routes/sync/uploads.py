@@ -61,7 +61,7 @@ async def initial_upload(
         "current_revision": result.current_revision,
     }
 class CourseUploadItem(BaseModel):
-    # The lengths are the columns'; a longer value failed with a 500.
+    # The columns' lengths, so a longer value gets a 422, not a 500 from the database.
     semester: str = Field(max_length=16)
     course_no: str = Field(max_length=64)
     course_name: str = Field(max_length=256)

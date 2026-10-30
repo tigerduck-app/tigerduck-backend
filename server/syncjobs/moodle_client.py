@@ -8,7 +8,7 @@ Error taxonomy is the load-bearing part — the executor's retry policy
 hangs off it:
 
 * `MoodleTokenInvalid`  → the stored token died; the app must send a new one.
-* `SsoUnavailable`      → nothing raises it now; the executor still retries it.
+* `SsoUnavailable`      → raised by nothing; the executor still retries it.
 * `MoodleRateLimited`   → school API pushback; retry with backoff.
 * `MoodleUnreachable`   → a transport or parse error, or an answer that
                           cannot list the user's courses; retry.
