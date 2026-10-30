@@ -130,11 +130,46 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `TIGERDUCK_PUSH_JOB_RETENTION_INTERVAL_HOURS` and
   `TIGERDUCK_SYNC_CHANGELOG_RETENTION_INTERVAL_HOURS` are gone and ignored
   if set.
+- **The Moodle sync runs jobs side by side under a request budget (#80).**
+  Two jobs at once (`TIGERDUCK_SYNC_JOB_CONCURRENCY`, default 2), and never
+  more than `TIGERDUCK_SYNC_JOB_REQUESTS_PER_MINUTE` (default 10) Moodle
+  requests a minute across them. `TIGERDUCK_SYNC_JOB_MIN_INTERVAL_SECONDS`
+  is no longer read. An HTTP 429 pauses the whole worker for
+  `TIGERDUCK_SYNC_JOB_BACKOFF_BASE_SECONDS`, logged as
+  `syncjobs.rate_limited_pause`. While the overdue jobs drain, the worker
+  runs at the ceiling for an hour or two; watch
+  `tigerduck_sync_moodle_requests_total` and
+  `tigerduck_sync_jobs_overdue{job_type="moodle_assignments"}`.
+- **Push follow-ups (#91).** The anonymous bulletin fan-out records each
+  device, or each FCM batch of 500, before the next, so a restart no longer
+  resends to everyone reached; a token APNs or FCM reports dead is cleared
+  until the app registers again. A user's background sync triggers go out
+  at least 20 minutes apart, counted from actual sends (the portal's force
+  button excepted). A second re-login prompt for a newer failing credential
+  is no longer held back for a week.
+- **Sign-in and uploads (#48, #62, #65, #93).** Login trims and upper-cases
+  the student ID before matching the account. Before deploying, check that
+  `SELECT count(*) FROM external_accounts WHERE provider = 'ntust_sso' AND
+  external_user_id <> upper(btrim(external_user_id))` and
+  `SELECT count(*) FROM users WHERE student_id <> upper(btrim(student_id))`
+  are 0. A refused
+  request body answers 422 with only `type`, `loc` and `msg` per error,
+  and an upload field longer than its column answers 422 rather than 500.
+  The assignment override PATCH answers 404 `assignment_not_found` for an
+  unknown assignment. The unused password token obtainer is removed.
+- **School course re-added on a stamped upload (#202).** A protocol-2 add
+  of a school course whose hide was not the user's own comes back as a
+  school row.
+- **Portal (#209).** Clicking a class day in a course's term strip opens
+  Add change for that day; existing changes are edited from the table.
 - **Migrations `9ba5a424fff6`, `8178548f185e`, `4f13b23279f1` and
   `8184b299cf8e`, in that order.** A `.env` change only for a setting the
   check names. Rollback: run
   `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
-  out 3.9.0 and run `./start.sh`. The downgrade drops the sync log key, the
+  out 3.9.0 and run `./start.sh`. If the backend is not running (it
+  migrates before the startup checks, so a refused start leaves the schema
+  at head), run the downgrade as
+  `docker compose run --rm --no-deps backend alembic downgrade 199cfb4bbb49`. The downgrade drops the sync log key, the
   index and `device_active_days`, and with it the Userbase dashboard's
   activity before the window; rows already deleted stay deleted.
 
