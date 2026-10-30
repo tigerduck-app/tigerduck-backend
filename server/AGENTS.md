@@ -27,7 +27,8 @@ server/
 ├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
 ├── db.py                      # Base, async engine/session, SessionDep;
-│                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
+│                              #   in_array and INSERT_CHUNK_ROWS (bind limit);
+│                              #   delete_in_batches for the retention purges
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
@@ -40,9 +41,12 @@ server/
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
-│                              #   retirement.py deregisters gone devices daily
+│                              #   retirement.py deregisters gone devices daily;
+│                              #   retention.py prunes expired sessions, keeping
+│                              #   each device's active days
 ├── sync/                      # v3 sync models + changelog retention
-├── syncjobs/                  # server-side academic sync executor
+├── syncjobs/                  # server-side academic sync executor; retention.py
+│                              #   prunes the sync log and finished runs
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
 ├── course_catalog/            # NTUST's course list per term and language: models
