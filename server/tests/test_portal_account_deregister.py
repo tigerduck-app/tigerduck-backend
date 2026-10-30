@@ -4,6 +4,7 @@ server suite for the reason test_portal_sync_job_retry.py gives."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import uuid
@@ -281,7 +282,8 @@ async def test_a_deregister_deadlocked_with_the_sync_executor_is_tried_again(
 ):
     """The executor locks a job and then needs the users row for its run; the
     deregister holds that row and waits for the job, which its delete of the
-    NTUST account cascades to. Postgres aborts the deregister."""
+    NTUST account cascades to. Postgres aborts the deregister, and the retry
+    reports what it deleted, the executor's log row too."""
     user = await _old_rows(db_session)
     job_id = await db_session.scalar(select(SyncJob.id).where(SyncJob.user_id == user.id))
     factory = build_session_factory(prepared_engine)
@@ -296,8 +298,14 @@ async def test_a_deregister_deadlocked_with_the_sync_executor_is_tried_again(
         await executor.execute(
             "INSERT INTO sync_runs (sync_job_id, user_id) VALUES ($1, $2)", job_id, user.id
         )
+        await executor.execute(
+            "INSERT INTO sync_log_entries (user_id, source, message) VALUES ($1, 's', 'm')",
+            user.id,
+        )
 
-    assert (await deregistering).status_code == 200
+    response = await deregistering
+    assert response.status_code == 200
+    assert json.loads(response.body)["deleted_counts"]["sync_log_entries"] == 2
     assert "deadlock" in caplog.text
     assert await portal_pool.fetchval("SELECT count(*) FROM sync_runs") == 0
 
