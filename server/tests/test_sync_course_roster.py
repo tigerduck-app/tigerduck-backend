@@ -288,3 +288,17 @@ async def test_the_snapshot_asks_for_a_roster_that_is_missing_or_old(client) -> 
             update(UserCourseRoster).values(received_at=datetime.now(UTC) - timedelta(days=age)),
         )
         assert await _roster_requests(client, phone) == requests
+
+
+async def test_turning_course_sync_off_forgets_when_the_roster_arrived(client) -> None:
+    phone = await _login(client)
+    await _publish_term(client)
+    await _roster(client, phone, ["A"])
+    assert await _roster_requests(client, phone) == []
+
+    for on in (False, True):
+        response = await client.patch(
+            "/v3/devices/iphone-abc/preferences", headers=phone, json={"sync_courses": on}
+        )
+        assert response.status_code == 200, response.text
+    assert await _roster_requests(client, phone) == [TERM]

@@ -568,6 +568,7 @@ async def _cleanup_orphaned_sync_data(
         UserAssignmentOverride,
         UserCourse,
         UserCourseOverride,
+        UserCourseRoster,
         UserCourseTombstone,
         UserSemesterReset,
     )
@@ -606,6 +607,9 @@ async def _cleanup_orphaned_sync_data(
         )
         await session.execute(
             sa_delete(UserSemesterReset).where(UserSemesterReset.user_id == user_id)
+        )
+        await session.execute(
+            sa_delete(UserCourseRoster).where(UserCourseRoster.user_id == user_id)
         )
         rows = (
             await session.execute(
