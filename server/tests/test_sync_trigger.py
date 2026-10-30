@@ -3,10 +3,11 @@ to sync, and Apple advises two or three of those an hour at most (#107)."""
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from server.auth.models import PushDelivery, PushJob, User
 from server.db import build_session_factory
@@ -122,3 +123,42 @@ async def test_the_first_trigger_goes_at_once(db_session, prepared_engine):
 
     [trigger] = await _triggers(db_session, user)
     assert before <= trigger.fire_at <= datetime.now(UTC) + timedelta(seconds=1)
+
+
+async def test_a_writer_that_loses_the_insert_rides_on_the_winners_trigger(
+    db_session, prepared_engine
+):
+    """Two writers read the same latest trigger and file the next one under
+    the same key. The loser used to drop its change; the winner's trigger
+    could then go out before the loser committed it."""
+    user = await _user(db_session)
+    await _enqueue(prepared_engine, user)
+    [sent] = await _triggers(db_session, user)
+    sent.status = "sent"
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    async with factory() as winner, factory() as loser:
+        await enqueue_sync_trigger(winner, user.id, source_device_id="iphone")
+        losing = asyncio.create_task(
+            enqueue_sync_trigger(loser, user.id, source_device_id="ipad")
+        )
+        # The loser's insert waits on the winner's uncommitted row.
+        for _ in range(500):
+            waiting = await db_session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+                )
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.01)
+        await winner.commit()
+        assert await losing is None
+        await loser.commit()
+
+    triggers = await _triggers(db_session, user)
+    assert len(triggers) == 2
+    # Both devices' changes ride on it, so neither device is left out.
+    assert triggers[1].payload["source_device_id"] is None
