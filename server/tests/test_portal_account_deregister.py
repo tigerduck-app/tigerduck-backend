@@ -38,7 +38,8 @@ from server.config import Settings  # noqa: E402
 from server.db import Base, build_session_factory  # noqa: E402
 from server.syncjobs.models import SyncJob, SyncLogEntry, SyncRun  # noqa: E402
 from server.syncjobs.retention import prune_sync_history  # noqa: E402
-from server.tests.test_auth_refresh import do_login  # noqa: E402
+from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier  # noqa: E402
+from server.tests.test_auth_refresh import LOGIN_BODY, do_login  # noqa: E402
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -200,6 +201,51 @@ async def test_a_deregister_during_a_session_purge_waits_for_it(
     assert await retention.prune_expired_sessions(factory, Settings()) == 1
     assert (await deregistering[0]).status_code == 200
     assert await portal_pool.fetchval("SELECT count(*) FROM user_devices") == 0
+
+
+async def test_a_sign_in_switching_a_device_during_a_session_purge_waits_for_it(
+    client, prepared_engine, monkeypatch
+):
+    """The purge had deleted a device's sessions and then needed the device,
+    which another student's sign-in on it had deleted and then waited on those
+    sessions: Postgres aborted the sign-in."""
+    await do_login(client)
+    factory = build_session_factory(prepared_engine)
+    gone = datetime.now(UTC) - timedelta(days=31)
+    async with factory() as session:
+        device = await session.scalar(select(UserDevice))
+        session.add(
+            AuthSession(
+                user_id=device.user_id,
+                device_id=device.id,
+                refresh_token_hash="old",
+                issued_at=gone - timedelta(days=90),
+                expires_at=gone,
+            )
+        )
+        await session.commit()
+    keep_active_days = retention._keep_active_days
+    signing_in: list[asyncio.Task] = []
+
+    async def racing(session, rows) -> None:
+        # So that Postgres would abort the sign-in, not the purge it retries.
+        await session.execute(text("SET LOCAL deadlock_timeout = '30s'"))
+        client.app.state.moodle_verifier = StaticMoodleVerifier(
+            MoodleVerifyResult(ok=True, username="b11015001")
+        )
+        signing_in.append(
+            asyncio.create_task(
+                client.post("/v3/auth/login", json={**LOGIN_BODY, "student_id": "B11015001"})
+            )
+        )
+        purge_pid = await session.scalar(text("SELECT pg_backend_pid()"))
+        await _blocked_by(signing_in[0], factory, purge_pid)
+        await keep_active_days(session, rows)
+
+    monkeypatch.setattr(retention, "_keep_active_days", racing)
+
+    assert await retention.prune_expired_sessions(factory, Settings()) == 1
+    assert (await signing_in[0]).status_code == 200
 
 
 async def test_the_purges_during_a_deregister_wait_at_the_account(

@@ -43,6 +43,9 @@ async def prune_expired_sessions(
         ),
         returning=[AuthSession.device_id, AuthSession.created_at],
         then=_keep_active_days,
+        # Deleting a device, as a sign-in switching its account does, waits on
+        # its sessions, and `_keep_active_days` needs the device.
+        lock_devices=True,
     )
     logger.info(
         "auth.sessions.retention.done",

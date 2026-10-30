@@ -212,8 +212,10 @@ into the backend container via `docker-compose.yml`.
   `external_accounts` rows in id order, as `lock_accounts` does for sign-in
   and sign-out, then its `users` row `FOR UPDATE`, and only then deletes; a
   sign-in writes the `users` row only after `lock_accounts`. A retention
-  batch (`delete_in_batches`) locks only its rows' `users` rows, `FOR KEY
-  SHARE` in id order, before deleting them. The sync executor takes no
+  batch (`delete_in_batches`) locks its rows' `users` rows and then, for
+  `auth_sessions`, their `user_devices` rows, each `FOR KEY SHARE` in id
+  order, before deleting them, so a sign-in deleting the device of
+  another account waits for the batch. The sync executor takes no
   account lock: it locks a job, then needs the `users` row for its run, so
   a deregister can still deadlock with it. The deregister tries its
   transaction again on a deadlock (40P01), up to 3 times, and a purge

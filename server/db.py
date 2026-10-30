@@ -105,6 +105,7 @@ async def delete_in_batches(
     *where: ColumnElement[bool],
     returning: Sequence[Any] = (),
     then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None = None,
+    lock_devices: bool = False,
 ) -> tuple[int, bool]:
     """Delete `model`'s rows that match `where`, oldest id first and
     `PRUNE_BATCH_ROWS` per transaction; return how many went and whether it
@@ -113,7 +114,8 @@ async def delete_in_batches(
     Each batch reads on from the last id the one before read. `then` runs in
     each batch's transaction with the rows it deleted: their `id` and the
     `returning` columns. `model` has a `user_id`: a batch first locks the
-    accounts of its rows (server/AGENTS.md has the order). A batch aborted as
+    accounts of its rows, then with `lock_devices` their `device_id` devices
+    (server/AGENTS.md has the order). A batch aborted as
     a deadlock is tried again; after `PRUNE_BATCH_ATTEMPTS` it stops early, and
     the next night's run picks up the rest.
     """
@@ -122,7 +124,7 @@ async def delete_in_batches(
         for attempt in range(1, PRUNE_BATCH_ATTEMPTS + 1):
             try:
                 batch, rows = await _delete_batch(
-                    factory, model, where, after, returning, then
+                    factory, model, where, after, returning, then, lock_devices
                 )
                 break
             except DBAPIError as exc:
@@ -158,27 +160,33 @@ async def _delete_batch(
     after: int,
     returning: Sequence[Any],
     then: Callable[[AsyncSession, Sequence[Row[Any]]], Awaitable[None]] | None,
+    lock_devices: bool,
 ) -> tuple[Sequence[Row[Any]], Sequence[Row[Any]]]:
     """One batch of `delete_in_batches`: the rows it read, and those it deleted."""
-    from server.auth.models import User  # server.auth.models imports this module
+    # server.auth.models imports this module.
+    from server.auth.models import User, UserDevice
 
     async with session_scope(factory) as session:
         # The last batch reads every row the purge keeps, past the limit.
         await lift_timeouts(session)
         batch = (
             await session.execute(
-                select(model.id, model.user_id)
+                select(model.id, model.user_id, *([model.device_id] if lock_devices else []))
                 .where(model.id > after, *where)
                 .order_by(model.id)
                 .limit(PRUNE_BATCH_ROWS)
             )
         ).all()
-        await session.execute(
-            select(User.id)
-            .where(in_array(User.id, {row.user_id for row in batch}))
-            .order_by(User.id)
-            .with_for_update(read=True, key_share=True)
-        )
+        locks = [(User.id, {row.user_id for row in batch})]
+        if lock_devices:
+            locks.append((UserDevice.id, {row.device_id for row in batch} - {None}))
+        for key, ids in locks:
+            await session.execute(
+                select(key)
+                .where(in_array(key, ids))
+                .order_by(key)
+                .with_for_update(read=True, key_share=True)
+            )
         rows = (
             await session.execute(
                 delete(model)
