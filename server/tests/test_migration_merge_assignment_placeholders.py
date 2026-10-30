@@ -188,7 +188,7 @@ async def _state(conn: AsyncConnection, user: uuid.UUID) -> dict[int, list[tuple
     return state
 
 
-async def _add_later_columns(conn: AsyncConnection) -> None:
+async def _add_extension_column(conn: AsyncConnection) -> None:
     """Today's models read columns later migrations add."""
     await conn.execute(
         text(
@@ -250,7 +250,7 @@ async def test_upgrade_merges_each_placeholder_into_the_servers_row(
                     " PRIMARY KEY (user_id, semester))"
                 )
             )
-            await _add_later_columns(conn)
+            await _add_extension_column(conn)
         shown = await _shown(engine, user)
 
         _alembic(migration_db_url, "upgrade", "head")
@@ -442,7 +442,7 @@ async def test_the_merged_rows_keep_the_reminder_scan_quiet(
     try:
         due = datetime.now(UTC) + timedelta(hours=30)
         async with engine.begin() as conn:
-            await _add_later_columns(conn)
+            await _add_extension_column(conn)
             user = await _user(conn)
             device = (
                 await conn.execute(
@@ -467,19 +467,6 @@ async def test_the_merged_rows_keep_the_reminder_scan_quiet(
             await _mark(conn, user, await _row(conn, user, 0, 2, due=due), "ignored", T0)
             await _row(conn, user, 7001, 2, due=due)
             await _row(conn, user, 7001, 3, due=due)
-            # The scan reminds of a course of the current term only.
-            await conn.execute(
-                text(
-                    "INSERT INTO semester_terms (code, start_date, end_date)"
-                    " VALUES ('1151', current_date - 30, current_date + 90)"
-                )
-            )
-            await conn.execute(
-                text(
-                    "UPDATE user_assignments SET moodle_semester = '1151'"
-                    " WHERE moodle_course_id <> 0"
-                )
-            )
         factory = build_session_factory(engine)
         assert await _reminded(factory, test_settings) == {1, 2, 3}
 

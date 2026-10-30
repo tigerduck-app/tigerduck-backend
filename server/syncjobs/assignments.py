@@ -150,14 +150,16 @@ async def apply_fetched_assignments(
     user_id: uuid.UUID,
     fetched: list[FetchedAssignment],
     now: datetime,
-    enrolled: Sequence[FetchedCourse] = (),
+    enrolled: Sequence[FetchedCourse] | None = None,
     refused_course_ids: frozenset[int] = frozenset(),
 ) -> AssignmentSyncStats:
     """Apply one Moodle answer, soft-deleting the stored rows it leaves out.
 
-    `enrolled` is the student's Moodle courses. A row of a course the iPhone
-    app lists in the current term (`listed_courses`) is linked to the class
-    table's course of that number, if there is one; any other row is not.
+    `enrolled` is the student's Moodle courses, None when they could not be
+    read. A row of a course the iPhone app lists in the current term
+    (`listed_courses`) is linked to the class table's course of that number,
+    if there is one, and any other row is not. Without `enrolled` the rows
+    keep their links and a new row stays unclassified.
 
     `refused_course_ids` are the courses an answer that lost every course
     refused (`MoodleNoCourseAccess`). It says nothing about them, so their
@@ -191,19 +193,23 @@ async def apply_fetched_assignments(
         (r.moodle_course_id, r.moodle_assignment_id): r for r in existing_rows
     }
 
-    term = await current_term_code(session, now)
-    class_table = {
-        c.course_no: c
-        for c in await session.scalars(
-            select(UserCourse).where(
-                UserCourse.user_id == user_id, UserCourse.semester == term
+    class_table: dict[str, UserCourse] = {}
+    listed: dict[int, str] = {}
+    term = await current_term_code(session, now) if enrolled else None
+    if term is not None:
+        class_table = {
+            c.course_no: c
+            for c in await session.scalars(
+                select(UserCourse).where(
+                    UserCourse.user_id == user_id, UserCourse.semester == term
+                )
             )
-        )
-        if c.course_no
-    }
-    listed = listed_courses(enrolled, set(class_table), term) if term else {}
+            if c.course_no
+        }
+        listed = listed_courses(enrolled, set(class_table), term)
+    # "" marks a row classified as of no term; None, one no fetch classified.
     semester_by_course = {
-        c.moodle_course_id: moodle_semester(c.idnumber) for c in enrolled
+        c.moodle_course_id: moodle_semester(c.idnumber) or "" for c in enrolled or ()
     }
 
     changed = 0
@@ -235,7 +241,11 @@ async def apply_fetched_assignments(
                 user_course_id=linked_course.id if linked_course else None,
                 moodle_course_id=item.moodle_course_id,
                 moodle_assignment_id=item.moodle_assignment_id,
-                moodle_semester=semester_by_course.get(item.moodle_course_id),
+                moodle_semester=(
+                    semester_by_course.get(item.moodle_course_id, "")
+                    if enrolled is not None
+                    else None
+                ),
                 course_no=course_no,
                 course_name=item.course_name,
                 title=item.title,
@@ -264,14 +274,15 @@ async def apply_fetched_assignments(
             if getattr(row, field_name) != new_value:
                 setattr(row, field_name, new_value)
                 fields.append(field_name)
-        linked_id = linked_course.id if linked_course else None
-        if row.user_course_id != linked_id:
-            row.user_course_id = linked_id
-            fields.append("user_course_id")
-        if course_no is not None and row.course_no != course_no:
-            row.course_no = course_no
-            fields.append("course_no")
-        row.moodle_semester = semester_by_course.get(item.moodle_course_id)
+        if enrolled is not None:
+            linked_id = linked_course.id if linked_course else None
+            if row.user_course_id != linked_id:
+                row.user_course_id = linked_id
+                fields.append("user_course_id")
+            if course_no is not None and row.course_no != course_no:
+                row.course_no = course_no
+                fields.append("course_no")
+            row.moodle_semester = semester_by_course.get(item.moodle_course_id, "")
         if row.deleted_at is not None:
             row.deleted_at = None
             fields.append("deleted_at")

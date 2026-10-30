@@ -36,16 +36,16 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 - **Assignment reminders follow the iPhone app's list (#81).** The server's
   sync also reads the student's Moodle courses now, one more Moodle request
-  per run, and links each fetched assignment to the class table as the
-  iPhone app files it. The reminder scan files only for an assignment of a
-  course of the term in progress or of the term's class table, and for an
-  app's upload. Another term's course still open on Moodle, or a course
-  without a term, gets none.
-- **Reminders wait for each user's next sync.** Migration `9ba5a424fff6`
-  adds `user_assignments.moodle_semester`, which no stored data can fill.
-  Until a user's next sync links their rows, up to the sync interval after
-  the upgrade, the scan files none of their fetched assignments' reminders
-  and cancels the ones pending.
+  per run, and classifies each fetched assignment as the iPhone app files
+  it. The reminder scan then files only for an assignment of a course of
+  the term in progress or of the term's class table. Another term's course
+  still open on Moodle, or a course without a term, gets none. When the
+  course list fails, the run still stores the assignments, keeps the rows'
+  links and backs off.
+- **Rows are classified at each user's next sync.** Migration
+  `9ba5a424fff6` adds `user_assignments.moodle_semester`, which no stored
+  data can fill. A row no fetch has classified, every existing row and
+  every row an app uploads, is reminded of as before until then.
 - **No `.env` change.** Rollback: run
   `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
   out 3.9.0 and run `./start.sh`.

@@ -5,7 +5,7 @@ current term (tigerduck-backend#81), which it tells from this column and the
 row's link to a course of the student's class table. Both come from the
 server's sync, which now also reads the student's Moodle courses. No stored
 data holds a course's Moodle idnumber, so existing rows are not backfilled:
-each is linked at its user's next sync and gets no reminder until then.
+the scan reminds of each as before until its user's next sync classifies it.
 
 Revision ID: 9ba5a424fff6
 Revises: 199cfb4bbb49

@@ -205,17 +205,17 @@ def in_ignored_course(
 def _listed_in(term: str | None) -> ColumnElement[bool]:
     """Whether the iPhone app lists an assignment in `term`, the current one.
 
-    A placeholder is one an app uploaded from its own list. A fetched row
-    counts when its Moodle course is of the term or the sync linked it to the
-    term's class-table course (`syncjobs/assignments.listed_courses`). A row
-    no sync has linked yet, and every fetched row while no term is published,
-    gets no reminder.
+    A row no fetch has classified (`moodle_semester` NULL), an app's upload
+    or one from before the column, counts as listed until the user's next
+    sync. A classified row counts when its Moodle course is of the term or
+    the sync linked it to the term's class-table course
+    (`syncjobs/assignments.listed_courses`); without a term, none does.
     """
-    placeholder = UserAssignment.moodle_course_id == 0
+    unclassified = UserAssignment.moodle_semester.is_(None)
     if term is None:
-        return placeholder
+        return unclassified
     return or_(
-        placeholder,
+        unclassified,
         UserAssignment.moodle_semester == term,
         UserCourse.semester == term,
     )

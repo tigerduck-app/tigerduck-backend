@@ -246,6 +246,18 @@ async def test_a_retaken_course_is_listed_in_its_latest_moodle_course():
     assert listed == {30: "EE2005301", 40: "CS1001301"}
 
 
+async def test_another_terms_course_is_listed_by_its_idnumbers_number_only():
+    """The app matches the class table on the idnumber's number and reads a
+    co-listed course's other numbers only to file what it lists."""
+    co_listed = _course(
+        7001,
+        "1142AS5140701",
+        fullname="114.2【半導體研究所】AS5140701 / 【資工系】CS5140701 晶片設計",
+    )
+    assert listed_courses([co_listed], {"CS5140701"}, "1151") == {}
+    assert listed_courses([co_listed], {"AS5140701"}, "1151") == {7001: "AS5140701"}
+
+
 async def test_a_co_listed_course_is_filed_under_the_class_tables_code():
     """A co-listed course's idnumber carries one department's code and its
     full name the other's; the class table holds the student's own."""
@@ -337,26 +349,55 @@ async def test_links_an_assignment_to_the_class_table_course_the_app_files_it_un
         _course(7001, "1151CS2006301"),
         _course(7002, "1151GE1001301"),
         _course(7003, "1141MA1001301"),
+        _course(7004, ""),
     ]
 
     await apply_fetched_assignments(
         db_session,
         user_id=user.id,
-        fetched=[_fa(1), _fa(2, moodle_course_id=7002), _fa(3, moodle_course_id=7003)],
+        fetched=[_fa(i, moodle_course_id=7000 + i) for i in (1, 2, 3, 4, 5)],
         now=NOW,
         enrolled=enrolled,
     )
     await db_session.commit()
 
     rows = await _rows(db_session, user)
+    # A course without a term, or missing from the course list, is of none.
     assert [
         (rows[i].user_course_id, rows[i].course_no, rows[i].moodle_semester)
-        for i in (1, 2, 3)
+        for i in (1, 2, 3, 4, 5)
     ] == [
         (course.id, "CS2006301", "1151"),
         (None, "GE1001301", "1151"),
         (None, None, "1141"),
+        (None, None, ""),
+        (None, None, ""),
     ]
+
+
+async def test_without_the_course_list_a_fetch_leaves_the_links_alone(db_session):
+    user = await _make_user(db_session)
+    await _publish_term(db_session)
+    course = await _class_table_course(db_session, user, "CS2006301")
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1)],
+        now=NOW,
+        enrolled=[_course(7001, "1151CS2006301")],
+    )
+    await db_session.commit()
+
+    await apply_fetched_assignments(
+        db_session, user_id=user.id, fetched=[_fa(1), _fa(2)], now=NOW
+    )
+    await db_session.commit()
+
+    rows = await _rows(db_session, user)
+    assert [
+        (rows[i].user_course_id, rows[i].course_no, rows[i].moodle_semester)
+        for i in (1, 2)
+    ] == [(course.id, "CS2006301", "1151"), (None, None, None)]
 
 
 async def test_a_course_no_longer_listed_loses_its_link(db_session):
