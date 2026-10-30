@@ -20,6 +20,7 @@ from typing import Literal
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.db import in_array
 from server.models import DevicePlatform, DeviceRegistration
 
 TargetClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
@@ -120,7 +121,7 @@ async def count_by_class(
             select(
                 DeviceRegistration.device_class,
                 DeviceRegistration.platform,
-            ).where(DeviceRegistration.device_id.in_(ids))
+            ).where(in_array(DeviceRegistration.device_id, ids))
         )
     ).all()
     for device_class, platform in rows:
