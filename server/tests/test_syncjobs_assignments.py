@@ -379,6 +379,24 @@ async def test_links_an_assignment_to_the_class_table_course_the_app_files_it_un
     ]
 
 
+async def test_a_dropped_class_table_course_takes_no_assignment(db_session):
+    user = await _make_user(db_session)
+    await _publish_term(db_session)
+    course = await _class_table_course(db_session, user, "CS2006301")
+    course.enrollment_status = "dropped"
+
+    await apply_fetched_assignments(
+        db_session,
+        user_id=user.id,
+        fetched=[_fa(1)],
+        now=NOW,
+        enrolled=[_course(7001, "1151CS2006301")],
+    )
+    await db_session.commit()
+
+    assert (await _rows(db_session, user))[1].user_course_id is None
+
+
 @pytest.mark.parametrize("enrolled", [None, []], ids=["failed", "empty"])
 async def test_without_the_course_list_a_fetch_leaves_the_links_alone(
     db_session, enrolled

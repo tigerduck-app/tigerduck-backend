@@ -412,6 +412,19 @@ into the backend container via `docker-compose.yml`.
   hides nothing on the device, today the iPhone's tap-again in Add
   course: the apps' other removals keep a local hide, so their rosters
   leave the course out. A semester reset needs a device id.
+- Only a roster sets which school courses a student is enrolled in. An
+  upload's `roster_terms` names the terms whose courses it carries are the
+  school's whole roster, which the apps send only from course selection's
+  answer or a final transcript. For each such term it lists a school course
+  of, the listed courses become `enrolled` and the term's other
+  `ntust_portal` rows `dropped`, except a row with `added_at` or with a
+  tombstone. Any other listing keeps a row's `enrollment_status`, since
+  delete paths, adds and Android's Moodle fallback send partial or stale
+  lists; a hand-add sets `enrolled`. A roster records its arrival in
+  `user_course_rosters`, and `/sync/full` asks for the current term's in
+  `roster_requests` once that is `sync_roster_request_days` old. Every job
+  that reads a student's courses for class reminders, course changes or a
+  class table reads `enrolled` rows only.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.

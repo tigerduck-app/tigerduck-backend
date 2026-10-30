@@ -17,6 +17,7 @@ from .enums import (
 from .courses import (
     UserCourse,
     UserCourseOverride,
+    UserCourseRoster,
     UserCourseSkippedDate,
     UserCourseTombstone,
     UserSemesterReset,
@@ -56,6 +57,7 @@ __all__ = [
     "UserChangeLog",
     "UserCourse",
     "UserCourseOverride",
+    "UserCourseRoster",
     "UserCourseSkippedDate",
     "UserCourseTombstone",
     "UserSemesterReset",

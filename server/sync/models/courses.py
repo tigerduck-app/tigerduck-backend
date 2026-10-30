@@ -235,6 +235,18 @@ class UserSemesterReset(Base):
     )
     semester: Mapped[str] = mapped_column(String(16), primary_key=True)
     reset_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+class UserCourseRoster(Base):
+    """When the school's roster of one term last arrived for the user: an
+    upload naming the term in `roster_terms` and listing a course of it.
+    `/sync/full` asks for the current term's once this is too old."""
+
+    __tablename__ = "user_course_rosters"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    semester: Mapped[str] = mapped_column(String(16), primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 class UserCourseSkippedDate(Base):
     __tablename__ = "user_course_skipped_dates"
 

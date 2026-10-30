@@ -8,6 +8,7 @@ from fastapi import APIRouter, BackgroundTasks, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import delete, func, select, text, update
 from server.academic_calendar.models import UserHolidayOverride
+from server.academic_calendar.terms import current_term_code
 from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync import serializers
@@ -22,6 +23,7 @@ from server.sync.models import (
     UserChangeLog,
     UserCourse,
     UserCourseOverride,
+    UserCourseRoster,
     UserCourseSkippedDate,
     UserCourseTombstone,
     UserSettingsDocument,
@@ -122,9 +124,28 @@ async def full_sync(
         await snap_session.connection(
             execution_options={"isolation_level": "REPEATABLE READ"}
         )
-        return await _read_full_snapshot(
+        snapshot = await _read_full_snapshot(
             snap_session, auth.user_id, auth.device_id, speaks_clock=speaks_clock
         )
+        snapshot["roster_requests"] = await _roster_requests(
+            snap_session, auth.user_id, request.app.state.settings.sync_roster_request_days
+        )
+        return snapshot
+
+
+async def _roster_requests(session, user_id, days: int) -> list[str]:
+    """The current term, when no roster of it arrived in the last `days`:
+    the app answers with course selection's list in `roster_terms`."""
+    now = datetime.now(UTC)
+    term = await current_term_code(session, now)
+    if term is None:
+        return []
+    received = await session.scalar(
+        select(UserCourseRoster.received_at).where(
+            UserCourseRoster.user_id == user_id, UserCourseRoster.semester == term
+        )
+    )
+    return [term] if received is None or received < now - timedelta(days=days) else []
 async def _read_full_snapshot(session, user_id, device_id, *, speaks_clock=False):
     async def rows(stmt):
         return (await session.execute(stmt)).scalars().all()
