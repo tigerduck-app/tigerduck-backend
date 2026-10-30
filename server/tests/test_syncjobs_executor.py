@@ -955,6 +955,41 @@ async def test_a_run_asks_moodle_who_the_user_is_once(
     assert asked.count("core_webservice_get_site_info") == 1
 
 
+async def test_a_site_info_page_moodle_cannot_answer_keeps_the_assignments(
+    db_session, prepared_engine, test_settings
+):
+    """In an outage the site info can come back as an HTML page. The
+    assignments are still stored and the job keeps retrying."""
+    user, _, job = await _setup_user_job(db_session)
+    due = int((datetime.now(UTC) + timedelta(days=3)).timestamp())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["wsfunction"] == "mod_assign_get_assignments":
+            course = {"id": 7001, "fullname": "DS", "assignments": [
+                {"id": 1, "cmid": 11, "name": "HW1", "duedate": due}
+            ]}
+            return httpx.Response(200, json={"courses": [course], "warnings": []})
+        return httpx.Response(503, text="<html>Moodle is unavailable</html>")
+
+    transport = httpx.MockTransport(handler)
+    base = "https://moodle.example.edu"
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=HttpAssignmentFetcher(base, 5.0, transport=transport),
+        course_fetcher=HttpCourseFetcher(base, 5.0, transport=transport),
+    )
+
+    await run_sync_tick(worker)
+
+    titles = await db_session.scalars(
+        select(UserAssignment.title).where(UserAssignment.user_id == user.id)
+    )
+    assert list(titles) == ["HW1"]
+    await db_session.refresh(job)
+    assert (job.status, job.last_error) == ("pending", "sync_failed:invalid_json")
+
+
 class _ObservingFetcher(StubFetcher):
     """Runs `observe()` from inside the Moodle call, then answers."""
 

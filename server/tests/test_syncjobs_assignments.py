@@ -281,6 +281,9 @@ async def test_the_course_fetch_reads_each_courses_idnumber_and_start():
                 {"id": 7001, "fullname": "DS", "idnumber": "1151CS2006301",
                  "startdate": 1788220800},
                 {"id": 7002, "fullname": "Training", "idnumber": "", "startdate": 0},
+                "not a course",
+                {"id": 7003, "fullname": "Lab", "idnumber": "1151CS2006303",
+                 "startdate": 10**20},
             ],
         )
 
@@ -295,6 +298,7 @@ async def test_the_course_fetch_reads_each_courses_idnumber_and_start():
     assert [(c.idnumber, c.start_at) for c in courses] == [
         ("1151CS2006301", datetime(2026, 9, 1, 0, 0, tzinfo=UTC)),
         ("", None),
+        ("1151CS2006303", None),
     ]
 
 

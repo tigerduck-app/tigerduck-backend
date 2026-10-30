@@ -247,6 +247,15 @@ def _ts(value: object) -> datetime | None:
     return datetime.fromtimestamp(value, tz=UTC)
 
 
+def _start(value: object) -> datetime | None:
+    """A course's start date, None past what `datetime` holds: it only
+    orders a retaken course's runs, so one bad date must not fail the list."""
+    try:
+        return _ts(value)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
 _REDACTED = "<token-redacted>"
 
 # Any `wstoken=...` still embedded in text, whatever its value. The token we
@@ -332,18 +341,22 @@ async def _get_moodle_userid(
     response = await client.get(f"{base_url}{_WS_PATH}", params=params)
     if response.status_code == 429:
         raise MoodleRateLimited("http_429")
-    body = response.json()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise MoodleUnreachable("invalid_json") from exc
     if isinstance(body, dict) and "exception" in body:
         errorcode = str(body.get("errorcode", ""))
         if errorcode == "invalidtoken":
             raise MoodleTokenInvalid(errorcode)
         raise MoodleUnreachable(errorcode or "moodle_exception")
-    if not isinstance(body, dict) or "userid" not in body:
+    userid = body.get("userid") if isinstance(body, dict) else None
+    if type(userid) is not int:
         raise MoodleUnreachable("missing_userid_in_site_info")
     fullname = body.get("fullname")
     if on_fullname is not None and isinstance(fullname, str):
         on_fullname(fullname)
-    return int(body["userid"])
+    return userid
 
 
 async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> dict:
@@ -876,10 +889,10 @@ class HttpCourseFetcher:
                 category_id=c.get("categoryid"),
                 enrolled_user_count=c.get("enrolledusercount"),
                 idnumber=str(c.get("idnumber") or ""),
-                start_at=_ts(c.get("startdate")),
+                start_at=_start(c.get("startdate")),
             )
             for c in body
-            if isinstance(c.get("id"), int)
+            if isinstance(c, dict) and isinstance(c.get("id"), int)
         ]
 
 
