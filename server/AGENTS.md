@@ -306,7 +306,9 @@ into the backend container via `docker-compose.yml`.
   `push/sync_trigger.py`, which every writer but the portal's forced one
   calls). A change while one has yet to go out rides on it, locked so the
   claim skips it until the change commits; a change after it waits for
-  the next.
+  the next. Before each round the pipeline puts a trigger back until 20
+  minutes after the user's last recorded sync trigger send
+  (`_last_sync_trigger_sent`), so downtime or a retry cannot bunch them.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for

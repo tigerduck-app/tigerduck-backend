@@ -9,9 +9,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select, text
 
-from server.auth.models import PushDelivery, PushJob, User
+from server.auth.crypto import CredentialCipher
+from server.auth.models import DevicePushToken, PushDelivery, PushJob, User, UserDevice
 from server.db import build_session_factory
+from server.push.apns_client import SendResult
+from server.push.pipeline import PushPipelineWorker, run_push_tick
+from server.push.router import PushRouter
 from server.push.sync_trigger import MIN_GAP, enqueue_sync_trigger
+from server.tests.conftest import SubmissionStatusStub
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -162,3 +167,102 @@ async def test_a_writer_that_loses_the_insert_rides_on_the_winners_trigger(
     assert len(triggers) == 2
     # Both devices' changes ride on it, so neither device is left out.
     assert triggers[1].payload["source_device_id"] is None
+
+
+class _Sender:
+    def __init__(self):
+        self.requests = []
+
+    async def send(self, request):
+        self.requests.append(request)
+        return SendResult(success=True, status="200")
+
+    async def send_multi(self, requests):
+        return [await self.send(r) for r in requests]
+
+    async def close(self):
+        pass
+
+
+async def _tick(prepared_engine, test_settings):
+    """One push tick; returns the pushes it sent."""
+    apple = _Sender()
+    await run_push_tick(
+        PushPipelineWorker(
+            session_factory=build_session_factory(prepared_engine),
+            settings=test_settings,
+            router=PushRouter(apple=apple, android=_Sender()),
+            worker_id="sync-trigger-test",
+            cipher=CredentialCipher.from_settings(test_settings),
+            fetcher=SubmissionStatusStub(),
+        )
+    )
+    return apple.requests
+
+
+async def _iphone(session, user):
+    device = UserDevice(user_id=user.id, client_device_id="iphone", platform="ios")
+    session.add(device)
+    await session.flush()
+    session.add(
+        DevicePushToken(
+            device_id=device.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-iphone",
+            token_value="tok-iphone",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    await session.commit()
+
+
+async def test_a_trigger_sent_late_spaces_the_next_from_its_send(
+    db_session, prepared_engine, test_settings
+):
+    """A trigger due 25 minutes ago went out only now, after downtime. Its
+    planned time would let the next go at once."""
+    user = await _user(db_session)
+    await _iphone(db_session, user)
+    await _enqueue(prepared_engine, user)
+    assert len(await _tick(prepared_engine, test_settings)) == 1
+    [sent] = await _triggers(db_session, user)
+    sent.fire_at -= timedelta(minutes=25)
+    await db_session.commit()
+    sent_at = await db_session.scalar(
+        select(PushDelivery.sent_at).where(PushDelivery.push_job_id == sent.id)
+    )
+
+    await _enqueue(prepared_engine, user)
+
+    assert await _tick(prepared_engine, test_settings) == []
+    [_, paced] = await _triggers(db_session, user)
+    assert paced.status == "pending"
+    assert paced.available_at == sent_at + MIN_GAP
+
+
+async def test_overdue_triggers_go_out_one_per_gap(
+    db_session, prepared_engine, test_settings
+):
+    user = await _user(db_session)
+    await _iphone(db_session, user)
+    due = datetime.now(UTC) - timedelta(hours=1)
+    db_session.add_all(
+        PushJob(
+            user_id=user.id,
+            dedupe_key=f"sync_trigger:{user.id}:after:{n}",
+            channel="system",
+            scenario="sync_trigger",
+            fire_at=due + n * MIN_GAP,
+            available_at=due + n * MIN_GAP,
+            payload={"kind": "sync_trigger", "source_device_id": None},
+        )
+        for n in range(2)
+    )
+    await db_session.commit()
+
+    assert len(await _tick(prepared_engine, test_settings)) == 1
+    assert sorted(t.status for t in await _triggers(db_session, user)) == [
+        "pending",
+        "sent",
+    ]

@@ -98,6 +98,7 @@ from server.push.presend import (
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.router import PushRouter
 from server.push.session_reauth import announced_while_sessionless, send_after
+from server.push.sync_trigger import MIN_GAP as SYNC_TRIGGER_GAP
 from server.syncjobs.moodle_client import SubmissionStatusChecker
 
 logger = structlog.get_logger(__name__)
@@ -645,6 +646,15 @@ async def _materialize(
     is_sync_trigger = job.scenario == "sync_trigger"
     source_device_id: str | None = None
     if is_sync_trigger:
+        # Paced from the last send, not the planned time: downtime or a retry
+        # can leave triggers due together (#107).
+        if last := await _last_sync_trigger_sent(session, job, now=now):
+            job.status = PushJobStatus.pending.value
+            job.available_at = last + SYNC_TRIGGER_GAP
+            job.locked_by = None
+            job.locked_at = None
+            logger.info("push.sync_trigger_paced", job_id=job.id)
+            return False
         token_query = token_query.where(UserDevice.cloud_sync_enabled.is_(True))
         source_device_id = (job.payload or {}).get("source_device_id")
 
@@ -1000,6 +1010,29 @@ async def _classes_quiet(
         )
     ).first()
     return "holiday" if opted_in is None else None
+
+
+async def _last_sync_trigger_sent(
+    session: AsyncSession, job: PushJob, *, now: datetime
+) -> datetime | None:
+    """When another of the user's sync triggers reached a device within the
+    gap, or None."""
+    return await session.scalar(
+        select(func.max(PushDelivery.sent_at)).where(
+            PushDelivery.push_job_id.in_(
+                select(PushJob.id).where(
+                    PushJob.user_id == job.user_id,
+                    PushJob.scenario == "sync_trigger",
+                    PushJob.id != job.id,
+                    # A job with a sent delivery has one of these statuses;
+                    # as SQL text the user's jobs come from its index.
+                    PUSH_JOB_DEDUPE_ACTIVE_WHERE,
+                )
+            ),
+            PushDelivery.status == PushDeliveryStatus.sent.value,
+            PushDelivery.sent_at > now - SYNC_TRIGGER_GAP,
+        )
+    )
 
 
 async def _has_deliveries(session: AsyncSession, job: PushJob) -> bool:
