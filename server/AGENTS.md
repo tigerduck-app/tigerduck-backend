@@ -27,7 +27,8 @@ server/
 ├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
 ├── db.py                      # Base, async engine/session, SessionDep;
-│                              #   in_array and INSERT_CHUNK_ROWS (bind limit)
+│                              #   in_array and INSERT_CHUNK_ROWS (bind limit);
+│                              #   delete_in_batches for the retention purges
 ├── models.py                  # DeviceRegistration, DeviceList, CustomPushDispatch
 ├── security.py                # shared-secret dependency (X-Push-Token) for the admin endpoints
 ├── system_settings.py         # operator-tunable settings read at runtime
@@ -40,9 +41,12 @@ server/
 ├── i18n.py                    # localized push copy from the app-translation bundles
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
-│                              #   retirement.py deregisters gone devices daily
+│                              #   retirement.py deregisters gone devices daily;
+│                              #   retention.py prunes expired sessions, keeping
+│                              #   each device's active days
 ├── sync/                      # v3 sync models + changelog retention
-├── syncjobs/                  # server-side academic sync executor
+├── syncjobs/                  # server-side academic sync executor; retention.py
+│                              #   prunes the sync log and finished runs
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
 ├── course_catalog/            # NTUST's course list per term and language: models
@@ -204,6 +208,18 @@ into the backend container via `docker-compose.yml`.
   one array parameter, rather than `in_()`, which binds one per value, and
   rows inserted for every user or device go `INSERT_CHUNK_ROWS` (`db.py`)
   at a time.
+- Deleting an account (the portal's deregister) locks its
+  `external_accounts` rows in id order, as `lock_accounts` does for sign-in
+  and sign-out, then its `users` row `FOR UPDATE`, and only then deletes; a
+  sign-in writes the `users` row only after `lock_accounts`. A retention
+  batch (`delete_in_batches`) locks its rows' `users` rows and then, for
+  `auth_sessions`, their `user_devices` rows, each `FOR KEY SHARE` in id
+  order, before deleting them, so a sign-in deleting the device of
+  another account waits for the batch. The sync executor takes no
+  account lock: it locks a job, then needs the `users` row for its run, so
+  a deregister can still deadlock with it. The deregister tries its
+  transaction again on a deadlock (40P01), up to 3 times, and a purge
+  batch likewise, ending the night's run after the third.
 - `dedupe_key` on a `push_job` is what makes client retries idempotent —
   the partial unique index only covers active statuses, so an ON CONFLICT
   must repeat that predicate or Postgres cannot match the index. Pass it as

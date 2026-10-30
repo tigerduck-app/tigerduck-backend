@@ -25,6 +25,7 @@ from .user import (
 from .device import (
     PUSH_TOKEN_ACTIVE_WHERE,
     AuthSession,
+    DeviceActiveDay,
     DevicePushToken,
     UserDevice,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "APPLE_HANDHELD_PLATFORMS",
     "AuthSession",
     "CredentialStatus",
+    "DeviceActiveDay",
     "DevicePushToken",
     "ExternalAccount",
     "ExternalAccountCredential",

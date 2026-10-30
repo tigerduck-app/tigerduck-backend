@@ -97,10 +97,46 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `9ba5a424fff6` adds `user_assignments.moodle_semester`, which no stored
   data can fill. A row no fetch has classified, every existing row and
   every row an app uploads, is reminded of as before until then.
-- **Migration `9ba5a424fff6`.** A `.env` change only for a setting the
+- **Deleting an account deletes its sync log (#90).**
+  `sync_log_entries.user_id` gets a foreign key to `users` that deletes the
+  log with the account, as every other table of an account does. Migration
+  `8178548f185e` adds the key without checking the rows, deletes the log
+  rows of accounts deleted before, then validates the key with nothing
+  blocked meanwhile. The portal's audit log still names a deleted
+  account by its id, and the device's anonymous registration stays,
+  unlinked, as it did.
+- **Pruning (#95).** Nightly, 5,000 rows per transaction:
+  - `sync_log_entries` and finished `sync_runs` older than
+    `TIGERDUCK_SYNC_HISTORY_RETENTION_DAYS` (default 30) are deleted;
+  - `auth_sessions` rows more than `TIGERDUCK_AUTH_SESSION_RETENTION_DAYS`
+    (default 30) past their expiry are deleted, about 120 days after their
+    token was issued. A token of a deleted row is answered 401
+    `invalid_refresh_token` rather than `refresh_token_expired`. Each
+    device's first and last session of a UTC day stays in the new
+    `device_active_days` table (migration `4f13b23279f1`), which the Userbase
+    dashboard reads, so its history still reaches back to launch.
+
+  Migration `8184b299cf8e` indexes `auth_sessions.replaced_by_session_id`
+  without blocking writes; deleting a session sets that column null on the
+  rows pointing at it, which read the whole table per row before. Do not
+  deploy during the 04:30 backup or another long transaction: the
+  concurrent build waits for it, and past the 10-second lock timeout the
+  upgrade fails and restarts with the container. The first night deletes
+  everything already past the windows.
+- **The retention jobs run at fixed times.** Every retention job now runs
+  daily from 03:00 Taipei, five minutes apart, rather than 24 hours after
+  the backend started, which each deploy put off again.
+  `TIGERDUCK_BULLETIN_RETENTION_INTERVAL_HOURS`,
+  `TIGERDUCK_PUSH_JOB_RETENTION_INTERVAL_HOURS` and
+  `TIGERDUCK_SYNC_CHANGELOG_RETENTION_INTERVAL_HOURS` are gone and ignored
+  if set.
+- **Migrations `9ba5a424fff6`, `8178548f185e`, `4f13b23279f1` and
+  `8184b299cf8e`, in that order.** A `.env` change only for a setting the
   check names. Rollback: run
   `docker compose exec backend alembic downgrade 199cfb4bbb49`, then check
-  out 3.9.0 and run `./start.sh`.
+  out 3.9.0 and run `./start.sh`. The downgrade drops the sync log key, the
+  index and `device_active_days`, and with it the Userbase dashboard's
+  activity before the window; rows already deleted stay deleted.
 
 ## Upgrading to 3.9.0
 
