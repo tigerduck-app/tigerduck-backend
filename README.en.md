@@ -49,7 +49,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now` (per-user cooldown; refused while the policy is disabled)
 
 ### 📣 Bulletins (`server/bulletins/`)
-- **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's TLS chain is broken, so we ship a pinned CA bundle (falling back to `verify=False`).
+- **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's servers may leave intermediates out of their TLS chain, so it verifies against certifi's roots plus the NTUST intermediates bundled in the repository.
 - **dedup** — `content_hash` deduplication (same source + same hash is treated as a repost and marked `skipped`, no re-notification).
 - **LLM classification** — OpenAI-compatible client (defaults to a host-side [llama-server](https://github.com/ggml-org/llama.cpp)). Returns `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`.
 - **Subscription matching + dispatch (dual-track)** — Anonymous devices match `BulletinSubscription` rules through the existing `bulletin_dispatches` path; logged-in users match `user_bulletin_subscriptions` (rules belong to each device and sit outside TigerSync) through `bulletin_user_matches` + `push_jobs`, and only devices whose rules matched and that have not turned bulletin push off receive it. A physical device that logs in gets a `linked_user_id` marker so the anonymous path skips it — no double pushes.

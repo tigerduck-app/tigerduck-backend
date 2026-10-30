@@ -310,13 +310,9 @@ class Settings(BaseSettings):
     bulletin_retention_days: int = 365
     # Retention job runs at this cadence. Once a day is plenty.
     bulletin_retention_interval_hours: int = 24
-    # Optional PEM file bundling NTUST's root + intermediates. When set and
-    # readable, the bulletin HTTP client uses it as the trust anchor so
-    # OpenSSL can complete the chain (the NTUST servers themselves ship
-    # incomplete chains). When unset, the client falls back to the MVP
-    # behavior of `verify=False` — still functional, but skips hostname /
-    # chain validation. Obtain the bundle via `openssl s_client -showcerts`
-    # against each NTUST subdomain the pipeline reaches.
+    # More CA certificates for bulletin fetches, PEM, on top of certifi's roots
+    # and server/bulletins/ntust_intermediates.pem: for a CA NTUST moves to
+    # before a release bundles it. A root in it becomes a trust anchor.
     bulletin_ca_bundle: Path | None = None
 
     # --- Links (`/links/{name}`, server/links/) ---

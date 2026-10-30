@@ -346,9 +346,7 @@ async def main_async(args: argparse.Namespace) -> int:
         async with httpx.AsyncClient(
             follow_redirects=True,
             headers={"User-Agent": "TigerDuckBulletinBot/0.1 (backfill)"},
-            # Match the scheduler client — use the NTUST CA bundle when
-            # configured, fall back to verify=False with a logged warning
-            # otherwise. See server/bulletins/jobs.resolve_bulletin_verify.
+            # Verifies as the scheduler's client does.
             verify=resolve_bulletin_verify(settings),
         ) as http_client:
             if not args.skip_preflight:
