@@ -62,9 +62,13 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   feature off.
 - **Bulletin scraping verifies TLS (#94).** It checks against certifi's
   roots and the TWCA intermediates NTUST's certificates come from, bundled
-  in `server/bulletins/ntust_intermediates.pem`; it no longer falls back to
-  `verify=False`. A detail page whose chain cannot be completed that way
-  fails its fetch (`detail fetch:` in `processing_error`).
+  in `server/bulletins/ntust_intermediates.pem`, and fetches an intermediate
+  neither bundled nor sent through the certificate's AIA URL; it no longer
+  falls back to `verify=False`. A list page that fails to load logs
+  `bulletins.scrape_job.fetch_failed` at error level, and the "Bulletin
+  scrape reads nothing" alert fires within the hour. A detail page whose
+  chain cannot be completed fails its fetch (`detail fetch:` in
+  `processing_error`).
   `TIGERDUCK_BULLETIN_CA_BUNDLE` now adds certificates to those instead of
   replacing them, and when set, its file must exist. Leave it unset unless
   NTUST moves to a CA the bundle lacks.
