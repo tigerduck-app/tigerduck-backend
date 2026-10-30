@@ -285,10 +285,16 @@ async def _course_prefs(
     )
     for doc in docs:
         section = (doc.document or {}).get("courses") or {}
-        enabled = bool(section.get("enabled", True))
+        # Absent means on; anything but a JSON boolean is malformed and counts
+        # as off (#104).
+        enabled = section.get("enabled", True) is True
         raw = section.get("reminder_offsets_minutes")
         offsets = (
-            [float(value) for value in raw if isinstance(value, (int, float))]
+            [
+                float(value)
+                for value in raw
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            ]
             if isinstance(raw, list)
             else default[1]
         )
