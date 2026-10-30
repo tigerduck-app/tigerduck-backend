@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import json
@@ -35,6 +36,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.syncjobs import executor as executor_module
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, run_sync_tick
 from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
 from server.syncjobs.moodle_client import (
@@ -85,8 +87,18 @@ class StubCourseFetcher:
         return self.results
 
 
+class _Clock:
+    """The budget's clock: still unless a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
 def _worker(
-    prepared_engine, test_settings, fetcher=None, course_fetcher=None
+    prepared_engine, test_settings, fetcher=None, course_fetcher=None, clock=None
 ) -> SyncWorker:
     # Neutralise the Moodle maintenance window (defaults to 00:00–05:00
     # Taipei): during the window _handle_moodle_failure reschedules instead
@@ -105,6 +117,10 @@ def _worker(
         fetcher=fetcher if fetcher is not None else StubFetcher(),
         course_fetcher=course_fetcher if course_fetcher is not None else StubCourseFetcher(),
         worker_id="test-worker",
+        budget=RequestBudget(
+            settings.sync_job_requests_per_minute,
+            clock=clock if clock is not None else _Clock(),
+        ),
     )
 
 
@@ -518,7 +534,7 @@ async def test_a_suspended_sync_claims_nothing(
     assert job.status == "pending"
 
 
-async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
+async def test_a_suspend_during_a_tick_starts_no_further_job(
     db_session, prepared_engine, test_settings
 ):
     await _setup_user_job(db_session, student_id="b00000001", token="tok-1")
@@ -534,7 +550,7 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
     worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
     worker = dataclasses.replace(
         worker,
-        settings=worker.settings.model_copy(update={"sync_job_min_interval_seconds": 0}),
+        settings=worker.settings.model_copy(update={"sync_job_concurrency": 1}),
     )
 
     assert await run_sync_tick(worker) == 1
@@ -546,7 +562,103 @@ async def test_a_suspend_during_a_tick_hands_back_the_jobs_not_yet_run(
         ("pending", 0, None, True),
     ]
     runs = (await db_session.execute(select(SyncRun.status, SyncRun.error))).all()
-    assert sorted(runs) == [("cancelled", "sync_suspended"), ("succeeded", None)]
+    assert runs == [("succeeded", None)]
+
+
+class _OverlapFetcher(StubFetcher):
+    """Holds each fetch until a second one is in flight, or for `patience`
+    seconds, and records the most it saw at once."""
+
+    def __init__(self, patience=5.0):
+        super().__init__(results=[])
+        self.patience = patience
+        self.in_flight = 0
+        self.most = 0
+        self._overlap = asyncio.Event()
+
+    async def fetch_assignments(self, *, token):
+        self.in_flight += 1
+        self.most = max(self.most, self.in_flight)
+        if self.in_flight > 1:
+            self._overlap.set()
+        try:
+            await asyncio.wait_for(self._overlap.wait(), self.patience)
+        except TimeoutError:
+            pass
+        finally:
+            self.in_flight -= 1
+        return await super().fetch_assignments(token=token)
+
+
+async def test_a_tick_runs_the_jobs_of_several_users_at_once(
+    db_session, prepared_engine, test_settings
+):
+    """tigerduck-backend#80: one job at a time, a minute apart, could not
+    keep up with the 8-hour policy; the request budget now sets the pace."""
+    for n in range(3):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher()
+    worker = _worker(prepared_engine, test_settings, fetcher=fetcher)
+    assert worker.settings.sync_job_concurrency == 2
+
+    assert await run_sync_tick(worker) == 3
+
+    assert fetcher.most == 2
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2"]
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 3
+
+
+async def test_a_tick_never_runs_two_jobs_of_one_user_at_once(
+    db_session, prepared_engine, test_settings
+):
+    user = await _setup_course_job(db_session)
+    db_session.add(
+        SyncJob(
+            user_id=user.id,
+            external_account_id=(
+                await db_session.scalar(select(SyncJob.external_account_id))
+            ),
+            job_type=SyncJobType.moodle_assignments.value,
+            run_after=datetime.now(UTC) - timedelta(minutes=2),
+        )
+    )
+    await db_session.commit()
+    fetcher = StubFetcher(results=[])
+    course_fetcher = StubCourseFetcher(results=[])
+    worker = _worker(
+        prepared_engine, test_settings, fetcher=fetcher, course_fetcher=course_fetcher
+    )
+
+    assert await run_sync_tick(worker) == 1
+    assert fetcher.calls == ["tok-1"]
+    assert (await db_session.execute(select(func.count(SyncRun.id)))).scalar_one() == 1
+
+    assert await run_sync_tick(worker) == 1
+    statuses = (await db_session.execute(select(SyncRun.status))).scalars().all()
+    assert statuses == ["succeeded"] * 2
+
+
+async def test_two_workers_at_once_run_each_job_once(
+    db_session, prepared_engine, test_settings
+):
+    for n in range(4):
+        await _setup_user_job(db_session, student_id=f"b0000000{n}", token=f"tok-{n}")
+    fetcher = _OverlapFetcher(patience=0.05)
+    workers = [
+        dataclasses.replace(
+            _worker(prepared_engine, test_settings, fetcher=fetcher), worker_id=name
+        )
+        for name in ("worker-a", "worker-b")
+    ]
+
+    started = await asyncio.gather(*(run_sync_tick(w) for w in workers))
+
+    assert sum(started) == 4
+    assert sorted(fetcher.calls) == ["tok-0", "tok-1", "tok-2", "tok-3"]
+    runs = (await db_session.execute(select(SyncRun.sync_job_id, SyncRun.status))).all()
+    assert len({job_id for job_id, _ in runs}) == 4
+    assert {status for _, status in runs} == {"succeeded"}
 
 
 async def test_successful_run_upserts_and_reschedules(

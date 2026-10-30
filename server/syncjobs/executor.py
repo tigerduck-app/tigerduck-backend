@@ -1,15 +1,17 @@
 """Server-side sync job executor (sync-and-push spec §4).
 
-Claim/execute split: one short transaction recovers stale locks, another
-claims up to `sync_job_batch_size` due jobs (`FOR UPDATE SKIP LOCKED`,
-joined to an enabled+in-window policy, of users with a device syncing,
-global running-count cap; none while the portal suspends sync), then
-each job reads its token, fetches from Moodle with no transaction open and
-stores the result in a transaction of its own, so one failure can't poison
-the batch; an assignments job then probes submission status in transactions
-of its own (`_refresh_submission_status`). Jobs run sequentially within a
-tick — deliberate politeness toward the school APIs behind our single
-egress IP.
+Claim/execute split: one short transaction recovers stale locks, then a
+tick claims due jobs one at a time, up to `sync_job_batch_size`, each as a
+slot of `sync_job_concurrency` frees (`FOR UPDATE SKIP LOCKED`, joined to an
+enabled+in-window policy, of users with a device syncing and no job
+running, global running-count cap; none while the portal suspends sync or a
+429 pauses the worker). Each job reads its token, fetches from Moodle with
+no transaction open and stores the result in a transaction of its own, so
+one failure can't poison the rest; an assignments job then probes
+submission status in transactions of its own (`_refresh_submission_status`).
+Every Moodle request of the worker waits its turn in one `RequestBudget`
+(`sync_job_requests_per_minute`), for the school APIs behind our single
+egress IP (tigerduck-backend#80).
 
 Failure taxonomy → outcome:
 * `CredentialInvalid`            → account invalidated, ALL user jobs
@@ -53,6 +55,7 @@ import sqlalchemy as sa
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from server.auth.crypto import CredentialCipher
 from server.auth.models import (
@@ -68,6 +71,7 @@ from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.availability import is_moodle_available, manual_suspend_until
+from server.syncjobs.budget import RequestBudget
 from server.syncjobs.courses import apply_fetched_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
@@ -136,6 +140,8 @@ class SyncWorker:
     fetcher: AssignmentFetcher
     course_fetcher: CourseFetcher
     worker_id: str
+    # Shared by every job in flight; the fetchers send through its hooks.
+    budget: RequestBudget
 
 
 def _in_maintenance_window(window: str) -> bool:
@@ -164,8 +170,9 @@ def _in_maintenance_window(window: str) -> bool:
 
 
 async def run_sync_tick(worker: SyncWorker) -> int:
-    """One scheduler tick: recover stale locks, claim due jobs, execute
-    them sequentially. Returns the number of jobs executed."""
+    """One scheduler tick: recover stale locks, then claim due jobs one at a
+    time, up to `sync_job_batch_size`, and run `sync_job_concurrency` of them
+    at once. Returns the number of jobs started."""
     if _in_maintenance_window(worker.settings.sync_maintenance_window):
         logger.info(
             "syncjobs.maintenance_window",
@@ -173,17 +180,43 @@ async def run_sync_tick(worker: SyncWorker) -> int:
         )
         return 0
     await _recover_stale_jobs(worker)
-    if await _suspended(worker):
-        return 0
-    claimed = await _claim_due_jobs(worker)
-    for idx, (job_id, run_id) in enumerate(claimed):
-        if idx > 0:
-            await asyncio.sleep(worker.settings.sync_job_min_interval_seconds)
-            if await _suspended(worker):
-                await _hand_back(worker, claimed[idx:])
-                return idx
-        await _execute_job(worker, job_id=job_id, run_id=run_id)
-    return len(claimed)
+    slots = asyncio.Semaphore(worker.settings.sync_job_concurrency)
+    running: list[asyncio.Task[None]] = []
+    try:
+        while len(running) < worker.settings.sync_job_batch_size:
+            await slots.acquire()
+            claimed = await _claim_next(worker)
+            if claimed is None:
+                slots.release()
+                break
+            running.append(
+                asyncio.create_task(_execute_in_slot(worker, claimed, slots))
+            )
+    except asyncio.CancelledError:
+        for task in running:
+            task.cancel()
+        raise
+    finally:
+        # A claim that failed leaves the jobs already started to finish.
+        await asyncio.gather(*running, return_exceptions=True)
+    return len(running)
+
+
+async def _claim_next(worker: SyncWorker) -> tuple[int, int] | None:
+    """The next job to start, or None while a 429 pauses the worker, an
+    operator suspends sync, or no job is due."""
+    if worker.budget.paused or await _suspended(worker):
+        return None
+    return await _claim_due_job(worker)
+
+
+async def _execute_in_slot(
+    worker: SyncWorker, claimed: tuple[int, int], slots: asyncio.Semaphore
+) -> None:
+    try:
+        await _execute_job(worker, job_id=claimed[0], run_id=claimed[1])
+    finally:
+        slots.release()
 
 
 async def _suspended(worker: SyncWorker) -> bool:
@@ -193,33 +226,6 @@ async def _suspended(worker: SyncWorker) -> bool:
     if until is not None:
         logger.info("syncjobs.suspended", until=until.isoformat())
     return until is not None
-
-
-async def _hand_back(worker: SyncWorker, claimed: list[tuple[int, int]]) -> None:
-    """Return claimed jobs untouched, their runs cancelled, so none counts
-    as an attempt."""
-    async with session_scope(worker.session_factory) as session:
-        await session.execute(
-            update(SyncJob)
-            .where(
-                SyncJob.id.in_([job_id for job_id, _ in claimed]),
-                SyncJob.status == SyncJobStatus.running.value,
-                SyncJob.locked_by == worker.worker_id,
-            )
-            .values(status=SyncJobStatus.pending.value, locked_by=None, locked_at=None)
-        )
-        await session.execute(
-            update(SyncRun)
-            .where(
-                SyncRun.id.in_([run_id for _, run_id in claimed]),
-                SyncRun.status == SyncRunStatus.running.value,
-            )
-            .values(
-                status=SyncRunStatus.cancelled.value,
-                finished_at=datetime.now(UTC),
-                error="sync_suspended",
-            )
-        )
 
 
 async def _recover_stale_jobs(worker: SyncWorker) -> None:
@@ -296,8 +302,10 @@ def _has_syncing_device(settings: Settings, now: datetime) -> sa.Exists:
     )
 
 
-async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
+async def _claim_due_job(worker: SyncWorker) -> tuple[int, int] | None:
+    """Claim the next due job and open its run: (job id, run id)."""
     now = datetime.now(UTC)
+    busy = aliased(SyncJob)
     async with session_scope(worker.session_factory) as session:
         # Serialize the count+claim across workers (see _CLAIM_LOCK_KEY).
         # Released automatically at transaction end.
@@ -309,14 +317,10 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                 .where(SyncJob.status == SyncJobStatus.running.value)
             )
         ).scalar_one()
-        capacity = min(
-            worker.settings.sync_job_batch_size,
-            worker.settings.sync_job_global_concurrency - running,
-        )
-        if capacity <= 0:
-            return []
+        if running >= worker.settings.sync_job_global_concurrency:
+            return None
 
-        jobs = (
+        job = (
             (
                 await session.execute(
                     select(SyncJob)
@@ -325,6 +329,12 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                         SyncJob.status == SyncJobStatus.pending.value,
                         SyncJob.run_after <= now,
                         _has_syncing_device(worker.settings, now),
+                        # One job of a user at a time: both write the user's
+                        # rows, and a rejected token disables all of them.
+                        ~sa.exists().where(
+                            busy.user_id == SyncJob.user_id,
+                            busy.status == SyncJobStatus.running.value,
+                        ),
                         SyncPolicy.enabled.is_(True),
                         sa.or_(
                             SyncPolicy.active_from.is_(None),
@@ -336,23 +346,22 @@ async def _claim_due_jobs(worker: SyncWorker) -> list[tuple[int, int]]:
                         ),
                     )
                     .order_by(SyncJob.priority, SyncJob.run_after)
-                    .limit(capacity)
+                    .limit(1)
                     .with_for_update(skip_locked=True, of=SyncJob)
                 )
             )
             .scalars()
-            .all()
+            .one_or_none()
         )
-        claimed: list[tuple[int, int]] = []
-        for job in jobs:
-            job.status = SyncJobStatus.running.value
-            job.locked_by = worker.worker_id
-            job.locked_at = now
-            run = SyncRun(sync_job_id=job.id, user_id=job.user_id)
-            session.add(run)
-            await session.flush()
-            claimed.append((job.id, run.id))
-        return claimed
+        if job is None:
+            return None
+        job.status = SyncJobStatus.running.value
+        job.locked_by = worker.worker_id
+        job.locked_at = now
+        run = SyncRun(sync_job_id=job.id, user_id=job.user_id)
+        session.add(run)
+        await session.flush()
+        return job.id, run.id
 
 
 async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:

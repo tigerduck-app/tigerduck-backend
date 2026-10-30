@@ -11,7 +11,8 @@ from sqlalchemy import select, text, update
 from server.auth.models import UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
-from server.syncjobs.executor import SyncWorker, _claim_due_jobs
+from server.syncjobs.budget import RequestBudget
+from server.syncjobs.executor import SyncWorker, _claim_due_job
 from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -94,6 +95,7 @@ def _claimer(client) -> SyncWorker:
         fetcher=None,
         course_fetcher=None,
         worker_id="test-worker",
+        budget=RequestBudget(client.app.state.settings.sync_job_requests_per_minute),
     )
 
 
@@ -125,8 +127,8 @@ async def test_run_now_reaches_the_next_claim_from_a_device_not_seen_lately(
     )
 
     assert response.json()["queued"] is queued
-    claimed = [job_id for job_id, _ in await _claim_due_jobs(_claimer(client))]
-    assert (await _get_job(client)).id in claimed
+    claimed = await _claim_due_job(_claimer(client))
+    assert claimed is not None and claimed[0] == (await _get_job(client)).id
 
 
 async def _waiting_on_a_lock(factory) -> None:
