@@ -20,16 +20,19 @@ _FK = "sync_log_entries_user_id_fkey"
 
 
 def upgrade() -> None:
+    """A second run changes nothing."""
     # The log of accounts deleted before the key existed (tigerduck-backend#90).
     op.execute(
         "DELETE FROM sync_log_entries e"
         " WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = e.user_id)"
     )
-    op.create_foreign_key(
-        _FK, "sync_log_entries", "users", ["user_id"], ["id"], ondelete="CASCADE"
+    op.execute(
+        f"ALTER TABLE sync_log_entries DROP CONSTRAINT IF EXISTS {_FK},"
+        f" ADD CONSTRAINT {_FK} FOREIGN KEY (user_id)"
+        " REFERENCES users (id) ON DELETE CASCADE"
     )
 
 
 def downgrade() -> None:
     """Drops the key; the log rows it deleted stay deleted."""
-    op.drop_constraint(_FK, "sync_log_entries", type_="foreignkey")
+    op.execute(f"ALTER TABLE sync_log_entries DROP CONSTRAINT IF EXISTS {_FK}")

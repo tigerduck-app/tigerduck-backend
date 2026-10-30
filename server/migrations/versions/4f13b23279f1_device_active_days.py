@@ -8,9 +8,7 @@ Create Date: 2026-10-30 12:30:00.000000
 """
 from collections.abc import Sequence
 
-import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = '4f13b23279f1'
@@ -20,20 +18,20 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "device_active_days",
-        sa.Column(
-            "device_id",
-            postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("user_devices.id", ondelete="CASCADE"),
-            primary_key=True,
-        ),
-        sa.Column("day", sa.Date(), primary_key=True),
-        sa.Column("first_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("last_at", sa.DateTime(timezone=True), nullable=False),
+    """A second run changes nothing."""
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_active_days (
+            device_id uuid NOT NULL REFERENCES user_devices (id) ON DELETE CASCADE,
+            day       date NOT NULL,
+            first_at  timestamptz NOT NULL,
+            last_at   timestamptz NOT NULL,
+            PRIMARY KEY (device_id, day)
+        )
+        """
     )
 
 
 def downgrade() -> None:
     """The days of sessions already pruned go with the table."""
-    op.drop_table("device_active_days")
+    op.execute("DROP TABLE IF EXISTS device_active_days")
