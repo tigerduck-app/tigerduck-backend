@@ -191,16 +191,18 @@ async def _preview(pool, *, keeps_record: bool, **filt) -> dict:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_a_send_stores_every_device_it_reaches(db_session, portal_pool):
-    """The Devices reached tile sums each send's total, so a recorded push also
-    counts the anonymous devices its preview shows; a popup reaches none of them."""
+async def test_a_send_reports_and_stores_every_device_it_reaches(db_session, portal_pool):
+    """The toast after a send and the Devices reached tile, which sums each
+    send's total, count the anonymous devices a recorded push's preview shows
+    too; a popup reaches none of them."""
     await _recipients(db_session)
-    expected = {}
+    expected, queued = {}, {}
     for keeps_record in (True, False):
-        expected["record" if keeps_record else "popup"] = (
+        kind = "record" if keeps_record else "popup"
+        expected[kind] = (
             await _preview(portal_pool, keeps_record=keeps_record, target_classes=["iphone"])
         )["total"]
-        await send(
+        response = await send(
             _SendRequest(
                 target_classes=["iphone"], title="t", body="b",
                 keeps_record=keeps_record, force_ring=False,
@@ -208,10 +210,12 @@ async def test_a_send_stores_every_device_it_reaches(db_session, portal_pool):
             _REQUEST,
             pool=portal_pool,
         )
+        queued[kind] = json.loads(response.body)["queued"]
 
     rows = await portal_pool.fetch("SELECT kind, total FROM custom_push_sends")
 
     assert {r["kind"]: r["total"] for r in rows} == expected
+    assert queued == expected
     assert expected["record"] > expected["popup"]
 
 

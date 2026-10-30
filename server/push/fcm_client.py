@@ -22,6 +22,20 @@ from server.push.payload import FcmRequest
 logger = structlog.get_logger(__name__)
 
 
+def is_dead_fcm_token(status: str | None, description: str | None) -> bool:
+    """Whether FCM said the registration token itself will never work again.
+
+    INVALID_ARGUMENT also answers a payload FCM refuses, so it counts only
+    when its message names the token
+    (https://firebase.google.com/docs/cloud-messaging/manage-tokens).
+    """
+    s = (status or "").upper()
+    if s in {"UNREGISTERED", "SENDER_ID_MISMATCH"}:
+        return True
+    named = "registration token" in (description or "").lower()
+    return s == "INVALID_ARGUMENT" and named
+
+
 class FcmSender:
     """Real FCM sender — requires a Firebase service-account JSON file."""
 

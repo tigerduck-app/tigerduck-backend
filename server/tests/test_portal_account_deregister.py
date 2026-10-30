@@ -72,7 +72,7 @@ def _account_columns(table: Table):
 async def test_deregister_leaves_no_row_of_the_account(db_session, portal_pool):
     """tigerduck-backend#90: the sync log has no foreign key to users and
     outlived the account."""
-    user = User(student_id="b1")
+    user = User(student_id="B1")
     db_session.add(user)
     await db_session.flush()
     phone = UserDevice(user_id=user.id, client_device_id="iphone-1", platform="ios")
@@ -143,7 +143,7 @@ async def _blocked_by(task: asyncio.Task, factory, pid: int) -> str:
 async def _old_rows(db_session) -> User:
     """An account with an NTUST account, and a session, a sync log row and a
     sync run past their windows."""
-    user = User(student_id="b1")
+    user = User(student_id="B1")
     db_session.add(user)
     await db_session.flush()
     account = ExternalAccount(user_id=user.id, provider="ntust_sso", external_user_id="b1")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -139,3 +140,37 @@ async def test_mark_credentials_invalid_disables_and_notifies(db_session):
         .all()
     )
     assert len(pushes) == 1
+
+
+async def test_a_later_credential_that_fails_prompts_again(db_session):
+    """A sent prompt keeps its key until retention prunes it days later, so a
+    fixed key left a student whose next token failed that week unprompted
+    (#91)."""
+    cipher = _cipher()
+    user, account, _ = await _setup(db_session, cipher)
+    signed_in = datetime.now(UTC) - timedelta(days=2)
+    account.last_auth_success_at = signed_in
+    await mark_credentials_invalid(
+        db_session, account=account, user_id=user.id, error="credential_invalid"
+    )
+    await db_session.commit()
+    first = (
+        await db_session.execute(select(PushJob).where(PushJob.user_id == user.id))
+    ).scalar_one()
+    first.status = "sent"
+    # The app signs in again and stores a new token, which fails in turn.
+    account.credential_status = "active"
+    account.last_auth_success_at = signed_in + timedelta(days=1)
+    await db_session.commit()
+
+    await mark_credentials_invalid(
+        db_session, account=account, user_id=user.id, error="credential_invalid"
+    )
+    await db_session.commit()
+
+    keys = (
+        await db_session.execute(
+            select(PushJob.dedupe_key).where(PushJob.user_id == user.id)
+        )
+    ).scalars()
+    assert len(set(keys)) == 2

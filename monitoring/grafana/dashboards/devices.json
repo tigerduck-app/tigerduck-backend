@@ -1023,13 +1023,75 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Replaced refresh tokens sent again",
+      "description": "From the backend log. grace_retry and lost_rotation_recovered rotated the token again for an app that lost the reply, within or after the 60-second grace; duplicate_refused and reuse_detected refused it. Not affected by the filters.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (event) (count_over_time({service=\"backend\"} |= \"auth.refresh.\" | json event=\"event\" | event=~\"auth.refresh.(grace_retry|lost_rotation_recovered|duplicate_refused|reuse_detected)\" [$__auto]))",
+          "legendFormat": "{{event}}",
+          "queryType": "range",
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 70,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": 0,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "id": 16,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      }
+    },
+    {
+      "id": 17,
       "type": "row",
       "title": "Breakdown",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 30,
         "w": 24,
         "h": 1
       },
@@ -1088,10 +1150,10 @@
           "sort": "none"
         }
       },
-      "id": 17,
+      "id": 18,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 31,
         "w": 6,
         "h": 8
       }
@@ -1149,10 +1211,10 @@
           "values": true
         }
       },
-      "id": 18,
+      "id": 19,
       "gridPos": {
         "x": 6,
-        "y": 23,
+        "y": 31,
         "w": 6,
         "h": 8
       }
@@ -1210,10 +1272,10 @@
           "values": true
         }
       },
-      "id": 19,
+      "id": 20,
       "gridPos": {
         "x": 12,
-        "y": 23,
+        "y": 31,
         "w": 6,
         "h": 8
       }
@@ -1271,10 +1333,10 @@
           "values": true
         }
       },
-      "id": 20,
+      "id": 21,
       "gridPos": {
         "x": 18,
-        "y": 23,
+        "y": 31,
         "w": 6,
         "h": 8
       }
@@ -1332,10 +1394,10 @@
           "values": true
         }
       },
-      "id": 21,
+      "id": 22,
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 39,
         "w": 8,
         "h": 8
       }
@@ -1393,10 +1455,10 @@
           "values": true
         }
       },
-      "id": 22,
+      "id": 23,
       "gridPos": {
         "x": 8,
-        "y": 31,
+        "y": 39,
         "w": 8,
         "h": 8
       }
@@ -1454,22 +1516,22 @@
           "sort": "none"
         }
       },
-      "id": 23,
+      "id": 24,
       "gridPos": {
         "x": 16,
-        "y": 31,
+        "y": 39,
         "w": 8,
         "h": 8
       }
     },
     {
-      "id": 24,
+      "id": 25,
       "type": "row",
       "title": "Devices",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 47,
         "w": 24,
         "h": 1
       },
@@ -1818,10 +1880,10 @@
           "show": false
         }
       },
-      "id": 25,
+      "id": 26,
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 48,
         "w": 24,
         "h": 14
       }
@@ -1866,10 +1928,10 @@
           "show": false
         }
       },
-      "id": 26,
+      "id": 27,
       "gridPos": {
         "x": 0,
-        "y": 54,
+        "y": 62,
         "w": 12,
         "h": 6
       }
@@ -1928,10 +1990,10 @@
           "sort": "desc"
         }
       },
-      "id": 27,
+      "id": 28,
       "gridPos": {
         "x": 12,
-        "y": 54,
+        "y": 62,
         "w": 12,
         "h": 6
       }
@@ -1992,10 +2054,10 @@
         "wideLayout": true,
         "showPercentChange": false
       },
-      "id": 28,
+      "id": 29,
       "gridPos": {
         "x": 0,
-        "y": 60,
+        "y": 68,
         "w": 4,
         "h": 4
       }

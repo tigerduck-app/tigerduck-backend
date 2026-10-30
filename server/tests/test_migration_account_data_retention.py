@@ -15,7 +15,7 @@ from server.tests.conftest import _alembic
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 REVISION = "8184b299cf8e"
-BEFORE = "199cfb4bbb49"
+BEFORE = "9ba5a424fff6"
 
 _LOG = "INSERT INTO sync_log_entries (user_id, source, message) VALUES (:u, 's', 'm')"
 _STATE = """

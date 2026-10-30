@@ -25,8 +25,18 @@ def test_android_sender_id_mismatch_is_bad_token() -> None:
     assert _classify(_fail("SENDER_ID_MISMATCH"), platform="android") == "bad_token"
 
 
-def test_android_invalid_argument_is_bad_token() -> None:
-    assert _classify(_fail("INVALID_ARGUMENT"), platform="android") == "bad_token"
+def test_android_invalid_argument_naming_the_token_is_bad_token() -> None:
+    bad = _fail(
+        "INVALID_ARGUMENT",
+        "The registration token is not a valid FCM registration token",
+    )
+    assert _classify(bad, platform="android") == "bad_token"
+
+
+def test_android_invalid_argument_about_the_payload_is_transient() -> None:
+    # FCM answers a payload it refuses the same way; the token may be fine.
+    too_big = _fail("INVALID_ARGUMENT", "Message is too big")
+    assert _classify(too_big, platform="android") == "transient"
 
 
 def test_android_unknown_status_is_transient() -> None:

@@ -261,6 +261,36 @@ async def test_settings_control_offsets_and_disable(
     assert all(j.status == "cancelled" for j in jobs)
 
 
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({}, (True, [10.0])),
+        ({"enabled": "false"}, (False, [10.0])),
+        ({"enabled": 1}, (False, [10.0])),
+        ({"reminder_offsets_minutes": [True, 15, 2.5, "5"]}, (True, [15.0, 2.5])),
+    ],
+)
+async def test_settings_take_only_a_boolean_switch_and_numeric_offsets(
+    db_session, test_settings, section, expected
+):
+    """A hand-edited document must not turn reminders on with the string
+    "false", or file a 1-minute reminder for a JSON true (#104)."""
+    user = await _make_user(db_session)
+    db_session.add(
+        UserSettingsDocument(
+            user_id=user.id, namespace="notification", document={"courses": section}
+        )
+    )
+    await db_session.flush()
+    settings = test_settings.model_copy(
+        update={"course_reminder_default_offsets_minutes": [10]}
+    )
+
+    prefs = await course_reminders_module._course_prefs(db_session, {user.id}, settings)
+
+    assert prefs[user.id] == expected
+
+
 async def test_old_semester_hidden_and_excluded_courses(
     db_session, prepared_engine, test_settings
 ):

@@ -22,7 +22,7 @@ from server.bulletins.models import (
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
 from server.db import build_session_factory
 from server.models import DevicePlatform, DeviceRegistration
-from server.push.apns_client import RecordingSender
+from server.push.apns_client import RecordingSender, SendResult
 from server.push.fcm_client import RecordingFcmSender
 from server.push.router import PushRouter
 
@@ -196,3 +196,109 @@ async def test_a_failing_bulletin_leaves_its_batch_slot_to_the_next(
     assert (first.bulletins_handled, second.bulletins_handled) == (0, 1)
     assert [r.data["bulletin_id"] for r in android.requests] == [str(later.id)]
     assert not await _notified(db_session, failing)
+
+
+async def _subscribe_iphones(session, count: int) -> None:
+    """`count` anonymous iPhones, `ios-1`.., subscribed to ORG."""
+    for n in range(1, count + 1):
+        session.add(
+            DeviceRegistration(
+                device_id=f"ios-{n}",
+                user_id="u",
+                platform=DevicePlatform.apple.value,
+                pts_token_hex="",
+                device_token_hex=f"apns-{n}",
+                bundle_id="org.ntust.app.TigerDuck",
+                attrs_type="",
+                apns_env="",
+            )
+        )
+        await session.flush()
+        session.add(
+            BulletinSubscription(
+                device_id=f"ios-{n}", orgs=[ORG], tags=[], mode="AND"
+            )
+        )
+    await session.flush()
+
+
+class Restart(BaseException):
+    """The process going away mid-send, which no handler catches."""
+
+
+async def test_a_restart_mid_fan_out_resends_to_no_device_already_reached(
+    db_session, prepared_engine, test_settings
+):
+    """Each device's outcome is committed as it is sent; committed only
+    after the whole bulletin, a restart sent it again to every device the
+    first run reached (#91)."""
+    await _subscribe_iphones(db_session, 3)
+    db_session.add(_bulletin("910001"))
+    await db_session.commit()
+    factory = build_session_factory(prepared_engine)
+
+    class DiesOnSecondSend(RecordingSender):
+        async def send(self, request):
+            if self.requests:
+                raise Restart
+            return await super().send(request)
+
+    first = DiesOnSecondSend()
+    with pytest.raises(Restart):
+        await dispatch_pending_bulletins(
+            factory,
+            PushRouter(apple=first, android=RecordingFcmSender()),
+            test_settings,
+        )
+    after_restart = RecordingSender()
+    await dispatch_pending_bulletins(
+        factory,
+        PushRouter(apple=after_restart, android=RecordingFcmSender()),
+        test_settings,
+    )
+
+    reached = [r.device_token for r in first.requests + after_restart.requests]
+    assert sorted(reached) == ["apns-1", "apns-2", "apns-3"]
+
+
+async def test_a_token_the_provider_calls_dead_is_dropped(
+    db_session, prepared_engine, test_settings
+):
+    """So the next bulletin does not target it again; the app's next launch
+    registers a working one (#91)."""
+    await _subscribe_iphones(db_session, 1)
+    await _subscribe_devices(db_session, 1)
+    db_session.add(_bulletin("910001"))
+    await db_session.commit()
+
+    class Refuses:
+        def __init__(self, status):
+            self.status = status
+
+        async def send(self, request):
+            return SendResult(success=False, status=self.status, description="gone")
+
+        async def send_multi(self, requests):
+            return [await self.send(r) for r in requests]
+
+        async def close(self):
+            pass
+
+    await dispatch_pending_bulletins(
+        build_session_factory(prepared_engine),
+        PushRouter(apple=Refuses("410"), android=Refuses("UNREGISTERED")),
+        test_settings,
+    )
+
+    tokens = (
+        await db_session.execute(
+            select(
+                DeviceRegistration.device_id,
+                DeviceRegistration.device_token_hex,
+                DeviceRegistration.pts_token_hex,
+            )
+            .order_by(DeviceRegistration.device_id)
+            .execution_options(populate_existing=True)
+        )
+    ).all()
+    assert [tuple(row) for row in tokens] == [("dev-1", None, ""), ("ios-1", None, "")]

@@ -163,6 +163,34 @@ async def test_the_expire_notification_goes_only_to_a_student_waiting_to_sign_in
     assert [tuple(r) for r in notified] == [("b2", "reauth_required")]
 
 
+async def test_a_later_credential_that_expires_is_notified_again(
+    db_session, portal_pool
+):
+    """A sent notification keeps its key for the 7-day retention, so a fixed
+    key per student left one whose next token expired that week untold, the
+    gap tigerduck-backend#91 fixed for the server's own prompt."""
+    job = await _job(db_session, "b2", status="disabled", last_error="credential_invalid")
+    db_session.add(
+        UserDevice(user_id=job.user_id, client_device_id="iphone-1", platform="ios")
+    )
+    account = await db_session.get(ExternalAccount, job.external_account_id)
+    account.last_auth_success_at = datetime.now(UTC) - timedelta(days=2)
+    await db_session.commit()
+    await retry_all_moodle(_REQUEST, RetryAllRequest(notify=True), pool=portal_pool)
+    await portal_pool.execute("UPDATE push_jobs SET status = 'sent'")
+
+    # The student signs in again, and that token expires in turn.
+    account.last_auth_success_at = datetime.now(UTC) - timedelta(days=1)
+    await db_session.commit()
+    await portal_pool.execute("UPDATE sync_jobs SET status = 'disabled'")
+    result = await retry_all_moodle(
+        _REQUEST, RetryAllRequest(notify=True), pool=portal_pool
+    )
+
+    assert result["notified"] == 1
+    assert await portal_pool.fetchval("SELECT count(*) FROM push_jobs") == 2
+
+
 async def test_the_job_list_is_under_the_key_the_jobs_table_reads(
     db_session, portal_pool
 ):

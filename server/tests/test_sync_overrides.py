@@ -319,6 +319,22 @@ async def test_course_override_prefers_portal_row_over_moodle_shell(client) -> N
         assert override.color_hex == "#FF8800"
 
 
+async def test_assignment_override_of_an_assignment_the_server_lacks_names_it(
+    client,
+) -> None:
+    """As for a course, the detail tells this 404 from the one a backend
+    without the route gives (tigerduck-backend#62)."""
+    login = await do_login(client)
+
+    response = await client.patch(
+        "/v3/sync/assignments/9001/override",
+        headers=bearer(login),
+        json={"local_status": "ignored"},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "assignment_not_found"}
+
+
 async def test_course_override_of_a_course_the_server_lacks_names_it(client) -> None:
     """An app can hold settings for a course the server no longer has: its
     rows go once no device syncs courses. The detail tells that 404 from

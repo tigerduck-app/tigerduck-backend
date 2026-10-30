@@ -16,10 +16,14 @@ re-notifying devices (the unique index + `notified_at` stamp do the work).
 from __future__ import annotations
 
 import asyncio
+import ssl
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from functools import cache, partial
+from pathlib import Path
 
+import certifi
 import httpx
 import structlog
 from sqlalchemy import delete, select, update
@@ -39,67 +43,102 @@ from server.config import Settings
 from server.db import lift_timeouts
 from server.metrics import observe_bulletin_scrape
 from server.push.router import PushRouter
+from server.tls_chain import (
+    AIA_FETCH_DEADLINE_SECONDS,
+    INCOMPLETE_CHAIN_CODES,
+    IssuerFetch,
+    fetch_issuer,
+    missing_intermediates,
+    trust_context,
+    verify_code,
+)
+from server.tls_pins.targets import resolve as resolve_public
 
 logger = structlog.get_logger(__name__)
 
 HttpClientFactory = Callable[[], httpx.AsyncClient]
 
 
-@lru_cache(maxsize=1)
-def _warn_ca_bundle_missing(path: str) -> None:
-    """Log once per process when the configured bundle path isn't present
-    on disk, so the fallback to unverified TLS doesn't stay silent."""
-    logger.warning(
-        "bulletins.ca_bundle.missing",
-        path=path,
-        fallback="verify=False",
-    )
+# The intermediates NTUST's certificates are issued from, which its servers
+# may leave out of the chain they send. Their roots are in certifi.
+NTUST_INTERMEDIATES = Path(__file__).with_name("ntust_intermediates.pem")
 
 
-@lru_cache(maxsize=1)
-def _warn_ca_bundle_unset() -> None:
-    """Log once per process when no bundle is configured at all, so the
-    security trade-off is visible in startup logs instead of folklore."""
-    logger.warning(
-        "bulletins.ca_bundle.unset",
-        fallback="verify=False",
-        remedy="set TIGERDUCK_BULLETIN_CA_BUNDLE to a PEM file",
-    )
-
-
-def resolve_bulletin_verify(settings: Settings | None = None) -> bool | str:
-    """Pick the TLS verification strategy for bulletin scraping.
-
-    NTUST subdomains (bulletin / obei / admissions / library …) ship
-    incomplete cert chains and certs missing RFC 5280 extensions. OpenSSL
-    3 on Debian rejects them; curl/macOS tolerate them via AIA chasing.
-
-    When the operator has bundled NTUST's root + the missing intermediates
-    at ``settings.bulletin_ca_bundle`` (build via
-    ``openssl s_client -showcerts -connect <host>:443`` and concat each
-    leaf's chain into one PEM), return that path so httpx can validate
-    hostname and chain against it. Otherwise fall back to ``verify=False``
-    with a logged warning — MVP content is public, but the degradation
-    should stay visible so we don't drift into permanent acceptance.
-    """
+def resolve_bulletin_verify(
+    settings: Settings | None = None,
+    *,
+    cafile: str = certifi.where(),
+    intermediates: Path = NTUST_INTERMEDIATES,
+) -> ssl.SSLContext:
+    """The context bulletin fetches verify with: certifi's roots, with NTUST's
+    intermediates and the operator's `bulletin_ca_bundle` in the store, where
+    an intermediate never becomes an anchor (`trust_context`)."""
     s = settings or Settings()
-    bundle = s.bulletin_ca_bundle
-    if bundle is None:
-        _warn_ca_bundle_unset()
-        return False
-    if bundle.is_file():
-        return str(bundle)
-    _warn_ca_bundle_missing(str(bundle))
-    return False
+    ctx = trust_context(cafile)
+    ctx.load_verify_locations(cafile=intermediates)
+    if s.bulletin_ca_bundle is not None:
+        ctx.load_verify_locations(cafile=s.bulletin_ca_bundle)
+    return ctx
+
+
+class AiaTransport(httpx.AsyncBaseTransport):
+    """Sends over `context`, and a chain that stops short of a root, as a
+    renewal under an intermediate not bundled would, is completed through
+    AIA as server/links/checker.py does: the intermediates join the store,
+    never as anchors, stay there for later requests, and the request is sent
+    once more."""
+
+    def __init__(
+        self,
+        context: ssl.SSLContext,
+        *,
+        resolve: Callable[[str, int], list[tuple[str, int]]] = resolve_public,
+        fetch: IssuerFetch | None = None,
+    ) -> None:
+        self._context = context
+        self._transport = httpx.AsyncHTTPTransport(verify=context)
+        self._resolve = resolve
+        self._fetch = fetch
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._transport.handle_async_request(request)
+        except httpx.ConnectError as exc:
+            if verify_code(exc) not in INCOMPLETE_CHAIN_CODES:
+                raise
+            extra = await asyncio.to_thread(self._missing_intermediates, request.url)
+            if not extra:
+                raise
+        for der in extra:
+            self._context.load_verify_locations(cadata=der)
+        return await self._transport.handle_async_request(request)
+
+    def _missing_intermediates(self, url: httpx.URL) -> list[bytes]:
+        # One deadline for the chain read and every issuer download together.
+        deadline = time.monotonic() + AIA_FETCH_DEADLINE_SECONDS
+        fetch = self._fetch or partial(fetch_issuer, deadline=deadline)
+        try:
+            addresses = self._resolve(url.host, url.port or 443)
+            return missing_intermediates(url.host, addresses, fetch, deadline)
+        except (OSError, ValueError):
+            return []
+
+    async def aclose(self) -> None:
+        await self._transport.aclose()
+
+
+@cache
+def _default_context() -> ssl.SSLContext:
+    return resolve_bulletin_verify()
 
 
 def default_http_client_factory() -> httpx.AsyncClient:
     """Each job call builds its own client — simpler than juggling an app-
     wide pool for calls that only happen every minute or so."""
     return httpx.AsyncClient(
+        transport=AiaTransport(_default_context()),
         follow_redirects=True,
         headers={"User-Agent": "TigerDuckBulletinBot/0.1"},
-        verify=resolve_bulletin_verify(),
     )
 
 
@@ -113,7 +152,17 @@ async def scrape_job(
     """Fetch the list page and reconcile with DB. Returns #inserted."""
     ts = now or datetime.now(timezone.utc)
     async with http_client_factory() as client:
-        rows = await fetch_list(settings.bulletin_list_url, client)
+        try:
+            rows = await fetch_list(settings.bulletin_list_url, client)
+        except httpx.HTTPError as exc:
+            # Raised on, so the scheduler counts the run as failed; with no rows
+            # read, td-bulletin-scrape-empty fires within the hour.
+            logger.error(
+                "bulletins.scrape_job.fetch_failed",
+                url=settings.bulletin_list_url,
+                error=f"{type(exc).__name__}: {exc}"[:300],
+            )
+            raise
 
     async with session_factory() as session:
         outcome = await upsert_list_rows(session, rows, now=ts)

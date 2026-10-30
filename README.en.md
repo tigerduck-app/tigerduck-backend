@@ -49,7 +49,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now` (per-user cooldown; refused while the policy is disabled)
 
 ### 📣 Bulletins (`server/bulletins/`)
-- **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's TLS chain is broken, so we ship a pinned CA bundle (falling back to `verify=False`).
+- **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's servers may leave intermediates out of their TLS chain, so it verifies against certifi's roots plus the NTUST intermediates bundled in the repository, and fetches any other missing intermediate through AIA.
 - **dedup** — `content_hash` deduplication (same source + same hash is treated as a repost and marked `skipped`, no re-notification).
 - **LLM classification** — OpenAI-compatible client (defaults to a host-side [llama-server](https://github.com/ggml-org/llama.cpp)). Returns `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`.
 - **Subscription matching + dispatch (dual-track)** — Anonymous devices match `BulletinSubscription` rules through the existing `bulletin_dispatches` path; logged-in users match `user_bulletin_subscriptions` (rules belong to each device and sit outside TigerSync) through `bulletin_user_matches` + `push_jobs`, and only devices whose rules matched and that have not turned bulletin push off receive it. A physical device that logs in gets a `linked_user_id` marker so the anonymous path skips it — no double pushes.
@@ -297,7 +297,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
 | `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
 | `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain; a course the server lacks → 404 `course_not_found`) | JWT |
-| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain; an assignment the server lacks → 404 `assignment_not_found`) | JWT |
 
 ### Courses / Assignments
 

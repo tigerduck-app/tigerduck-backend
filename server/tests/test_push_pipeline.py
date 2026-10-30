@@ -601,6 +601,113 @@ async def test_unregistered_token_invalidated(
     assert delivery.failure_code == "unregistered"
 
 
+@pytest.mark.parametrize(
+    ("status", "description", "dead"),
+    [
+        ("SENDER_ID_MISMATCH", "SenderId mismatch", True),
+        (
+            "INVALID_ARGUMENT",
+            "The registration token is not a valid FCM registration token",
+            True,
+        ),
+        ("INVALID_ARGUMENT", "Message is too big", False),
+    ],
+)
+async def test_an_fcm_token_fcm_calls_dead_is_invalidated(
+    db_session, prepared_engine, test_settings, status, description, dead
+):
+    """Not retried on every later push (#91). An INVALID_ARGUMENT about the
+    payload says nothing about the token."""
+    user, _, token = await _setup_user_device_token(
+        db_session, platform="android", provider="fcm"
+    )
+    job = _job(user)
+    db_session.add(job)
+    await db_session.commit()
+
+    android = ScriptedSender(
+        [SendResult(success=False, status=status, description=description)]
+    )
+    await run_push_tick(_worker(prepared_engine, test_settings, android=android))
+
+    await db_session.refresh(token)
+    assert token.status == ("invalidated" if dead else "active")
+
+
+@pytest.mark.parametrize("kind", ["custom", "countdown_start"])
+async def test_a_device_push_whose_device_row_is_gone_reaches_no_other_device(
+    db_session, prepared_engine, test_settings, kind
+):
+    """Another account signing in on a phone deletes this account's row of
+    it, and `push_jobs.device_id` is ON DELETE SET NULL: the pipeline sent
+    such a job to every device of the user."""
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    devices = {}
+    for name in ("gone", "kept"):
+        devices[name] = UserDevice(
+            user_id=user.id, client_device_id=f"iphone-{name}", platform="ios"
+        )
+        db_session.add(devices[name])
+        await db_session.flush()
+        for token_kind in ("standard", "push_to_start"):
+            db_session.add(
+                DevicePushToken(
+                    device_id=devices[name].id,
+                    provider="apns",
+                    token_kind=token_kind,
+                    token_hash=f"hash-{token_kind}-{name}",
+                    token_value=f"{token_kind}-{name}",
+                    bundle_id="org.ntust.app.TigerDuck",
+                )
+            )
+    gone = devices["gone"]
+    if kind == "custom":
+        job = _job(
+            user,
+            device_id=gone.id,
+            dedupe_key=f"custom:req-1:{gone.id}",
+            channel="custom",
+            scenario="custom",
+            payload={
+                "title": "t",
+                "body": "b",
+                "force_ring": False,
+                "kind": "custom_push_popup",
+                "notification_id": "req-1",
+            },
+        )
+    else:
+        job = _job(
+            user,
+            device_id=gone.id,
+            dedupe_key=schedule_key(gone.id, "71", "assignmentUrgent"),
+            channel="schedule",
+            scenario="assignmentUrgent",
+            priority=10,
+            payload={
+                "kind": "schedule",
+                "scenario": "assignmentUrgent",
+                "source_id": "71",
+                "activity_id": "assignmentUrgent::71",
+                "title": "HW",
+                "countdownTarget": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            },
+        )
+    db_session.add(job)
+    await db_session.commit()
+    await db_session.delete(gone)
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(_worker(prepared_engine, test_settings, apple=apple))
+
+    await db_session.refresh(job)
+    assert apple.requests == []
+    assert (job.status, job.last_error) == ("cancelled", "device_gone")
+
+
 async def test_no_active_tokens_fails_job(
     db_session, prepared_engine, test_settings
 ):

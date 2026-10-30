@@ -45,6 +45,14 @@ def trust_context(cafile: str | None, extra: Sequence[bytes] = ()) -> ssl.SSLCon
     return ctx
 
 
+def verify_code(exc: BaseException | None) -> int | None:
+    """The X.509 verify code of the failed certificate check behind `exc`."""
+    while exc is not None and not isinstance(exc, ssl.SSLCertVerificationError):
+        # httpcore drops the cause, so the ssl error is only the context.
+        exc = exc.__cause__ or exc.__context__
+    return exc.verify_code if exc is not None else None
+
+
 def unverified_context() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False

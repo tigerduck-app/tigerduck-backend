@@ -7,9 +7,9 @@
 
 FROM python:3.13-slim-bookworm AS builder
 
-# Install uv from its official image. Pinning a version would be safer for
-# reproducible builds; 'latest' is fine for development.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Pinned by tag and digest, like the images in docker-compose.yml, and
+# bumped by Renovate. uv reads any uv.lock of the same schema version.
+COPY --from=ghcr.io/astral-sh/uv:0.12.24@sha256:3af4716e991d6956a41e573eab705d0ee08500cd829ed30293eb8472f372c65a /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 ENV UV_LINK_MODE=copy \
@@ -55,6 +55,13 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UVICORN_PORT=40000
+
+# The server writes no files, so /app stays root's and the process cannot
+# change its own code. A fixed id, for hosts where mounted files need an owner.
+RUN groupadd --system --gid 10001 tigerduck \
+    && useradd --system --uid 10001 --gid tigerduck --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin tigerduck
+USER tigerduck
 
 EXPOSE 40000
 CMD ["./entrypoint.sh"]

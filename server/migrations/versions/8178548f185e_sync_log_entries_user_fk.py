@@ -2,7 +2,7 @@
 deletes its sync log
 
 Revision ID: 8178548f185e
-Revises: 199cfb4bbb49
+Revises: 9ba5a424fff6
 Create Date: 2026-10-30 12:00:00.000000
 
 """
@@ -12,7 +12,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '8178548f185e'
-down_revision: str | Sequence[str] | None = '199cfb4bbb49'
+down_revision: str | Sequence[str] | None = '9ba5a424fff6'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -93,8 +93,8 @@ class UploadSkippedDate(BaseModel):
 class UploadAssignment(BaseModel):
     moodle_course_id: int
     moodle_assignment_id: int
-    course_no: str | None = None
-    course_name: str | None = None
+    course_no: str | None = Field(default=None, max_length=64)
+    course_name: str | None = Field(default=None, max_length=256)
     title: str = Field(max_length=512)
     due_at: datetime | None = None
     cutoff_at: datetime | None = None

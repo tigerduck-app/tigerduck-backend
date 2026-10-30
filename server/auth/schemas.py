@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 Platform = Literal[
     "ios", "ipados", "macos", "windows", "watchos", "wearos", "android", "web",
@@ -68,7 +75,12 @@ class LoginRequest(BaseModel):
     # unknown field; forbidding extra fields would refuse their logins.
     model_config = ConfigDict(extra="ignore")
 
-    student_id: str = Field(min_length=1, max_length=64)
+    # Accounts are keyed by it, and Moodle matches it in any case; the apps
+    # send it trimmed and upper-cased.
+    student_id: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, to_upper=True, min_length=1, max_length=64),
+    ]
     moodle_token: str | None = Field(default=None, max_length=256)
     moodle_private_token: str | None = Field(default=None, max_length=256)
     device_info: DeviceInfo

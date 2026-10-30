@@ -31,14 +31,15 @@ router = APIRouter(prefix="/sync", tags=["sync"])
 
 
 class AssignmentUploadItem(BaseModel):
+    # The columns' lengths, so a longer value gets a 422, not a 500 from the database.
     moodle_assignment_id: int
-    course_no: str
-    course_name: str
-    title: str
+    course_no: str = Field(max_length=64)
+    course_name: str = Field(max_length=256)
+    title: str = Field(max_length=512)
     due_at: str | None = None
-    moodle_url: str | None = None
+    moodle_url: str | None = Field(default=None, max_length=512)
     is_submitted: bool = False
-    grade: str | None = None
+    grade: str | None = Field(default=None, max_length=64)
 class AssignmentUploadRequest(BaseModel):
     assignments: list[AssignmentUploadItem]
 @router.post("/assignments/upload")

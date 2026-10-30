@@ -67,7 +67,8 @@ _ANON_IP_WINDOW_SECONDS = 60
 
 
 class AnonymousDeviceRequest(BaseModel):
-    device_id: str = Field(min_length=8, max_length=128)
+    # 59, so the row's `user_id`, "anon-" and this, fits its 64 characters.
+    device_id: str = Field(min_length=8, max_length=59)
     platform: Literal["apple", "android"]
     device_class: DeviceClass | None = None
 

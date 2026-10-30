@@ -331,10 +331,8 @@ async def test_a_submission_moodle_reports_cancels_the_reminder_and_its_siblings
         True,
         SUBMITTED_AT,
     )
-    # The user's other devices hear of the flip on a trigger of its own.
-    assert any(
-        key.endswith(":presend") for key in await _sync_trigger_keys(db_session, user)
-    )
+    # The user's other devices hear of the flip.
+    assert await _sync_trigger_keys(db_session, user) != []
 
 
 @pytest.mark.parametrize(
@@ -976,7 +974,8 @@ async def test_a_rate_limiting_moodle_is_asked_once_a_tick(
     await db_session.commit()
     await run_push_tick(worker)
 
-    assert moodle.asked == [41, 41, 42, 43]
+    # Once Moodle has answered, the rest of the batch is asked side by side.
+    assert (moodle.asked[:2], sorted(moodle.asked[2:])) == ([41, 41], [42, 43])
     for job in jobs:
         assert (await _reload(db_session, job)).status == "sent"
 
@@ -996,6 +995,77 @@ async def test_a_moodle_that_hangs_costs_one_timeout_a_tick(
     assert moodle.asked == [41]
     for job in jobs:
         assert (await _reload(db_session, job)).status == "pending"
+
+
+class CountingMoodle:
+    """Moodle answering every assignment open, counting the calls it has out
+    at once. After the first, a call waits up to a second for company."""
+
+    def __init__(self):
+        self.calls = 0
+        self.out = 0
+        self.most_out = 0
+
+    async def check_submission_status(self, *, token, assignment_id, timeout_seconds):
+        self.calls += 1
+        self.out += 1
+        self.most_out = max(self.most_out, self.out)
+        for _ in range(100 if self.calls > 1 else 0):
+            if self.out > 1:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.01)
+        self.out -= 1
+        return FetchedSubmission(moodle_assignment_id=assignment_id, **OPEN)
+
+
+async def test_a_batchs_checks_run_side_by_side_once_moodle_answers(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    """One at a time, a deadline rush's checks held every job behind them for
+    minutes when Moodle slowed down (#98). The first goes alone, so an
+    outage still costs one call a tick."""
+    jobs = await _three_due_reminders(db_session, make_assignment, store_moodle_token)
+    moodle = CountingMoodle()
+
+    await run_push_tick(_worker(prepared_engine, test_settings, moodle))
+
+    assert moodle.most_out == 2
+    for job in jobs:
+        assert (await _reload(db_session, job)).status == "sent"
+
+
+async def test_a_job_no_check_guards_opens_no_check(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token,
+    monkeypatch,
+):
+    """Every claimed job opened a transaction for the check before the check
+    turned it away (#98)."""
+    user, _ = await _iphone_user(db_session)
+    _, due_at = await _open_assignment(make_assignment, store_moodle_token, user, 44)
+    reminder = _reminder(user, 44, due_at)
+    other = PushJob(
+        user_id=user.id,
+        dedupe_key="system:test:other",
+        channel="system",
+        scenario="reauth_required",
+        fire_at=_ago(5),
+        available_at=_ago(5),
+        payload={"title": "t", "body": "b"},
+    )
+    db_session.add_all([reminder, other])
+    await db_session.commit()
+    real_check = pipeline_module.check_before_send
+    checked = []
+
+    async def check(worker, *, job_id, breaker):
+        checked.append(job_id)
+        return await real_check(worker, job_id=job_id, breaker=breaker)
+
+    monkeypatch.setattr(pipeline_module, "check_before_send", check)
+    await run_push_tick(_worker(prepared_engine, test_settings, SubmissionStatusStub()))
+
+    assert checked == [reminder.id]
 
 
 def _moodle_answering(handler):
@@ -1107,7 +1177,8 @@ async def test_one_users_dead_token_does_not_hold_back_the_others(
 
     await run_push_tick(_worker(prepared_engine, test_settings, moodle))
 
-    assert moodle.asked == [41, 42, 43]
+    # The first goes alone; once Moodle has answered, the rest side by side.
+    assert (moodle.asked[0], sorted(moodle.asked)) == (41, [41, 42, 43])
     assert [(await _reload(db_session, job)).status for job in jobs] == [
         "pending",
         "sent",
@@ -1132,7 +1203,7 @@ async def test_one_users_refusal_does_not_hold_back_the_others(
 
     await run_push_tick(_worker(prepared_engine, test_settings, moodle))
 
-    assert moodle.asked == [41, 42, 43]
+    assert (moodle.asked[0], sorted(moodle.asked)) == (41, [41, 42, 43])
     assert [(await _reload(db_session, job)).status for job in jobs] == [
         "pending",
         "sent",

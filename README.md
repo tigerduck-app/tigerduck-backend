@@ -49,7 +49,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **Pull-to-refresh** — `POST /v3/sync-jobs/run-now`（per-user cooldown，policy 停用時拒絕）
 
 ### 📣 公告（`server/bulletins/`）
-- **scraper** — 從 NTUST 公告列表抓 HTML、解 metadata；TLS chain 是壞的所以走自簽 CA bundle 或 `verify=False`
+- **scraper** — 從 NTUST 公告列表抓 HTML、解 metadata；NTUST 送的 TLS chain 常缺中繼憑證，所以用 certifi 的根憑證加上 repo 內附的 NTUST 中繼憑證驗證，其他缺的中繼憑證經 AIA 補上
 - **dedup** — `content_hash` 去重（同 source、同 hash 視為 repost，標 `skipped` 不重發推播）
 - **LLM 分類** — OpenAI-compatible API（預設指向 host 上的 [llama-server](https://github.com/ggml-org/llama.cpp)），輸出 `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`
 - **訂閱比對 + dispatch（雙軌）** — 匿名裝置比對 `BulletinSubscription` 走既有 `bulletin_dispatches`；登入使用者比對 `user_bulletin_subscriptions`（規則屬於各裝置，不在 TigerSync 同步範圍）走 `bulletin_user_matches` + `push_jobs`，只推給規則命中、且沒關閉公告推播的裝置。同一實體裝置登入後標記 `linked_user_id`，匿名管道跳過避免重複推播
@@ -297,7 +297,7 @@ macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama
 | `DELETE` | `/v3/sync/courses/{key}` | 刪除單一課程 | JWT |
 | `POST` | `/v3/sync/assignments/upload` | 上傳作業 | JWT |
 | `PATCH` | `/v3/sync/courses/{moodle_id}/override` | 課程顏色 / 名稱 / 忽略作業覆寫（outbox drain；伺服器沒有該課程回 404 `course_not_found`） | JWT |
-| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain） | JWT |
+| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | 作業狀態覆寫（outbox drain；伺服器沒有該作業回 404 `assignment_not_found`） | JWT |
 
 ### 課表 / 作業
 

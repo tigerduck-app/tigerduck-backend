@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from ...audit import audit
 from ...db import get_pool
+from ...student_ids import student_id_key
 from ._push_queue import payload_of, recipients, summary
 from ._shared import logger
 
@@ -138,7 +139,7 @@ async def student_timetable(
     when the term is the current one."""
     async with pool.acquire() as conn:
         uid = await conn.fetchval(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if uid is None:
             return JSONResponse({"error": "user not found"}, 404)
@@ -206,7 +207,7 @@ async def sync_events(
 ):
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if not user:
             return {"student_id": student_id, "found": False, "events": []}
@@ -529,7 +530,7 @@ async def sync_courses(
 ):
     async with pool.acquire() as conn:
         user = await conn.fetchrow(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if not user:
             return {

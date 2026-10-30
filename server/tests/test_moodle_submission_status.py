@@ -25,6 +25,7 @@ from server.syncjobs.moodle_client import (
     MoodleUnavailable,
     MoodleUnreachable,
 )
+from server.tests.conftest import PRODUCTION_SECRETS
 
 BASE = "https://moodle.example.test"
 
@@ -343,6 +344,28 @@ async def test_the_pre_send_check_reads_one_assignment(body, expected):
     )
 
     assert (None if answer is None else answer.is_submitted) == expected
+
+
+@pytest.mark.asyncio
+async def test_the_pre_send_check_asks_for_a_tokens_user_id_once():
+    """The user id lookup doubled every check's calls to Moodle, which at the
+    23:59 deadline rush slows the whole drain (#98)."""
+    asked = []
+
+    def site_info(request):
+        asked.append(request.url.params["wstoken"])
+        return _ok(request)
+
+    fetcher = HttpAssignmentFetcher(
+        base_url=BASE, timeout_seconds=5.0, transport=_transport(_checking(site_info))
+    )
+
+    for token, assignment_id in (("tok-a", 77), ("tok-a", 78), ("tok-b", 77)):
+        await fetcher.check_submission_status(
+            token=token, assignment_id=assignment_id, timeout_seconds=5.0
+        )
+
+    assert asked == ["tok-a", "tok-b"]
 
 
 @pytest.mark.asyncio
@@ -1205,16 +1228,10 @@ def production_log_chain(monkeypatch):
     saved = {n: logging.getLogger(n).level for n in names}
     root = logging.getLogger().level
     try:
-        # Production settings refuse to load without a shared secret. Name
-        # one here rather than leave it to a local `.env`, which neither a
+        # Production settings refuse to load without their secrets. Name
+        # them here rather than leave them to a local `.env`, which neither a
         # clean checkout nor CI has.
-        configure(
-            Settings(
-                env="production",
-                log_level="INFO",
-                api_shared_secret="test-shared-secret",
-            )
-        )
+        configure(Settings(env="production", log_level="INFO", **PRODUCTION_SECRETS))
         monkeypatch.setattr(
             moodle_client,
             "logger",
