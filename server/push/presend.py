@@ -205,7 +205,7 @@ async def record_submitted(
         session, user_id=user_id, moodle_assignment_ids={assignment_id}, now=now
     )
     if changed:
-        await enqueue_sync_trigger(session, user_id, source="presend")
+        await enqueue_sync_trigger(session, user_id)
 
 
 def _gone(reason: str) -> PresendCheck:

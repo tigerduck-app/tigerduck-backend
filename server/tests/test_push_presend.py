@@ -331,10 +331,8 @@ async def test_a_submission_moodle_reports_cancels_the_reminder_and_its_siblings
         True,
         SUBMITTED_AT,
     )
-    # The user's other devices hear of the flip on a trigger of its own.
-    assert any(
-        key.endswith(":presend") for key in await _sync_trigger_keys(db_session, user)
-    )
+    # The user's other devices hear of the flip.
+    assert await _sync_trigger_keys(db_session, user) != []
 
 
 @pytest.mark.parametrize(

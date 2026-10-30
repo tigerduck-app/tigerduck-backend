@@ -791,7 +791,7 @@ async def _refresh_submission_status(
                 session, user_id=user_id, fetched=fetched, listed=listed
             )
             if changed_ids or moved:
-                await enqueue_sync_trigger(session, user_id, source="submissions")
+                await enqueue_sync_trigger(session, user_id)
     except (MoodleTokenInvalid, MoodleRateLimited, MoodleUnreachable):
         raise
     except Exception as exc:
