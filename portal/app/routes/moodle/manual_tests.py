@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from ...audit import audit
 from ...db import get_pool
+from ...student_ids import student_id_key
 from .push import run_pipeline_now
 
 router = APIRouter(prefix="/api/moodle/tests")
@@ -103,7 +104,7 @@ async def send_test_reauth_push(
     """
     async with pool.acquire() as conn, conn.transaction():
         uid = await conn.fetchval(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if uid is None:
             return JSONResponse({"ok": False, "error": "user not found"}, 404)
@@ -172,7 +173,7 @@ async def start_test_live_activity(
             "SELECT d.id, d.user_id, d.platform FROM user_devices d "
             "JOIN users u ON u.id = d.user_id "
             "WHERE u.student_id = $1 AND d.id::text = $2 AND d.deleted_at IS NULL",
-            body.student_id,
+            student_id_key(body.student_id),
             body.device_id,
         )
         if device is None:
@@ -262,7 +263,7 @@ async def end_live_activity_now(
             "AND pj.payload->>'kind' = 'live_activity_end' "
             "AND pj.status = 'pending' "
             "RETURNING pj.id, pj.user_id, pj.device_id",
-            student_id,
+            student_id_key(student_id),
             job_id,
         )
         if moved is not None:

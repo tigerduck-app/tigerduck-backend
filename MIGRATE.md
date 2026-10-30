@@ -498,9 +498,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   Until then the job stays `pending` and is left alone, and it runs at the
   next tick once a device signs in or turns sync on. Signing out of the
   last device (the apps delete it) also deletes the stored Moodle token;
-  the next sign-in stores a new one. The portal's deregister keeps it: it
-  leaves the device's sessions live, and the app's next request brings the
-  device back.
+  the next sign-in stores a new one. Until 3.8.0 the portal's deregister
+  kept it: it left the device's sessions live, and the app's next request
+  brought the device back. From 3.8.0 it signs the devices out and drops
+  the token as well (#176).
   The overdue metric and the Moodle sync dashboard's Overdue panel leave
   such jobs out: restart `sql-exporter` after `./start.sh`, which reads
   its collectors only at start.

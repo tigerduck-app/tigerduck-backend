@@ -184,3 +184,12 @@ async def test_device_class_must_fit_the_platform(client) -> None:
         json=body("apple-honest", platform="apple", device_class="mac"),
     )
     assert honest.status_code == 200
+
+
+async def test_a_device_id_too_long_for_its_row_is_refused(client) -> None:
+    """The row's `user_id` is "anon-" and the id, in 64 characters; a longer
+    one failed at the database with a 500 (tigerduck-backend#93)."""
+    longest = "d" * 59
+    assert (await client.post("/v3/devices/anonymous", json=body(longest))).status_code == 200
+    response = await client.post("/v3/devices/anonymous", json=body(longest + "d"))
+    assert response.status_code == 422

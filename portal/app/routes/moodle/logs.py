@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 from ...audit import audit
 from ...db import get_pool
+from ...student_ids import student_id_key
 
 router = APIRouter(prefix="/api/moodle")
 
@@ -43,7 +44,7 @@ async def sync_logs(
             _log_table_ready = True
 
         user = await conn.fetchrow(
-            "SELECT id FROM users WHERE student_id = $1", student_id
+            "SELECT id FROM users WHERE student_id = $1", student_id_key(student_id)
         )
         if not user:
             return {"entries": [], "latest_id": after_id}

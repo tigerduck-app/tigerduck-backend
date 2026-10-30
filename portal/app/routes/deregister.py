@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..audit import audit
 from ..db import get_pool
+from ..student_ids import student_id_key
 
 router = APIRouter(prefix="/api/deregister")
 
@@ -28,10 +29,10 @@ def _iso(ts) -> str | None:
     return ts.isoformat() if ts else None
 
 
-# A student id matches whole and in any case; anything else is part of a name.
+# A student id matches whole, as login keys it ($2); anything else is part of a name.
 _LOOKUP_SQL = """
 WITH found AS (
-    SELECT id FROM users WHERE lower(student_id) = lower($1)
+    SELECT id FROM users WHERE student_id = $2
 ), named AS (
     SELECT id FROM users
     WHERE NOT EXISTS (SELECT 1 FROM found)
@@ -58,7 +59,7 @@ async def lookup_students(
     if not q.strip():
         return JSONResponse(content={"students": []})
     async with pool.acquire() as conn:
-        rows = await conn.fetch(_LOOKUP_SQL, q.strip())
+        rows = await conn.fetch(_LOOKUP_SQL, q.strip(), student_id_key(q))
         await audit(conn, request, "user.list", count=len(rows))
     return JSONResponse(
         content={
@@ -86,8 +87,8 @@ async def preview_student(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, student_id, display_name, created_at FROM users"
-            " WHERE lower(student_id) = lower($1)",
-            student_id.strip(),
+            " WHERE student_id = $1",
+            student_id_key(student_id),
         )
         if row is None:
             return JSONResponse(content={"error": "user_not_found"}, status_code=404)
@@ -112,7 +113,7 @@ async def deregister_student(
     request: Request,
     pool=Depends(get_pool),
 ) -> JSONResponse:
-    student_id = body.student_id.strip()
+    student_id = student_id_key(body.student_id)
     if not student_id:
         return JSONResponse(
             content={"error": "student_id_required"}, status_code=400

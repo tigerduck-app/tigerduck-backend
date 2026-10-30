@@ -297,7 +297,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `DELETE` | `/v3/sync/courses/{key}` | Delete a single course | JWT |
 | `POST` | `/v3/sync/assignments/upload` | Upload assignments | JWT |
 | `PATCH` | `/v3/sync/courses/{moodle_id}/override` | Course color / name / ignore-assignments override (outbox drain; a course the server lacks → 404 `course_not_found`) | JWT |
-| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain) | JWT |
+| `PATCH` | `/v3/sync/assignments/{moodle_id}/override` | Assignment status override (outbox drain; an assignment the server lacks → 404 `assignment_not_found`) | JWT |
 
 ### Courses / Assignments
 

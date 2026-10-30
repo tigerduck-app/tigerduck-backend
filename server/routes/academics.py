@@ -335,10 +335,16 @@ async def list_assignments(auth: CurrentAuthDep, session: SessionDep):
         .scalars()
         .all()
     )
+    # Keyed by the live rows listed, as `/sync/full` keys them: a key on a
+    # soft-deleted row's mark could bring back one it leaves hidden.
+    moodle_ids = {a.id: a.moodle_assignment_id for a in assignments}
     return {
         "assignments": [serializers.assignment_to_dict(a) for a in assignments],
         "overrides": [
-            serializers.assignment_override_to_dict(o) for o in overrides
+            serializers.assignment_override_to_dict(
+                o, moodle_assignment_id=moodle_ids.get(o.user_assignment_id)
+            )
+            for o in overrides
         ],
     }
 
@@ -415,4 +421,8 @@ async def put_assignment_override(
             device_id=auth.device_id,
             locked_state=state,
         )
-    return {"override": serializers.assignment_override_to_dict(override)}
+    return {
+        "override": serializers.assignment_override_to_dict(
+            override, moodle_assignment_id=assignment.moodle_assignment_id
+        )
+    }

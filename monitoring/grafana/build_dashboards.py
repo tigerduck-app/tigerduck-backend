@@ -441,6 +441,11 @@ GROUP BY 1
 ORDER BY 1
 """, fmt="time_series")], bars=True,
     desc="Logins plus refresh-token rotations. Access tokens last 15 minutes, so an app in use rotates a few times an hour: a rough activity signal."), 8, 8)
+L.add(series("Replaced refresh tokens sent again", LOKI, [loki(
+    'sum by (event) (count_over_time({service="backend"} |= "auth.refresh." | json event="event"'
+    ' | event=~"auth.refresh.(grace_retry|lost_rotation_recovered|duplicate_refused|reuse_detected)" [$__auto]))',
+    "{{event}}")], bars=True, stacked=True,
+    desc="From the backend log. grace_retry and lost_rotation_recovered rotated the token again for an app that lost the reply, within or after the 60-second grace; duplicate_refused and reuse_detected refused it. Not affected by the filters."), 24, 8)
 
 L.row("Breakdown")
 L.add(pie("Platform", PG, [sql(f"SELECT ud.platform AS \"platform\", count(*) AS \"devices\" {FROM_DEV} WHERE {DEV_FILTER} GROUP BY 1 ORDER BY 2 DESC")]), 6, 8)

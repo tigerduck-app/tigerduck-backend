@@ -8,6 +8,7 @@ from server import _ssl_compat  # noqa: F401, E402
 
 import asyncio  # noqa: E402
 import contextlib  # noqa: E402
+import json  # noqa: E402
 import socket  # noqa: E402
 import time  # noqa: E402
 from contextlib import asynccontextmanager  # noqa: E402
@@ -18,10 +19,11 @@ import httpx  # noqa: E402
 import structlog  # noqa: E402
 import uvicorn  # noqa: E402
 from fastapi import Depends, FastAPI  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
-from fastapi.responses import JSONResponse, PlainTextResponse  # noqa: E402
+from fastapi.responses import JSONResponse, PlainTextResponse, Response  # noqa: E402
 
 from server import __version__, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
@@ -426,6 +428,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def _unhandled_error(request, _exc):
         return _with_clock(
             request, PlainTextResponse("Internal Server Error", status_code=500)
+        )
+
+    # Without the input: echoed back, a lone UTF-16 surrogate in it failed to
+    # encode and turned the 422 into a 500 (tigerduck-backend#65). ASCII JSON,
+    # since a dict key in `loc` can carry one too.
+    @app.exception_handler(RequestValidationError)
+    async def _invalid_request(_request, exc: RequestValidationError):
+        errors = [{"type": e["type"], "loc": e["loc"], "msg": e["msg"]} for e in exc.errors()]
+        return Response(
+            json.dumps({"detail": errors}), status_code=422, media_type="application/json"
         )
 
     # Added after the 410 middleware so it wraps it (Starlette runs the

@@ -186,6 +186,19 @@ async def test_second_login_reuses_user_and_device(client) -> None:
         assert len(sessions) == 2
 
 
+async def test_a_student_id_in_another_case_signs_in_to_the_same_account(client) -> None:
+    """Moodle matches the student ID in any case, so the server keys the
+    account by it trimmed and upper-cased (tigerduck-backend#93)."""
+    allow_moodle(client)
+    first = await client.post("/v3/auth/login", json=LOGIN_BODY)
+    second = await client.post(
+        "/v3/auth/login", json=dict(LOGIN_BODY, student_id=" b11015000 ")
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["user"] == first.json()["user"]
+    assert second.json()["user"]["student_id"] == "B11015000"
+
+
 @pytest.mark.parametrize("error", ["invalid_token", "username_mismatch"])
 async def test_moodle_failure_returns_401_and_creates_nothing(client, error) -> None:
     deny_moodle(client, error=error)
@@ -492,3 +505,24 @@ async def test_a_refused_sign_in_stores_no_name(client, error) -> None:
     response = await client.post("/v3/auth/login", json=LOGIN_BODY)
     assert response.status_code == 401
     assert await _stored_display_name(client) == "Test Student"
+
+
+async def test_an_invalid_body_is_refused_without_echoing_its_input(client) -> None:
+    """A lone UTF-16 surrogate cannot be encoded back into the answer, so a
+    422 that echoed the input failed with a 500 (tigerduck-backend#65)."""
+    response = await client.post(
+        "/v3/auth/login",
+        content=b'{"student_id": "\\ud800", "moodle_token": "moodle-tok-1",'
+        b' "device_info": {"client_device_id": "iphone-abc", "platform": "ios"}}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "string_unicode",
+                "loc": ["body", "student_id"],
+                "msg": "Input should be a valid string, unable to parse raw data as a unicode string",
+            }
+        ]
+    }

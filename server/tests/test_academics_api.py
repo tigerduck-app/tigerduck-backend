@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -436,12 +437,39 @@ async def test_get_assignments_with_override(client) -> None:
     )
     assert put.status_code == 200
     assert put.json()["override"]["local_status"] == "locally_completed"
+    # As `/sync/full` keys it (tigerduck-backend#62).
+    assert put.json()["override"]["moodle_assignment_id"] == 9001
 
     response = await client.get("/v3/assignments", headers=bearer(login))
     body = response.json()
     assert len(body["assignments"]) == 1
     assert len(body["overrides"]) == 1
     assert body["overrides"][0]["local_status"] == "locally_completed"
+    assert body["overrides"][0]["moodle_assignment_id"] == 9001
+
+
+async def test_an_override_on_a_removed_row_is_listed_unkeyed(client) -> None:
+    """`/sync/full` leaves some marks on soft-deleted rows unkeyed so the apps
+    drop them (tigerduck-backend#42), so the list keys only the rows it lists."""
+    login = await do_login(client)
+    assignment_id = await seed_assignment(client, login["user"]["id"])
+    put = await client.put(
+        f"/v3/assignments/{assignment_id}/override",
+        headers=bearer(login),
+        json={"local_status": "ignored", "local_status_updated_at": "2026-06-10T10:00:00Z"},
+    )
+    assert put.status_code == 200
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = await session.get(UserAssignment, assignment_id)
+        row.deleted_at = datetime.now(UTC)
+        await session.commit()
+
+    body = (await client.get("/v3/assignments", headers=bearer(login))).json()
+    assert body["assignments"] == []
+    assert [(o["local_status"], o["moodle_assignment_id"]) for o in body["overrides"]] == [
+        ("ignored", None)
+    ]
 
 
 async def test_override_writes_changelog(client) -> None:
@@ -464,3 +492,34 @@ async def test_override_writes_changelog(client) -> None:
         ).scalar_one()
         assert entry.entity_id == str(course_id)
         assert entry.payload == {"fields": ["color_hex"]}
+
+
+async def test_only_a_mark_edit_moves_when_the_mark_reached_the_server(client) -> None:
+    """`/sync/full` compares a mark's arrival with a fetch's soft-delete
+    (`_hidden_since_received`), so a note edit must leave it alone
+    (tigerduck-backend#71)."""
+    login = await do_login(client)
+    assignment_id = await seed_assignment(client, login["user"]["id"])
+    path = f"/v3/assignments/{assignment_id}/override"
+    t = datetime.now(UTC) - timedelta(hours=1)
+
+    async def received_at() -> datetime | None:
+        factory = build_session_factory(client.app.state.engine)
+        async with factory() as session:
+            return (
+                await session.execute(select(UserAssignmentOverride.local_status_received_at))
+            ).scalar_one()
+
+    note_only = {"note": "Bring the lab sheet", "note_updated_at": t.isoformat()}
+    assert (await client.put(path, headers=bearer(login), json=note_only)).status_code == 200
+    assert await received_at() is None
+
+    before = datetime.now(UTC)
+    mark = {"local_status": "ignored", "local_status_updated_at": t.isoformat()}
+    assert (await client.put(path, headers=bearer(login), json=mark)).status_code == 200
+    received = await received_at()
+    assert received is not None and received >= before
+
+    note_only["note_updated_at"] = (t + timedelta(minutes=1)).isoformat()
+    assert (await client.put(path, headers=bearer(login), json=note_only)).status_code == 200
+    assert await received_at() == received
