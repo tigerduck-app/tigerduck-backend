@@ -95,6 +95,7 @@ Clients branch on `error` only. Extra fields sit at the top level, as in v3's `s
 | 401 | `missing_bearer_token`, `invalid_access_token`, `session_revoked`, `session_user_mismatch`, `invalid_refresh_token`, `refresh_token_expired`, `moodle_verification_failed` |
 | 403 | `account_suspended` |
 | 404 | `not_found`, `device_not_found`, `course_not_found`, `assignment_not_found`, `holiday_not_found`, `settings_document_not_found`, `subscription_not_found`, `bulletin_not_found`, `term_not_found`, `course_catalog_not_found` |
+| 405 | `method_not_allowed` (a route this method does not take) |
 | 409 | `clock_ahead`, `login_conflict_retry`, `settings_conflict` (+`namespace, server`), `subscription_conflict` (+`server`), `sync_revision_expired` (+revisions) |
 | 410 | `api_retired` (+`current_api`), `app_version_retired` |
 | 422 | `invalid_request` (+`fields[{type, loc, msg}]`), `hlc_required`, `add_not_in_courses`, `activity_id_mismatch`, `unknown_namespace` |
