@@ -52,7 +52,9 @@ V4_ROUTES = {
 }
 
 
-async def login(client, prefix: str = "/v4", student_id: str = "B11015000") -> dict:
+async def login(
+    client, prefix: str = "/v4", student_id: str = "B11015000", device: str = "iphone"
+) -> dict:
     client.app.state.moodle_verifier = StaticMoodleVerifier(
         MoodleVerifyResult(ok=True, username=student_id.lower())
     )
@@ -61,7 +63,7 @@ async def login(client, prefix: str = "/v4", student_id: str = "B11015000") -> d
         json={
             "student_id": student_id,
             "moodle_token": "tok",
-            "device_info": {"client_device_id": f"iphone-{student_id}", "platform": "ios"},
+            "device_info": {"client_device_id": f"{device}-{student_id}", "platform": "ios"},
         },
     )
     assert response.status_code == 200, response.text
