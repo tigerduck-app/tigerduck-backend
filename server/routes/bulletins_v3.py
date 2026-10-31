@@ -19,7 +19,7 @@ from typing import Literal
 import structlog
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -27,6 +27,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.bulletins.models import Bulletin
 from server.db import SessionDep
 from server.sync import serializers
+from server.sync.changelog import lock_sync_state
 from server.sync.merge import clamp_ts
 from server.sync.models import UserBulletinState, UserBulletinSubscription
 
@@ -34,6 +35,10 @@ subscriptions_router = APIRouter(
     prefix="/bulletin-subscriptions", tags=["bulletin-subscriptions"]
 )
 states_router = APIRouter(prefix="/bulletin-states", tags=["bulletin-states"])
+# /v4 keeps each rule by the id its client made (docs/api-v4.md).
+subscriptions_v4_router = APIRouter(
+    prefix="/bulletin-subscriptions", tags=["bulletin-subscriptions"]
+)
 logger = structlog.get_logger(__name__)
 
 
@@ -93,9 +98,8 @@ async def _get_owned_subscription(
     return row
 
 
-@subscriptions_router.get("")
-async def list_subscriptions(auth: CurrentAuthDep, session: SessionDep):
-    rows = (
+async def _live_subscriptions(session, auth) -> list[UserBulletinSubscription]:
+    return (
         (
             await session.execute(
                 select(UserBulletinSubscription)
@@ -110,6 +114,11 @@ async def list_subscriptions(auth: CurrentAuthDep, session: SessionDep):
         .scalars()
         .all()
     )
+
+
+@subscriptions_router.get("")
+async def list_subscriptions(auth: CurrentAuthDep, session: SessionDep):
+    rows = await _live_subscriptions(session, auth)
     return {"items": [serializers.subscription_to_dict(s) for s in rows]}
 
 
@@ -158,6 +167,70 @@ async def replace_subscriptions(
         created.append(s)
     await session.flush()
     return {"items": [serializers.subscription_to_dict(s) for s in created]}
+
+
+class SubscriptionRuleV4(SubscriptionCreate):
+    client_id: uuid.UUID
+
+
+class SubscriptionsPutV4Body(BaseModel):
+    rules: list[SubscriptionRuleV4]
+
+    @model_validator(mode="after")
+    def _one_rule_per_client_id(self):
+        if len({r.client_id for r in self.rules}) < len(self.rules):
+            raise ValueError("each rule needs its own client_id")
+        return self
+
+
+def _subscription_v4(s: UserBulletinSubscription) -> dict:
+    return {**serializers.subscription_to_dict(s), "client_id": str(s.client_id)}
+
+
+@subscriptions_v4_router.get("")
+async def list_subscriptions_v4(auth: CurrentAuthDep, session: SessionDep):
+    return {"items": [_subscription_v4(s) for s in await _live_subscriptions(session, auth)]}
+
+
+@subscriptions_v4_router.put("")
+async def replace_subscriptions_v4(
+    payload: SubscriptionsPutV4Body, auth: CurrentAuthDep, session: SessionDep
+):
+    """This device's rules become `rules`: a live rule with a sent
+    `client_id` is updated in place, keeping its `id`, and its revision
+    moves when a value changed; new ones are inserted and the rest
+    soft-deleted. Answers the rules in the order sent."""
+    device_id = _device_id(auth)
+    # Two PUTs at once would both insert a new client_id; the second would
+    # fail on the unique index.
+    await lock_sync_state(session, auth.user_id)
+    live = {row.client_id: row for row in await _live_subscriptions(session, auth)}
+    now = datetime.now(UTC)
+    rules = []
+    for rule in payload.rules:
+        values = rule.model_dump(exclude={"client_id"})
+        row = live.pop(rule.client_id, None)
+        if row is None:
+            row = UserBulletinSubscription(
+                user_id=auth.user_id,
+                device_id=device_id,
+                client_id=rule.client_id,
+                **values,
+                created_by_device_id=device_id,
+                updated_by_device_id=device_id,
+            )
+            session.add(row)
+        elif any(getattr(row, field) != value for field, value in values.items()):
+            for field, value in values.items():
+                setattr(row, field, value)
+            row.revision += 1
+            row.updated_by_device_id = device_id
+        rules.append(row)
+    for row in live.values():
+        row.deleted_at = now
+        row.updated_by_device_id = device_id
+    await session.flush()
+    return {"items": [_subscription_v4(s) for s in rules]}
 
 
 @subscriptions_router.post("")

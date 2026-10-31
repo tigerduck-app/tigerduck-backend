@@ -18,14 +18,14 @@ from typing import AsyncIterator  # noqa: E402
 import httpx  # noqa: E402
 import structlog  # noqa: E402
 import uvicorn  # noqa: E402
-from fastapi import Depends, FastAPI  # noqa: E402
+from fastapi import APIRouter, Depends, FastAPI  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, Response  # noqa: E402
 
-from server import __version__, metrics
+from server import __version__, api_v4, metrics
 from server.auth.crypto import CredentialCipher, CredentialCipherError
 from server.auth.moodle import HttpMoodleVerifier
 from server.auth.rate_limit import SlidingWindowLimiter
@@ -56,6 +56,10 @@ from server.routes import schedule_v3 as schedule_v3_routes
 from server.routes import settings_docs as settings_docs_routes
 from server.routes import overrides as overrides_routes
 from server.routes import sync as sync_routes
+from server.routes.sync import assignments as sync_assignments
+from server.routes.sync import courses as sync_courses
+from server.routes.sync import snapshot as sync_snapshot
+from server.routes.sync import uploads as sync_uploads
 from server.routes import sync_jobs as sync_jobs_routes
 from server.routes import user_devices as user_devices_routes
 from server.push.pipeline import PushPipelineWorker
@@ -408,24 +412,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await call_next(request)
 
-    # Every /v3 answer, an error too, carries the server's clock, which the
-    # apps stamp their edits against (`server/sync/merge.py`).
-    v3_path = settings.api_v3_base_path.rstrip("/")
-
+    # Every /v3 and /v4 answer, an error too, carries the server's clock,
+    # which the apps stamp their edits against (`server/sync/merge.py`).
     def _with_clock(request, response):
         path = request.url.path
-        if path == v3_path or path.startswith(v3_path + "/"):
+        if api_v4.under(path, settings.api_v3_base_path) or api_v4.under(
+            path, settings.api_v4_base_path
+        ):
             response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
         return response
 
+    # A /v4 error goes out in its envelope (`server/api_v4.py`).
     @app.middleware("http")
     async def _tigersync_clock(request, call_next):
-        return _with_clock(request, await call_next(request))
+        response = await call_next(request)
+        if response.status_code >= 400 and api_v4.under(
+            request.url.path, settings.api_v4_base_path
+        ):
+            response = await api_v4.enveloped(response)
+        return _with_clock(request, response)
 
     # An unhandled error is answered outside every middleware, by Starlette's
     # ServerErrorMiddleware, which calls this handler and then re-raises.
     @app.exception_handler(Exception)
     async def _unhandled_error(request, _exc):
+        if api_v4.under(request.url.path, settings.api_v4_base_path):
+            return _with_clock(request, api_v4.error_response(500, None))
         return _with_clock(
             request, PlainTextResponse("Internal Server Error", status_code=500)
         )
@@ -464,8 +476,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def version() -> dict[str, str]:
         # Unversioned on purpose — operator tooling (portal status, start.sh)
         # shouldn't have to know the prefix to ask what's running. Reports the
-        # live v3 base path (v1/v2 are retired → 410).
-        return {"version": __version__, "api_base_path": settings.api_v3_base_path}
+        # live base paths (v1/v2 are retired → 410).
+        return {
+            "version": __version__,
+            "api_base_path": settings.api_v3_base_path,
+            "api_v4_base_path": settings.api_v4_base_path,
+        }
 
     # Unversioned (was {api_base_path}/ping) so it survives the /v1+/v2
     # sunset and infra probes don't need to know a version prefix.
@@ -559,6 +575,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         admin.include_router(
             sync_jobs_routes.admin_router, prefix=settings.api_v3_base_path
         )
+    if settings.api_v4_base_path:
+        _mount_api_v4(app, settings.api_v4_base_path)
 
     return app
 
@@ -584,6 +602,64 @@ def _mount_api_v3(app: FastAPI, prefix: str) -> None:
     app.include_router(live_activities_v3_routes.router, prefix=prefix)
 
 
+# The /v3 handlers /v4 serves as they are (docs/api-v4.md, section 2). Its
+# seven other routes are its own variants, mounted in `_mount_api_v4`.
+_V4_SHARED = {
+    auth_routes.login,
+    auth_routes.refresh,
+    auth_routes.update_credentials,
+    user_devices_routes.register_device,
+    user_devices_routes.register_anonymous_device,
+    user_devices_routes.delete_device,
+    user_devices_routes.update_device_preferences,
+    sync_snapshot.poll_revision,
+    sync_courses.delete_all_courses,
+    sync_courses.delete_course,
+    sync_assignments.upload_assignments,
+    holiday_overrides_routes.set_override,
+    settings_docs_routes.read_document,
+    settings_docs_routes.put_document,
+    schedule_v3_routes.sync_schedule,
+    live_activities_v3_routes.register_live_activity,
+    bulletins_feed_routes.get_taxonomy,
+    bulletins_feed_routes.list_bulletins,
+    bulletins_feed_routes.get_bulletin,
+    academic_calendar_routes.get_academic_calendar,
+    academic_calendar_routes.get_course_changes,
+    course_catalog_routes.get_course_catalog,
+}
+
+
+def _shared(router: APIRouter) -> APIRouter:
+    """`router`'s routes in `_V4_SHARED`, in its order. They are the same
+    route objects, served under both prefixes."""
+    return APIRouter(
+        routes=[r for r in router.routes if getattr(r, "endpoint", None) in _V4_SHARED]
+    )
+
+
+def _mount_api_v4(app: FastAPI, prefix: str) -> None:
+    """Mount /v4 in /v3's order, which decides the route a path matches
+    first. Protocol 2 is implied on every route (`ClockProtocolDep`)."""
+    for router, at in (
+        (_shared(auth_routes.router), ""),
+        (_shared(user_devices_routes.router), ""),
+        (_shared(sync_snapshot.router), ""),
+        (sync_snapshot.v4_router, ""),
+        (sync_uploads.v4_router, ""),
+        (_shared(sync_courses.router), ""),
+        (_shared(sync_assignments.router), ""),
+        (overrides_routes.v4_router, "/sync"),
+        (_shared(settings_docs_routes.router), ""),
+        (_shared(academic_calendar_routes.router), ""),
+        (_shared(course_catalog_routes.router), ""),
+        (_shared(bulletins_feed_routes.router), ""),
+        (_shared(holiday_overrides_routes.router), "/sync"),
+        (bulletins_v3_routes.subscriptions_v4_router, ""),
+        (_shared(schedule_v3_routes.router), ""),
+        (_shared(live_activities_v3_routes.router), ""),
+    ):
+        app.include_router(router, prefix=prefix + at)
 
 
 app = create_app()
