@@ -1035,6 +1035,16 @@ async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
     pooled connection must not be held while it does."""
     _, _, job = await _setup_user_job(db_session)
     seen: dict = {}
+    idle_in_transaction = text(
+        "SELECT pid FROM pg_stat_activity "
+        "WHERE datname = current_database() "
+        "AND state LIKE 'idle in transaction%' "
+        "AND pid <> pg_backend_pid()"
+    )
+    # A connection an earlier test left open until garbage collection is not the tick's.
+    async with prepared_engine.connect() as conn:
+        before = set((await conn.execute(idle_in_transaction)).scalars())
+        await conn.rollback()
 
     async def observe():
         async with prepared_engine.connect() as conn:
@@ -1046,16 +1056,8 @@ async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
             ).first()
             seen["lock"] = "acquired" if row is not None else "no row"
             await conn.rollback()
-            seen["idle_in_transaction"] = (
-                await conn.execute(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity "
-                        "WHERE datname = current_database() "
-                        "AND state LIKE 'idle in transaction%' "
-                        "AND pid <> pg_backend_pid()"
-                    )
-                )
-            ).scalar_one()
+            during = set((await conn.execute(idle_in_transaction)).scalars())
+            seen["idle_in_transaction"] = len(during - before)
             await conn.rollback()
 
     fetcher = _ObservingFetcher(observe, results=[_fa(1)])
