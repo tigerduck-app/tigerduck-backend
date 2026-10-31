@@ -153,6 +153,29 @@ async def test_the_course_override_finds_the_course_by_its_key(client, t) -> Non
     ]
 
 
+async def test_the_course_override_takes_a_key_with_a_slash(client, t) -> None:
+    session = await login(client)
+    await upload(client, bearer(session), {"courses": [course("CS/301")]})
+
+    raw = await client.patch(
+        f"/v4/sync/courses/{key('CS/301')}/override",
+        headers=bearer(session),
+        json={"color_hex": "#00FF00", "hlc": to_clock(t)},
+    )
+    encoded = await client.patch(
+        f"/v4/sync/courses/{key('CS%2F301')}/override",
+        headers=bearer(session),
+        json={"custom_name": "Networks", "locale": "en", "hlc": to_clock(t + timedelta(seconds=1))},
+    )
+
+    assert raw.status_code == 200, raw.text
+    assert encoded.status_code == 200, encoded.text
+    snapshot = (await client.get("/v4/sync/full", headers=bearer(session))).json()
+    assert [(o["course_key"], o["color_hex"]) for o in snapshot["course_overrides"]] == [
+        (key("CS/301"), "#00FF00")
+    ]
+
+
 async def test_the_course_override_answers_unknown_keys_and_unstamped_edits(client) -> None:
     session = await login(client)
     await upload(client, bearer(session), {"courses": [course("CS1")]})
