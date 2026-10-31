@@ -219,7 +219,7 @@ async def patch_course_override(
     )
 
 
-@v4_router.patch("/courses/{course_key}/override")
+@v4_router.patch("/courses/{course_key:path}/override")
 async def patch_course_override_v4(
     course_key: str,
     payload: CourseOverrideRequest,
@@ -227,7 +227,8 @@ async def patch_course_override_v4(
     session: SessionDep,
 ):
     """A course by its key, which names its term, unlike a Moodle id. Any
-    value sent needs an `hlc`, `moodle_course_id` and a lone `locale` too."""
+    value sent needs an `hlc`, `moodle_course_id` and a lone `locale` too.
+    The key may hold a `/`, as a course number may, so it matches as a path."""
     if payload.model_dump(exclude={"hlc"}, exclude_none=True):
         require_stamp(True, payload.hlc)
     return await _override_course(

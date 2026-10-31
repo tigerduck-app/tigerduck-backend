@@ -35,7 +35,7 @@ V4_ROUTES = {
     ("DELETE", "/v4/sync/courses/{course_key:path}"),
     ("POST", "/v4/sync/assignments/upload"),
     ("PATCH", "/v4/sync/assignments/{moodle_assignment_id}/override"),
-    ("PATCH", "/v4/sync/courses/{course_key}/override"),
+    ("PATCH", "/v4/sync/courses/{course_key:path}/override"),
     ("PUT", "/v4/sync/holiday-overrides/{holiday_id}"),
     ("GET", "/v4/settings/{namespace}"),
     ("PUT", "/v4/settings/{namespace}"),
