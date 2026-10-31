@@ -1035,6 +1035,7 @@ async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
     pooled connection must not be held while it does."""
     _, _, job = await _setup_user_job(db_session)
     seen: dict = {}
+    leftover: list[str] = []
     idle_in_transaction = text(
         "SELECT pid FROM pg_stat_activity "
         "WHERE datname = current_database() "
@@ -1058,6 +1059,12 @@ async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
             await conn.rollback()
             during = set((await conn.execute(idle_in_transaction)).scalars())
             seen["idle_in_transaction"] = len(during - before)
+            if during - before:
+                left = await conn.execute(
+                    text("SELECT left(query, 300) FROM pg_stat_activity WHERE pid = ANY(:pids)"),
+                    {"pids": list(during - before)},
+                )
+                leftover.extend(left.scalars())
             await conn.rollback()
 
     fetcher = _ObservingFetcher(observe, results=[_fa(1)])
@@ -1065,7 +1072,7 @@ async def test_the_list_fetch_waits_on_moodle_without_the_job_lock(
 
     await run_sync_tick(worker)
 
-    assert seen == {"lock": "acquired", "idle_in_transaction": 0}
+    assert seen == {"lock": "acquired", "idle_in_transaction": 0}, leftover
     await db_session.refresh(job)
     assert job.status == "pending"
     assert job.last_success_at is not None
