@@ -50,9 +50,11 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   `user_bulletin_subscriptions` with a random default for every existing
   row, and a partial unique index on `(device_id, client_id)` for live
   rows. It rewrites that table under a short lock at startup. No `.env`
-  change. Rollback: run `docker compose exec backend alembic downgrade
-  9f599ff4ebb6`, then check out 3.10.1 and run `./start.sh`; the
-  downgrade drops the column and the ids apps stored for it.
+  change. Rollback: stop the backend first, since 4.0.0 reads the column
+  the downgrade drops (`docker compose stop backend`), run `docker compose
+  run --rm --no-deps backend alembic downgrade 9f599ff4ebb6`, then check
+  out 3.10.1 and run `./start.sh`; the downgrade drops the column and the
+  ids apps stored for it.
 
 ## Upgrading to 3.10.1
 
