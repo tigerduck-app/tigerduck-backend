@@ -412,17 +412,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await call_next(request)
 
-    # Added before the clock middleware, so inside it: the clock stamps the
-    # enveloped answer.
-    @app.middleware("http")
-    async def _v4_error_envelope(request, call_next):
-        response = await call_next(request)
-        if response.status_code < 400 or not api_v4.under(
-            request.url.path, settings.api_v4_base_path
-        ):
-            return response
-        return await api_v4.enveloped(response)
-
     # Every /v3 and /v4 answer, an error too, carries the server's clock,
     # which the apps stamp their edits against (`server/sync/merge.py`).
     def _with_clock(request, response):
@@ -433,9 +422,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
         return response
 
+    # A /v4 error goes out in its envelope (`server/api_v4.py`).
     @app.middleware("http")
     async def _tigersync_clock(request, call_next):
-        return _with_clock(request, await call_next(request))
+        response = await call_next(request)
+        if response.status_code >= 400 and api_v4.under(
+            request.url.path, settings.api_v4_base_path
+        ):
+            response = await api_v4.enveloped(response)
+        return _with_clock(request, response)
 
     # An unhandled error is answered outside every middleware, by Starlette's
     # ServerErrorMiddleware, which calls this handler and then re-raises.

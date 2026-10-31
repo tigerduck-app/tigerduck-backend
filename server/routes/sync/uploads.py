@@ -103,6 +103,8 @@ class CourseUploadRequest(BaseModel):
     roster_terms: list[Annotated[str, Field(max_length=16)]] = Field(
         default_factory=list, max_length=8
     )
+
+
 class CourseUploadV4Request(CourseUploadRequest):
     """/v4 takes a colour only through the override PATCH and a hand-add only
     as an add, so the upload carries neither field that did."""
