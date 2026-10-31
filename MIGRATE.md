@@ -32,6 +32,28 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.0.0
+
+- **`/v4` beside `/v3`.** The contract is `docs/api-v4.md`. `/v4` runs on
+  the same handlers, database, change log, `sync_trigger` queue, JWT and
+  rate limits as `/v3`, so a token works on either and a `/v4` write is
+  seen by `/v3` devices as its `/v3` twin would be. `/v3`, its bodies and
+  every push payload are unchanged, and released apps keep working.
+- **What `/v4` changes.** Course colours go only through
+  `PATCH /v4/sync/courses/{course_key}/override`; the upload takes no
+  `course_overrides` or `force_keys`. Every stamped write needs `hlc`
+  (422 `hlc_required`). Bulletin subscription rules carry a `client_id`,
+  and the PUT updates each rule in place. Every non-2xx answer is
+  `{"error", "message", ...}`; an expired revision is 409
+  `sync_revision_expired`. `/version` gains `api_v4_base_path`.
+- **Migration `452fe3a32c93`** adds `client_id` to
+  `user_bulletin_subscriptions` with a random default for every existing
+  row, and a partial unique index on `(device_id, client_id)` for live
+  rows. It rewrites that table under a short lock at startup. No `.env`
+  change. Rollback: run `docker compose exec backend alembic downgrade
+  9f599ff4ebb6`, then check out 3.10.1 and run `./start.sh`; the
+  downgrade drops the column and the ids apps stored for it.
+
 ## Upgrading to 3.10.1
 
 - **Enrollment follows the school's roster.** A course upload names in
