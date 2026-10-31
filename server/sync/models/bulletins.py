@@ -41,6 +41,11 @@ class UserBulletinSubscription(Base):
     device_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("user_devices.id", ondelete="CASCADE")
     )
+    # The client's id for the rule, which `/v4`'s PUT keeps the row by.
+    # Rows inserted without one, as `/v3` inserts them, take their own.
+    client_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), server_default=sa.text("gen_random_uuid()")
+    )
     name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     orgs: Mapped[list[str]] = mapped_column(
         ARRAY(Text), default=list, server_default="{}"
@@ -86,6 +91,13 @@ class UserBulletinSubscription(Base):
         Index(
             "idx_bulletin_subs_device_active",
             "device_id",
+            postgresql_where=sa.text("deleted_at IS NULL"),
+        ),
+        Index(
+            "ux_bulletin_subs_device_client",
+            "device_id",
+            "client_id",
+            unique=True,
             postgresql_where=sa.text("deleted_at IS NULL"),
         ),
     )
