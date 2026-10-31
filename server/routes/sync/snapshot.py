@@ -33,6 +33,8 @@ from server.syncjobs.log_entries import log_sync
 from ._shared import MAX_SYNC_LIMIT, _cancel_pending_deliveries_for_device, logger
 
 router = APIRouter(prefix="/sync", tags=["sync"])
+# The /v4 forms of the feed and the snapshot (docs/api-v4.md).
+v4_router = APIRouter(prefix="/sync", tags=["sync"])
 
 
 @router.get("/revision")
@@ -57,6 +59,10 @@ async def incremental_sync(
     since_revision: int = Query(ge=0),
     limit: int = Query(default=MAX_SYNC_LIMIT, ge=1, le=MAX_SYNC_LIMIT),
 ):
+    return await _changes(auth, session, since_revision, limit, expired_status=410)
+
+
+async def _changes(auth, session, since_revision: int, limit: int, *, expired_status: int):
     try:
         page = await read_changes(
             session,
@@ -66,7 +72,7 @@ async def incremental_sync(
         )
     except RevisionExpired as expired:
         return JSONResponse(
-            status_code=410,
+            status_code=expired_status,
             content={
                 "error": "sync_revision_expired",
                 "min_available_revision": expired.min_available_revision,
@@ -89,6 +95,20 @@ async def incremental_sync(
             for c in page.changes
         ],
     }
+
+
+@v4_router.get("")
+async def incremental_sync_v4(
+    auth: CurrentAuthDep,
+    session: SessionDep,
+    since_revision: int = Query(ge=0),
+    limit: int = Query(default=MAX_SYNC_LIMIT, ge=1, le=MAX_SYNC_LIMIT),
+):
+    """As on /v3, but an expired revision is a 409: a v4 app reads any 410
+    as "update the app"."""
+    return await _changes(auth, session, since_revision, limit, expired_status=409)
+
+
 @router.get("/full")
 async def full_sync(
     auth: CurrentAuthDep, session: SessionDep, request: Request, speaks_clock: ClockProtocolDep
@@ -131,6 +151,21 @@ async def full_sync(
             snap_session, auth.user_id, request.app.state.settings.sync_roster_request_days
         )
         return snapshot
+
+
+@v4_router.get("/full")
+async def full_sync_v4(auth: CurrentAuthDep, session: SessionDep, request: Request):
+    """Protocol 2's snapshot, each course override naming its course's key,
+    which /v4's override PATCH takes."""
+    snapshot = await full_sync(auth, session, request, speaks_clock=True)
+    keys = {c["id"]: c["course_key"] for c in snapshot["courses"]}
+    return {
+        **snapshot,
+        "course_overrides": [
+            {**o, "course_key": keys.get(o["user_course_id"])}
+            for o in snapshot["course_overrides"]
+        ],
+    }
 
 
 async def _roster_requests(session, user_id, days: int) -> list[str]:

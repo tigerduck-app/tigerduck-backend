@@ -27,7 +27,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
+
+from server.api_v4 import speaks_v4
 
 MAX_CLOCK_SKEW = timedelta(seconds=5)
 CLOCK_HEADER = "X-TigerSync-Clock"
@@ -64,12 +66,14 @@ def edit_time(clock: int | None, now: datetime) -> datetime:
 
 
 def _speaks_clock_protocol(
+    request: Request,
     x_tigersync_protocol: Annotated[str | None, Header()] = None,
 ) -> bool:
-    return x_tigersync_protocol == "2"
+    return x_tigersync_protocol == "2" or speaks_v4(request)
 
 
-#: True for a request from an app that stamps its edits (`X-TigerSync-Protocol: 2`).
+#: True for a request from an app that stamps its edits: one sending
+#: `X-TigerSync-Protocol: 2`, and every `/v4` request whatever it sends.
 ClockProtocolDep = Annotated[bool, Depends(_speaks_clock_protocol)]
 
 

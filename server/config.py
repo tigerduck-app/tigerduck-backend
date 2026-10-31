@@ -58,6 +58,8 @@ class Settings(BaseSettings):
 
     # --- v3 user accounts / auth ---
     api_v3_base_path: str = "/v3"
+    # The same accounts and data on the v4 wire (docs/api-v4.md).
+    api_v4_base_path: str = "/v4"
     # HS256 signing key for access JWTs. Empty means /v3 auth is unconfigured
     # (login returns 503) in development; production refuses to start.
     auth_jwt_secret: str = ""

@@ -3,7 +3,8 @@
 ## OVERVIEW
 `server/` is the TigerDuck push + bulletin backend. Runs on the Mac mini
 behind nginx-proxy-manager + Cloudflare, serves the apps at
-`https://api.tigerduck.app/v3/`. **`/v1/*` and `/v2/*` are retired** — a
+`https://api.tigerduck.app/v3/` and `/v4/` (`docs/api-v4.md`).
+**`/v1/*` and `/v2/*` are retired** — a
 middleware in `main.py` answers both with 410 Gone, so an out-of-date
 client gets an unambiguous "update the app" signal rather than a 404.
 
@@ -24,7 +25,9 @@ What ships today:
 server/
 ├── __init__.py
 ├── _ssl_compat.py             # OpenSSL 3 leniency for NTUST's broken TLS chain
-├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware
+├── main.py                    # FastAPI app + lifespan; the /v1+/v2 410 middleware;
+│                              #   mounts /v3 and /v4
+├── api_v4.py                  # /v4 on the wire: protocol 2 implied, the error envelope
 ├── config.py                  # pydantic-settings, TIGERDUCK_ prefix
 ├── db.py                      # Base, async engine/session, SessionDep;
 │                              #   in_array and INSERT_CHUNK_ROWS (bind limit);
@@ -353,14 +356,15 @@ into the backend container via `docker-compose.yml`.
   (`sync/merge.py`). A stamp is a clock value, integer microseconds since
   the epoch, kept exactly in the field's `*_updated_at` (a course name per
   locale in `custom_names_updated_at`, a holiday setting in `updated_at`)
-  and sent back as `*_hlc`. Every `/v3` answer carries the server's clock
-  in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also in
-  `server_hlc`. A request's `hlc` later than server time plus
+  and sent back as `*_hlc`. Every `/v3` and `/v4` answer carries the
+  server's clock in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also
+  in `server_hlc`. A request's `hlc` later than server time plus
   `MAX_CLOCK_SKEW` is refused with 409 `clock_ahead` before anything is
   written, never clamped, so a retry keeps the stamp first stored. An edit
   sent without one is stamped when it arrives, or refused with 422
-  `hlc_required` when the request carries `X-TigerSync-Protocol: 2`. A
-  value in a bulk upload sent without a time counts as `OLDEST`.
+  `hlc_required` when the request carries `X-TigerSync-Protocol: 2` or is
+  on `/v4`, which implies it. A value in a bulk upload sent without a time
+  counts as `OLDEST`.
 - A stamp no later than the stored one loses, so a tie keeps the stored
   value; a later stamp with the stored value moves only the stamp, and a
   field with no stamp takes any edit. A write takes `lock_sync_state`
@@ -425,6 +429,15 @@ into the backend container via `docker-compose.yml`.
   `roster_requests` once that is `sync_roster_request_days` old. Every job
   that reads a student's courses for class reminders, course changes or a
   class table reads `enrolled` rows only.
+- `/v4` serves the same handlers, data and tokens as `/v3`
+  (`docs/api-v4.md`); only the routes listed there are mounted
+  (`_V4_SHARED` and the `v4_router`s in `main.py`). A route that differs
+  on `/v4` gets a `v4_router` form in its module that calls the `/v3`
+  code, so both versions log the same changes and queue the same
+  `sync_trigger`. `/v3` keeps its bodies and `HTTPException` details byte
+  for byte; `api_v4.py` turns a `/v4` error body into
+  `{"error", "message", ...}`, so a new prose detail needs its code in
+  `_PROSE` and every code a message in `CODES`.
 - APNs topic for a Live Activity: `{bundle_id}.push-type.liveactivity`
   (the payload builder handles this — do not hardcode elsewhere)
 - Scheduler runs IN-PROCESS in FastAPI's lifespan as a single worker.
