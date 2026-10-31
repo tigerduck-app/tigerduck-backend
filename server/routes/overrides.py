@@ -226,7 +226,10 @@ async def patch_course_override_v4(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    """A course by its key, which names its term, unlike a Moodle id."""
+    """A course by its key, which names its term, unlike a Moodle id. Any
+    value sent needs an `hlc`, `moodle_course_id` and a lone `locale` too."""
+    if payload.model_dump(exclude={"hlc"}, exclude_none=True):
+        require_stamp(True, payload.hlc)
     return await _override_course(
         session, auth, payload, True,
         find=lambda: _get_course_by_key(session, auth.user_id, course_key),

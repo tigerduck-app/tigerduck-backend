@@ -142,6 +142,33 @@ async def test_the_course_override_answers_unknown_keys_and_unstamped_edits(clie
     assert (unstamped.status_code, unstamped.json()["error"]) == (422, "hlc_required")
 
 
+async def test_any_course_override_value_needs_an_hlc_on_v4_only(client) -> None:
+    session = await login(client)
+    await upload(client, bearer(session), {"courses": [course("CS1")]})
+    for body in (
+        {"color_hex": "#00FF00"},
+        {"custom_name": "Algorithms"},
+        {"locale": "en"},
+        {"ignore_assignments": True},
+        {"moodle_course_id": 42},
+    ):
+        v4 = await client.patch(
+            f"/v4/sync/courses/{key('CS1')}/override", headers=bearer(session), json=body
+        )
+        assert (v4.status_code, v4.json()["error"]) == (422, "hlc_required"), body
+        v3 = await client.patch(
+            f"/v3/sync/courses/{SEMESTER}CS1/override", headers=bearer(session), json=body
+        )
+        assert v3.status_code == 200, body
+
+    stamped = await client.patch(
+        f"/v4/sync/courses/{key('CS1')}/override",
+        headers=bearer(session),
+        json={"moodle_course_id": 42, "hlc": to_clock(datetime.now(UTC))},
+    )
+    assert stamped.status_code == 200, stamped.text
+
+
 # --- Assignment override ----------------------------------------------------------
 
 
