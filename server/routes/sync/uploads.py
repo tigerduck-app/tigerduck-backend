@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, model_validator
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from server.auth.dependencies import CurrentAuthDep
@@ -38,6 +38,7 @@ from server.syncjobs.models import SyncJobType
 from ._shared import _push_back_sync_jobs, _trigger_push_tick, logger
 
 router = APIRouter(prefix="/sync", tags=["sync"])
+v4_router = APIRouter(prefix="/sync", tags=["sync"])
 
 
 @router.post("/initial-upload")
@@ -102,6 +103,18 @@ class CourseUploadRequest(BaseModel):
     roster_terms: list[Annotated[str, Field(max_length=16)]] = Field(
         default_factory=list, max_length=8
     )
+class CourseUploadV4Request(CourseUploadRequest):
+    """/v4 takes a colour only through the override PATCH and a hand-add only
+    as an add, so the upload carries neither field that did."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _refuse_v3_fields(cls, data):
+        if isinstance(data, dict) and {"course_overrides", "force_keys"} & data.keys():
+            raise ValueError("course_overrides and force_keys are not taken on /v4")
+        return data
+
+
 @router.post("/courses/upload")
 async def upload_courses(
     payload: CourseUploadRequest,
@@ -493,6 +506,20 @@ async def upload_courses(
         "accepted_keys": sorted(uploaded_keys),
         **({"adds": add_answers} if speaks_clock else {}),
     }
+
+
+@v4_router.post("/courses/upload")
+async def upload_courses_v4(
+    payload: CourseUploadV4Request,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    answer = await upload_courses(
+        payload, auth, session, request, background_tasks, speaks_clock=True
+    )
+    return {k: v for k, v in answer.items() if k != "overrides_applied"}
 
 
 async def _roster_by_stamp(session, user_id, payload, payload_keys, adds):

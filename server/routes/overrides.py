@@ -42,6 +42,8 @@ from server.sync.models import (
 )
 
 router = APIRouter(tags=["sync-overrides"])
+# /v4's forms: a course by its key, and one reply shape (docs/api-v4.md).
+v4_router = APIRouter(tags=["sync-overrides"])
 logger = structlog.get_logger(__name__)
 
 
@@ -187,6 +189,19 @@ async def patch_assignment_override(
     return {"id": target.id, "updated_at": now.isoformat(), **answer}
 
 
+@v4_router.patch("/assignments/{moodle_assignment_id}/override")
+async def patch_assignment_override_v4(
+    moodle_assignment_id: int,
+    payload: AssignmentOverrideRequest,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    answer = await patch_assignment_override(
+        moodle_assignment_id, payload, auth, session, speaks_clock=True
+    )
+    return {k: answer[k] for k in ("local_status", "local_status_hlc", "applied")}
+
+
 @router.patch(
     "/courses/{moodle_id}/override",
 )
@@ -197,13 +212,38 @@ async def patch_course_override(
     session: SessionDep,
     speaks_clock: ClockProtocolDep,
 ):
+    return await _override_course(
+        session, auth, payload, speaks_clock,
+        find=lambda: _get_course_by_moodle_id(session, auth.user_id, moodle_id),
+        ref=("moodle_id", moodle_id),
+    )
+
+
+@v4_router.patch("/courses/{course_key}/override")
+async def patch_course_override_v4(
+    course_key: str,
+    payload: CourseOverrideRequest,
+    auth: CurrentAuthDep,
+    session: SessionDep,
+):
+    """A course by its key, which names its term, unlike a Moodle id."""
+    return await _override_course(
+        session, auth, payload, True,
+        find=lambda: _get_course_by_key(session, auth.user_id, course_key),
+        ref=("course_key", course_key),
+    )
+
+
+async def _override_course(session, auth, payload, speaks_clock, *, find, ref):
+    """`find` reads the course once the sync lock is held; `ref` names it in
+    the sync log."""
     names = bool(payload.locale) and payload.custom_name is not None
     if payload.color_hex is not None or names or payload.ignore_assignments is not None:
         require_stamp(speaks_clock, payload.hlc)
     now = datetime.now(UTC)
     stamp = edit_time(payload.hlc, now)
     state = await lock_sync_state(session, auth.user_id)
-    course = await _get_course_by_moodle_id(session, auth.user_id, moodle_id)
+    course = await find()
 
     existing = (
         await session.execute(
@@ -295,12 +335,12 @@ async def patch_course_override(
         user_id=auth.user_id,
         source="override",
         message=(
-            f"Course override: moodle_id={moodle_id} → {', '.join(parts)}"
+            f"Course override: {ref[0]}={ref[1]} → {', '.join(parts)}"
             + (f" (kept {', '.join(kept)}, stamped later)" if kept else "")
         ),
         device_id=auth.device_id,
         detail={
-            "moodle_id": moodle_id,
+            ref[0]: ref[1],
             "moodle_course_id": payload.moodle_course_id,
             "fields": changed_fields,
             "kept": kept,
@@ -354,6 +394,15 @@ async def _get_assignment_by_moodle_id(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="assignment_not_found"
         )
+    return row
+
+
+async def _get_course_by_key(session: AsyncSession, user_id, course_key: str) -> UserCourse:
+    row = await session.scalar(
+        select(UserCourse).where(UserCourse.user_id == user_id, UserCourse.course_key == course_key)
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="course_not_found")
     return row
 
 
