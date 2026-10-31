@@ -15,7 +15,14 @@ from server.auth.models import PushDelivery, PushDeliveryStatus, PushJobStatus, 
 from server.sync.changelog import RevisionExpired, append_change, lock_sync_state, read_changes
 from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync import membership
-from server.sync.merge import OLDEST, ClockProtocolDep, apply_field, edit_time, to_clock
+from server.sync.merge import (
+    OLDEST,
+    ClockProtocolDep,
+    apply_field,
+    edit_time,
+    require_stamp,
+    to_clock,
+)
 from server.sync.models import (
     ChangeEntityType,
     CourseSource,
@@ -105,9 +112,21 @@ class CourseUploadRequest(BaseModel):
     )
 
 
-class CourseUploadV4Request(CourseUploadRequest):
+class CourseAddV4(BaseModel):
+    course_key: str = Field(max_length=128)
+    # Optional here so a missing one is `hlc_required`, as on every /v4 write.
+    hlc: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+
+
+class CourseUploadV4Request(BaseModel):
     """/v4 takes a colour only through the override PATCH and a hand-add only
-    as an add, so the upload carries neither field that did."""
+    as an add, so the upload has neither field that did, and refuses both."""
+
+    courses: list[CourseUploadItem]
+    adds: list[CourseAddV4] = Field(default_factory=list, max_length=50)
+    roster_terms: list[Annotated[str, Field(max_length=16)]] = Field(
+        default_factory=list, max_length=8
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -518,8 +537,15 @@ async def upload_courses_v4(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
+    for add in payload.adds:
+        require_stamp(True, add.hlc)
+    shared = CourseUploadRequest(
+        courses=payload.courses,
+        adds=[CourseAdd(course_key=a.course_key, hlc=a.hlc) for a in payload.adds],
+        roster_terms=payload.roster_terms,
+    )
     answer = await upload_courses(
-        payload, auth, session, request, background_tasks, speaks_clock=True
+        shared, auth, session, request, background_tasks, speaks_clock=True
     )
     return {k: v for k, v in answer.items() if k != "overrides_applied"}
 

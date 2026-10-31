@@ -76,6 +76,36 @@ async def test_the_upload_answers_its_adds_and_writes_no_colour(client, t) -> No
         assert await db.scalar(select(func.count()).select_from(UserCourseOverride)) == 0
 
 
+async def test_the_upload_schema_lists_only_the_v4_fields(client) -> None:
+    spec = client.app.openapi()
+
+    def fields(path: str) -> set[str]:
+        body = spec["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+        name = body["schema"]["$ref"].rsplit("/", 1)[1]
+        return set(spec["components"]["schemas"][name]["properties"])
+
+    assert fields("/v4/sync/courses/upload") == {"courses", "adds", "roster_terms"}
+    assert {"course_overrides", "force_keys"} <= fields("/v3/sync/courses/upload")
+
+
+async def test_an_add_without_its_hlc_is_hlc_required(client) -> None:
+    session = await login(client)
+    body = {"courses": [course("CS1")], "adds": [{"course_key": key("CS1")}]}
+
+    v4 = await upload(client, bearer(session), body)
+    v3 = await upload(
+        client, {**bearer(session), "X-TigerSync-Protocol": "2"}, body, prefix="/v3"
+    )
+
+    assert (v4.status_code, v4.json()) == (
+        422, {"error": "hlc_required", "message": CODES["hlc_required"]},
+    )
+    assert v3.status_code == 422
+    assert v3.json()["detail"][0]["loc"] == ["body", "adds", 0, "hlc"]
+    snapshot = (await client.get("/v4/sync/full", headers=bearer(session))).json()
+    assert snapshot["courses"] == []
+
+
 async def test_an_add_outside_courses_is_add_not_in_courses(client, t) -> None:
     session = await login(client)
     response = await upload(
