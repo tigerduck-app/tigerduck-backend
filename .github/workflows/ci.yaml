@@ -19,7 +19,8 @@ name: CI
 # would have caught something.
 #
 # Each job runs only when its own code changed: documentation alone runs
-# nothing, and a portal change does not rerun the server suite.
+# nothing. The server suite also runs for portal Python, since the portal's
+# database-backed tests live in server/tests.
 
 on:
   pull_request:
@@ -44,7 +45,9 @@ jobs:
       - name: Changed paths
         id: paths
         run: |
-          files=$(git diff --name-only HEAD^1 HEAD \
+          # Both sides of a rename, and paths unquoted so non-ASCII names still match.
+          files=$(git -c core.quotePath=false diff --no-renames --name-only HEAD^1 HEAD)
+          files=$(printf '%s\n' "$files" \
             | grep -vE '\.md$|^(docs|\.greptile|\.github/ISSUE_TEMPLATE)/|^LICENSE' || true)
           printf '%s\n' "$files"
           any() { grep -q . && echo true || echo false; }
@@ -53,7 +56,7 @@ jobs:
             exit 0
           fi
           {
-            echo "server=$(printf '%s\n' "$files" | grep -vE '^portal/' | any)"
+            echo "server=$(printf '%s\n' "$files" | grep -vE '^portal/web/' | any)"
             echo "web=$(printf '%s\n' "$files" | grep -E '^portal/web/' | any)"
             echo "app=$(printf '%s\n' "$files" | grep -E '^portal/' | grep -vE '^portal/web/' | any)"
           } >> "$GITHUB_OUTPUT"
