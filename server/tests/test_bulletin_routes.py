@@ -131,6 +131,70 @@ async def test_get_bulletin_404s_when_missing(client: AsyncClient) -> None:
     assert resp.status_code == 404
 
 
+async def _seed_custom_pushes(client: AsyncClient) -> dict[str, int]:
+    """Custom push records as the portal stores them: one per target kind,
+    the device one deleted, and one with no target."""
+    factory: async_sessionmaker = client.app.state.session_factory  # type: ignore[attr-defined]
+    ids: dict[str, int] = {}
+    async with factory() as session:
+        for name, target, deleted in (
+            ("user", {"user_id": "B11015000"}, False),
+            ("device", {"device_id": "dev-1"}, True),
+            ("list", {"list_id": 3}, False),
+            ("untargeted", {}, False),
+        ):
+            ids[name] = await session.scalar(
+                insert(Bulletin)
+                .values(
+                    source="custom_push",
+                    external_id=f"custom-{name}",
+                    source_url="",
+                    title=name,
+                    canonical_org="server",
+                    content_tags=["server_notification"],
+                    importance="normal",
+                    processing_state=BulletinProcessingState.processed.value,
+                    is_deleted=deleted,
+                    dispatch_filter_json={
+                        "target_classes": ["iphone"],
+                        "user_id": None,
+                        "device_id": None,
+                        "list_id": None,
+                        "force_ring": False,
+                        **target,
+                    },
+                )
+                .returning(Bulletin.id)
+            )
+        await session.commit()
+    return ids
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+@pytest.mark.parametrize("include_deleted", ["false", "true"])
+async def test_the_feed_leaves_out_targeted_custom_pushes(
+    client: AsyncClient, version: str, include_deleted: str
+) -> None:
+    ids = await _seed_custom_pushes(client)
+
+    resp = await client.get(f"/{version}/bulletins?include_deleted={include_deleted}")
+
+    assert resp.status_code == 200
+    assert {item["id"] for item in resp.json()["items"]} == {ids["untargeted"]}
+
+
+@pytest.mark.parametrize("version", ["v3", "v4"])
+async def test_a_targeted_custom_push_has_no_detail(
+    client: AsyncClient, version: str
+) -> None:
+    ids = await _seed_custom_pushes(client)
+
+    for name in ("user", "device", "list"):
+        resp = await client.get(f"/{version}/bulletins/{ids[name]}")
+        assert resp.status_code == 404, name
+    assert (await client.get(f"/{version}/bulletins/{ids['untargeted']}")).status_code == 200
+
+
 # --- Subscription snapshot PUT ---------------------------------------------
 
 
