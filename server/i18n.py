@@ -37,7 +37,6 @@ _ALIASES: dict[str, str] = {
     "tl": "fil",
     "nb": "no",
     "in": "id",
-    "iw": "he",
     # `en` and `pt` each have more than one regional bundle; a bare or
     # cross-region tag needs an explicit pointer to the right one instead
     # of falling through to the canonical English bundle.
