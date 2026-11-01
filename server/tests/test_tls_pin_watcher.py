@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import structlog
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -32,6 +33,7 @@ from cryptography.x509.oid import (
 )
 from prometheus_client import REGISTRY
 from sqlalchemy import select
+from structlog.testing import capture_logs
 
 from server import tls_chain
 from server.db import build_session_factory
@@ -604,6 +606,37 @@ async def test_a_failing_host_keeps_its_last_success_while_others_succeed(
     assert _gauge("tigerduck_tls_host_last_success_timestamp", "ok.tls.test") == later.timestamp()
     results = (await _stored_set(factory)).watch_results
     assert results[HOST]["last_success_at"] == "2026-10-25T04:00:00Z"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_host_logs_once_as_it_becomes_unreachable_and_once_as_it_recovers(
+    pki, db_session, factory, monkeypatch
+) -> None:
+    await _store_set(db_session, [HOST], [pki.root.pin], auto_publish=False)
+    chain = (pki.leaf.cert, pki.intermediate.cert, pki.root.cert)
+    answers = [
+        Probe("error", detail="refused: does not resolve"),
+        Probe("error", detail="timeout"),
+        Probe("trusted", chain),
+        Probe("trusted", chain),
+        Probe("error", detail="timeout"),
+    ]
+    # A cached logger keeps an earlier app's processors, out of capture_logs' reach.
+    monkeypatch.setattr(watcher, "logger", structlog.get_logger(watcher.__name__))
+    with capture_logs() as logs:
+        for hour, answer in enumerate(answers):
+            await run_pin_watch(
+                factory, None, timeout=10, probe_fn=lambda target, a=answer: a,
+                now=NOW + timedelta(hours=hour),
+            )
+
+    hosts = [log for log in logs if log["event"].startswith("tls_pins.host_")]
+    assert [(log["event"], log["log_level"], log.get("detail")) for log in hosts] == [
+        ("tls_pins.host_unreachable", "warning", "refused: does not resolve"),
+        ("tls_pins.host_reachable", "info", None),
+        ("tls_pins.host_unreachable", "warning", "timeout"),
+    ]
+    assert {(log["set"], log["host"]) for log in hosts} == {("ntust", HOST)}
 
 
 @pytest.mark.asyncio(loop_scope="session")

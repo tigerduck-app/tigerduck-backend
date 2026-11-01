@@ -207,6 +207,11 @@ def _apply(
         ),
     }
     labels = {"set": pin_set.id, "host": target}
+    was_error = previous.get("status") == "error"
+    if result.status == "error" and not was_error:
+        logger.warning("tls_pins.host_unreachable", **labels, detail=result.detail)
+    elif result.status != "error" and was_error:
+        logger.info("tls_pins.host_reachable", **labels)
     # An error keeps the last chain's values, as the series do.
     gauges = previous.get("gauges")
     if result.status == "untrusted":
