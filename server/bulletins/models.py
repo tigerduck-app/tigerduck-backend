@@ -29,7 +29,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     func,
+    not_,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -141,6 +143,21 @@ class Bulletin(Base):
             postgresql_where=(notified_at.is_(None)),
         ),
     )
+
+
+_TARGET = Bulletin.dispatch_filter_json
+#: The bulletins a public read may return: a custom push sent to one user,
+#: device or list is not one of them.
+PUBLIC_BULLETIN = not_(
+    and_(
+        Bulletin.source == "custom_push",
+        func.coalesce(
+            _TARGET["user_id"].astext,
+            _TARGET["device_id"].astext,
+            _TARGET["list_id"].astext,
+        ).isnot(None),
+    )
+)
 
 
 class BulletinSubscription(Base):

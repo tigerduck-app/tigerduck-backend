@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.auth.dependencies import CurrentAuthDep
-from server.bulletins.models import Bulletin
+from server.bulletins.models import PUBLIC_BULLETIN, Bulletin
 from server.db import SessionDep
 from server.sync import serializers
 from server.sync.changelog import lock_sync_state
@@ -378,8 +378,10 @@ async def put_state(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    bulletin = await session.get(Bulletin, bulletin_id)
-    if bulletin is None:
+    found = await session.scalar(
+        select(Bulletin.id).where(Bulletin.id == bulletin_id, PUBLIC_BULLETIN)
+    )
+    if found is None:
         raise HTTPException(status_code=404, detail="bulletin not found")
 
     # INSERT ... ON CONFLICT DO NOTHING to atomically ensure the row

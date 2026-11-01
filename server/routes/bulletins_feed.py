@@ -15,9 +15,9 @@ from __future__ import annotations
 
 import structlog
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import and_, or_, select
 
-from server.bulletins.models import Bulletin
+from server.bulletins.models import PUBLIC_BULLETIN, Bulletin
 from server.bulletins.schemas import (
     BulletinDetail,
     BulletinListResponse,
@@ -38,19 +38,6 @@ from server.db import SessionDep
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/bulletins", tags=["bulletins"])
-
-_TARGET = Bulletin.dispatch_filter_json
-# A custom push sent to one user, device or list stays out of the feed.
-_PUBLIC = not_(
-    and_(
-        Bulletin.source == "custom_push",
-        func.coalesce(
-            _TARGET["user_id"].astext,
-            _TARGET["device_id"].astext,
-            _TARGET["list_id"].astext,
-        ).isnot(None),
-    )
-)
 
 
 @router.get("/taxonomy", response_model=TaxonomyResponse)
@@ -122,7 +109,7 @@ async def list_bulletins(
     """
     stmt = (
         select(Bulletin)
-        .where(Bulletin.canonical_org.isnot(None), _PUBLIC)
+        .where(Bulletin.canonical_org.isnot(None), PUBLIC_BULLETIN)
         .order_by(Bulletin.posted_at.desc().nulls_last(), Bulletin.id.desc())
         .limit(limit + 1)
     )
@@ -165,7 +152,7 @@ async def list_bulletins(
 @router.get("/{bulletin_id}", response_model=BulletinDetail)
 async def get_bulletin(bulletin_id: int, session: SessionDep) -> BulletinDetail:
     row = await session.scalar(
-        select(Bulletin).where(Bulletin.id == bulletin_id, _PUBLIC)
+        select(Bulletin).where(Bulletin.id == bulletin_id, PUBLIC_BULLETIN)
     )
     if row is None:
         raise HTTPException(status_code=404, detail="bulletin not found")

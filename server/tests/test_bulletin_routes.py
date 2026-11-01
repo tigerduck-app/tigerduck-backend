@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import insert
+from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.bulletins.models import Bulletin, BulletinProcessingState
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag
+from server.sync.models import UserBulletinState
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -292,6 +293,27 @@ async def test_put_subscriptions_is_snapshot_replacement(
     rules = got.json()["items"]
     assert len(rules) == 1
     assert rules[0]["orgs"] == [CanonicalOrg.library.value]
+
+
+async def test_a_targeted_custom_push_takes_no_state(client: AsyncClient) -> None:
+    login = await _login(client)
+    ids = await _seed_custom_pushes(client)
+    body = {"is_read": True, "read_updated_at": "2026-06-08T10:00:00Z"}
+
+    for name in ("user", "device", "list"):
+        resp = await client.put(
+            f"/v3/bulletin-states/{ids[name]}", headers=_bearer(login), json=body
+        )
+        assert resp.status_code == 404, name
+    untargeted = await client.put(
+        f"/v3/bulletin-states/{ids['untargeted']}", headers=_bearer(login), json=body
+    )
+
+    assert untargeted.status_code == 200, untargeted.text
+    factory: async_sessionmaker = client.app.state.session_factory  # type: ignore[attr-defined]
+    async with factory() as session:
+        states = await session.scalar(select(func.count()).select_from(UserBulletinState))
+    assert states == 1
 
 
 async def test_subscriptions_put_requires_auth(client: AsyncClient) -> None:
