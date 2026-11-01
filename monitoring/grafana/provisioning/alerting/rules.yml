@@ -390,7 +390,7 @@ groups:
             model:
               refId: A
               instant: true
-              expr: 'time() - (max(tigerduck_tls_host_last_success_timestamp) or max(process_start_time_seconds{job="backend"}))'
+              expr: 'time() - (max(tigerduck_scheduler_job_last_success_timestamp_seconds{job_id="tls_pin_watch"}) or max(process_start_time_seconds{job="backend"}))'
           - refId: C
             datasourceUid: __expr__
             model: {refId: C, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [10800]}}]}
@@ -398,7 +398,7 @@ groups:
         noDataState: OK
         execErrState: Error
         annotations:
-          summary: The TLS pin watcher has reached no host of any set for over 3 hours, or none since the backend started (seconds since in the value).
+          summary: The TLS pin watcher job has not completed a run for over 3 hours, or none since the backend started (seconds since in the value). Hosts it cannot reach raise TLS pin host not reached instead.
 
       - uid: td-tls-watch-stale
         title: TLS pin host not reached
