@@ -199,20 +199,20 @@ def _targeting_where(filt: _TargetFilter, term: str | None) -> tuple[str, list]:
 
 
 def _refuse_a_targeted_record(filt: _PreviewRequest | _SendRequest) -> None:
-    if filt.keeps_record and (
-        filt.user_id is not None or filt.device_id is not None or filt.list_id is not None
-    ):
-        # A record is a bulletin every user's feed lists, not only the target's.
+    # A record is a bulletin every user's feed lists, not only the target's.
+    if not filt.keeps_record:
+        return
+    if filt.course_code is not None:
+        raise HTTPException(status_code=422, detail="a course push cannot keep a record")
+    if filt.user_id is not None or filt.device_id is not None or filt.list_id is not None:
         raise HTTPException(status_code=422, detail="a targeted push cannot keep a record")
 
 
-def _anonymous_where(filt: _TargetFilter) -> tuple[str, list] | None:
+def _anonymous_where(filt: _TargetFilter) -> tuple[str, list]:
     """The WHERE clause + params for the anonymous devices a recorded push
     also reaches, repeating `server.push.custom_push_targeting`, which the
-    bulletin dispatcher resolves them with. None for a course: it holds
-    signed-in devices only. A recorded push has no user, device or list."""
-    if filt.course_code is not None:
-        return None
+    bulletin dispatcher resolves them with. A recorded push has no target
+    but its device classes."""
     classes = list(filt.target_classes)
     platforms = sorted({_CLASS_TO_ANONYMOUS_PLATFORM[c] for c in classes})
     params: list = [classes, platforms]
@@ -271,9 +271,8 @@ async def preview(filt: _PreviewRequest, pool=Depends(get_pool)) -> JSONResponse
             f"WHERE {where} GROUP BY 1, 2",
             *params,
         )
-        anonymous = _anonymous_where(filt) if filt.keeps_record else None
-        if anonymous is not None:
-            where, params = anonymous
+        if filt.keeps_record:
+            where, params = _anonymous_where(filt)
             anonymous_rows = await conn.fetch(
                 f"SELECT r.device_class, r.platform, count(*) AS n "
                 f"FROM device_registrations r WHERE {where} GROUP BY 1, 2",
@@ -294,9 +293,6 @@ async def preview(filt: _PreviewRequest, pool=Depends(get_pool)) -> JSONResponse
 async def send(
     body: _SendRequest, request: Request, pool=Depends(get_pool)
 ) -> JSONResponse:
-    if body.course_code is not None and body.keeps_record:
-        # A record is a bulletin every user's feed lists, not only the course's.
-        raise HTTPException(status_code=422, detail="a course push cannot keep a record")
     _refuse_a_targeted_record(body)
     request_id = secrets.token_hex(8)  # 16 chars
     kind = "record" if body.keeps_record else "popup"
@@ -324,9 +320,8 @@ async def send(
             # The bulletin dispatcher also sends a recorded push to the anonymous
             # devices the preview counts, so they belong in the devices reached.
             reached = matched
-            anonymous = _anonymous_where(body) if body.keeps_record else None
-            if anonymous is not None:
-                anon_where, anon_params = anonymous
+            if body.keeps_record:
+                anon_where, anon_params = _anonymous_where(body)
                 reached += await conn.fetchval(
                     f"SELECT count(*) FROM device_registrations r WHERE {anon_where}",
                     *anon_params,

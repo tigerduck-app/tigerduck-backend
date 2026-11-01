@@ -348,7 +348,7 @@ async def test_a_course_code_finds_its_takers_in_the_current_term(
 
     response = await preview(
         _PreviewRequest(
-            target_classes=["iphone"], keeps_record=True, course_code=" cs2001301 "
+            target_classes=["iphone"], keeps_record=False, course_code=" cs2001301 "
         ),
         pool=portal_pool,
     )
@@ -441,15 +441,20 @@ async def test_a_course_push_cannot_keep_a_record(db_session, portal_pool):
     assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
 
 
-_TARGETS = [{"user_id": "b1"}, {"device_id": "iphone-1"}, {"list_id": 1}]
-_TARGET_IDS = ["user", "device", "list"]
+_TARGETS = [
+    {"user_id": "b1"},
+    {"device_id": "iphone-1"},
+    {"list_id": 1},
+    {"course_code": "CS2001301"},
+]
+_TARGET_IDS = ["user", "device", "list", "course"]
 
 
 @pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.parametrize("target", _TARGETS, ids=_TARGET_IDS)
 async def test_a_targeted_push_cannot_keep_a_record(db_session, portal_pool, target):
     """A recorded push becomes a bulletin every user's feed lists, which a
-    push meant for one user, device or list must not."""
+    push meant for one user, device, list or course must not."""
     await _recipients(db_session)
 
     with pytest.raises(HTTPException) as refused:
