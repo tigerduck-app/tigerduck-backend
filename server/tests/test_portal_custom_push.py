@@ -247,10 +247,8 @@ async def test_the_preview_counts_the_anonymous_devices_only_a_recorded_push_rea
     [
         {"target_classes": ["iphone", "ipad", "mac", "android", "android_tablet"]},
         {"target_classes": ["ipad"]},
-        {"target_classes": ["iphone"], "device_id": "anon-iphone"},
-        {"target_classes": ["iphone", "android"], "user_id": "u-anon-pixel"},
     ],
-    ids=["all", "ipad", "device", "user"],
+    ids=["all", "ipad"],
 )
 async def test_the_anonymous_count_agrees_with_the_dispatcher(
     db_session, portal_pool, filt
@@ -441,6 +439,52 @@ async def test_a_course_push_cannot_keep_a_record(db_session, portal_pool):
     assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
     assert await portal_pool.fetchval("SELECT count(*) FROM push_jobs") == 0
     assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
+
+
+_TARGETS = [{"user_id": "b1"}, {"device_id": "iphone-1"}, {"list_id": 1}]
+_TARGET_IDS = ["user", "device", "list"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("target", _TARGETS, ids=_TARGET_IDS)
+async def test_a_targeted_push_cannot_keep_a_record(db_session, portal_pool, target):
+    """A recorded push becomes a bulletin every user's feed lists, which a
+    push meant for one user, device or list must not."""
+    await _recipients(db_session)
+
+    with pytest.raises(HTTPException) as refused:
+        await send(
+            _SendRequest(
+                target_classes=["iphone"],
+                title="停課通知",
+                body="明天停課",
+                keeps_record=True,
+                force_ring=False,
+                **target,
+            ),
+            _REQUEST,
+            pool=portal_pool,
+        )
+
+    assert refused.value.status_code == 422
+    assert await portal_pool.fetchval("SELECT count(*) FROM bulletins") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM push_jobs") == 0
+    assert await portal_pool.fetchval("SELECT count(*) FROM custom_push_sends") == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("target", _TARGETS, ids=_TARGET_IDS)
+async def test_a_targeted_preview_cannot_keep_a_record(db_session, portal_pool, target):
+    await _recipients(db_session)
+
+    with pytest.raises(HTTPException) as refused:
+        await _preview(portal_pool, keeps_record=True, target_classes=["iphone"], **target)
+
+    assert refused.value.status_code == 422
+    # The same target as a popup still counts.
+    assert "total" in await _preview(
+        portal_pool, keeps_record=False, target_classes=["iphone"], **target
+    )
 
 
 @pytest.mark.asyncio(loop_scope="session")

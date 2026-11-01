@@ -198,12 +198,20 @@ def _targeting_where(filt: _TargetFilter, term: str | None) -> tuple[str, list]:
     return " AND ".join(clauses), params
 
 
+def _refuse_a_targeted_record(filt: _PreviewRequest | _SendRequest) -> None:
+    if filt.keeps_record and (
+        filt.user_id is not None or filt.device_id is not None or filt.list_id is not None
+    ):
+        # A record is a bulletin every user's feed lists, not only the target's.
+        raise HTTPException(status_code=422, detail="a targeted push cannot keep a record")
+
+
 def _anonymous_where(filt: _TargetFilter) -> tuple[str, list] | None:
     """The WHERE clause + params for the anonymous devices a recorded push
     also reaches, repeating `server.push.custom_push_targeting`, which the
-    bulletin dispatcher resolves them with. None for a device list or a
-    course: they hold signed-in devices only."""
-    if filt.list_id is not None or filt.course_code is not None:
+    bulletin dispatcher resolves them with. None for a course: it holds
+    signed-in devices only. A recorded push has no user, device or list."""
+    if filt.course_code is not None:
         return None
     classes = list(filt.target_classes)
     platforms = sorted({_CLASS_TO_ANONYMOUS_PLATFORM[c] for c in classes})
@@ -220,12 +228,6 @@ def _anonymous_where(filt: _TargetFilter) -> tuple[str, list] | None:
             "OR (r.device_class = '' AND r.platform = ANY($2::text[])))"
         ),
     ]
-    if filt.user_id is not None:
-        params.append(filt.user_id)
-        clauses.append(f"r.user_id = ${len(params)}")
-    if filt.device_id is not None:
-        params.append(filt.device_id)
-        clauses.append(f"r.device_id = ${len(params)}")
     return " AND ".join(clauses), params
 
 
@@ -257,6 +259,7 @@ def _by_class(rows, classes: list[str]) -> dict[str, int]:
 
 @router.post("/preview")
 async def preview(filt: _PreviewRequest, pool=Depends(get_pool)) -> JSONResponse:
+    _refuse_a_targeted_record(filt)
     anonymous_rows = []
     async with pool.acquire() as conn:
         term, course = await _course(conn, filt)
@@ -294,6 +297,7 @@ async def send(
     if body.course_code is not None and body.keeps_record:
         # A record is a bulletin every user's feed lists, not only the course's.
         raise HTTPException(status_code=422, detail="a course push cannot keep a record")
+    _refuse_a_targeted_record(body)
     request_id = secrets.token_hex(8)  # 16 chars
     kind = "record" if body.keeps_record else "popup"
     target_classes = ",".join(body.target_classes)
