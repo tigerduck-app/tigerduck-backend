@@ -17,9 +17,10 @@ echo "[entrypoint] launching uvicorn on :40000"
 # job (bulletin scrape, LLM classify, APNs dispatch) — no lock coordinates
 # them. Stay single-worker until we extract the scheduler into its own
 # process or wire up an advisory-lock leader election.
+# --no-proxy-headers: the app reads X-Forwarded-For itself, and only from
+# the proxies TIGERDUCK_FORWARDED_ALLOW_IPS names (server/config.py).
 exec uvicorn server.main:app \
     --host 0.0.0.0 \
     --port 40000 \
-    --proxy-headers \
-    --forwarded-allow-ips '*' \
+    --no-proxy-headers \
     --workers 1
