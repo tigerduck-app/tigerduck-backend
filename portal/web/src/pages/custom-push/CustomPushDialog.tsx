@@ -134,8 +134,9 @@ export function CustomPushDialog({
   });
 
   const code = courseCode.trim().toUpperCase() || undefined;
-  // A course push cannot keep a record: it would land in every user's feed.
-  const kind: Kind = code ? "popup" : chosenKind;
+  // A push with a target cannot keep a record: it would land in every user's feed.
+  const targeted = !!(code || listId || userId.trim() || deviceId.trim());
+  const kind: Kind = targeted ? "popup" : chosenKind;
   const filter = {
     keeps_record: kind === "record",
     list_id: listId ? Number(listId) : undefined,
@@ -308,7 +309,7 @@ export function CustomPushDialog({
               {(Object.keys(KINDS) as Kind[]).map((k) => {
                 const { label, note, icon: Icon } = KINDS[k];
                 const on = kind === k;
-                const locked = k === "record" && !!code;
+                const locked = k === "record" && targeted;
                 return (
                   <button
                     key={k}
