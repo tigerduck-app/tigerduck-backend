@@ -21,6 +21,7 @@ import uvicorn  # noqa: E402
 from fastapi import APIRouter, Depends, FastAPI  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware  # noqa: E402
 
 from server.security import require_shared_secret  # noqa: E402
 from fastapi.responses import JSONResponse, PlainTextResponse, Response  # noqa: E402
@@ -455,6 +456,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Added after the 410 middleware so it wraps it (Starlette runs the
     # last-added middleware outermost) and counts those answers too.
     app.add_middleware(metrics.HttpMetricsMiddleware)
+    # Last, so outermost: every middleware and route sees the client's address.
+    if settings.forwarded_allow_ips:
+        app.add_middleware(
+            ProxyHeadersMiddleware, trusted_hosts=settings.forwarded_allow_ips
+        )
 
     @app.get("/health", tags=["meta"])
     async def health() -> dict[str, str]:

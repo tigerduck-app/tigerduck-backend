@@ -39,8 +39,8 @@ from server.auth.schemas import (
     PushTokenIn,
 )
 from server.db import SessionDep, in_array
-# Shared so the anonymous endpoint honours the same `auth_trust_forwarded_for`
-# setting as login — two different notions of "the client's IP" behind the
+# Shared so the anonymous endpoint keys on the same client address as
+# login — two different notions of "the client's IP" behind the
 # same proxy would make one of the two limits trivially wrong.
 from server.routes.auth import _client_ip
 from pydantic import BaseModel, Field, model_validator

@@ -230,6 +230,12 @@ async def login(
     )
 
 
+async def user_is_active(session: AsyncSession, user_id: uuid.UUID) -> bool:
+    """Whether the user may keep using a session; a missing user may not."""
+    user_status = await session.scalar(select(User.status).where(User.id == user_id))
+    return user_status == UserStatus.active.value
+
+
 async def refresh(
     session: AsyncSession, settings: Settings, *, refresh_token: str
 ) -> RefreshResult:
@@ -265,6 +271,11 @@ async def refresh(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid_refresh_token",
+        )
+    if not await user_is_active(session, auth_session.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="session_revoked",
         )
 
     now = datetime.now(UTC)
