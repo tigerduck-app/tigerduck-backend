@@ -17,6 +17,9 @@ name: CI
 #
 # No Docker build, no lint gate, no coverage threshold. Add them when they
 # would have caught something.
+#
+# Each job runs only when its own code changed: documentation alone runs
+# nothing, and a portal change does not rerun the server suite.
 
 on:
   pull_request:
@@ -26,7 +29,38 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.paths.outputs.server }}
+      web: ${{ steps.paths.outputs.web }}
+      app: ${{ steps.paths.outputs.app }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The merge commit and its base.
+          fetch-depth: 2
+
+      - name: Changed paths
+        id: paths
+        run: |
+          files=$(git diff --name-only HEAD^1 HEAD \
+            | grep -vE '\.md$|^(docs|\.greptile|\.github/ISSUE_TEMPLATE)/|^LICENSE' || true)
+          printf '%s\n' "$files"
+          any() { grep -q . && echo true || echo false; }
+          if printf '%s\n' "$files" | grep -qx '\.github/workflows/ci\.yaml'; then
+            printf 'server=true\nweb=true\napp=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "server=$(printf '%s\n' "$files" | grep -vE '^portal/' | any)"
+            echo "web=$(printf '%s\n' "$files" | grep -E '^portal/web/' | any)"
+            echo "app=$(printf '%s\n' "$files" | grep -E '^portal/' | grep -vE '^portal/web/' | any)"
+          } >> "$GITHUB_OUTPUT"
+
   server-tests:
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -77,6 +111,8 @@ jobs:
         run: uv run --frozen pytest server/tests -q
 
   portal-web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -103,6 +139,8 @@ jobs:
         run: npm run build
 
   portal-app:
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
