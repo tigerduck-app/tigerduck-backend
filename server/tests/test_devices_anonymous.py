@@ -444,3 +444,44 @@ async def test_a_row_whose_token_was_dropped_takes_a_new_one(client) -> None:
 
     assert response.status_code == 200
     assert (await row_for(client, "dropped-token")).device_token_hex == "apns-new"
+
+
+# --- The cut-off switch (TIGERDUCK_DEVICE_SECRET_REQUIRED) ---------------------
+
+
+@pytest.fixture
+def secret_required(client, monkeypatch):
+    monkeypatch.setattr(client.app.state.settings, "device_secret_required", True)
+
+
+async def test_the_switch_refuses_a_create_by_a_released_app(client, secret_required) -> None:
+    response = await announce(client, "cutoff-create")
+
+    assert (response.status_code, response.json()) == (403, REFUSED)
+    assert await row_for(client, "cutoff-create") is None
+
+
+async def test_the_switch_refuses_an_update_by_a_released_app(client, monkeypatch) -> None:
+    await announce(client, "cutoff-update")
+    before = columns(await row_for(client, "cutoff-update"))
+    monkeypatch.setattr(client.app.state.settings, "device_secret_required", True)
+
+    refused = [
+        await announce(client, "cutoff-update", server_push_enabled=False),
+        await announce(client, "cutoff-update", device_secret=SECRET, push_token=None),
+    ]
+
+    assert [(r.status_code, r.json()) for r in refused] == [(403, REFUSED)] * 2
+    assert columns(await row_for(client, "cutoff-update")) == before
+
+
+async def test_the_switch_still_lets_an_updated_app_claim_and_create(client, monkeypatch) -> None:
+    await announce(client, "cutoff-claim")
+    monkeypatch.setattr(client.app.state.settings, "device_secret_required", True)
+
+    claim = await announce(client, "cutoff-claim", device_secret=SECRET)
+    create = await announce(client, "cutoff-new", device_secret=OTHER)
+
+    assert (claim.status_code, create.status_code) == (200, 200)
+    assert (await row_for(client, "cutoff-claim")).secret_hash == hashed(SECRET)
+    assert (await row_for(client, "cutoff-new")).secret_hash == hashed(OTHER)

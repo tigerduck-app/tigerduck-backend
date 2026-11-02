@@ -121,7 +121,8 @@ async def register_anonymous_device(
       secret.
     - Without a secret, a request sets `device_class` and
       `server_push_enabled`, and a token only on a row that stores none. It
-      may not change `platform`.
+      may not change `platform`, and while `device_secret_required` is on
+      it is refused.
 
     Every refusal is 403 `device_secret_invalid` and writes nothing,
     `updated_at` included, which retirement and the sign-in-again push read
@@ -154,6 +155,9 @@ async def register_anonymous_device(
     now = datetime.now(UTC)
     secret = payload.device_secret
     token = payload.push_token or None
+    required = request.app.state.settings.device_secret_required
+    if secret is None and required:
+        _refuse_secret(payload.device_id, "secret_required")
 
     # Apple alert pushes consume `device_token_hex`; Android goes via FCM,
     # whose token lives in `pts_token_hex`. Mirrors the gate in
@@ -198,7 +202,7 @@ async def register_anonymous_device(
                 .with_for_update()
             )
         ).scalar_one()
-        access = _anonymous_access(existing, payload, token)
+        access = _anonymous_access(existing, payload, token, required=required)
         if access not in _ANONYMOUS_GRANTS:
             _refuse_secret(payload.device_id, access)
         if access == "claim":
@@ -240,6 +244,8 @@ def _anonymous_access(
     row: DeviceRegistration,
     payload: AnonymousDeviceRequest,
     token: str | None,
+    *,
+    required: bool,
 ) -> str:
     """One of `_ANONYMOUS_GRANTS`, or the reason the request is refused."""
     secret = payload.device_secret
@@ -252,6 +258,8 @@ def _anonymous_access(
         return "claim"
     if secret is not None and token is not None:
         return "claim" if _holds_token(row, token) else "token_unproven"
+    if required:
+        return "secret_required"
     if payload.platform != row.platform:
         return "platform_change"
     return "limited"

@@ -769,3 +769,13 @@ async def test_signing_out_unlinks_the_row_and_keeps_its_secret(client) -> None:
     async with factory() as session:
         row = await session.get(DeviceRegistration, "iphone-abc")
         assert (row.linked_user_id, row.secret_hash) == (None, _secret_hash(SECRET))
+
+
+async def test_the_switch_still_links_a_row_by_its_token(client, monkeypatch) -> None:
+    monkeypatch.setattr(client.app.state.settings, "device_secret_required", True)
+    await _seed_anonymous_registration(client)
+    login = await do_login(client)
+
+    await _register(client, login, push_token=WITH_SEEDED_TOKEN["push_token"])
+
+    assert await _linked_user_id(client) is not None
