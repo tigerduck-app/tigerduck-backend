@@ -61,3 +61,14 @@ def test_partial_expiry_only_drops_old_attempts() -> None:
     assert limiter.allow("k") is False
     clock.now += 31  # first two attempts now out of window, third remains
     assert limiter.allow("k") is True
+
+
+def test_a_key_left_alone_is_dropped_once_its_window_passes() -> None:
+    clock = FakeClock()
+    limiter = make_limiter(clock)
+    limiter.record("ip:1")
+    clock.now += 30
+    limiter.record("ip:2")
+    clock.now += 31
+    limiter.record("ip:3")
+    assert set(limiter._attempts) == {"ip:2", "ip:3"}

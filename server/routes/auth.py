@@ -47,11 +47,8 @@ _CREDENTIALS_WINDOW_SECONDS = 300
 
 
 def _client_ip(request: Request) -> str:
-    if request.app.state.settings.auth_trust_forwarded_for:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            # First hop = original client when the trusted proxy appends.
-            return forwarded.split(",")[0].strip()
+    # The proxy headers middleware (`forwarded_allow_ips`) has already put
+    # the client's address here when a trusted proxy sent the request.
     return request.client.host if request.client else "unknown"
 
 

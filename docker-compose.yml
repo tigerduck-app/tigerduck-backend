@@ -77,6 +77,11 @@ services:
     environment:
       TIGERDUCK_METRICS_HOST: tigerduck-internal-metrics
       TIGERDUCK_ADMIN_HOST: tigerduck-internal-admin
+      # The proxies whose X-Forwarded-For names the client (server/config.py):
+      # nginx-proxy-manager on proxy-net, inside Docker's default address
+      # pools. It takes the client from Cloudflare's CF-Connecting-IP and
+      # appends it, so the backend trusts no hop beyond it.
+      TIGERDUCK_FORWARDED_ALLOW_IPS: 172.16.0.0/12,192.168.0.0/16
     # Mount the APNs auth key read-only. Also makes cert rotation a host-side
     # operation (drop the new .p8, restart container) instead of a rebuild.
     volumes:

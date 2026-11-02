@@ -82,11 +82,13 @@ class Settings(BaseSettings):
     # stuffing and against our single server IP getting blocked by Moodle.
     auth_login_max_attempts: int = 5
     auth_login_window_seconds: int = 900
-    # Behind nginx-proxy-manager the socket peer is always the proxy, which
-    # would collapse every user into one per-IP rate-limit bucket. Enable
-    # this ONLY when a trusted proxy strips/sets X-Forwarded-For; when off,
-    # the header is ignored (it is client-spoofable without a proxy).
-    auth_trust_forwarded_for: bool = False
+    # The reverse proxy's addresses and networks, comma-separated, as
+    # uvicorn's --forwarded-allow-ips takes them. Only a request from one of
+    # them has its X-Forwarded-For and X-Forwarded-Proto read, and the client
+    # is the last X-Forwarded-For entry none of them is: the entries left of
+    # it are the client's own, which it can write freely. Empty reads the
+    # headers from nobody; docker-compose.yml sets production's.
+    forwarded_allow_ips: str = ""
 
     # --- Credential envelope encryption ---
     # key_id -> base64-encoded 32-byte AES-256 key. Multiple entries allow

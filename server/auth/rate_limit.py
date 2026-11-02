@@ -29,6 +29,7 @@ class SlidingWindowLimiter:
         self._window = window_seconds
         self._clock = clock
         self._attempts: dict[str, deque[float]] = {}
+        self._next_sweep = 0.0
 
     def _prune(self, key: str) -> deque[float]:
         cutoff = self._clock() - self._window
@@ -46,9 +47,20 @@ class SlidingWindowLimiter:
     def allow(self, key: str) -> bool:
         return len(self._prune(key)) < self._max_attempts
 
+    def _sweep(self, now: float) -> None:
+        """Once a window, drop every key whose last attempt has left it, so
+        keys that never come back do not pile up."""
+        if now < self._next_sweep:
+            return
+        self._next_sweep = now + self._window
+        cutoff = now - self._window
+        for key in [k for k, b in self._attempts.items() if not b or b[-1] <= cutoff]:
+            del self._attempts[key]
+
     def record(self, key: str) -> None:
-        bucket = self._attempts.setdefault(key, deque())
-        bucket.append(self._clock())
+        now = self._clock()
+        self._sweep(now)
+        self._attempts.setdefault(key, deque()).append(now)
 
     def reset(self, key: str) -> None:
         self._attempts.pop(key, None)

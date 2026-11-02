@@ -1,11 +1,11 @@
 """FastAPI dependency: authenticate /v3 requests via Bearer access JWT.
 
 Besides verifying the JWT itself, this checks the backing auth_session is
-not revoked — so logout, device deletion, and a session superseded by a
-rival cut access immediately instead of "within 15 minutes when the JWT
-expires".
-Two PK lookups per authenticated request, the session and its device,
-plus one write on a session's first; the session object is shared with the route handler via FastAPI's
+not revoked and its user is active — so logout, device deletion, a session
+superseded by a rival and a suspended user cut access immediately instead
+of "within 15 minutes when the JWT expires".
+Three lookups per authenticated request, the session, its user's status
+and its device, plus one write on a session's first; the session object is shared with the route handler via FastAPI's
 per-request dependency cache.
 """
 
@@ -22,7 +22,12 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.models import AuthSession, UserDevice
-from server.auth.service import lock_accounts, lock_contest, settle_contest
+from server.auth.service import (
+    lock_accounts,
+    lock_contest,
+    settle_contest,
+    user_is_active,
+)
 from server.auth.tokens import InvalidAccessToken, decode_access_token
 from server.db import SessionDep
 
@@ -65,11 +70,7 @@ async def require_user(
 
     auth_session = await session.get(AuthSession, claims.session_id)
     if auth_session is None or auth_session.revoked_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="session_revoked",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _session_revoked()
     # Defense-in-depth: the JWT's sub must own the session it points at.
     # Not reachable today without the signing secret, but a free check on
     # the row we already loaded.
@@ -79,6 +80,8 @@ async def require_user(
             detail="session_user_mismatch",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if not await user_is_active(session, user_id):
+        raise _session_revoked()
     if auth_session.first_used_at is None:
         await _record_first_use(session, auth_session)
     if device_id:

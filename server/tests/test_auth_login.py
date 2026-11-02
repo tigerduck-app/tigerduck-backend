@@ -25,6 +25,7 @@ from server.auth.moodle import (
     StaticMoodleVerifier,
 )
 from server.db import build_session_factory
+from server.main import create_app
 from server.syncjobs.models import SyncJob
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -285,29 +286,89 @@ async def test_password_without_token_is_refused(client, token) -> None:
         assert (await session.execute(select(User))).scalars().all() == []
 
 
+_PROXY = "192.0.2.10"
+
+
+async def tokenless_logins(
+    settings, engine, peer: str, attempts: list[tuple[str, str]]
+) -> list[int]:
+    """The status of each tokenless login, (student id, X-Forwarded-For),
+    that `peer` sends to an app built with `settings`."""
+    app = create_app(settings)
+    app.state.session_factory = build_session_factory(engine)
+    transport = httpx.ASGITransport(app=app, client=(peer, 50000))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        return [
+            (
+                await ac.post(
+                    "/v3/auth/login",
+                    json=tokenless_body(student_id),
+                    headers={"X-Forwarded-For": forwarded},
+                )
+            ).status_code
+            for student_id, forwarded in attempts
+        ]
+
+
 @pytest.mark.parametrize("shared", ["student_id", "ip"])
 async def test_tokenless_attempts_count_against_the_limit(
-    client, monkeypatch, shared
+    test_settings, prepared_engine, shared
 ) -> None:
     # Only the key under test repeats, so the 429 can come from it alone.
-    monkeypatch.setattr(client.app.state.settings, "auth_trust_forwarded_for", True)
-    allow_moodle(client)
-    for n in range(client.app.state.settings.auth_login_max_attempts):
-        student_id = "B11015000" if shared == "student_id" else f"B1101510{n}"
-        ip = "10.0.0.1" if shared == "ip" else f"10.0.1.{n}"
-        response = await client.post(
-            "/v3/auth/login",
-            json=tokenless_body(student_id),
-            headers={"X-Forwarded-For": ip},
+    settings = test_settings.model_copy(update={"forwarded_allow_ips": _PROXY})
+    attempts = [
+        (
+            "B11015000" if shared == "student_id" else f"B1101510{n}",
+            "10.0.0.1" if shared == "ip" else f"10.0.1.{n}",
         )
-        assert response.status_code == 400, response.text
+        for n in range(settings.auth_login_max_attempts + 1)
+    ]
 
-    ip = "10.0.0.1" if shared == "ip" else "10.0.2.1"
-    response = await client.post(
-        "/v3/auth/login", json=LOGIN_BODY, headers={"X-Forwarded-For": ip}
+    statuses = await tokenless_logins(settings, prepared_engine, _PROXY, attempts)
+
+    assert statuses == [400] * settings.auth_login_max_attempts + [429]
+
+
+@pytest.mark.parametrize(
+    "trusted", ["", "203.0.113.1"], ids=["no proxy", "another proxy"]
+)
+async def test_a_forwarded_for_from_an_untrusted_peer_does_not_change_the_key(
+    test_settings, prepared_engine, trusted
+) -> None:
+    settings = test_settings.model_copy(update={"forwarded_allow_ips": trusted})
+    attempts = [
+        (f"B1101520{n}", f"10.0.3.{n}")
+        for n in range(settings.auth_login_max_attempts + 1)
+    ]
+
+    statuses = await tokenless_logins(settings, prepared_engine, _PROXY, attempts)
+
+    assert statuses == [400] * settings.auth_login_max_attempts + [429]
+
+
+async def test_the_key_is_the_last_address_the_trusted_proxy_did_not_add(
+    test_settings, prepared_engine
+) -> None:
+    """A client's own X-Forwarded-For sits left of the address the proxy
+    appends, so only the rightmost untrusted entry names the client."""
+    settings = test_settings.model_copy(update={"forwarded_allow_ips": _PROXY})
+    n = settings.auth_login_max_attempts + 1
+
+    forged = await tokenless_logins(
+        settings,
+        prepared_engine,
+        _PROXY,
+        [(f"B1101530{i}", f"10.0.4.{i}, 198.51.100.7") for i in range(n)],
     )
-    assert response.status_code == 429
-    assert response.json()["detail"] == "too_many_login_attempts"
+    distinct = await tokenless_logins(
+        settings,
+        prepared_engine,
+        _PROXY,
+        [(f"B1101540{i}", f"198.51.100.7, 10.0.5.{i}") for i in range(n)],
+    )
+
+    assert forged == [400] * (n - 1) + [429]
+    assert distinct == [400] * n
 
 
 async def test_tokenless_login_is_logged(client, monkeypatch) -> None:
