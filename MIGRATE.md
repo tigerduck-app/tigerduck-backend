@@ -43,7 +43,8 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   changes only with that secret. A row without one, which every row from a
   released app (iOS 2.9.1, Android 2.4.0) is, binds an updated app's secret
   only when the request names a push token the row stores, in either token
-  column, or when the row stores none. Every refusal is 403
+  column, or when the row has no token its pushes go to (an Apple row's
+  device token, an Android row's FCM token). Every refusal is 403
   `device_secret_invalid` (on `/v4` in the error envelope) and writes
   nothing, `updated_at` included. The log shows `device.secret_bound` and
   `device.secret_refused` with the device id and a reason.

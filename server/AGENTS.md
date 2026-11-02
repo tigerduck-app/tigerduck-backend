@@ -436,8 +436,8 @@ into the backend container via `docker-compose.yml`.
   line, metric or portal page carries either. `POST /devices/anonymous`
   binds the secret on create, changes a bound row only with it, and binds
   one to a row without one only with a push token the row stores (either
-  column) or when it stores none. A request without one keeps the stored
-  token, may not change `platform`, and is refused while
+  column) or when it has no token its pushes go to. A request without one
+  keeps that token, may not change `platform`, and is refused while
   `device_secret_required` is on. `POST /devices/register` links the row
   only by its secret, or, without one, by a token it stores. Every refusal
   is 403 `device_secret_invalid` and writes nothing, `updated_at` included

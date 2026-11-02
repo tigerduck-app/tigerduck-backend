@@ -116,11 +116,12 @@ async def register_anonymous_device(
     - A new row binds the request's secret, or none from a released app.
     - A row with a secret changes only with that secret.
     - A row with none binds a request's secret when the request also names
-      a push token the row stores in either column, or the row stores none.
-      A secret sent with no token, to a row that stores one, counts as no
-      secret.
+      a push token the row stores in either column, or the row has no
+      delivery token (`_delivery_token`). A secret sent with no token, to a
+      row that has one, counts as no secret.
     - Without a secret, a request sets `device_class` and
-      `server_push_enabled`, and a token only on a row that stores none. It
+      `server_push_enabled`, and a token only on a row with no delivery
+      token. It
       may not change `platform`, and while `device_secret_required` is on
       it is refused.
 
@@ -212,8 +213,8 @@ async def register_anonymous_device(
             logger.info("device.secret_bound", device_id=payload.device_id, reason="claimed")
         # An absent token means "nothing new to report", not "drop the one you
         # have": FCM only hands over a token once it is ready. Without a
-        # secret, only a row that stores no token takes one.
-        if token and (access != "limited" or not _stored_tokens(existing)):
+        # secret, only a row with no delivery token takes one.
+        if token and (access != "limited" or not _delivery_token(existing)):
             if is_android:
                 existing.pts_token_hex = token
             else:
@@ -256,8 +257,7 @@ def _anonymous_access(
         if secret is None:
             return "secret_missing"
         return "owner" if _secret_matches(row, secret) else "secret_mismatch"
-    stored = _stored_tokens(row)
-    if secret is not None and not stored:
+    if secret is not None and not _delivery_token(row):
         return "claim"
     if secret is not None and token is not None:
         return "claim" if _holds_token(row, token) else "token_unproven"
@@ -274,6 +274,14 @@ def _secret_hash(secret: str) -> str:
 
 def _secret_matches(row: DeviceRegistration, secret: str | None) -> bool:
     return secret is not None and hmac.compare_digest(row.secret_hash, _secret_hash(secret))
+
+
+def _delivery_token(row: DeviceRegistration) -> str | None:
+    """The token the row's pushes go to, as `_forget_dead_token` clears it:
+    an Apple row can keep a push-to-start token beside an empty one."""
+    if row.platform == DevicePlatform.android.value:
+        return row.pts_token_hex
+    return row.device_token_hex
 
 
 def _stored_tokens(row: DeviceRegistration) -> list[str]:

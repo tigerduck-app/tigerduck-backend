@@ -449,6 +449,45 @@ async def test_a_row_whose_token_was_dropped_takes_a_new_one(client) -> None:
     assert (await row_for(client, "dropped-token")).device_token_hex == "apns-new"
 
 
+async def add_push_to_start_only_row(client, device_id: str) -> None:
+    """An Apple row from `/v2` whose device token the dispatcher dropped."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add(
+            DeviceRegistration(
+                device_id=device_id, user_id=f"anon-{device_id}", platform="apple",
+                pts_token_hex="pts-from-v2", device_token_hex=None, bundle_id="b",
+                attrs_type="", apns_env="",
+            )
+        )
+        await session.commit()
+
+
+async def test_a_released_app_restores_its_token_beside_a_push_to_start_one(client) -> None:
+    await add_push_to_start_only_row(client, "pts-left")
+
+    response = await announce(
+        client, "pts-left", platform="apple", device_class="iphone", push_token="apns-new"
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "pts-left")
+    assert (row.device_token_hex, row.pts_token_hex) == ("apns-new", "pts-from-v2")
+
+
+async def test_an_updated_app_claims_a_row_with_only_a_push_to_start_token(client) -> None:
+    await add_push_to_start_only_row(client, "pts-claim")
+
+    response = await announce(
+        client, "pts-claim", platform="apple", device_class="iphone",
+        push_token="apns-new", device_secret=SECRET,
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "pts-claim")
+    assert (row.secret_hash, row.device_token_hex) == (hashed(SECRET), "apns-new")
+
+
 # --- The cut-off switch (TIGERDUCK_DEVICE_SECRET_REQUIRED) ---------------------
 
 
