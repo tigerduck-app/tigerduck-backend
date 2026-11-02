@@ -47,4 +47,5 @@ SETTINGS_NAMESPACES = (
     "schedule_display",
     "watch",
     "wearos",
+    "club_subscriptions",
 )
