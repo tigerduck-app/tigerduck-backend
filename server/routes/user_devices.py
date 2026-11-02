@@ -30,6 +30,7 @@ from server.auth.models import (
 from server.auth.schemas import (
     check_device_class,
     DeviceClass,
+    DeviceSecret,
     DeviceItem,
     DeviceListV3Response,
     DevicePreferencesV3Request,
@@ -84,6 +85,7 @@ class AnonymousDeviceRequest(BaseModel):
     # row is the one `custom_push_targeting` filters on. None means "not
     # reported", not "reset to the default".
     server_push_enabled: bool | None = None
+    device_secret: DeviceSecret | None = None
 
 
 class AnonymousDeviceResponse(BaseModel):

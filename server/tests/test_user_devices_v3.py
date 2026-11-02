@@ -642,3 +642,16 @@ async def test_device_class_must_fit_the_platform(client) -> None:
         headers=headers,
     )
     assert response.status_code == 422
+
+
+async def test_a_malformed_device_secret_is_refused_and_never_echoed(client) -> None:
+    headers = bearer(await do_login(client))
+    short = "malformed-secret-20c"
+    response = await client.post(
+        "/v3/devices/register",
+        json={"client_device_id": "iphone-abc", "platform": "ios", "device_secret": short},
+        headers=headers,
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "device_secret"]
+    assert short not in response.text

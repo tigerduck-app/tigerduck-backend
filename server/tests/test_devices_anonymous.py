@@ -8,6 +8,9 @@ whether the owner's push opt-out survives.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+
 import pytest
 from sqlalchemy import select
 
@@ -38,6 +41,12 @@ def fresh_limiters(client):
     client.app.state.anon_ip_limiter = ip
 
 
+def secret_for(seed: str) -> str:
+    """A device secret as the apps mint one: 32 bytes, unpadded base64url."""
+    digest = hashlib.sha256(seed.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
 def body(device_id: str, **overrides) -> dict:
     payload = {
         "device_id": device_id,
@@ -50,7 +59,7 @@ def body(device_id: str, **overrides) -> dict:
     return payload
 
 
-async def row_for(client, device_id: str) -> DeviceRegistration:
+async def row_for(client, device_id: str) -> DeviceRegistration | None:
     factory = build_session_factory(client.app.state.engine)
     async with factory() as session:
         return (
@@ -59,7 +68,7 @@ async def row_for(client, device_id: str) -> DeviceRegistration:
                     DeviceRegistration.device_id == device_id
                 )
             )
-        ).scalar_one()
+        ).scalar_one_or_none()
 
 
 async def test_android_token_lands_in_pts_column(client) -> None:
@@ -193,3 +202,20 @@ async def test_a_device_id_too_long_for_its_row_is_refused(client) -> None:
     assert (await client.post("/v3/devices/anonymous", json=body(longest))).status_code == 200
     response = await client.post("/v3/devices/anonymous", json=body(longest + "d"))
     assert response.status_code == 422
+
+
+async def test_a_malformed_secret_is_refused_and_never_echoed(client, capsys, caplog) -> None:
+    short = "malformed-secret-20c"
+    assert len(short) == 20
+    with caplog.at_level("DEBUG"):
+        response = await client.post(
+            "/v3/devices/anonymous", json=body("short-secret", device_secret=short)
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "device_secret"]
+    assert short not in response.text
+    written = capsys.readouterr()
+    assert short not in written.out + written.err
+    assert short not in caplog.text
+    assert await row_for(client, "short-secret") is None
