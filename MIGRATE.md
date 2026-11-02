@@ -32,7 +32,7 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
-## Upgrading to 4.0.2
+## Upgrading to 4.1.0
 
 - **Migration `9aa3f2c27919`** adds `device_registrations.secret_hash`
   (nullable, no backfill), the SHA-256 hash of the `device_secret` an
