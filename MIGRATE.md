@@ -32,6 +32,25 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.0.1
+
+- **Client address behind the proxy.** uvicorn no longer reads forwarding
+  headers itself (`entrypoint.sh`). The backend takes the client address
+  from `X-Forwarded-For` only when the request comes from an address in
+  `TIGERDUCK_FORWARDED_ALLOW_IPS`, which `docker-compose.yml` sets to
+  Docker's private ranges, where nginx-proxy-manager sits. Login rate-limit
+  keys whose window has passed are dropped.
+- **Accounts that are not active.** Their sessions are refused with 401,
+  on every request and on refresh.
+- **Targeted custom pushes.** A custom push sent to chosen users stays out
+  of the stored records and the public feed.
+- **TLS pin watcher.** It logs a pinned host becoming unreachable and
+  recovering. The Grafana alert is split into the watcher job not running
+  and a pinned host not reached; run `docker compose restart grafana` so
+  provisioning loads the new rules.
+- No migration and no `.env` change. Rollback: check out 4.0.0 and run
+  `./start.sh`.
+
 ## Upgrading to 4.0.0
 
 - **`/v4` beside `/v3`.** The contract is `docs/api-v4.md`. `/v4` runs on
