@@ -51,7 +51,9 @@ class SubscriptionCreate(BaseModel):
 
 
 class SubscriptionPatch(BaseModel):
-    base_revision: int = Field(ge=1)
+    # Android's released builds send none
+    # (https://github.com/tigerduck-app/tigerduck-app-android/issues/676).
+    base_revision: int | None = Field(default=None, ge=1)
     name: str | None = Field(default=None, max_length=128)
     orgs: list[str] | None = None
     tags: list[str] | None = None
@@ -260,10 +262,10 @@ async def patch_subscription(
     auth: CurrentAuthDep,
     session: SessionDep,
 ):
-    # Atomic compare-and-swap on revision (mirrors settings_docs.py):
-    # UPDATE ... WHERE revision = base_revision so a concurrent writer
-    # that bumps the revision between our SELECT and UPDATE causes
-    # rowcount=0 instead of silently overwriting.
+    # With base_revision, an atomic compare-and-swap on revision (mirrors
+    # settings_docs.py): UPDATE ... WHERE revision = base_revision, so a
+    # concurrent writer that bumps the revision first causes rowcount=0
+    # instead of being silently overwritten. Without it the last writer wins.
     values: dict = {
         "revision": UserBulletinSubscription.revision + 1,
         "updated_by_device_id": auth.device_id,
@@ -279,17 +281,17 @@ async def patch_subscription(
     if payload.enabled is not None:
         values["enabled"] = payload.enabled
 
-    result = await session.execute(
-        update(UserBulletinSubscription)
-        .where(
-            UserBulletinSubscription.id == subscription_id,
-            UserBulletinSubscription.user_id == auth.user_id,
-            UserBulletinSubscription.device_id == _device_id(auth),
-            UserBulletinSubscription.deleted_at.is_(None),
-            UserBulletinSubscription.revision == payload.base_revision,
-        )
-        .values(**values)
+    statement = update(UserBulletinSubscription).where(
+        UserBulletinSubscription.id == subscription_id,
+        UserBulletinSubscription.user_id == auth.user_id,
+        UserBulletinSubscription.device_id == _device_id(auth),
+        UserBulletinSubscription.deleted_at.is_(None),
     )
+    if payload.base_revision is not None:
+        statement = statement.where(
+            UserBulletinSubscription.revision == payload.base_revision
+        )
+    result = await session.execute(statement.values(**values))
     if result.rowcount == 0:
         subscription = await _get_owned_subscription(
             session, auth, subscription_id

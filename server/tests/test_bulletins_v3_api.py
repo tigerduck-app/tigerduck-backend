@@ -109,6 +109,12 @@ async def test_subscription_cross_user_isolation(client) -> None:
         f"/v3/bulletin-subscriptions/{sub_id}", headers=bearer(login_b)
     )
     assert response.status_code == 404
+    response = await client.patch(
+        f"/v3/bulletin-subscriptions/{sub_id}",
+        headers=bearer(login_b),
+        json={"name": "x"},
+    )
+    assert response.status_code == 404
 
 
 async def test_subscriptions_are_per_device(client) -> None:
@@ -150,6 +156,7 @@ async def test_subscriptions_are_per_device(client) -> None:
 
     for method, kwargs in (
         ("patch", {"json": {"base_revision": 1, "name": "x"}}),
+        ("patch", {"json": {"name": "x"}}),
         ("delete", {}),
     ):
         response = await getattr(client, method)(
@@ -167,6 +174,41 @@ async def test_subscriptions_are_per_device(client) -> None:
             )
         ).scalar_one()
     assert logged == 0
+
+
+async def test_patch_without_base_revision_edits_the_current_row(client) -> None:
+    """Android's released builds send no base_revision
+    (https://github.com/tigerduck-app/tigerduck-app-android/issues/676): the
+    edit applies to the row as it is and moves its revision, while a
+    base_revision sent keeps its check."""
+    login = await do_login(client)
+    create = await client.post(
+        "/v3/bulletin-subscriptions",
+        headers=bearer(login),
+        json={"name": "rule", "orgs": ["教務處"]},
+    )
+    url = f"/v3/bulletin-subscriptions/{create.json()['id']}"
+
+    blind = await client.patch(url, headers=bearer(login), json={"enabled": False})
+    assert blind.status_code == 200, blind.text
+    assert blind.json()["revision"] == 2
+    assert blind.json()["enabled"] is False
+    assert blind.json()["name"] == "rule"
+
+    stale = await client.patch(
+        url, headers=bearer(login), json={"base_revision": 1, "name": "stale"}
+    )
+    assert stale.status_code == 409
+    assert stale.json()["server"]["revision"] == 2
+    current = await client.patch(
+        url, headers=bearer(login), json={"base_revision": 2, "name": "current"}
+    )
+    assert current.status_code == 200
+    assert current.json()["revision"] == 3
+
+    assert (await client.delete(url, headers=bearer(login))).status_code == 204
+    gone = await client.patch(url, headers=bearer(login), json={"enabled": True})
+    assert gone.status_code == 404
 
 
 async def test_bulletin_state_put_and_get(client) -> None:

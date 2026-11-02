@@ -276,7 +276,9 @@ export function TlsPinsPage() {
           title={
             confirm.kind === "resign"
               ? "Re-sign the pin document?"
-              : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
+              : pendingCount === 0
+                ? "Publish the pin sets?"
+                : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
           }
           width={560}
           footer={
@@ -504,7 +506,9 @@ function PinSetSection({
                   )}
                 >
                   <span className="whitespace-nowrap font-medium">{name}</span>
-                  <span className="text-[11px] tabular-nums text-ink-3">{c.not_after.slice(0, 7)}</span>
+                  <span className="whitespace-nowrap text-[11px] tabular-nums text-ink-3">
+                    {fullDate(c.not_after, true)}
+                  </span>
                 </span>
               </Fragment>
             );
