@@ -8,11 +8,12 @@ whether the owner's push opt-out survives.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.db import build_session_factory
@@ -69,6 +70,23 @@ async def row_for(client, device_id: str) -> DeviceRegistration | None:
                 )
             )
         ).scalar_one_or_none()
+
+
+SECRET = secret_for("this device")
+OTHER = secret_for("another caller")
+REFUSED = {"detail": "device_secret_invalid"}
+
+
+def hashed(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+async def announce(client, device_id: str, **overrides):
+    return await client.post("/v3/devices/anonymous", json=body(device_id, **overrides))
+
+
+def columns(row: DeviceRegistration) -> dict:
+    return {c.key: getattr(row, c.key) for c in DeviceRegistration.__table__.columns}
 
 
 async def test_android_token_lands_in_pts_column(client) -> None:
@@ -219,3 +237,210 @@ async def test_a_malformed_secret_is_refused_and_never_echoed(client, capsys, ca
     assert short not in written.out + written.err
     assert short not in caplog.text
     assert await row_for(client, "short-secret") is None
+
+
+# --- Device secrets ------------------------------------------------------------
+
+
+async def test_an_updated_app_creates_its_row_with_the_hash_of_its_secret(client) -> None:
+    response = await announce(client, "new-updated", device_secret=SECRET)
+
+    assert response.status_code == 200
+    row = await row_for(client, "new-updated")
+    assert row.secret_hash == hashed(SECRET)
+    assert SECRET not in response.text and row.secret_hash not in response.text
+
+
+async def test_a_released_app_creates_its_row_with_no_secret(client) -> None:
+    assert (await announce(client, "new-released")).status_code == 200
+    assert (await row_for(client, "new-released")).secret_hash is None
+
+
+async def test_the_matching_secret_changes_a_bound_row(client) -> None:
+    await announce(client, "bound-match", device_secret=SECRET)
+    response = await announce(
+        client, "bound-match", device_secret=SECRET, push_token="fcm-rotated",
+        server_push_enabled=False,
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "bound-match")
+    assert (row.pts_token_hex, row.server_push_enabled) == ("fcm-rotated", False)
+    assert row.secret_hash == hashed(SECRET)
+
+
+async def test_a_bound_row_refuses_a_request_without_its_secret(client) -> None:
+    await announce(client, "bound-missing", device_secret=SECRET)
+    before = columns(await row_for(client, "bound-missing"))
+
+    response = await announce(
+        client, "bound-missing", push_token="fcm-other", server_push_enabled=False
+    )
+
+    assert (response.status_code, response.json()) == (403, REFUSED)
+    after = columns(await row_for(client, "bound-missing"))
+    assert after == before and after["updated_at"] == before["updated_at"]
+
+
+async def test_a_bound_row_refuses_another_secret(client) -> None:
+    await announce(client, "bound-other", device_secret=SECRET)
+    before = columns(await row_for(client, "bound-other"))
+
+    response = await announce(
+        client, "bound-other", device_secret=OTHER, push_token="fcm-other"
+    )
+
+    assert (response.status_code, response.json()) == (403, REFUSED)
+    assert columns(await row_for(client, "bound-other")) == before
+
+
+async def test_the_real_device_claims_its_row_with_the_token_it_stores(client) -> None:
+    await announce(client, "claim-real")
+
+    response = await announce(
+        client, "claim-real", device_secret=SECRET, server_push_enabled=False
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "claim-real")
+    assert (row.secret_hash, row.server_push_enabled) == (hashed(SECRET), False)
+
+
+async def test_a_caller_with_only_the_id_binds_nothing(client) -> None:
+    await announce(client, "claim-foreign")
+    before = columns(await row_for(client, "claim-foreign"))
+
+    response = await announce(
+        client, "claim-foreign", device_secret=OTHER, push_token="fcm-foreign"
+    )
+
+    assert (response.status_code, response.json()) == (403, REFUSED)
+    after = columns(await row_for(client, "claim-foreign"))
+    assert after == before
+    assert (after["secret_hash"], after["pts_token_hex"]) == (None, "fcm-token-claim-foreign")
+
+
+async def test_a_row_with_no_token_binds_the_secret(client) -> None:
+    mac = {"platform": "apple", "device_class": "mac", "push_token": None}
+    await announce(client, "claim-tokenless", **mac)
+
+    response = await announce(client, "claim-tokenless", device_secret=SECRET, **mac)
+
+    assert response.status_code == 200
+    assert (await row_for(client, "claim-tokenless")).secret_hash == hashed(SECRET)
+
+
+async def test_a_token_in_either_column_proves_the_claim(client) -> None:
+    """A row from `/v2` can hold a token in both columns, and an Apple row
+    whose device token was dropped still holds its push-to-start one."""
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        session.add(
+            DeviceRegistration(
+                device_id="claim-v2", user_id="anon-claim-v2", platform="apple",
+                pts_token_hex="pts-from-v2", device_token_hex=None, bundle_id="b",
+                attrs_type="", apns_env="",
+            )
+        )
+        await session.commit()
+
+    response = await announce(
+        client, "claim-v2", platform="apple", device_class="iphone",
+        push_token="pts-from-v2", device_secret=SECRET,
+    )
+
+    assert response.status_code == 200
+    assert (await row_for(client, "claim-v2")).secret_hash == hashed(SECRET)
+
+
+async def test_two_claims_at_once_bind_one_secret(client) -> None:
+    mac = {"platform": "apple", "device_class": "mac", "push_token": None}
+    await announce(client, "claim-race", **mac)
+
+    answers = await asyncio.gather(
+        announce(client, "claim-race", device_secret=SECRET, **mac),
+        announce(client, "claim-race", device_secret=OTHER, **mac),
+    )
+
+    assert sorted(a.status_code for a in answers) == [200, 403]
+    winner = SECRET if answers[0].status_code == 200 else OTHER
+    assert (await row_for(client, "claim-race")).secret_hash == hashed(winner)
+
+
+async def test_two_creates_at_once_bind_one_secret(client) -> None:
+    """Both insert the same device_id; the second waits for the first and
+    then finds its secret bound, where it used to fail with a 500."""
+    answers = await asyncio.gather(
+        announce(client, "create-race", device_secret=SECRET),
+        announce(client, "create-race", device_secret=OTHER),
+    )
+
+    assert sorted(a.status_code for a in answers) == [200, 403]
+    winner = SECRET if answers[0].status_code == 200 else OTHER
+    assert (await row_for(client, "create-race")).secret_hash == hashed(winner)
+
+
+async def test_a_secret_sent_before_the_token_binds_nothing(client) -> None:
+    await announce(client, "claim-early")
+
+    response = await announce(
+        client, "claim-early", device_secret=SECRET, push_token=None,
+        server_push_enabled=False,
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "claim-early")
+    assert (row.secret_hash, row.server_push_enabled) == (None, False)
+    assert row.pts_token_hex == "fcm-token-claim-early"
+
+
+async def test_a_released_app_refreshes_its_row(client) -> None:
+    await announce(client, "released-refresh")
+
+    response = await announce(client, "released-refresh", server_push_enabled=False)
+
+    assert response.status_code == 200
+    assert (await row_for(client, "released-refresh")).server_push_enabled is False
+
+
+async def test_a_request_without_a_secret_cannot_change_the_platform(client) -> None:
+    await announce(client, "platform-flip", platform="apple", device_class="iphone")
+    before = columns(await row_for(client, "platform-flip"))
+
+    response = await announce(client, "platform-flip", platform="android", device_class="android")
+
+    assert (response.status_code, response.json()) == (403, REFUSED)
+    assert columns(await row_for(client, "platform-flip")) == before
+
+
+async def test_a_request_without_a_secret_keeps_the_stored_token(client) -> None:
+    await announce(client, "redirect")
+
+    response = await announce(
+        client, "redirect", push_token="fcm-elsewhere", device_class="android_tablet",
+        server_push_enabled=False,
+    )
+
+    assert response.status_code == 200
+    row = await row_for(client, "redirect")
+    assert row.pts_token_hex == "fcm-token-redirect"
+    assert (row.device_class, row.server_push_enabled) == ("android_tablet", False)
+
+
+async def test_a_row_whose_token_was_dropped_takes_a_new_one(client) -> None:
+    iphone = {"platform": "apple", "device_class": "iphone"}
+    await announce(client, "dropped-token", **iphone)
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        # As `_forget_dead_token` clears a token APNs refused.
+        await session.execute(
+            update(DeviceRegistration)
+            .where(DeviceRegistration.device_id == "dropped-token")
+            .values(device_token_hex=None)
+        )
+        await session.commit()
+
+    response = await announce(client, "dropped-token", push_token="apns-new", **iphone)
+
+    assert response.status_code == 200
+    assert (await row_for(client, "dropped-token")).device_token_hex == "apns-new"

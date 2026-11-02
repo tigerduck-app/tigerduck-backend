@@ -9,11 +9,14 @@ anonymous pipeline during the migration (dual-write happens client-side).
 from __future__ import annotations
 
 import hashlib
+import hmac
 from datetime import UTC, datetime
+from typing import NoReturn
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import delete as sa_delete, func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from server.models import DevicePlatform, DeviceRegistration
 
@@ -105,9 +108,24 @@ async def register_anonymous_device(
     that has never been signed into was invisible and unreachable — there was
     no way to tell that an Android, iPhone or iPad was running the app at all.
 
-    Deliberately unauthenticated: there is no account to authenticate
-    against. The only secret is `device_id`, a client-generated UUID, which
-    is the same trust model the retired /v2 registration used.
+    Unauthenticated: there is no account to authenticate against. The
+    `device_id` is not secret, since the apps show it in their settings, so
+    a row is owned by the `device_secret` its app mints, of which the row
+    keeps only the SHA-256 hash (`secret_hash`):
+
+    - A new row binds the request's secret, or none from a released app.
+    - A row with a secret changes only with that secret.
+    - A row with none binds a request's secret when the request also names
+      a push token the row stores in either column, or the row stores none.
+      A secret sent with no token, to a row that stores one, counts as no
+      secret.
+    - Without a secret, a request sets `device_class` and
+      `server_push_enabled`, and a token only on a row that stores none. It
+      may not change `platform`.
+
+    Every refusal is 403 `device_secret_invalid` and writes nothing,
+    `updated_at` included, which retirement and the sign-in-again push read
+    as the device's last announce.
 
     Scope is kept narrow: this endpoint may create a row, refresh its token,
     and carry its owner's push preference. It never rewrites `user_id` and
@@ -134,29 +152,26 @@ async def register_anonymous_device(
     ip_limiter.record(ip_key)
 
     now = datetime.now(UTC)
-    existing = (
-        await session.execute(
-            select(DeviceRegistration).where(
-                DeviceRegistration.device_id == payload.device_id
-            )
-        )
-    ).scalar_one_or_none()
+    secret = payload.device_secret
+    token = payload.push_token or None
 
     # Apple alert pushes consume `device_token_hex`; Android goes via FCM,
     # whose token lives in `pts_token_hex`. Mirrors the gate in
     # `custom_push_targeting` and `bulletins/matcher` — keep the three in sync.
     is_android = payload.platform == DevicePlatform.android.value
-    token = payload.push_token or ""
 
-    if existing is None:
-        session.add(
-            DeviceRegistration(
+    # A concurrent create of the same id waits here for the first to commit,
+    # then finds its row below.
+    created = (
+        await session.execute(
+            pg_insert(DeviceRegistration)
+            .values(
                 device_id=payload.device_id,
                 user_id=f"anon-{payload.device_id}",
                 platform=payload.platform,
                 device_class=payload.device_class or "",
-                pts_token_hex=token if is_android else "",
-                device_token_hex=None if is_android else (payload.push_token or None),
+                pts_token_hex=(token or "") if is_android else "",
+                device_token_hex=None if is_android else token,
                 bundle_id=payload.bundle_id,
                 attrs_type="",
                 apns_env="",
@@ -167,23 +182,40 @@ async def register_anonymous_device(
                     if payload.server_push_enabled is None
                     else payload.server_push_enabled
                 ),
+                secret_hash=_secret_hash(secret) if secret else None,
                 created_at=now,
             )
+            .on_conflict_do_nothing(index_elements=[DeviceRegistration.device_id])
+            .returning(DeviceRegistration.device_id)
         )
-    else:
+    ).first() is not None
+
+    if not created:
+        existing = (
+            await session.execute(
+                select(DeviceRegistration)
+                .where(DeviceRegistration.device_id == payload.device_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+        access = _anonymous_access(existing, payload, token)
+        if access not in _ANONYMOUS_GRANTS:
+            _refuse_secret(payload.device_id, access)
+        if access == "claim":
+            existing.secret_hash = _secret_hash(secret)
+        # An absent token means "nothing new to report", not "drop the one you
+        # have": FCM only hands over a token once it is ready. Without a
+        # secret, only a row that stores no token takes one.
+        if token and (access != "limited" or not _stored_tokens(existing)):
+            if is_android:
+                existing.pts_token_hex = token
+            else:
+                existing.device_token_hex = token
         existing.platform = payload.platform
         if payload.device_class:
             existing.device_class = payload.device_class
         if payload.server_push_enabled is not None:
             existing.server_push_enabled = payload.server_push_enabled
-        # An absent token means "nothing new to report", not "drop the one you
-        # have" — the app calls this on every launch, and FCM only hands over a
-        # token once it is ready.
-        if payload.push_token:
-            if is_android:
-                existing.pts_token_hex = payload.push_token
-            else:
-                existing.device_token_hex = payload.push_token
         existing.updated_at = now
 
     await session.commit()
@@ -192,11 +224,58 @@ async def register_anonymous_device(
         device_id=payload.device_id,
         platform=payload.platform,
         device_class=payload.device_class,
-        created=existing is None,
+        created=created,
         has_token=bool(payload.push_token),
         server_push_enabled=payload.server_push_enabled,
     )
     return AnonymousDeviceResponse(device_id=payload.device_id, registered=True)
+
+
+# What `_anonymous_access` lets a request do: change everything the route
+# writes, bind its secret first, or the subset a request without one may.
+_ANONYMOUS_GRANTS = frozenset({"owner", "claim", "limited"})
+
+
+def _anonymous_access(
+    row: DeviceRegistration,
+    payload: AnonymousDeviceRequest,
+    token: str | None,
+) -> str:
+    """One of `_ANONYMOUS_GRANTS`, or the reason the request is refused."""
+    secret = payload.device_secret
+    if row.secret_hash is not None:
+        if secret is None:
+            return "secret_missing"
+        if not hmac.compare_digest(row.secret_hash, _secret_hash(secret)):
+            return "secret_mismatch"
+        return "owner"
+    stored = _stored_tokens(row)
+    if secret is not None and not stored:
+        return "claim"
+    if secret is not None and token is not None:
+        return "claim" if _holds_token(row, token) else "token_unproven"
+    if payload.platform != row.platform:
+        return "platform_change"
+    return "limited"
+
+
+def _secret_hash(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def _stored_tokens(row: DeviceRegistration) -> list[str]:
+    return [t for t in (row.device_token_hex, row.pts_token_hex) if t]
+
+
+def _holds_token(row: DeviceRegistration, token: str) -> bool:
+    return any(
+        hmac.compare_digest(stored.encode(), token.encode())
+        for stored in _stored_tokens(row)
+    )
+
+
+def _refuse_secret(device_id: str, reason: str) -> NoReturn:
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="device_secret_invalid")
 
 
 @router.post("/register", response_model=DeviceRegisterV3Response)
