@@ -98,6 +98,22 @@ metrics:
       FROM device_registrations
       GROUP BY 1
 
+  # Anonymous registrations announced in the last 14 days, by whether
+  # their app bound a device secret. Released apps send none; the share
+  # without one decides when TIGERDUCK_DEVICE_SECRET_REQUIRED goes on.
+  - metric_name: tigerduck_anonymous_devices
+    type: gauge
+    help: Anonymous device registrations announced in the last 14 days, by device secret.
+    key_labels: [platform, secret_bound]
+    values: [count]
+    query: |
+      SELECT COALESCE(platform, 'unknown') AS platform,
+             CASE WHEN secret_hash IS NULL THEN 'false' ELSE 'true' END AS secret_bound,
+             count(*) AS count
+      FROM device_registrations
+      WHERE updated_at > now() - interval '14 days'
+      GROUP BY 1, 2
+
   - metric_name: tigerduck_users
     type: gauge
     help: Users by status, split into signed-in students and anonymous users.

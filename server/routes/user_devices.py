@@ -194,7 +194,9 @@ async def register_anonymous_device(
         )
     ).first() is not None
 
-    if not created:
+    if created and secret:
+        logger.info("device.secret_bound", device_id=payload.device_id, reason="created")
+    elif not created:
         existing = (
             await session.execute(
                 select(DeviceRegistration)
@@ -207,6 +209,7 @@ async def register_anonymous_device(
             _refuse_secret(payload.device_id, access)
         if access == "claim":
             existing.secret_hash = _secret_hash(secret)
+            logger.info("device.secret_bound", device_id=payload.device_id, reason="claimed")
         # An absent token means "nothing new to report", not "drop the one you
         # have": FCM only hands over a token once it is ready. Without a
         # secret, only a row that stores no token takes one.
@@ -292,6 +295,7 @@ def _may_link(row: DeviceRegistration, payload: DeviceRegisterV3Request) -> bool
 
 
 def _refuse_secret(device_id: str, reason: str) -> NoReturn:
+    logger.info("device.secret_refused", device_id=device_id, reason=reason)
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="device_secret_invalid")
 
 

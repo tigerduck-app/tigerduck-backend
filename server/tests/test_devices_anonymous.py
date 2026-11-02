@@ -13,11 +13,14 @@ import base64
 import hashlib
 
 import pytest
+import structlog
 from sqlalchemy import select, update
+from structlog.testing import capture_logs
 
 from server.auth.rate_limit import SlidingWindowLimiter
 from server.db import build_session_factory
 from server.models import DeviceRegistration
+from server.routes import user_devices
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -485,3 +488,30 @@ async def test_the_switch_still_lets_an_updated_app_claim_and_create(client, mon
     assert (claim.status_code, create.status_code) == (200, 200)
     assert (await row_for(client, "cutoff-claim")).secret_hash == hashed(SECRET)
     assert (await row_for(client, "cutoff-new")).secret_hash == hashed(OTHER)
+
+
+async def test_binding_and_refusals_log_the_device_and_the_reason_only(
+    client, monkeypatch
+) -> None:
+    # A cached logger keeps an earlier app's processors, out of capture_logs' reach.
+    monkeypatch.setattr(user_devices, "logger", structlog.get_logger(user_devices.__name__))
+    with capture_logs() as logs:
+        await announce(client, "logged-create", device_secret=SECRET)
+        await announce(client, "logged-claim")
+        await announce(client, "logged-claim", device_secret=SECRET)
+        await announce(client, "logged-create", device_secret=OTHER)
+        await announce(client, "logged-create")
+        await announce(client, "logged-claim", device_secret=OTHER, push_token="fcm-foreign")
+
+    secret_logs = [log for log in logs if log["event"].startswith("device.secret_")]
+    assert [(log["event"], log["device_id"], log["reason"]) for log in secret_logs] == [
+        ("device.secret_bound", "logged-create", "created"),
+        ("device.secret_bound", "logged-claim", "claimed"),
+        ("device.secret_refused", "logged-create", "secret_mismatch"),
+        ("device.secret_refused", "logged-create", "secret_missing"),
+        ("device.secret_refused", "logged-claim", "secret_mismatch"),
+    ]
+    assert all(set(log) == {"event", "log_level", "device_id", "reason"} for log in secret_logs)
+    written = repr(logs)
+    for value in (SECRET, OTHER, hashed(SECRET), hashed(OTHER)):
+        assert value not in written
