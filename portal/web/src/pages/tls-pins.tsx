@@ -276,7 +276,9 @@ export function TlsPinsPage() {
           title={
             confirm.kind === "resign"
               ? "Re-sign the pin document?"
-              : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
+              : pendingCount === 0
+                ? "Publish the pin sets?"
+                : `Publish ${pendingCount} ${pendingCount === 1 ? "pin" : "pins"}?`
           }
           width={560}
           footer={
