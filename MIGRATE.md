@@ -32,6 +32,23 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.2.0
+
+- **Settings namespace `club_subscriptions`.** `GET` and `PUT
+  /settings/club_subscriptions` (`/v3` and `/v4`), the initial upload and
+  both `/sync/full` snapshots take it like every other namespace: the clubs
+  whose activities a student shows in the class table, with each club's
+  colour, written only by the apps.
+- **Migration `bdeb139d9662`** replaces the `chk_settings_namespace` check
+  on `user_settings_documents` with one that admits the namespace. The check
+  reads every row once; nothing is rewritten. No `.env` change.
+- Rollback: stop the backend (`docker compose stop backend`), run
+  `docker compose run --rm --no-deps backend alembic stamp 9aa3f2c27919`,
+  then check out 4.1.0 and run `./start.sh`. 4.1.0 answers the namespace's
+  own routes with 422, its snapshots still return the stored documents, and
+  the next upgrade keeps them. `alembic downgrade 9aa3f2c27919` instead
+  deletes every `club_subscriptions` document.
+
 ## Upgrading to 4.1.0
 
 - **Migration `9aa3f2c27919`** adds `device_registrations.secret_hash`
