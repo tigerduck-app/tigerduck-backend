@@ -32,6 +32,48 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.1.0
+
+- **Migration `9aa3f2c27919`** adds `device_registrations.secret_hash`
+  (nullable, no backfill), the SHA-256 hash of the `device_secret` an
+  updated app mints and sends on `POST /devices/anonymous` and
+  `POST /devices/register` (`/v3` and `/v4`). It adds the column without
+  rewriting the table.
+- **Anonymous registrations follow their secret.** A row with a secret
+  changes only with that secret. A row without one, which every row from a
+  released app (iOS 2.9.1, Android 2.4.0) is, binds an updated app's secret
+  only when the request names a push token the row stores, in either token
+  column, or when the row has no token its pushes go to (an Apple row's
+  device token, an Android row's FCM token). Every refusal is 403
+  `device_secret_invalid` (on `/v4` in the error envelope) and writes
+  nothing, `updated_at` included. The log shows `device.secret_bound` and
+  `device.secret_refused` with the device id and a reason.
+- **Released apps from this deploy.** A request without a secret still sets
+  `device_class` and `server_push_enabled`, but no longer replaces a stored
+  push token, and one naming another `platform` is refused. A released app
+  whose push token changed stores its new one after the dispatcher drops
+  the refused one. `POST /devices/register` links the anonymous row only
+  by its secret, or, for a row without one, by a push token the row
+  stores; released apps send that token, and a request that proves
+  neither still registers the signed-in device.
+- **`TIGERDUCK_DEVICE_SECRET_REQUIRED`** (default `false`) refuses every
+  anonymous request without a secret the row holds or can bind; an updated
+  app can still claim its row with its token. Leave it off until both
+  updated apps have been in their stores for 30 days and rows without a
+  secret are under 5% of those announced in the last 14 days, and turn it
+  on 90 days after the later release in any case. Set it in `.env` and run
+  `./start.sh`. Released apps then get 403 and keep running without
+  anonymous pushes.
+- **Gauge.** `tigerduck_anonymous_devices` (sql-exporter) counts rows
+  announced in the last 14 days by `platform` and `secret_bound`. Run
+  `docker compose restart sql-exporter` after `./start.sh`; it reads its
+  collectors only at start.
+- Rollback: stop the backend (`docker compose stop backend`), run
+  `docker compose run --rm --no-deps backend alembic stamp 452fe3a32c93`,
+  then check out 4.0.1 and run `./start.sh`. 4.0.1 ignores the column, and
+  the next upgrade keeps the secrets bound in it. `alembic downgrade
+  452fe3a32c93` instead drops the column and every bound secret.
+
 ## Upgrading to 4.0.1
 
 - **Client address behind the proxy.** uvicorn no longer reads forwarding

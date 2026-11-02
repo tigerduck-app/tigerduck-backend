@@ -173,6 +173,21 @@ async def test_v3_prose_details_become_codes_on_v4(client) -> None:
         ), path
 
 
+async def test_a_refused_device_secret_is_device_secret_invalid(client) -> None:
+    body = {"device_id": "iphone-bound", "platform": "apple", "device_class": "iphone"}
+    bound = await client.post("/v4/devices/anonymous", json={**body, "device_secret": "s" * 43})
+    assert bound.status_code == 200
+
+    wrong = {**body, "device_secret": "t" * 43}
+    v4 = await client.post("/v4/devices/anonymous", json=wrong)
+    v3 = await client.post("/v3/devices/anonymous", json=wrong)
+
+    assert (v3.status_code, v3.json()) == (403, {"detail": "device_secret_invalid"})
+    assert (v4.status_code, v4.json()) == (
+        403, {"error": "device_secret_invalid", "message": CODES["device_secret_invalid"]}
+    )
+
+
 async def test_a_conflict_keeps_its_fields_beside_the_code(client) -> None:
     session = await login(client)
     body = {"document": {"theme": "dark"}, "base_revision": None}

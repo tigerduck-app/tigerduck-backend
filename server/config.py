@@ -89,6 +89,10 @@ class Settings(BaseSettings):
     # it are the client's own, which it can write freely. Empty reads the
     # headers from nobody; docker-compose.yml sets production's.
     forwarded_allow_ips: str = ""
+    # On, `POST /devices/anonymous` refuses every request that carries no
+    # device secret the row holds or can bind (403 device_secret_invalid),
+    # which ends what released apps without one can change (MIGRATE.md).
+    device_secret_required: bool = False
 
     # --- Credential envelope encryption ---
     # key_id -> base64-encoded 32-byte AES-256 key. Multiple entries allow

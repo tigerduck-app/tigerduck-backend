@@ -25,6 +25,10 @@ Platform = Literal[
 # to.
 DeviceClass = Literal["iphone", "ipad", "mac", "android", "android_tablet"]
 
+# The secret an app mints for its anonymous registration: 32 random bytes,
+# unpadded base64url.
+DeviceSecret = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9_-]{43}$")]
+
 
 # Which form factors a platform can honestly report. Custom-push targeting
 # matches on `device_class` alone once one is stored, so a mismatched pair
@@ -142,6 +146,9 @@ class PushTokenIn(BaseModel):
 
 class DeviceRegisterV3Request(DeviceInfo):
     push_token: PushTokenIn | None = None
+    # Links the anonymous registration of `client_device_id` to the caller
+    # (`register_device`). Not on `DeviceInfo`, so login takes none.
+    device_secret: DeviceSecret | None = None
     cloud_sync_enabled: bool | None = None
     # None means "not reported" and leaves the stored value untouched --
     # same convention as cloud_sync_enabled above. Lets a client carry the
