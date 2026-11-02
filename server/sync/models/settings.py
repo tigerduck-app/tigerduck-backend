@@ -23,6 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from server.db import Base
+from server.sync.models.enums import SETTINGS_NAMESPACES
 
 
 class UserSettingsDocument(Base):
@@ -64,10 +65,7 @@ class UserSettingsDocument(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "namespace IN ("
-            "'home_layout', 'appearance', 'assignment_display', "
-            "'notification', 'browser', 'language', "
-            "'schedule_display', 'watch', 'wearos')",
+            "namespace IN (" + ", ".join(f"'{n}'" for n in SETTINGS_NAMESPACES) + ")",
             name="chk_settings_namespace",
         ),
         CheckConstraint("revision >= 1", name="chk_settings_revision"),
