@@ -429,6 +429,19 @@ into the backend container via `docker-compose.yml`.
   `roster_requests` once that is `sync_roster_request_days` old. Every job
   that reads a student's courses for class reminders, course changes or a
   class table reads `enrolled` rows only.
+- An anonymous registration (`device_registrations`) belongs to the
+  `device_secret` its app mints, since its `device_id` is shown in the
+  apps' settings. The row keeps only the secret's SHA-256 hash
+  (`secret_hash`), compared with `hmac.compare_digest`; no response, log
+  line, metric or portal page carries either. `POST /devices/anonymous`
+  binds the secret on create, changes a bound row only with it, and binds
+  one to a row without one only with a push token the row stores (either
+  column) or when it stores none. A request without one keeps the stored
+  token, may not change `platform`, and is refused while
+  `device_secret_required` is on. `POST /devices/register` links the row
+  only by its secret, or, without one, by a token it stores. Every refusal
+  is 403 `device_secret_invalid` and writes nothing, `updated_at` included
+  (`register_anonymous_device`).
 - `/v4` serves the same handlers, data and tokens as `/v3`
   (`docs/api-v4.md`); only the routes listed there are mounted
   (`_V4_SHARED` and the `v4_router`s in `main.py`). A route that differs
