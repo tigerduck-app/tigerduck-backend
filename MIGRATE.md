@@ -41,13 +41,23 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   colour, written only by the apps.
 - **Migration `bdeb139d9662`** replaces the `chk_settings_namespace` check
   on `user_settings_documents` with one that admits the namespace. The check
-  reads every row once; nothing is rewritten. No `.env` change.
+  reads every row once; nothing is rewritten.
+- **TLS pin set `clubs`.** Migration `9e90a76a367e` seeds it for
+  `clubs.ntust.edu.tw` alone, which serves a Let's Encrypt chain the
+  `ntust` set's TWCA pins do not cover: ISRG Root X1, X2, YR and YE,
+  expiring 2027-07-21, the host monitored, `auto_publish` off. A re-sign
+  keeps the served document's sets, so after `./start.sh` press Publish
+  now on the portal's TLS pins page (`POST /tls-pins/publish` on the admin
+  listener). TLS pins published then fires once for `clubs`.
+- No `.env` change.
 - Rollback: stop the backend (`docker compose stop backend`), run
   `docker compose run --rm --no-deps backend alembic stamp 9aa3f2c27919`,
   then check out 4.1.0 and run `./start.sh`. 4.1.0 answers the namespace's
-  own routes with 422, its snapshots still return the stored documents, and
-  the next upgrade keeps them. `alembic downgrade 9aa3f2c27919` instead
-  deletes every `club_subscriptions` document.
+  own routes with 422, its snapshots still return the stored documents,
+  and it keeps watching and publishing the `clubs` set; the next upgrade
+  keeps both. `alembic downgrade 9aa3f2c27919` instead deletes every
+  `club_subscriptions` document and the `clubs` set, and a document signed
+  with the set keeps it until the next publish.
 
 ## Upgrading to 4.1.0
 
