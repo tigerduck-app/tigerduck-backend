@@ -246,9 +246,7 @@ def _anonymous_access(
     if row.secret_hash is not None:
         if secret is None:
             return "secret_missing"
-        if not hmac.compare_digest(row.secret_hash, _secret_hash(secret)):
-            return "secret_mismatch"
-        return "owner"
+        return "owner" if _secret_matches(row, secret) else "secret_mismatch"
     stored = _stored_tokens(row)
     if secret is not None and not stored:
         return "claim"
@@ -263,6 +261,10 @@ def _secret_hash(secret: str) -> str:
     return hashlib.sha256(secret.encode()).hexdigest()
 
 
+def _secret_matches(row: DeviceRegistration, secret: str | None) -> bool:
+    return secret is not None and hmac.compare_digest(row.secret_hash, _secret_hash(secret))
+
+
 def _stored_tokens(row: DeviceRegistration) -> list[str]:
     return [t for t in (row.device_token_hex, row.pts_token_hex) if t]
 
@@ -272,6 +274,13 @@ def _holds_token(row: DeviceRegistration, token: str) -> bool:
         hmac.compare_digest(stored.encode(), token.encode())
         for stored in _stored_tokens(row)
     )
+
+
+def _may_link(row: DeviceRegistration, payload: DeviceRegisterV3Request) -> bool:
+    if row.secret_hash is not None:
+        return _secret_matches(row, payload.device_secret)
+    token = payload.push_token
+    return token is not None and _holds_token(row, token.token_value)
 
 
 def _refuse_secret(device_id: str, reason: str) -> NoReturn:
@@ -344,14 +353,20 @@ async def register_device(
             session, device=device, token=payload.push_token, now=now
         )
 
-    # Phase 4c: if this physical device also has an anonymous v2
-    # registration (same client device id), mark it as linked so the
-    # anonymous bulletin fan-out stops double-pushing to it.
-    await session.execute(
-        update(DeviceRegistration)
-        .where(DeviceRegistration.device_id == payload.client_device_id)
-        .values(linked_user_id=auth.user_id)
-    )
+    # Phase 4c: if this physical device also has an anonymous registration
+    # (same client device id), mark it as linked so the anonymous bulletin
+    # fan-out stops double-pushing to it. `client_device_id` is the
+    # client's word, so the row is linked only for the app that owns it:
+    # by its secret, or by a token it stores when it has no secret.
+    anonymous = (
+        await session.execute(
+            select(DeviceRegistration)
+            .where(DeviceRegistration.device_id == payload.client_device_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if anonymous is not None and _may_link(anonymous, payload):
+        anonymous.linked_user_id = auth.user_id
 
     logger.info(
         "device.v3.registered",

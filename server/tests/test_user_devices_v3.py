@@ -243,7 +243,19 @@ async def test_session_revoked_when_own_device_deleted(client) -> None:
 # --- Phase 4c: linked-user marker on device_registrations ---
 
 
-async def _seed_anonymous_registration(client, device_id="iphone-abc") -> None:
+SEEDED_TOKEN = "a1b2c3" * 10
+# Registers the token the seeded anonymous row stores, which links it.
+WITH_SEEDED_TOKEN = {
+    "client_device_id": "iphone-abc",
+    "platform": "ios",
+    "push_token": {**PUSH_TOKEN, "token_value": SEEDED_TOKEN},
+}
+SECRET = "s" * 43
+
+
+async def _seed_anonymous_registration(
+    client, device_id="iphone-abc", **columns
+) -> None:
     """The v2 register endpoint is retired (410); seed the pre-sunset
     anonymous row the marker logic reconciles directly instead."""
     from server.models import DeviceRegistration
@@ -252,12 +264,15 @@ async def _seed_anonymous_registration(client, device_id="iphone-abc") -> None:
     async with factory() as session:
         session.add(
             DeviceRegistration(
-                device_id=device_id,
-                user_id="anon-1",
-                pts_token_hex="a1b2c3" * 10,
-                bundle_id="org.ntust.app.TigerDuck",
-                attrs_type="TigerDuckActivityAttributes",
-                apns_env="development",
+                **{
+                    "device_id": device_id,
+                    "user_id": "anon-1",
+                    "pts_token_hex": SEEDED_TOKEN,
+                    "bundle_id": "org.ntust.app.TigerDuck",
+                    "attrs_type": "TigerDuckActivityAttributes",
+                    "apns_env": "development",
+                    **columns,
+                }
             )
         )
         await session.commit()
@@ -278,7 +293,7 @@ async def test_v3_register_links_anonymous_registration(client) -> None:
     response = await client.post(
         "/v3/devices/register",
         headers=bearer(login),
-        json={"client_device_id": "iphone-abc", "platform": "ios"},
+        json=WITH_SEEDED_TOKEN,
     )
     assert response.status_code == 200
 
@@ -306,7 +321,7 @@ async def test_v3_reregister_rederives_lost_marker(client) -> None:
     await client.post(
         "/v3/devices/register",
         headers=bearer(login),
-        json={"client_device_id": "iphone-abc", "platform": "ios"},
+        json=WITH_SEEDED_TOKEN,
     )
     assert await _linked_user_id(client) is not None
 
@@ -323,7 +338,7 @@ async def test_v3_reregister_rederives_lost_marker(client) -> None:
     await client.post(
         "/v3/devices/register",
         headers=bearer(login),
-        json={"client_device_id": "iphone-abc", "platform": "ios"},
+        json=WITH_SEEDED_TOKEN,
     )
     assert await _linked_user_id(client) is not None
 
@@ -334,7 +349,7 @@ async def test_v3_device_delete_clears_marker(client) -> None:
     await client.post(
         "/v3/devices/register",
         headers=bearer(login),
-        json={"client_device_id": "iphone-abc", "platform": "ios"},
+        json=WITH_SEEDED_TOKEN,
     )
     assert await _linked_user_id(client) is not None
 
@@ -655,3 +670,102 @@ async def test_a_malformed_device_secret_is_refused_and_never_echoed(client) -> 
     assert response.status_code == 422
     assert response.json()["detail"][0]["loc"] == ["body", "device_secret"]
     assert short not in response.text
+
+
+# --- Linking needs the device secret, or the token for a row with none ---
+
+
+async def _register(client, login: dict, **fields):
+    response = await client.post(
+        "/v3/devices/register",
+        headers=bearer(login),
+        json={"client_device_id": "iphone-abc", "platform": "ios", **fields},
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def _secret_hash(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+async def test_an_updated_app_links_its_row_with_its_secret(client) -> None:
+    await _seed_anonymous_registration(client, secret_hash=_secret_hash(SECRET))
+    login = await do_login(client)
+
+    await _register(client, login, device_secret=SECRET)
+
+    assert await _linked_user_id(client) is not None
+
+
+async def test_a_bound_row_links_on_its_secret_alone(client) -> None:
+    await _seed_anonymous_registration(client, secret_hash=_secret_hash(SECRET))
+    login = await do_login(client)
+
+    await _register(client, login, push_token={**PUSH_TOKEN, "token_value": "b" * 64},
+                    device_secret=SECRET)
+
+    assert await _linked_user_id(client) is not None
+
+
+async def test_a_bound_row_does_not_link_on_its_token(client) -> None:
+    await _seed_anonymous_registration(client, secret_hash=_secret_hash(SECRET))
+    login = await do_login(client)
+
+    await _register(client, login, push_token=WITH_SEEDED_TOKEN["push_token"])
+    await _register(
+        client, login, push_token=WITH_SEEDED_TOKEN["push_token"], device_secret="t" * 43
+    )
+
+    assert await _linked_user_id(client) is None
+
+
+async def test_a_released_app_links_its_row_with_the_token_it_stores(client) -> None:
+    await _seed_anonymous_registration(client, device_token_hex="d" * 64)
+    login = await do_login(client)
+
+    await _register(client, login, push_token={**PUSH_TOKEN, "token_value": "d" * 64})
+
+    assert await _linked_user_id(client) is not None
+
+
+async def test_another_account_naming_the_id_leaves_the_link_alone(client) -> None:
+    owner = await do_login(client)
+    await _seed_anonymous_registration(client)
+    await _register(client, owner, push_token=WITH_SEEDED_TOKEN["push_token"])
+    linked = await _linked_user_id(client)
+    assert linked is not None
+
+    other = await do_login(client, student_id="B11015001")
+    response = await _register(
+        client, other, push_token={**PUSH_TOKEN, "token_value": "e" * 64}
+    )
+
+    assert response.json()["device_id"]
+    assert await _linked_user_id(client) == linked
+
+
+async def test_a_row_with_no_token_does_not_link_without_a_secret(client) -> None:
+    await _seed_anonymous_registration(client, pts_token_hex="")
+    login = await do_login(client)
+
+    await _register(client, login, push_token=PUSH_TOKEN)
+
+    assert await _linked_user_id(client) is None
+
+
+async def test_signing_out_unlinks_the_row_and_keeps_its_secret(client) -> None:
+    from server.models import DeviceRegistration
+
+    await _seed_anonymous_registration(client, secret_hash=_secret_hash(SECRET))
+    login = await do_login(client)
+    await _register(client, login, device_secret=SECRET)
+    assert await _linked_user_id(client) is not None
+
+    response = await client.delete("/v3/devices/iphone-abc", headers=bearer(login))
+
+    assert response.status_code == 204
+    factory = build_session_factory(client.app.state.engine)
+    async with factory() as session:
+        row = await session.get(DeviceRegistration, "iphone-abc")
+        assert (row.linked_user_id, row.secret_hash) == (None, _secret_hash(SECRET))
