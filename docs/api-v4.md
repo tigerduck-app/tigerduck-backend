@@ -13,8 +13,8 @@ On every Bearer endpoint: 401 `missing_bearer_token`, `invalid_access_token` or 
 | 1 | POST `/auth/login` | none | `student_id, moodle_token, moodle_private_token?, device_info{client_device_id, platform, device_class?, app_version?, os_version?, device_model?}` | `access_token, refresh_token, token_type, expires_in, user{id, student_id, display_name}, device_id` | 400 `moodle_token_required`, 401 `moodle_verification_failed`, 403 `account_suspended`, 409 `login_conflict_retry`, 429, 503 `moodle_unreachable` | iOS, Mac |
 | 2 | POST `/auth/refresh` | token in body | `refresh_token` | new pair, `expires_in` | 401 `invalid_refresh_token`, `refresh_token_expired`, `session_revoked`; 429 (10/min/IP, prose) | iOS, Mac |
 | 3 | PATCH `/auth/credentials` | Bearer | `moodle_token, moodle_private_token?` | `updated` | 429 | iOS, Mac |
-| 4 | POST `/devices/register` | Bearer | `device_info` fields, `push_token{provider, token_kind, token_value, bundle_id, environment, scope_key}?`, `cloud_sync_enabled?, bulletin_push_enabled?, server_push_enabled?, locale?` | `device_id, push_token_id` | | iOS, Mac |
-| 5 | POST `/devices/anonymous` | none | `device_id, platform:"apple", device_class, push_token?, bundle_id, server_push_enabled?` | `device_id, registered` (unread) | 429 | iOS, Mac |
+| 4 | POST `/devices/register` | Bearer | `device_info` fields, `push_token{provider, token_kind, token_value, bundle_id, environment, scope_key}?`, `cloud_sync_enabled?, bulletin_push_enabled?, server_push_enabled?, locale?, device_secret?`; links the anonymous row of `client_device_id` only by its secret, or by a token it stores when it has none | `device_id, push_token_id` | | iOS, Mac |
+| 5 | POST `/devices/anonymous` | none | `device_id, platform:"apple", device_class, push_token?, bundle_id, server_push_enabled?, device_secret?` (43 base64url characters, minted by the app) | `device_id, registered` (unread) | 403 `device_secret_invalid`, 429 | iOS, Mac |
 | 6 | DELETE `/devices/{client_device_id}` | Bearer (also a departing session) | | 204 | 404 `"device not found"` | iOS, Mac |
 | 7 | PATCH `/devices/{client_device_id}/preferences` | Bearer | any of nine `sync_*`/`*_enabled` flags, `locale?` | `device_id` + all flags | 404 `device_not_found` | iOS, Mac |
 | 8 | GET `/sync/revision` | Bearer | | `revision` | | iOS, Mac |
@@ -93,7 +93,7 @@ Clients branch on `error` only. Extra fields sit at the top level, as in v3's `s
 |---|---|
 | 400 | `device_id_required`, `moodle_token_required` |
 | 401 | `missing_bearer_token`, `invalid_access_token`, `session_revoked`, `session_user_mismatch`, `invalid_refresh_token`, `refresh_token_expired`, `moodle_verification_failed` |
-| 403 | `account_suspended` |
+| 403 | `account_suspended`, `device_secret_invalid` |
 | 404 | `not_found`, `device_not_found`, `course_not_found`, `assignment_not_found`, `holiday_not_found`, `settings_document_not_found`, `subscription_not_found`, `bulletin_not_found`, `term_not_found`, `course_catalog_not_found` |
 | 405 | `method_not_allowed` (a route this method does not take) |
 | 409 | `clock_ahead`, `login_conflict_retry`, `settings_conflict` (+`namespace, server`), `subscription_conflict` (+`server`), `sync_revision_expired` (+revisions) |

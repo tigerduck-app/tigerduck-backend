@@ -89,6 +89,9 @@ class DeviceRegistration(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # SHA-256 hex digest of the device secret bound to this row
+    # (`register_anonymous_device`); None until its app sends one.
+    secret_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

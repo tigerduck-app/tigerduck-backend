@@ -27,6 +27,7 @@ CODES = {
     "refresh_token_expired": "The refresh token has expired.",
     "moodle_verification_failed": "Moodle did not accept the token.",
     "account_suspended": "The account is suspended.",
+    "device_secret_invalid": "The device secret is missing or does not match.",
     "not_found": "No such route.",
     "method_not_allowed": "The route does not take this method.",
     "device_not_found": "No such device.",

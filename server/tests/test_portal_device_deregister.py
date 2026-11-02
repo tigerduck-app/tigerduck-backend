@@ -68,6 +68,7 @@ async def _student(db_session) -> tuple[UserDevice, UserDevice]:
                 attrs_type="",
                 apns_env="",
                 linked_user_id=user.id,
+                secret_hash="f" * 64,
             ),
             *(
                 AuthSession(
@@ -101,10 +102,11 @@ async def test_deregistering_a_device_signs_it_out(db_session, portal_pool):
         (phone.id, "admin_revoked"),
         (mac.id, None),
     }
-    linked = await portal_pool.fetchval(
-        "SELECT linked_user_id FROM device_registrations WHERE device_id = 'iphone-1'"
+    anonymous = await portal_pool.fetchrow(
+        "SELECT linked_user_id, secret_hash FROM device_registrations"
+        " WHERE device_id = 'iphone-1'"
     )
-    assert linked is None
+    assert (anonymous["linked_user_id"], anonymous["secret_hash"]) == (None, "f" * 64)
 
 
 async def test_deregistering_the_last_device_drops_the_moodle_token(
