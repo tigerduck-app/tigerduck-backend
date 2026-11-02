@@ -21,6 +21,7 @@ from server.sync.models import (
     UserCourseOverride,
     UserSettingsDocument,
 )
+from server.tests.test_settings_api import CLUB_SUBSCRIPTIONS
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -202,6 +203,33 @@ async def test_existing_settings_namespace_is_preserved(client) -> None:
         # Server copy (another device's upload) is authoritative.
         assert doc.document == {"theme": "light"}
         assert doc.revision == 5
+
+
+async def test_initial_upload_stores_club_subscriptions(client) -> None:
+    login = await do_login(client)
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={
+            "settings_documents": [
+                {"namespace": "club_subscriptions", "document": CLUB_SUBSCRIPTIONS}
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["counts"]["settings_documents"] == 1
+    read = await client.get("/v3/settings/club_subscriptions", headers=bearer(login))
+    assert read.json()["document"] == CLUB_SUBSCRIPTIONS
+
+
+async def test_initial_upload_refuses_an_unknown_namespace(client) -> None:
+    login = await do_login(client)
+    response = await client.post(
+        "/v3/sync/initial-upload",
+        headers=bearer(login),
+        json={"settings_documents": [{"namespace": "not_a_namespace", "document": {}}]},
+    )
+    assert response.status_code == 422
 
 
 async def test_override_for_unknown_course_is_skipped(client) -> None:

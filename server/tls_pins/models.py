@@ -1,7 +1,8 @@
 """Pin sets and the signed documents published from them.
 
 Keep in sync with `8996a3bf992f_tls_pin_tables.py`, which also seeds the
-two sets the apps ship with.
+first two sets the apps ship with; `9e90a76a367e_tls_pin_set_clubs.py`
+seeds `clubs`.
 """
 
 from __future__ import annotations

@@ -35,6 +35,7 @@ from server.sync import membership
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import OLDEST, apply_field, set_locale_less_name
 from server.sync.models import (
+    SETTINGS_NAMESPACES,
     UserAssignment,
     UserAssignmentOverride,
     UserCourse,
@@ -117,17 +118,7 @@ class UploadAssignmentOverride(BaseModel):
 
 
 class UploadSettingsDocument(BaseModel):
-    namespace: Literal[
-        "home_layout",
-        "appearance",
-        "assignment_display",
-        "notification",
-        "browser",
-        "language",
-        "schedule_display",
-        "watch",
-        "wearos",
-    ]
+    namespace: Literal[SETTINGS_NAMESPACES]
     schema_version: int = Field(default=1, ge=1)
     document: dict
 
