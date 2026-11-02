@@ -69,7 +69,7 @@ Changed: 10 endpoints (9–13, 15–17, 25, 26). Dropped: the per-rule subscript
 
 **Assignment override.** Body `local_status, hlc`. Every reply, a clear included, is `{local_status, local_status_hlc, applied}`. Why: v3 answers a clear in another shape, so iOS does not read the reply.
 
-**Deletes and holiday PUT.** These are v3's protocol-2 forms with `hlc` required. The client answers a 409 `clock_ahead` by stamping the edit again from the server's clock and resending it, which replaces iOS's retry without a stamp and its protocol header, sent today only with adds.
+**Deletes and holiday PUT.** These are v3's protocol-2 forms with `hlc` required. The client answers a 409 `clock_ahead` by stamping the edit again one tick (1 µs) after the clock the reply carries and resending it, which replaces iOS's retry without a stamp and its protocol header, sent today only with adds.
 
 **`GET /sync/full`.** Always the protocol-2 shape: all tombstones with `hlc, kind`, `term_resets`, `courses_reset_hlc`, `server_hlc`, and no 30-day window, `deleted_by_reset` or `deleted_by_this_device`. `course_overrides[]` gains `course_key`.
 

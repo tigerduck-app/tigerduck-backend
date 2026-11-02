@@ -32,6 +32,18 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.2.1
+
+- **v3 bulletin subscription PATCH.** `PATCH /v3/bulletin-subscriptions/{id}`
+  takes `base_revision` as optional, as DELETE already did. With it, a stale
+  revision is still 409 with the server copy; without it, the last writer
+  wins. Android's released builds send none, so their edits to an existing
+  rule failed with 422 until now.
+- **Portal, TLS pins page.** Publish now with no pending pin asks "Publish
+  the pin sets?", and each served certificate shows its full expiry date.
+- No migration and no `.env` change.
+- Rollback: check out 4.2.0 and run `./start.sh`.
+
 ## Upgrading to 4.2.0
 
 - **Settings namespace `club_subscriptions`.** `GET` and `PUT
