@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from server.sync.merge import (
     MAX_CLOCK_SKEW,
+    MAX_EDIT_AGE,
     OLDEST,
     apply_course_name,
     apply_field,
@@ -132,6 +133,27 @@ def test_edit_time_is_arrival_without_a_stamp_and_refuses_one_ahead() -> None:
         with pytest.raises(HTTPException) as refused:
             edit_time(ahead, NOW)
         assert (refused.value.status_code, refused.value.detail) == (409, "clock_ahead")
+
+
+def test_edit_time_with_an_age_is_arrival_less_the_age_whatever_the_hlc() -> None:
+    assert edit_time(None, NOW, 1_500) == NOW - timedelta(milliseconds=1_500)
+    assert edit_time(to_clock(NOW + timedelta(hours=1)), NOW, 0) == NOW
+    assert edit_time(to_clock(NOW - timedelta(days=7)), NOW, 2_000) == NOW - timedelta(seconds=2)
+
+
+def test_edit_time_clamps_an_age_to_between_arrival_and_a_year_before() -> None:
+    assert edit_time(None, NOW, -1) == NOW
+    year_ms = MAX_EDIT_AGE // timedelta(milliseconds=1)
+    assert edit_time(None, NOW, year_ms) == NOW - MAX_EDIT_AGE
+    assert edit_time(None, NOW, year_ms + 1) == NOW - MAX_EDIT_AGE
+    assert edit_time(None, NOW, 2**63 - 1) == NOW - MAX_EDIT_AGE
+
+
+def test_a_retry_with_its_grown_age_moves_only_by_the_change_in_delay() -> None:
+    first = edit_time(None, NOW, 60_000)
+    # Sent again 30 s later, it takes 4 ms longer on the way.
+    retry = edit_time(None, NOW + timedelta(seconds=30, milliseconds=4), 90_000)
+    assert retry - first == timedelta(milliseconds=4)
 
 
 def test_same_value_raises_the_stamp_without_a_change() -> None:
