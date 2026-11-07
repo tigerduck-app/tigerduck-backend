@@ -3,15 +3,19 @@ the edits stamped on arrival less the `age_ms` their device sends."""
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.db import build_session_factory
+from server.db import build_session_factory, get_session, session_scope
 from server.routes.sync.snapshot import _read_full_snapshot
 from server.sync.merge import CLOCK_HEADER, MAX_EDIT_AGE, to_clock
 from server.tests.test_api_v4 import login
@@ -115,12 +119,12 @@ async def timed(client, method: str, path: str, headers: dict, **request) -> tup
     return before, response.json(), to_clock(datetime.now(UTC))
 
 
-async def test_every_write_is_stamped_its_age_before_it_arrived(client) -> None:
-    session = await login(client)
+async def age_writes(client, session: dict) -> list[tuple]:
+    """Every /v4 write that takes `age_ms`, with where its answer puts the stamp."""
     await seed_assignment(client, session["user"]["id"], moodle_course_id=101)
     holiday_id = await seed_holiday(client)
     age = {"age_ms": AGE_MS}
-    writes = [
+    return [
         (
             "POST", "/v4/sync/courses/upload",
             {"json": {"courses": [COURSE], "adds": [{"course_key": KEY, **age}]}},
@@ -152,9 +156,35 @@ async def test_every_write_is_stamped_its_age_before_it_arrived(client) -> None:
             lambda answer: answer["reset_hlc"],
         ),
     ]
-    for method, path, request, stamp_of in writes:
+
+
+async def test_every_write_is_stamped_its_age_before_it_arrived(client) -> None:
+    session = await login(client)
+    for method, path, request, stamp_of in await age_writes(client, session):
         before, answer, after = await timed(client, method, path, bearer(session), **request)
         assert before - AGE_MS * 1000 <= stamp_of(answer) <= after - AGE_MS * 1000, path
+
+
+async def test_a_write_held_up_before_its_handler_is_stamped_from_its_arrival(client) -> None:
+    """Authentication and the handler wait on the database, under load for
+    longer; an edit that waited must not count as made later."""
+    session = await login(client)
+    writes = await age_writes(client, session)
+    wait = timedelta(milliseconds=500)
+
+    async def opens_late(request: Request) -> AsyncIterator[AsyncSession]:
+        await asyncio.sleep(wait.total_seconds())
+        async with session_scope(request.app.state.session_factory) as db:
+            yield db
+
+    client.app.dependency_overrides[get_session] = opens_late
+    try:
+        for method, path, request, stamp_of in writes:
+            before, answer, _ = await timed(client, method, path, bearer(session), **request)
+            arrival = stamp_of(answer) + AGE_MS * 1000
+            assert before <= arrival < before + (wait / 2) // timedelta(microseconds=1), path
+    finally:
+        del client.app.dependency_overrides[get_session]
 
 
 async def test_protocol_2_on_v3_takes_an_age_too(client) -> None:
