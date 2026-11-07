@@ -358,12 +358,15 @@ into the backend container via `docker-compose.yml`.
   locale in `custom_names_updated_at`, a holiday setting in `updated_at`)
   and sent back as `*_hlc`. Every `/v3` and `/v4` answer carries the
   server's clock in `X-TigerSync-Clock` (`main.py`), and `/sync/full` also
-  in `server_hlc`. A request's `hlc` later than server time plus
-  `MAX_CLOCK_SKEW` is refused with 409 `clock_ahead` before anything is
-  written, never clamped, so a retry keeps the stamp first stored. An edit
-  sent without one is stamped when it arrives, or refused with 422
-  `hlc_required` when the request carries `X-TigerSync-Protocol: 2` or is
-  on `/v4`, which implies it. A value in a bulk upload sent without a time
+  in `server_hlc`. An edit sent with `age_ms`, the milliseconds its device
+  counted from the edit to the send, is stamped its arrival less that age,
+  held to 0 through `MAX_EDIT_AGE` (a year), whatever `hlc` it also sends.
+  A request's `hlc` alone, later than server time plus `MAX_CLOCK_SKEW`, is
+  refused with 409 `clock_ahead` before anything is written, never
+  clamped, so a retry keeps the stamp first stored. An edit sent with
+  neither is stamped when it arrives, or refused with 422 `hlc_required`
+  when the request carries `X-TigerSync-Protocol: 2` or is on `/v4`, which
+  implies it. A value in a bulk upload sent without a time
   counts as `OLDEST`.
 - A stamp no later than the stored one loses, so a tie keeps the stored
   value; a later stamp with the stored value moves only the stamp, and a
@@ -382,7 +385,7 @@ into the backend container via `docker-compose.yml`.
   recorded too, never moving a stored one back. A hand-added course the
   initial upload brings is stamped when it arrives. Turning course sync
   off everywhere drops tombstones and term resets together.
-- With `X-TigerSync-Protocol: 2`: a delete takes `hlc` and `kind` and
+- With `X-TigerSync-Protocol: 2`: a delete takes a stamp and `kind` and
   writes the tombstone even for a course the server lacks; a removal of a
   school row (`source` other than `user_added`) keeps the row and only
   clears its add. An upload's `adds` replace `force_keys`, and as with
