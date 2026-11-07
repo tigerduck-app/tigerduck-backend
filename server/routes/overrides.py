@@ -12,7 +12,6 @@ no value is neither logged nor pushed.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
@@ -27,6 +26,7 @@ from server.push.sync_trigger import enqueue_sync_trigger
 from server.sync import membership, serializers
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import (
+    ArrivalDep,
     ClockProtocolDep,
     apply_course_name,
     apply_field,
@@ -87,9 +87,9 @@ async def patch_assignment_override(
     auth: CurrentAuthDep,
     session: SessionDep,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
 ):
     require_stamp(speaks_clock, payload.hlc, payload.age_ms)
-    now = datetime.now(UTC)
     stamp = edit_time(payload.hlc, now, payload.age_ms)
     state = await lock_sync_state(session, auth.user_id)
     assignment = await _get_assignment_by_moodle_id(
@@ -198,9 +198,10 @@ async def patch_assignment_override_v4(
     payload: AssignmentOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
+    now: ArrivalDep,
 ):
     answer = await patch_assignment_override(
-        moodle_assignment_id, payload, auth, session, speaks_clock=True
+        moodle_assignment_id, payload, auth, session, speaks_clock=True, now=now
     )
     return {k: answer[k] for k in ("local_status", "local_status_hlc", "applied")}
 
@@ -214,9 +215,10 @@ async def patch_course_override(
     auth: CurrentAuthDep,
     session: SessionDep,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
 ):
     return await _override_course(
-        session, auth, payload, speaks_clock,
+        session, auth, payload, speaks_clock, now,
         find=lambda: _get_course_by_moodle_id(session, auth.user_id, moodle_id),
         ref=("moodle_id", moodle_id),
     )
@@ -228,6 +230,7 @@ async def patch_course_override_v4(
     payload: CourseOverrideRequest,
     auth: CurrentAuthDep,
     session: SessionDep,
+    now: ArrivalDep,
 ):
     """A course by its key, which names its term, unlike a Moodle id. Any
     value sent needs an `age_ms` or `hlc`, `moodle_course_id` and a lone
@@ -236,19 +239,18 @@ async def patch_course_override_v4(
     if payload.model_dump(exclude={"hlc", "age_ms"}, exclude_none=True):
         require_stamp(True, payload.hlc, payload.age_ms)
     return await _override_course(
-        session, auth, payload, True,
+        session, auth, payload, True, now,
         find=lambda: _get_course_by_key(session, auth.user_id, course_key),
         ref=("course_key", course_key),
     )
 
 
-async def _override_course(session, auth, payload, speaks_clock, *, find, ref):
+async def _override_course(session, auth, payload, speaks_clock, now, *, find, ref):
     """`find` reads the course once the sync lock is held; `ref` names it in
     the sync log."""
     names = bool(payload.locale) and payload.custom_name is not None
     if payload.color_hex is not None or names or payload.ignore_assignments is not None:
         require_stamp(speaks_clock, payload.hlc, payload.age_ms)
-    now = datetime.now(UTC)
     stamp = edit_time(payload.hlc, now, payload.age_ms)
     state = await lock_sync_state(session, auth.user_id)
     course = await find()

@@ -13,8 +13,6 @@ override.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 import structlog
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, StrictInt
@@ -25,6 +23,7 @@ from server.auth.dependencies import CurrentAuthDep
 from server.db import SessionDep
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.merge import (
+    ArrivalDep,
     ClockProtocolDep,
     apply_field,
     edit_time,
@@ -96,6 +95,7 @@ async def set_override(
     auth: CurrentAuthDep,
     session: SessionDep,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
 ) -> HolidayOverrideSet:
     """Set this user's exception for one holiday.
 
@@ -118,7 +118,6 @@ async def set_override(
             status_code=status.HTTP_404_NOT_FOUND, detail="holiday_not_found"
         )
 
-    now = datetime.now(UTC)
     stamp = edit_time(payload.hlc, now, payload.age_ms)
     state = await lock_sync_state(session, auth.user_id)
     existing = (

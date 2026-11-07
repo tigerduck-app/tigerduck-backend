@@ -2,7 +2,7 @@
 rows, so other devices learn about the deletion on their next sync."""
 
 from __future__ import annotations
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Literal
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import delete, func, select, text, update
@@ -28,7 +28,7 @@ from server.sync.models import (
     UserSyncState,
 )
 from server.sync import membership
-from server.sync.merge import ClockProtocolDep, edit_time, require_stamp, to_clock
+from server.sync.merge import ArrivalDep, ClockProtocolDep, edit_time, require_stamp, to_clock
 from server.sync.models import UserSemesterReset
 from server.syncjobs.log_entries import log_sync
 from ._shared import _trigger_push_tick, logger
@@ -57,6 +57,7 @@ async def delete_all_courses(
     request: Request,
     background_tasks: BackgroundTasks,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
     semester: str | None = Query(default=None, max_length=16),
     hlc: StampQuery = None,
     age_ms: int | None = None,
@@ -66,7 +67,6 @@ async def delete_all_courses(
     clears only what is stamped at or before it (`_reset_by_stamp`)."""
     require_stamp(speaks_clock, hlc, age_ms)
     if speaks_clock:
-        now = datetime.now(UTC)
         return await _reset_by_stamp(
             session, auth, semester, edit_time(hlc, now, age_ms), now, request, background_tasks
         )
@@ -78,7 +78,6 @@ async def delete_all_courses(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
         )
-    now = datetime.now(UTC)
     stamp = edit_time(hlc, now, age_ms)
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
@@ -365,6 +364,7 @@ async def delete_course(
     request: Request,
     background_tasks: BackgroundTasks,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
     hlc: StampQuery = None,
     kind: Annotated[Literal["hide", "remove"] | None, Query()] = None,
     age_ms: int | None = None,
@@ -374,7 +374,6 @@ async def delete_course(
     Under protocol 2 the tombstone is written even for a course the server
     lacks, so a hide of a course never uploaded still binds."""
     require_stamp(speaks_clock, hlc, age_ms)
-    now = datetime.now(UTC)
     stamp = edit_time(hlc, now, age_ms)
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)

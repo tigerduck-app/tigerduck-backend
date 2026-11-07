@@ -83,6 +83,15 @@ def _speaks_clock_protocol(
     return x_tigersync_protocol == "2" or speaks_v4(request)
 
 
+def _arrival(request: Request) -> datetime:
+    return request.state.arrived_at
+
+
+#: When the request reached the app (`main.py`), before authentication or a
+#: handler waited on anything: the `now` its edits are stamped against.
+ArrivalDep = Annotated[datetime, Depends(_arrival)]
+
+
 #: True for a request from an app that stamps its edits: one sending
 #: `X-TigerSync-Protocol: 2`, and every `/v4` request whatever it sends.
 ClockProtocolDep = Annotated[bool, Depends(_speaks_clock_protocol)]

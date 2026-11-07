@@ -17,6 +17,7 @@ from server.sync.upload import InitialUploadRequest, process_initial_upload
 from server.sync import membership
 from server.sync.merge import (
     OLDEST,
+    ArrivalDep,
     ClockProtocolDep,
     apply_field,
     edit_time,
@@ -140,8 +141,8 @@ async def upload_courses(
     request: Request,
     background_tasks: BackgroundTasks,
     speaks_clock: ClockProtocolDep,
+    now: ArrivalDep,
 ):
-    now = datetime.now(UTC)
     payload_keys = {f"client:{c.semester}:{c.course_no}" for c in payload.courses}
     if speaks_clock and not {a.course_key for a in payload.adds} <= payload_keys:
         raise HTTPException(
@@ -533,6 +534,7 @@ async def upload_courses_v4(
     session: SessionDep,
     request: Request,
     background_tasks: BackgroundTasks,
+    now: ArrivalDep,
 ):
     shared = CourseUploadRequest(
         courses=payload.courses,
@@ -540,7 +542,7 @@ async def upload_courses_v4(
         roster_terms=payload.roster_terms,
     )
     answer = await upload_courses(
-        shared, auth, session, request, background_tasks, speaks_clock=True
+        shared, auth, session, request, background_tasks, speaks_clock=True, now=now
     )
     return {k: v for k, v in answer.items() if k != "overrides_applied"}
 

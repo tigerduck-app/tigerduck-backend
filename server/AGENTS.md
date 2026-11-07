@@ -361,6 +361,9 @@ into the backend container via `docker-compose.yml`.
   in `server_hlc`. An edit sent with `age_ms`, the milliseconds its device
   counted from the edit to the send, is stamped its arrival less that age,
   held to 0 through `MAX_EDIT_AGE` (a year), whatever `hlc` it also sends.
+  Arrival is when the request reached the app (`ArrivalDep`, set in
+  `main.py`), so time spent authenticating or waiting on the database
+  never makes an edit later; it is the handler's `now` too.
   A request's `hlc` alone, later than server time plus `MAX_CLOCK_SKEW`, is
   refused with 409 `clock_ahead` before anything is written, never
   clamped, so a retry keeps the stamp first stored. An edit sent with
