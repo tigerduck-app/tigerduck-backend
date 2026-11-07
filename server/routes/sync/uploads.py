@@ -92,7 +92,9 @@ class CourseOverrideUploadItem(BaseModel):
 class CourseAdd(BaseModel):
     course_key: str = Field(max_length=128)
     # The add's TigerSync clock value. Strict, or true would be stamp 1.
-    hlc: StrictInt = Field(ge=0, le=2**63 - 1)
+    # Optional so a missing one with no `age_ms` is `hlc_required`.
+    hlc: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    age_ms: StrictInt | None = None
 class CourseUploadRequest(BaseModel):
     courses: list[CourseUploadItem]
     course_overrides: list[CourseOverrideUploadItem] = Field(
@@ -112,18 +114,12 @@ class CourseUploadRequest(BaseModel):
     )
 
 
-class CourseAddV4(BaseModel):
-    course_key: str = Field(max_length=128)
-    # Optional here so a missing one is `hlc_required`, as on every /v4 write.
-    hlc: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
-
-
 class CourseUploadV4Request(BaseModel):
     """/v4 takes a colour only through the override PATCH and a hand-add only
     as an add, so the upload has neither field that did, and refuses both."""
 
     courses: list[CourseUploadItem]
-    adds: list[CourseAddV4] = Field(default_factory=list, max_length=50)
+    adds: list[CourseAdd] = Field(default_factory=list, max_length=50)
     roster_terms: list[Annotated[str, Field(max_length=16)]] = Field(
         default_factory=list, max_length=8
     )
@@ -153,8 +149,9 @@ async def upload_courses(
         )
     adds: dict[str, datetime] = {}
     for add in payload.adds if speaks_clock else ():
+        require_stamp(True, add.hlc, add.age_ms)
         # A key sent twice keeps its latest stamp.
-        stamp = edit_time(add.hlc, now)
+        stamp = edit_time(add.hlc, now, add.age_ms)
         adds[add.course_key] = max(stamp, adds.get(add.course_key, stamp))
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
@@ -537,11 +534,9 @@ async def upload_courses_v4(
     request: Request,
     background_tasks: BackgroundTasks,
 ):
-    for add in payload.adds:
-        require_stamp(True, add.hlc)
     shared = CourseUploadRequest(
         courses=payload.courses,
-        adds=[CourseAdd(course_key=a.course_key, hlc=a.hlc) for a in payload.adds],
+        adds=payload.adds,
         roster_terms=payload.roster_terms,
     )
     answer = await upload_courses(

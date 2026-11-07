@@ -47,6 +47,9 @@ class HolidayOverrideRequest(BaseModel):
     #: The edit's TigerSync clock value, stored in `updated_at`; the arrival
     #: time when absent (`server/sync/merge.py`).
     hlc: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    #: Milliseconds from the edit to this send, which outranks `hlc`: the
+    #: edit is stamped its arrival less this age.
+    age_ms: StrictInt | None = None
 
 
 class HolidayOverrideOut(BaseModel):
@@ -104,7 +107,7 @@ async def set_override(
     The setting with the latest stamp wins, compared and written under the
     user's sync lock; one that changes nothing is not logged.
     """
-    require_stamp(speaks_clock, payload.hlc)
+    require_stamp(speaks_clock, payload.hlc, payload.age_ms)
     exists = (
         await session.execute(
             select(AcademicHoliday.id).where(AcademicHoliday.id == holiday_id)
@@ -116,7 +119,7 @@ async def set_override(
         )
 
     now = datetime.now(UTC)
-    stamp = edit_time(payload.hlc, now)
+    stamp = edit_time(payload.hlc, now, payload.age_ms)
     state = await lock_sync_state(session, auth.user_id)
     existing = (
         await session.execute(

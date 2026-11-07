@@ -47,7 +47,7 @@ CODES = {
     "api_retired": "This API version is retired; update the app.",
     "app_version_retired": "This app version is no longer supported; update the app.",
     "invalid_request": "The request did not validate.",
-    "hlc_required": "This write needs an hlc.",
+    "hlc_required": "This write needs an age_ms or an hlc.",
     "add_not_in_courses": "Every add must name a course in courses.",
     "activity_id_mismatch": "activity_id is not scenario::source_id.",
     "unknown_namespace": "No such settings namespace.",

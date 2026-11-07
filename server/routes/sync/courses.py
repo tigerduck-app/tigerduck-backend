@@ -59,15 +59,16 @@ async def delete_all_courses(
     speaks_clock: ClockProtocolDep,
     semester: str | None = Query(default=None, max_length=16),
     hlc: StampQuery = None,
+    age_ms: int | None = None,
 ):
     """Wipe the user's courses — every semester, or only `semester` when
     given. Used by 'reset course timetable'. Under protocol 2 the reset
     clears only what is stamped at or before it (`_reset_by_stamp`)."""
-    require_stamp(speaks_clock, hlc)
+    require_stamp(speaks_clock, hlc, age_ms)
     if speaks_clock:
         now = datetime.now(UTC)
         return await _reset_by_stamp(
-            session, auth, semester, edit_time(hlc, now), now, request, background_tasks
+            session, auth, semester, edit_time(hlc, now, age_ms), now, request, background_tasks
         )
     if semester and auth.device_id is None:
         # A semester reset writes tombstones that bind every device but
@@ -78,7 +79,7 @@ async def delete_all_courses(
             status_code=status.HTTP_400_BAD_REQUEST, detail="device_id_required"
         )
     now = datetime.now(UTC)
-    stamp = edit_time(hlc, now)
+    stamp = edit_time(hlc, now, age_ms)
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
     # Recorded for the apps that compare stamps, which refuse what predates it.
@@ -366,14 +367,15 @@ async def delete_course(
     speaks_clock: ClockProtocolDep,
     hlc: StampQuery = None,
     kind: Annotated[Literal["hide", "remove"] | None, Query()] = None,
+    age_ms: int | None = None,
 ):
     """Hide a course, or remove one added by hand, when the stamp is later
     than the key's add, tombstone and covering resets (`sync/membership.py`).
     Under protocol 2 the tombstone is written even for a course the server
     lacks, so a hide of a course never uploaded still binds."""
-    require_stamp(speaks_clock, hlc)
+    require_stamp(speaks_clock, hlc, age_ms)
     now = datetime.now(UTC)
-    stamp = edit_time(hlc, now)
+    stamp = edit_time(hlc, now, age_ms)
     # Before any row: the override writes take it first too.
     state = await lock_sync_state(session, auth.user_id)
     row = await session.scalar(
