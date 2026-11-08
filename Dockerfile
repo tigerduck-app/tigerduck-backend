@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.28
 
 # -------- stage 1: resolve dependencies with uv ------------------------------
 # `--mount=type=cache` lets uv reuse the wheel cache across builds, so
