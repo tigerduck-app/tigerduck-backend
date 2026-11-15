@@ -16,7 +16,6 @@ from structlog.testing import capture_logs
 from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher
 from server.auth.models import ExternalAccount, User, UserDevice
-from server.course_announcements.classifier import RecordingClassifier
 from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementCourse,
@@ -30,6 +29,7 @@ from server.course_announcements.poller import (
     run_poll_tick,
 )
 from server.db import build_session_factory
+from server.tests.conftest import RecordingClassifier
 from server.scheduler.runtime import build_scheduler
 from server.syncjobs.availability import SUSPENDED_UNTIL_KEY
 from server.syncjobs.budget import RequestBudget

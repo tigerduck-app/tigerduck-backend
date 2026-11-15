@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -163,69 +163,3 @@ class HttpClassifier:
         if any(result is None for result in parsed):
             raise ClassifierError("unexpected_shape")
         return parsed
-
-
-# The service's labels (tigerduck-app/announcement-classifier, labeling_guide.md).
-_LABELS = (
-    "exam_info",
-    "exam_change",
-    "exam_seating",
-    "exam_review",
-    "exam_prep",
-    "grade_release",
-    "assignment_new",
-    "assignment_change",
-    "assignment_note",
-    "class_cancel",
-    "class_change",
-    "class_prep",
-    "attendance",
-    "materials",
-    "grading_policy",
-    "course_info",
-    "grouping",
-    "admin",
-    "survey",
-    "event",
-)
-
-
-class RecordingClassifier:
-    """Test double: scores a post by its subject from `scores` (every label
-    0 otherwise), converts it as the service does, and records the posts it
-    was sent. Set `down` to make every call fail as an unreachable service."""
-
-    def __init__(
-        self,
-        scores: Mapping[str, Mapping[str, float]] | None = None,
-        *,
-        threshold: float = 0.35,
-        release: str | None = "model-test",
-    ) -> None:
-        self.scores = dict(scores or {})
-        self.threshold = threshold
-        self.release = release
-        self.down = False
-        self.posts: list[Post] = []
-
-    async def info(self) -> ClassifierInfo:
-        if self.down:
-            raise ClassifierError("ConnectError")
-        return ClassifierInfo(threshold=self.threshold, release=self.release)
-
-    async def classify(self, posts: Sequence[Post]) -> list[Classification | None]:
-        if self.down:
-            raise ClassifierError("ConnectError")
-        self.posts += posts
-        results: list[Classification | None] = []
-        for post in posts:
-            scores = {label: 0.0 for label in _LABELS} | dict(self.scores.get(post.subject, {}))
-            results.append(
-                Classification(
-                    labels=tuple(k for k, v in scores.items() if v >= self.threshold),
-                    scores=scores,
-                    text=f"{post.subject}\n\n{post.message}".strip(),
-                )
-            )
-        return results
-

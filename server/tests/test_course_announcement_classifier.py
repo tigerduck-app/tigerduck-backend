@@ -13,12 +13,12 @@ from server.course_announcements.classifier import (
     ClassifierError,
     HttpClassifier,
     Post,
-    RecordingClassifier,
     _without_inline_images,
 )
 from server.course_announcements.ingest import classify_pending, store_announcements
 from server.course_announcements.models import CourseAnnouncement
 from server.db import build_session_factory
+from server.tests.conftest import RecordingClassifier
 from server.syncjobs.moodle_client import FetchedDiscussion
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")

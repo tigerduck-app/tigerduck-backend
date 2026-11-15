@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from server.course_announcements.classifier import RecordingClassifier
 from server.course_announcements.ingest import (
     classify_pending,
     route_for,
@@ -20,6 +19,7 @@ from server.course_announcements.models import (
     CourseAnnouncementItem,
 )
 from server.db import build_session_factory
+from server.tests.conftest import RecordingClassifier
 from server.syncjobs.moodle_client import FetchedDiscussion
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
