@@ -319,7 +319,7 @@ async def _sourced_changes(
         .order_by(CourseChange.id)
         # The portal deletes a change without the course lock; this keeps the
         # ones an item will name until the items are stored.
-        .with_for_update(of=CourseChange, key_share=True)
+        .with_for_update(of=CourseChange, read=True, key_share=True)
     )
     return [(change, posted_at) for change, posted_at in rows.all()]
 

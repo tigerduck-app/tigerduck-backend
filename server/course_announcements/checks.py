@@ -143,7 +143,7 @@ async def lock_courses(
         await session.execute(
             select(SemesterTerm.start_date, SemesterTerm.end_date)
             .where(SemesterTerm.code == term)
-            .with_for_update(key_share=True)
+            .with_for_update(read=True, key_share=True)
         )
     ).first()
     return None if row is None else (row.start_date, row.end_date)

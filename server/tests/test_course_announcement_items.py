@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from server.course_announcements.items import mark_past_items
@@ -427,6 +428,33 @@ async def test_the_daily_pass_marks_waiting_items_past_the_next_day_in_taipei(
         ("exam", "past"),
         ("exam", "info"),
     ]
+
+
+async def test_a_store_shares_the_term_and_changes_it_reads_under_the_course_lock(
+    announcement_course, prepared_engine
+):
+    """A key share lock, since the portal updates a change FOR NO KEY UPDATE
+    before it takes the course lock."""
+    await announcement_course.post()
+    seen: list[str] = []
+
+    def record(_conn, _cursor, statement, *_args) -> None:
+        seen.append(statement)
+
+    event.listen(prepared_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        await announcement_course.extract(CANCEL_19)
+    finally:
+        event.remove(prepared_engine.sync_engine, "before_cursor_execute", record)
+
+    locks = {
+        table: [s.split(" FOR ", 1)[1] for s in seen if f"FROM {table}" in s and " FOR " in s]
+        for table in ("semester_terms", "course_changes")
+    }
+    assert locks == {
+        "semester_terms": ["KEY SHARE"],
+        "course_changes": ["KEY SHARE OF course_changes"],
+    }
 
 
 async def test_the_daily_pass_is_scheduled_after_midnight_in_taipei(test_settings):
