@@ -12,6 +12,7 @@ from sqlalchemy import delete, update
 
 from server.academic_calendar.models import AcademicHoliday, CourseChange, SemesterTerm
 from server.auth.models import User
+from server.course_announcements.models import CourseAnnouncement
 from server.db import build_session_factory
 from server.sync.models import UserCourse
 
@@ -116,6 +117,39 @@ async def test_a_change_is_served_in_the_apps_shape(client) -> None:
         "note_zh": None,
         "note_en": None,
     }
+
+
+async def test_a_change_from_an_announcement_is_served_without_its_source(client) -> None:
+    """The announcement a change was taken from stays in the portal; the
+    apps' answer keeps its fields, on /v3 and /v4."""
+    await _term_1151(client)
+    posted = datetime(2026, 11, 3, 1, 0, tzinfo=UTC)
+    await _seed(
+        client,
+        CourseAnnouncement(
+            id="101-901", term_code="1151", moodle_course_id=7001, course_codes=["CS2001301"],
+            raw_subject="Invented", raw_message="<p>Invented</p>", subject="Invented",
+            posted_at=posted, modified_at=posted, group_id=-1, has_attachment=False,
+        ),
+    )
+    await _seed(
+        client,
+        _change(
+            date(2026, 11, 5), source_announcement_id="101-901",
+            created_by="course-announcements", updated_by="course-announcements",
+        ),
+    )
+
+    for path in (PATH, "/v4/calendar/course-changes"):
+        response = await client.get(path, params={"term": "1151"})
+        assert response.status_code == 200
+        (change,) = response.json()["changes"]
+        assert set(change) == {
+            "id", "course_no", "kind", "mode", "day", "from", "to", "excluded_weekdays",
+            "periods", "class_days", "room", "start", "end", "note_zh", "note_en",
+            "updated_at",
+        }
+        assert "101-901" not in response.text and "Invented" not in response.text
 
 
 async def test_each_kind_carries_its_own_value(client) -> None:
