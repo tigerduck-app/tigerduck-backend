@@ -230,3 +230,25 @@ class SyncLogEntry(Base):
     __table_args__ = (
         Index("idx_sync_log_entries_user", "user_id", sa.text("ts DESC")),
     )
+
+
+class UserMoodleCourse(Base):
+    """A Moodle course the user is enrolled in, as their last
+    `moodle_assignments` run listed it. Course announcements find each
+    course's token holders here."""
+
+    __tablename__ = "user_moodle_courses"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    moodle_course_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # Term and course number, "1151CS1001301"; a co-listed course's full name
+    # names its other course numbers.
+    idnumber: Mapped[str] = mapped_column(Text)
+    full_name: Mapped[str] = mapped_column(Text)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_user_moodle_courses_course", "moodle_course_id"),
+    )

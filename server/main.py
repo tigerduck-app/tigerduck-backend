@@ -43,6 +43,7 @@ from server.academic_calendar.models import (  # noqa: F401
     SemesterTerm as _SemesterTerm,
     UserHolidayOverride as _UserHolidayOverride,
 )
+from server.course_announcements import models as _course_announcement_models  # noqa: F401
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
