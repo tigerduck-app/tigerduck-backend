@@ -60,9 +60,8 @@ async def llm_health(
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            r = await client.get(
-                url, headers={"Authorization": f"Bearer {llm_api_key}"}
-            )
+            auth = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else {}
+            r = await client.get(url, headers=auth)
             return {
                 "reachable": r.status_code < 400,
                 "status_code": r.status_code,

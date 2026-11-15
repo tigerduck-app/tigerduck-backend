@@ -72,3 +72,10 @@ async def test_the_check_carries_the_key_and_the_page_never_shows_it(
     assert KEY not in page.text
     assert KEY not in env.text
     assert KEY not in caplog.text
+
+
+async def test_a_server_without_a_key_is_checked_without_one(llm) -> None:
+    result = await checks.llm_health("http://llm:40001/v1", "")
+
+    assert "Authorization" not in llm[0].headers
+    assert result["status_code"] == 401
