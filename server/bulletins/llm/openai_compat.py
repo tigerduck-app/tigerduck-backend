@@ -144,7 +144,7 @@ class OpenAICompatibleClient:
             raise LLMError("timeout") from None
         except httpx.HTTPError:
             raise LLMError("transport") from None
-        except ValueError:
+        except (ValueError, RecursionError):
             raise LLMError("invalid_response") from None
         try:
             content = data["choices"][0]["message"]["content"]
@@ -246,7 +246,7 @@ def parse_json_object(content: str) -> dict[str, Any]:
     """The JSON object a model answered with; `LLMError` if there is none."""
     try:
         obj = json.loads(_strip_fences(content))
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         obj = None
     if not isinstance(obj, dict):
         raise LLMError("invalid_json")

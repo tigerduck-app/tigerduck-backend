@@ -101,6 +101,15 @@ async def test_invalid_json_is_retried_twice_with_backoff_then_raises() -> None:
     assert sleeps == [0.5, 1.0]
 
 
+@pytest.mark.parametrize(
+    "content", ["", "[]", '"text"', "[" * 100_000], ids=["empty", "array", "string", "deep"]
+)
+def test_an_answer_that_is_no_json_object_is_invalid_json(content: str) -> None:
+    with pytest.raises(LLMError) as raised:
+        openai_compat.parse_json_object(content)
+    assert raised.value.code == "invalid_json"
+
+
 async def test_an_answer_the_parse_refuses_is_retried() -> None:
     client, requests, _ = _client([_answer('{"held": "maybe"}'), _answer('{"held": false}')])
 
