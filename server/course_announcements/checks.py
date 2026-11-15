@@ -105,6 +105,32 @@ def days_of(payload: Mapping[str, Any]) -> tuple[date, date]:
     return date.fromisoformat(payload["start_date"]), date.fromisoformat(payload["end_date"])
 
 
+def covers_day(payload: Mapping[str, Any], day: date) -> bool:
+    """Whether a change, as a payload, reaches `day`: in its range and not on
+    a weekday it leaves out."""
+    first, last = days_of(payload)
+    return first <= day <= last and day.isoweekday() not in payload["excluded_weekdays"]
+
+
+def same_class_time(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """Whether two changes, as payloads, reach a class time in common: a day
+    both cover and a period both name, no periods being the whole day."""
+    if (
+        one["periods"] is not None
+        and other["periods"] is not None
+        and not set(one["periods"]) & set(other["periods"])
+    ):
+        return False
+    first = max(days_of(one)[0], days_of(other)[0])
+    last = min(days_of(one)[1], days_of(other)[1])
+    left_out = set(one["excluded_weekdays"]) | set(other["excluded_weekdays"])
+    # A week of the days both span holds every weekday they could share.
+    return any(
+        (first + timedelta(days=n)).isoweekday() not in left_out
+        for n in range(min((last - first).days + 1, 7))
+    )
+
+
 async def lock_courses(
     session: AsyncSession, term: str, course_nos: Iterable[str]
 ) -> TermDates | None:
@@ -295,7 +321,6 @@ def contradiction(
     """The contradiction check: whether an announcement of the course posted
     later holds a day of the change as usual, or states another change of
     that kind for it, naming the latest that does."""
-    first, last = days_of(payload)
     by: Statement | None = None
     for statement in statements:
         if (
@@ -305,10 +330,9 @@ def contradiction(
             or (by is not None and statement.posted_at <= by.posted_at)
         ):
             continue
-        if any(first <= day <= last for day in statement.held) or any(
+        if any(covers_day(payload, day) for day in statement.held) or any(
             other["kind"] == payload["kind"]
-            and days_of(other)[0] <= last
-            and first <= days_of(other)[1]
+            and same_class_time(other, payload)
             and any(other[field] != payload[field] for field in VALUE_FIELDS)
             for other in statement.changes
         ):

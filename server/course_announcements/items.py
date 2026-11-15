@@ -30,10 +30,11 @@ from server.course_announcements.checks import (
     check_change,
     contradiction,
     course_statements,
-    days_of,
+    covers_day,
     has_schedule,
     lock_courses,
     passes,
+    same_class_time,
     stored_payload,
 )
 from server.course_announcements.models import (
@@ -99,8 +100,8 @@ async def record_items(
             continue
         sourced = await _sourced_changes(session, term, code)
         own = [change for change, _ in sourced if change.source_announcement_id == announcement.id]
-        for payload, evidence in facts:
-            current = next((c for c in own if _covers(c, payload)), None)
+        replaced = _pair(own, [payload for payload, _ in facts])
+        for (payload, evidence), current in zip(facts, replaced, strict=True):
             if current is not None and _same(stored_payload(current), payload):
                 continue
             edits_applied = edits_applied or current is not None
@@ -138,7 +139,7 @@ async def record_items(
                 source_posted_at,
                 announcement=announcement,
                 code=code,
-                facts=[payload for payload, _ in facts],
+                stated=change in replaced,
                 held=held,
                 statements=statements,
             )
@@ -323,9 +324,31 @@ async def _sourced_changes(
     return [(change, posted_at) for change, posted_at in rows.all()]
 
 
-def _covers(change: CourseChange, payload: Mapping[str, Any]) -> bool:
-    first, _ = days_of(payload)
-    return change.kind == payload["kind"] and change.start_date <= first <= change.end_date
+def _pair(
+    changes: Sequence[CourseChange], facts: Sequence[Mapping[str, Any]]
+) -> list[CourseChange | None]:
+    """The applied change each fact restates or replaces, None for one it
+    adds: a change of its kind at a class time it reaches, the same change
+    first, and none paired twice."""
+    left = list(changes)
+    pairs: list[CourseChange | None] = [None] * len(facts)
+    for identical in (True, False):
+        for n, payload in enumerate(facts):
+            if pairs[n] is not None:
+                continue
+            pairs[n] = next(
+                (
+                    change
+                    for change in left
+                    if change.kind == payload["kind"]
+                    and same_class_time(stored_payload(change), payload)
+                    and (not identical or _same(stored_payload(change), payload))
+                ),
+                None,
+            )
+            if pairs[n] is not None:
+                left.remove(pairs[n])
+    return pairs
 
 
 def _same(stored: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
@@ -338,16 +361,18 @@ def _removal(
     *,
     announcement: CourseAnnouncement,
     code: str,
-    facts: Sequence[Mapping[str, Any]],
+    stated: bool,
     held: Sequence[tuple[date, str]],
     statements: Sequence[Statement],
 ) -> str | None:
     """Why `change` should be removed: the evidence of a day held as usual,
-    "" when the announcement no longer states it, None to keep it."""
+    "" when the announcement no longer states it (`stated` is whether a fact
+    of the extraction is paired with it), None to keep it."""
     own = change.source_announcement_id == announcement.id
+    payload = stored_payload(change)
 
     def held_on(day: date) -> bool:
-        return change.start_date <= day <= change.end_date
+        return covers_day(payload, day)
 
     if own or source_posted_at < announcement.posted_at:
         for day, evidence in held:
@@ -355,7 +380,7 @@ def _removal(
                 return evidence
     if not own:
         return None
-    if not any(_covers(change, payload) for payload in facts):
+    if not stated:
         return ""
     later = any(
         statement.announcement_id != announcement.id

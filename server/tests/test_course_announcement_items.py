@@ -129,6 +129,101 @@ async def test_an_edit_changing_an_applied_room_is_a_replace_item(announcement_c
     assert item.checks["rules"]["ok"]
 
 
+def _room(room: str, period: str) -> dict:
+    return extracted_change(
+        kind="room", room=room, periods=[period], evidence=f"11/19 第 {period} 節改到 {room}"
+    )
+
+
+async def _two_rooms(announcement_course) -> tuple[str, int, int]:
+    """Announcement 1 with its two applied room changes on Thursday 11/19,
+    period 6 and period 7."""
+    key = await announcement_course.post(text="11/19 第 6 節改到 IB-302，第 7 節改到 IB-303")
+    six = await announcement_course.applied(
+        key, date(2026, 11, 19), kind="room", room="IB-302", periods=["6"]
+    )
+    seven = await announcement_course.applied(
+        key, date(2026, 11, 19), kind="room", room="IB-303", periods=["7"]
+    )
+    return key, six, seven
+
+
+async def test_an_edit_replaces_the_change_of_its_periods(announcement_course):
+    _, _, seven = await _two_rooms(announcement_course)
+
+    await announcement_course.post(
+        text="11/19 第 6 節改到 IB-302，第 7 節改到 T4-201", edited=timedelta(hours=1)
+    )
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_change"],
+            course_changes=[_room("IB-302", "6"), _room("T4-201", "7")],
+        )
+    )
+
+    (item,) = await announcement_course.items()
+    assert (item.action, item.course_change_id, item.payload["room"]) == (
+        "replace",
+        seven,
+        "T4-201",
+    )
+
+
+async def test_an_edit_dropping_one_periods_change_removes_that_one(announcement_course):
+    _, _, seven = await _two_rooms(announcement_course)
+
+    await announcement_course.post(text="11/19 第 6 節改到 IB-302", edited=timedelta(hours=1))
+    await announcement_course.extract(
+        extraction_answer(labels=["class_change"], course_changes=[_room("IB-302", "6")])
+    )
+
+    (item,) = await announcement_course.items()
+    assert (item.action, item.course_change_id) == ("remove", seven)
+
+
+async def test_two_facts_never_replace_one_applied_change(announcement_course):
+    key = await announcement_course.post(text="11/19 第 6、7 節改到 IB-302")
+    applied = await announcement_course.applied(
+        key, date(2026, 11, 19), kind="room", room="IB-302", periods=["6", "7"]
+    )
+
+    await announcement_course.post(
+        text="11/19 第 6 節改到 T4-201，第 7 節改到 T4-202", edited=timedelta(hours=1)
+    )
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_change"],
+            course_changes=[_room("T4-201", "6"), _room("T4-202", "7")],
+        )
+    )
+
+    items = await announcement_course.items()
+    assert [(i.action, i.course_change_id) for i in items] == [
+        ("replace", applied),
+        ("add", None),
+    ]
+
+
+async def test_a_held_day_on_a_weekday_an_applied_range_leaves_out_removes_nothing(
+    announcement_course,
+):
+    first = await announcement_course.post(text="11/16 到 11/30 週一停課")
+    await announcement_course.applied(
+        first,
+        date(2026, 11, 16),
+        mode="range",
+        end_date=date(2026, 11, 30),
+        excluded_weekdays=[2, 3, 4, 5, 6, 7],
+    )
+    later = await announcement_course.post(
+        2, text="11/19 照常上課", posted=timedelta(days=1), scores={"class_change": 0.95}
+    )
+
+    await announcement_course.extract(HELD_19)
+
+    assert await announcement_course.items(later) == []
+
+
 async def test_an_unchanged_applied_change_needs_no_item(announcement_course):
     key = await announcement_course.post()
     await announcement_course.applied(key, date(2026, 11, 19))

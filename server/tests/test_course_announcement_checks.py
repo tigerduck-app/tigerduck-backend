@@ -300,6 +300,44 @@ async def test_a_later_post_holding_the_day_as_usual_contradicts_the_change():
     assert mark == {"ok": False, "announcement_id": "3-3"}
 
 
+async def test_a_change_for_other_periods_of_the_day_does_not_contradict():
+    room = extracted_change(kind="room", room="IB-302", periods=["3", "4"])
+    later = _statement(
+        1,
+        POSTED + timedelta(hours=1),
+        changes=[extracted_change(kind="room", room="T4-201", periods=["6", "7"])],
+    )
+
+    mark = contradiction(
+        course_no="CS1001301",
+        payload=change_payload(room),
+        announcement_id="0-0",
+        posted_at=POSTED,
+        statements=[later],
+    )
+
+    assert mark == {"ok": True, "announcement_id": None}
+
+
+async def test_a_day_held_as_usual_on_a_weekday_the_range_leaves_out_does_not_contradict():
+    weekdays = extracted_change(
+        mode="range", start_date="2026-11-16", end_date="2026-11-30", excluded_weekdays=[4]
+    )
+
+    def mark(held: date):
+        return contradiction(
+            course_no="CS1001301",
+            payload=change_payload(weekdays),
+            announcement_id="0-0",
+            posted_at=POSTED,
+            statements=[_statement(1, POSTED + timedelta(hours=1), held=[held])],
+        )
+
+    # Thursday 11/19 is left out; Monday 11/23 is not.
+    assert mark(date(2026, 11, 19))["ok"]
+    assert not mark(date(2026, 11, 23))["ok"]
+
+
 async def test_only_a_different_change_of_the_kind_contradicts():
     room = extracted_change(kind="room", room="IB-302")
     later = POSTED + timedelta(hours=1)
