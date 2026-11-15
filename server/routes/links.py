@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -24,7 +24,7 @@ from server.links.targets import (
     is_valid_name,
     validate_target,
 )
-from server.security import require_shared_secret
+from server.security import AdminActor, require_shared_secret
 
 logger = structlog.get_logger(__name__)
 
@@ -58,9 +58,6 @@ async def follow_link(name: str, request: Request, session: SessionDep) -> Redir
         headers={"Cache-Control": "no-store"},
     )
 
-
-# The portal sends the operator its Cloudflare Access check verified.
-Actor = Annotated[str, Header(alias="X-Admin-Actor", min_length=1, max_length=320)]
 
 TargetUrl = Annotated[str, Field(min_length=1, max_length=2048)]
 Expectations = Annotated[list[Rule], Field(max_length=20)]
@@ -120,7 +117,7 @@ async def list_links(session: SessionDep) -> dict:
 
 @admin_router.post("", status_code=status.HTTP_201_CREATED)
 async def create_link(
-    payload: LinkCreate, actor: Actor, request: Request, session: SessionDep
+    payload: LinkCreate, actor: AdminActor, request: Request, session: SessionDep
 ) -> dict:
     target = _checked_target(payload.target_url, request)
     inserted = await session.scalar(
@@ -160,7 +157,7 @@ def _update_action(changes: dict) -> str:
 
 @admin_router.patch("/{name}")
 async def update_link(
-    name: str, payload: LinkUpdate, actor: Actor, request: Request, session: SessionDep
+    name: str, payload: LinkUpdate, actor: AdminActor, request: Request, session: SessionDep
 ) -> dict:
     link = await session.get(Link, name, with_for_update=True)
     if link is None:
@@ -192,7 +189,7 @@ async def update_link(
 
 
 @admin_router.post("/{name}/test")
-async def test_link(name: str, actor: Actor, request: Request) -> dict:
+async def test_link(name: str, actor: AdminActor, request: Request) -> dict:
     """Check the link now, whether enabled or not, and record the result
     as a scheduled check would."""
     factory = request.app.state.session_factory

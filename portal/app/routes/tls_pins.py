@@ -11,13 +11,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from urllib.parse import quote
 
-import httpx
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ..db import get_pool
-from .moodle._shared import logger
-from .moodle.push import BACKEND_ADMIN_URL, _internal_headers
+from .moodle.push import forward_to_backend
 
 router = APIRouter(prefix="/api/tls-pins")
 
@@ -83,23 +81,7 @@ async def get_tls_pins(pool: Annotated[Any, Depends(get_pool)]) -> JSONResponse:
 
 
 async def _forward(request: Request, method: str, path: str, body: Any = None) -> JSONResponse:
-    headers = {**_internal_headers(request), "X-Admin-Actor": request.state.actor}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.request(
-                method, f"{BACKEND_ADMIN_URL}/tls-pins{path}", headers=headers, json=body
-            )
-    except httpx.HTTPError as exc:
-        logger.exception("tls pin action %s failed", path)
-        return JSONResponse({"detail": f"backend unreachable: {type(exc).__name__}"}, 502)
-    try:
-        payload = resp.json()
-    except ValueError:
-        payload = {"detail": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-    # A validation error's detail is a list; the SPA shows a string.
-    if isinstance(payload, dict) and isinstance(payload.get("detail"), list):
-        payload["detail"] = "; ".join(str(e.get("msg", e)) for e in payload["detail"])
-    return JSONResponse(payload, status_code=resp.status_code)
+    return await forward_to_backend(request, method, f"/tls-pins{path}", body)
 
 
 def _set_path(set_id: str, rest: str) -> str:
