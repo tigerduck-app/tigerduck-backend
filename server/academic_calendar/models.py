@@ -318,6 +318,10 @@ ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
 # The days are the ones the course meets on, holidays too: the apps apply a
 # change on a holiday the user put back. `editing` is the change being
 # replaced, so it is no clash; with a NULL kind only no_meetings is checked.
+# The rows come in no order, so a caller sorts them by day. `excluded` is '{}'
+# for no weekday, never NULL, which would pass every rule; `wanted` is NULL for
+# every period or a non-empty list, where a NULL is a period the course has no
+# class in.
 #
 # A writer takes, in the transaction that writes the change and before it
 # calls this, pg_advisory_xact_lock(hashtextextended('course_changes|' || term
