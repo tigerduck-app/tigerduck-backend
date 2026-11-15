@@ -329,7 +329,10 @@ async def _poll_course(
         logger.warning("course_announcements.rate_limited_pause", seconds=pause)
         return _Outcome.stop
     except MoodleUnavailable as exc:
-        logger.warning("course_announcements.moodle_unavailable", error=str(exc))
+        logger.warning(
+            "course_announcements.moodle_unavailable", moodle_course_id=course_id, error=str(exc)
+        )
+        await _defer(poller, course_id, term, now)
         return _Outcome.stop
     if discussions is None:
         # No news forum this holder sees: maybe one who can sees it.
@@ -369,6 +372,23 @@ async def _courses_without_forum(
         .limit(FORUM_LOOKUP_COURSES - 1)
     )
     return [course_id, *others]
+
+
+async def _defer(
+    poller: CourseAnnouncementPoller, course_id: int, term: str, now: datetime
+) -> None:
+    """Make `course_id` due after the shortest interval, the rest of its
+    state kept, so a course that fails does not lead every tick."""
+    due = now + ACTIVE_INTERVAL
+    async with session_scope(poller.session_factory) as session:
+        await session.execute(
+            pg_insert(CourseAnnouncementCourse)
+            .values(moodle_course_id=course_id, term_code=term, next_due_at=due)
+            .on_conflict_do_update(
+                index_elements=[CourseAnnouncementCourse.moodle_course_id],
+                set_={"next_due_at": due, "updated_at": func.now()},
+            )
+        )
 
 
 async def _record_poll(

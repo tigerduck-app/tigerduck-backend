@@ -414,16 +414,23 @@ async def test_a_rate_limit_pauses_both_budgets_and_ends_the_tick(
     assert (await _state(db_session)).next_due_at == NOW
 
 
-async def test_moodle_down_ends_the_tick_and_keeps_the_course_due(
+async def test_moodle_failing_on_a_course_ends_the_tick_and_defers_that_course(
     db_session, poller, moodle, holder, term
 ):
-    await holder("alice", DS)
-    await _set_state(db_session, forum_id=30, next_due_at=NOW)
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    for course_id in (7001, 7002):
+        await _set_state(db_session, course_id, forum_id=course_id, next_due_at=NOW)
     moodle.errors["token-alice"] = MoodleUnavailable("http_503")
 
     assert await _tick(poller, NOW) == 0
-    assert (await _state(db_session)).next_due_at == NOW
+    assert [call[2] for call in moodle.polled()] == [7001]
+    assert (await _state(db_session, 7001)).next_due_at == NOW + timedelta(minutes=15)
+    assert (await _state(db_session, 7002)).next_due_at == NOW
     assert not poller.budget.paused
+
+    del moodle.errors["token-alice"]
+    assert await _tick(poller, NOW + timedelta(minutes=1)) == 1
+    assert [call[2] for call in moodle.polled()] == [7001, 7002]
 
 
 # --- Holders -----------------------------------------------------------------------
