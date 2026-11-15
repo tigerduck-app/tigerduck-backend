@@ -8,12 +8,16 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from server.course_announcements.history import queue_reextraction
 from server.course_announcements.ingest import queue_extractions
 from server.course_announcements.items import mark_past_items
-from server.course_announcements.models import CourseAnnouncement
+from server.course_announcements.models import (
+    CourseAnnouncement,
+    CourseAnnouncementExtraction,
+)
 from server.scheduler.runtime import build_scheduler
 from server.tests.conftest import (
     AnnouncementCourse,
@@ -27,6 +31,7 @@ CANCEL_19 = extraction_answer(labels=["class_cancel"], course_changes=[extracted
 HELD_19 = extraction_answer(
     labels=["class_change"], held_as_usual=[{"date": "2026-11-19", "evidence": "11/19 照常上課"}]
 )
+NOT_SENT = {"class_cancel": 0.01}
 FINAL = {
     "kind": "final",
     "date": "2027-01-04",
@@ -247,6 +252,61 @@ async def test_an_unchanged_applied_change_needs_no_item(announcement_course):
     await announcement_course.extract(CANCEL_19)
 
     assert await announcement_course.items() == []
+
+
+async def _extractions(course: AnnouncementCourse, key: str) -> list[str]:
+    async with course.factory() as session:
+        rows = await session.scalars(
+            select(CourseAnnouncementExtraction.status)
+            .where(CourseAnnouncementExtraction.announcement_id == key)
+            .order_by(CourseAnnouncementExtraction.id)
+        )
+        return list(rows)
+
+
+async def test_an_edit_routed_not_sent_still_removes_the_change_taken_from_it(
+    announcement_course,
+):
+    key = await announcement_course.post()
+    applied = await announcement_course.applied(key, date(2026, 11, 19))
+
+    await announcement_course.post(
+        text="更正：本週照常上課", edited=timedelta(hours=1), scores=NOT_SENT
+    )
+    assert await _extractions(announcement_course, key) == ["superseded", "queued"]
+    await announcement_course.extract(extraction_answer())
+
+    items = await announcement_course.items()
+    assert _summary(items) == [
+        ("CS1001301", "course_change", "remove", "pending", "2026-11-19"),
+    ]
+    assert items[0].course_change_id == applied
+
+
+async def test_an_edit_routed_not_sent_with_no_change_taken_from_it_queues_nothing(
+    announcement_course,
+):
+    key = await announcement_course.post()
+    await announcement_course.extract(CANCEL_19)
+
+    await announcement_course.post(
+        text="更正：本週照常上課", edited=timedelta(hours=1), scores=NOT_SENT
+    )
+
+    assert await _extractions(announcement_course, key) == ["done"]
+
+
+async def test_reextract_queues_a_not_sent_announcement_a_change_was_taken_from(
+    announcement_course,
+):
+    key = await announcement_course.post(scores=NOT_SENT)
+    other = await announcement_course.post(2, scores=NOT_SENT)
+    await announcement_course.applied(key, date(2026, 11, 19))
+
+    assert await queue_reextraction(announcement_course.factory, announcement_course.now) == 1
+
+    assert await _extractions(announcement_course, key) == ["queued"]
+    assert await _extractions(announcement_course, other) == []
 
 
 async def test_a_corrected_date_removes_the_applied_day_and_adds_the_new_one(
