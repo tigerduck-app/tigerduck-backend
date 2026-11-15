@@ -24,6 +24,7 @@ from portal.app.routes.course_announcements import (  # noqa: E402
     get_announcement,
     list_announcements,
     list_reviews,
+    pending_count,
     reject_item,
 )
 from portal.app.routes.course_changes import (  # noqa: E402
@@ -380,6 +381,11 @@ async def test_approving_a_remove_item_deletes_the_change_and_marks_its_add(
     added = await _item(db_session, first, state="applied", change_id=change_id)
     later = await _extraction(db_session, announcement, model="m2")
     remove = await _item(db_session, later, action="remove", change_id=change_id)
+    other = await _announcement(db_session, "102-902")
+    replace = await _item(
+        db_session, await _extraction(db_session, other), _change(day=THU), action="replace",
+        change_id=change_id,
+    )
     await db_session.commit()
 
     response = await approve_item(remove.id, _request(), pool=pool)
@@ -388,6 +394,7 @@ async def test_approving_a_remove_item_deletes_the_change_and_marks_its_add(
     assert await pool.fetchval("SELECT count(*) FROM course_changes") == 0
     assert tuple(await _item_row(pool, remove.id))[:2] == ("approved", None)
     assert tuple(await _item_row(pool, added.id))[:2] == ("removed", None)
+    assert tuple(await _item_row(pool, replace.id))[:2] == ("superseded", None)
     assert [a for a, _ in await _audit(pool)] == ["course_change.delete"]
 
 
@@ -543,20 +550,30 @@ async def test_editing_a_sourced_change_marks_its_item_edited(term, pool, db_ses
     assert (await _item_row(pool, rejected.id))["state"] == "rejected"
 
 
-async def test_deleting_a_sourced_change_marks_its_item_removed(term, pool, db_session):
+async def test_deleting_a_sourced_change_marks_its_item_and_supersedes_pending_ones(
+    term, pool, db_session
+):
     change_id = await _applied_change(db_session)
     announcement = await _announcement(db_session)
+    applied = await _item(
+        db_session, await _extraction(db_session, announcement, model="m1"), state="applied",
+        change_id=change_id,
+    )
     extraction = await _extraction(db_session, announcement)
-    applied = await _item(db_session, extraction, state="applied", change_id=change_id)
-    pending = await _item(db_session, extraction, action="replace", change_id=change_id)
+    replace = await _item(
+        db_session, extraction, _change(day=THU), action="replace", change_id=change_id
+    )
+    remove = await _item(db_session, extraction, action="remove", change_id=change_id)
     await db_session.commit()
 
     response = await delete_change(change_id, _request(), pool=pool)
 
     assert response.status_code == 200
-    assert tuple(await _item_row(pool, applied.id))[:2] == ("removed", None)
-    # A pending replace loses the change it would replace, and can then only be rejected.
-    assert tuple(await _item_row(pool, pending.id))[:2] == ("pending", None)
+    assert tuple(await _item_row(pool, applied.id)) == ("removed", None, "ops@example.com", None)
+    for item in (replace, remove):
+        assert tuple(await _item_row(pool, item.id)) == ("superseded", None, None, None)
+    assert _body(await list_reviews("1151", _request(), pool=pool))["items"] == []
+    assert _body(await pending_count(pool=pool)) == {"pending": 0}
 
 
 # --- Reads -------------------------------------------------------------------

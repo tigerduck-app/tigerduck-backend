@@ -466,7 +466,8 @@ async def replace_change(
 
 async def remove_change(conn, actor: str, change_id: int, item_id=None):
     """Deletes change `change_id`, approving the remove item `item_id` when it
-    comes from one. Returns its term, course and kind."""
+    comes from one and superseding the other pending items that would replace
+    or remove it. Returns its term, course and kind."""
     await _lock_items(conn, change_id)
     item = None
     if item_id is not None:
@@ -477,6 +478,12 @@ async def remove_change(conn, actor: str, change_id: int, item_id=None):
             return _bad("the item does not remove this change", 409)
     # Before the delete clears their link to it.
     await _record_on_items(conn, change_id, "removed", actor)
+    await conn.execute(
+        "UPDATE course_announcement_items SET state = 'superseded', updated_at = now()"
+        " WHERE course_change_id = $1 AND state = 'pending' AND id IS DISTINCT FROM $2::bigint",
+        change_id,
+        item_id,
+    )
     row = await conn.fetchrow(
         "DELETE FROM course_changes WHERE id = $1 RETURNING term_code, course_no, kind",
         change_id,
