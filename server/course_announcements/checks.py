@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.types import Date, SmallInteger, Text
 
 from server.academic_calendar.models import CourseChange, SemesterTerm
+from server.academic_calendar.terms import TermDates
 from server.push.course_reminders import PERIOD_RANK
 
 ROOM_MAX = 128
@@ -49,7 +50,9 @@ _NO_MEETINGS = text(
 )
 _NOT_CLASS_DAY = {"no_meetings", "no_class_day", "holiday"}
 
-_WEEKDAY_CHARS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
+# Monday to Sunday.
+ZH_WEEKDAYS = "一二三四五六日"
+_WEEKDAY_CHARS = {char: n for n, char in enumerate(ZH_WEEKDAYS, start=1)} | {"天": 7}
 _ZH_WEEKDAY = re.compile(r"(?:週|周|星期|禮拜)([一二三四五六日天])|[（(]([一二三四五六日])[）)]")
 _EN_WEEKDAYS = {
     "mon": 1, "monday": 1, "tue": 2, "tues": 2, "tuesday": 2, "wed": 3, "wednesday": 3,
@@ -104,7 +107,7 @@ def days_of(payload: Mapping[str, Any]) -> tuple[date, date]:
 
 async def lock_courses(
     session: AsyncSession, term: str, course_nos: Iterable[str]
-) -> tuple[date, date] | None:
+) -> TermDates | None:
     """Take the lock every writer of `course_changes` takes for each course,
     in order, then the term's row FOR KEY SHARE. Returns the term's first
     and last day of classes, None for a term not published."""
@@ -146,7 +149,7 @@ async def check_change(
     session: AsyncSession,
     *,
     term: str,
-    term_days: tuple[date, date] | None,
+    term_days: TermDates | None,
     course_no: str,
     payload: Mapping[str, Any],
     evidence: str,

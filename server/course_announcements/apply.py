@@ -10,13 +10,14 @@ and always with the setting off, they wait for review in the portal.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import datetime
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.models import CourseChange
+from server.academic_calendar.terms import TermDates
 from server.admin_audit import AdminAuditLog
 from server.course_announcements.checks import Announcement, check_change, days_of, passes
 from server.course_announcements.models import (
@@ -43,7 +44,7 @@ async def apply_items(
     context: Announcement,
     items: Sequence[CourseAnnouncementItem],
     *,
-    term_days: tuple[date, date] | None,
+    term_days: TermDates | None,
     now: datetime,
 ) -> int:
     """Write the add items among `items`, one extraction's, if they may
@@ -79,7 +80,7 @@ async def _write(
     context: Announcement,
     item: CourseAnnouncementItem,
     *,
-    term_days: tuple[date, date] | None,
+    term_days: TermDates | None,
     now: datetime,
 ) -> None:
     # Again, since an earlier item of the same extraction may now clash with it.

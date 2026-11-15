@@ -21,6 +21,7 @@ from sqlalchemy import Date, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import CourseChange
+from server.academic_calendar.terms import SCHOOL_TZ
 from server.course_announcements.apply import apply_items
 from server.course_announcements.checks import (
     Announcement,
@@ -35,7 +36,6 @@ from server.course_announcements.checks import (
     passes,
     stored_payload,
 )
-from server.course_announcements.extraction import TAIPEI
 from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementExtraction,
@@ -158,7 +158,7 @@ async def record_items(
                 _item(extraction, None, kind=kind, state=ItemState.info, payload=payload,
                       evidence=fact["evidence"])
             )
-    today = now.astimezone(TAIPEI).date()
+    today = now.astimezone(SCHOOL_TZ).date()
     for item in items:
         if item.state != ItemState.skipped.value and _last_day(item.payload) is not None:
             if _last_day(item.payload) < today:
@@ -233,7 +233,7 @@ async def mark_past_items(
                 CourseAnnouncementItem.state.in_(
                     [ItemState.pending.value, ItemState.info.value]
                 ),
-                last_day < now.astimezone(TAIPEI).date(),
+                last_day < now.astimezone(SCHOOL_TZ).date(),
             )
             .values(state=ItemState.past.value)
         )

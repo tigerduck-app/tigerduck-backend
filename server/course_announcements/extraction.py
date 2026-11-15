@@ -13,14 +13,12 @@ import re
 from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
+from server.academic_calendar.terms import SCHOOL_TZ
 from server.bulletins.llm.base import LLMError
 from server.bulletins.llm.openai_compat import OpenAICompatibleClient, parse_json_object
 from server.config import Settings
-
-TAIPEI = ZoneInfo("Asia/Taipei")
-_WEEKDAYS = "一二三四五六日"
+from server.course_announcements.checks import ZH_WEEKDAYS
 
 RULES = """# 課程公告抽取規則
 
@@ -174,7 +172,7 @@ def build_extraction_llm(
 def build_messages(
     *, text: str, posted_at: datetime, term_code: str, course_codes: Sequence[str]
 ) -> list[dict[str, str]]:
-    posted = posted_at.astimezone(TAIPEI)
+    posted = posted_at.astimezone(SCHOOL_TZ)
     codes = ", ".join(f"{term_code}{code}" for code in course_codes)
     return [
         {"role": "system", "content": RULES},
@@ -182,7 +180,7 @@ def build_messages(
             "role": "user",
             "content": (
                 f"text:\n{text}\n\ncreated: {posted.isoformat()}\n"
-                f"created_weekday: 星期{_WEEKDAYS[posted.weekday()]}\n"
+                f"created_weekday: 星期{ZH_WEEKDAYS[posted.weekday()]}\n"
                 f"course_codes: {codes}"
             ),
         },
