@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+from sqlalchemy import select
 
 from server.course_announcements.classifier import (
     ClassifierError,
@@ -37,9 +38,12 @@ def _result(post: dict) -> dict:
     }
 
 
-def _service(*, max_posts: int = 64, sizes: list[int] | None = None):
+def _service(
+    *, max_posts: int = 64, sizes: list[int] | None = None, crashing: str | None = None
+):
     """Answers like serve.py, with 413 for a body over its limit or a request
-    of more than `max_posts` posts; records each request's size in `sizes`."""
+    of more than `max_posts` posts, and 500 for one holding the subject
+    `crashing`; records each request's size in `sizes`."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -52,6 +56,8 @@ def _service(*, max_posts: int = 64, sizes: list[int] | None = None):
             sizes.append(len(posts))
         if len(posts) > max_posts:
             return httpx.Response(413, json={"error": "body must be 1 to 4194304 bytes"})
+        if any(p["subject"] == crashing for p in posts):
+            return httpx.Response(500, text="Internal Server Error")
         return httpx.Response(200, json={"results": [_result(p) for p in posts]})
 
     return httpx.MockTransport(handler)
@@ -149,6 +155,68 @@ async def test_a_post_with_a_large_inline_image_is_stored_as_the_service_reads_i
     [without_data] = await classifier.classify([Post(subject, f'{before}<img src="">')])
     row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
     assert (row.route, row.text) == ("sent", without_data.text)
+
+
+async def test_a_batch_the_service_fails_on_keeps_the_results_of_its_other_posts():
+    sizes: list[int] = []
+    classifier = HttpClassifier(BASE, transport=_service(sizes=sizes, crashing="Notice 2"))
+
+    results = await classifier.classify(_posts(5))
+
+    assert sizes == [5, 2, 3, 1, 2]
+    assert [r and r.text.split("\n")[0] for r in results] == [
+        "Notice 0",
+        "Notice 1",
+        None,
+        "Notice 3",
+        "Notice 4",
+    ]
+
+
+async def test_a_post_the_service_fails_on_waits_while_the_others_are_stored(
+    db_session, prepared_engine
+):
+    created = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
+    discussions = [
+        FetchedDiscussion(
+            discussion_id=100 + n,
+            post_id=900 + n,
+            subject=subject,
+            message="<p>Invented</p>",
+            created_at=created,
+            modified_at=created,
+            group_id=-1,
+            visible_from=None,
+            has_attachment=False,
+            pinned=False,
+            starred=False,
+        )
+        for n, subject in enumerate(("Room moved", "Crashes the model"), start=1)
+    ]
+    await store_announcements(
+        db_session,
+        term_code="1151",
+        moodle_course_id=7001,
+        course_codes=["CS1001301"],
+        discussions=discussions,
+    )
+    await db_session.commit()
+    classifier = HttpClassifier(BASE, transport=_service(crashing="Crashes the model"))
+
+    assert await classify_pending(build_session_factory(prepared_engine), classifier) == 1
+
+    rows = await db_session.execute(
+        select(
+            CourseAnnouncement.id,
+            CourseAnnouncement.route,
+            CourseAnnouncement.classify_failed_at,
+        )
+        .order_by(CourseAnnouncement.id)
+        .execution_options(populate_existing=True)
+    )
+    [(_, stored, none), (_, waiting, failed_at)] = rows.all()
+    assert (stored, none, waiting) == ("sent", None, "unclassified")
+    assert failed_at is not None
 
 
 async def test_a_refused_request_raises_its_status_without_the_text():
