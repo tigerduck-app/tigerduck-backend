@@ -54,7 +54,10 @@ server/
 │                              #   rules and the scheduled link checker
 ├── course_announcements/      # first posts of Moodle course news forums: models,
 │                              #   the classifier service client, ingest (store,
-│                              #   classify, route to the LLM) and the poll job
+│                              #   classify, route to the LLM), the poll job, the
+│                              #   LLM's question (extraction.py) and its job
+│                              #   (extractor.py), checks, review items and
+│                              #   automatic apply
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
@@ -376,6 +379,21 @@ into the backend container via `docker-compose.yml`.
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
   for waits an hour and goes after the others.
+- The `course_announcement_extract` job runs every minute when the classifier
+  URL is set (`course_announcements/extractor.py`). While no bulletin is
+  claimable (`claimable_bulletins`, the LLM's one slot goes to bulletins first)
+  it claims one queued extraction, the latest post first, asks the LLM with no
+  transaction open and keeps the answer only while the extraction still runs
+  for the announcement's stored version. A failed attempt waits 1, 4 and 16
+  ticks, then the extraction fails; a claim older than 10 minutes counts as a
+  failed attempt. A stored result supersedes the announcement's earlier pending
+  items and becomes review items (`items.py`) under the lock every
+  `course_changes` writer takes (`checks.lock_courses`), checked with the
+  database's `course_change_violations`. With automatic apply on, an
+  extraction's add items are written all or none (`apply.py`), by and audited
+  as `course-announcements`; replace and remove items always wait for review.
+  `course_announcement_past` marks past the items whose days have passed,
+  daily at 00:05 Taipei.
 - Course announcement text may name students: it stays in the
   `course_announcements` tables and the portal, never in a log line, an
   exception, an error column or an app-facing response. Errors carry fixed
