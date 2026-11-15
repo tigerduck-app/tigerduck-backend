@@ -1,4 +1,4 @@
-"""OpenAI-compatible LLM provider.
+"""OpenAI-compatible LLM client, and the bulletin classifier on it.
 
 Works against anything that speaks the `/v1/chat/completions` wire format
 with `response_format.json_schema` support: llama.cpp server, vLLM, Ollama's
@@ -17,6 +17,7 @@ import json
 import re
 import time
 import unicodedata
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -24,7 +25,8 @@ import structlog
 
 from server.bulletins.llm.base import BulletinMetadata, LLMError, LLMProvider
 from server.bulletins.llm.prompts import (
-    RESPONSE_FORMAT,
+    RESPONSE_SCHEMA,
+    RESPONSE_SCHEMA_NAME,
     SYSTEM_PROMPT,
     TITLE_FULLWIDTH_BUDGET,
     build_user_prompt,
@@ -47,9 +49,126 @@ def _truncate(body_md: str) -> tuple[str, bool]:
     return body_md[:_MAX_BODY_CHARS], True
 
 
+class OpenAICompatibleClient:
+    """Chat completions answered under a caller's strict JSON schema, each
+    failed or invalid answer retried with backoff. No `openai` SDK
+    dependency so we don't inherit its auth/retry assumptions; httpx gives
+    us enough.
+
+    Its errors and log lines carry an `LLMError` code and HTTP status only,
+    never the prompt or the answer: both can quote what a student wrote."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout_seconds: float = 30.0,
+        max_retries: int = 2,
+        temperature: float = 0.2,
+        client: httpx.AsyncClient | None = None,
+        sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._model = model
+        self._max_retries = max_retries
+        self._temperature = temperature
+        self._sleep = sleep
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout_seconds),
+            headers={"User-Agent": "TigerDuckBot/0.1"},
+        )
+
+    async def complete_json(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        schema_name: str,
+        schema: dict[str, Any],
+        parse: Callable[[str], Any] | None = None,
+    ) -> Any:
+        """The answer to `messages` under `schema`, as `parse` reads it from
+        the message content: the JSON object by default. `parse` raises
+        `LLMError` for an answer to retry."""
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "temperature": self._temperature,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+            },
+            "messages": messages,
+        }
+        parse = parse or parse_json_object
+        for attempt in range(self._max_retries):
+            try:
+                return await self._once(payload, parse)
+            except LLMError as exc:
+                logger.warning(
+                    "llm.retry",
+                    schema=schema_name,
+                    attempt=attempt + 1,
+                    error=exc.code,
+                    status=exc.status,
+                )
+            await self._sleep(_backoff_seconds(attempt))
+        return await self._once(payload, parse)
+
+    async def _once(self, payload: dict[str, Any], parse: Callable[[str], Any]) -> Any:
+        # Timed through parsing: a reply that doesn't parse is a failed
+        # request as far as the caller goes, and gets retried like one.
+        started = time.perf_counter()
+        try:
+            value = parse(await self._content(payload))
+        except LLMError as exc:
+            error = LLMError(exc.code, exc.status)
+        except Exception:
+            observe_llm_request("error", time.perf_counter() - started)
+            raise
+        else:
+            observe_llm_request("success", time.perf_counter() - started)
+            return value
+        observe_llm_request("error", time.perf_counter() - started)
+        # Raised outside the handler, the copy has no __context__: that would
+        # hold the httpx response or the parse's exception, and so the answer,
+        # which `from None` only hides from tracebacks.
+        raise error
+
+    async def _content(self, payload: dict[str, Any]) -> str:
+        try:
+            response = await self._client.post(
+                f"{self._base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise LLMError("http_status", exc.response.status_code) from None
+        except httpx.TimeoutException:
+            raise LLMError("timeout") from None
+        except httpx.HTTPError:
+            raise LLMError("transport") from None
+        except (ValueError, RecursionError):
+            raise LLMError("invalid_response") from None
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            content = None
+        if not isinstance(content, str):
+            raise LLMError("invalid_response")
+        return content
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
 class OpenAICompatibleProvider:
-    """Minimal OpenAI-compat chat client. No `openai` SDK dependency so we
-    don't inherit its auth/retry assumptions; httpx gives us enough."""
+    """The bulletin classifier, on `OpenAICompatibleClient`."""
 
     def __init__(
         self,
@@ -62,16 +181,14 @@ class OpenAICompatibleProvider:
         temperature: float = 0.2,
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._model = model
-        self._timeout_seconds = timeout_seconds
-        self._max_retries = max_retries
-        self._temperature = temperature
-        self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_seconds),
-            headers={"User-Agent": "TigerDuckBot/0.1"},
+        self._llm = OpenAICompatibleClient(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            temperature=temperature,
+            client=client,
         )
 
     async def classify(
@@ -85,16 +202,11 @@ class OpenAICompatibleProvider:
         if truncated:
             logger.warning(
                 "bulletins.llm.body_truncated",
-                title=title[:40],
                 original_len=len(body_md),
                 kept_len=_MAX_BODY_CHARS,
             )
-
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "temperature": self._temperature,
-            "response_format": RESPONSE_FORMAT,
-            "messages": [
+        return await self._llm.complete_json(
+            messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
@@ -105,80 +217,18 @@ class OpenAICompatibleProvider:
                     ),
                 },
             ],
-        }
-
-        last_error: Exception | None = None
-        for attempt in range(self._max_retries + 1):
-            try:
-                return await self._once(payload)
-            except (httpx.HTTPError, LLMError, json.JSONDecodeError) as exc:
-                last_error = exc
-                if attempt >= self._max_retries:
-                    break
-                await asyncio.sleep(_backoff_seconds(attempt))
-                logger.warning(
-                    "bulletins.llm.retry",
-                    attempt=attempt + 1,
-                    error_type=type(exc).__name__,
-                    error=_describe(exc),
-                )
-
-        raise LLMError(
-            f"classification failed after {self._max_retries + 1} attempts: "
-            f"[{type(last_error).__name__}] {_describe(last_error)}"
+            schema_name=RESPONSE_SCHEMA_NAME,
+            schema=RESPONSE_SCHEMA,
+            parse=_parse_response,
         )
 
-    async def _once(self, payload: dict[str, Any]) -> BulletinMetadata:
-        # Timed through parsing: a reply that doesn't parse is a failed
-        # request as far as classification goes, and gets retried like one.
-        started = time.perf_counter()
-        try:
-            response = await self._client.post(
-                f"{self._base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            content = _extract_message_content(data)
-            metadata = _parse_response(content)
-        except Exception:
-            observe_llm_request("error", time.perf_counter() - started)
-            raise
-        observe_llm_request("success", time.perf_counter() - started)
-        return metadata
-
     async def close(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        await self._llm.close()
 
 
 def _backoff_seconds(attempt: int) -> float:
     """0.5s, 1s, 2s, ... capped at 8s. Attempt index is 0-based."""
     return min(8.0, 0.5 * (2**attempt))
-
-
-def _describe(exc: BaseException | None) -> str:
-    """Best-effort one-line description.
-
-    httpx exceptions (especially the Timeout hierarchy) often have empty
-    `str()` because the message is attached to `.request`/`.response` or
-    constructed lazily. Fall back to `repr` so the caller always has
-    SOMETHING useful to paste into a bug report. Truncated to stay
-    readable in log aggregators."""
-    if exc is None:
-        return "<none>"
-    text = str(exc).strip()
-    if not text:
-        text = repr(exc)
-    return text[:800]
-
-
-def _extract_message_content(data: dict[str, Any]) -> str:
-    try:
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMError(f"response missing choices[0].message.content: {data!r}") from exc
 
 
 # Match ```json ... ``` / ``` ... ``` / <tag>{json}</tag> wrappers that
@@ -200,31 +250,30 @@ def _strip_fences(content: str) -> str:
     return stripped
 
 
-def _parse_response(content: str) -> BulletinMetadata:
-    cleaned = _strip_fences(content)
+def parse_json_object(content: str) -> dict[str, Any]:
+    """The JSON object a model answered with; `LLMError` if there is none."""
     try:
-        obj = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise LLMError(
-            f"content was not valid JSON after fence-strip: {cleaned[:800]}"
-        ) from exc
+        obj = json.loads(_strip_fences(content))
+    except (ValueError, RecursionError):
+        obj = None
+    if not isinstance(obj, dict):
+        raise LLMError("invalid_json")
+    return obj
 
+
+def _parse_response(content: str) -> BulletinMetadata:
+    obj = parse_json_object(content)
     try:
         canonical_org = CanonicalOrg(obj["canonical_org"])
         importance = Importance(obj.get("importance", Importance.normal.value))
         content_tags = tuple(ContentTag(t) for t in obj.get("content_tags", []))
-    except (KeyError, ValueError) as exc:
-        raise LLMError(
-            f"response failed enum validation: {str(obj)[:800]} (cause: {exc})"
-        ) from exc
-
-    title = str(obj.get("title", "")).strip()
-    summary = str(obj.get("summary", "")).strip()
-    body_clean = str(obj.get("body_clean", "")).strip()
+        title = str(obj.get("title", "")).strip()
+        summary = str(obj.get("summary", "")).strip()
+        body_clean = str(obj.get("body_clean", "")).strip()
+    except (KeyError, ValueError, TypeError, RecursionError):
+        raise LLMError("invalid_answer") from None
     if not title or not summary or not body_clean:
-        raise LLMError(
-            f"title, summary, body_clean must be non-empty: {str(obj)[:800]}"
-        )
+        raise LLMError("invalid_answer")
 
     # Hard caps — schema gives the model a wall but instruction-tuned models
     # occasionally overshoot a few chars. Truncate rather than retry since

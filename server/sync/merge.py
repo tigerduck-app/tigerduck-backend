@@ -5,13 +5,17 @@ triplets: `<field>`, `<field>_updated_at`, `<field>_device_id`. A client
 edit wins iff its (clamped) timestamp is strictly newer than the stored
 one — so two devices editing different fields never clobber each other.
 
-TigerSync edits carry a clock value: integer microseconds since the Unix
+TigerSync stamps are clock values: integer microseconds since the Unix
 epoch (`to_clock` / `from_clock`), which a timestamp column holds exactly.
-An edit sent without one is stamped with the time it arrives (`edit_time`).
-A TigerSync stamp later than `now + MAX_CLOCK_SKEW` is refused with 409
-`clock_ahead`: clamping it would stamp each retry of one edit later, so a
-retry could beat an edit made meanwhile. Past stamps are kept, so offline
-edits merge correctly. The older paths' timestamps are still clamped
+An edit sent with `age_ms`, the milliseconds its device counted from the
+edit to this send, is stamped its arrival less that age (`edit_time`), so
+no device clock is compared with the server's; a retry sends a grown age
+and lands on about the same stamp. An edit sent with an `hlc` alone keeps
+it, and one sent with neither is stamped with the time it arrives. An `hlc`
+later than `now + MAX_CLOCK_SKEW` is refused with 409 `clock_ahead`:
+clamping it would stamp each retry of one edit later, so a retry could beat
+an edit made meanwhile. Past stamps are kept, so offline edits merge
+correctly. The older paths' timestamps are still clamped
 (`apply_field`). Ties lose: server state wins on equal timestamps, keeping replays
 idempotent. An edit carrying the stored value raises the stored stamp
 instead of changing the value, so a later edit of the same value still
@@ -32,9 +36,12 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from server.api_v4 import speaks_v4
 
 MAX_CLOCK_SKEW = timedelta(seconds=5)
+#: The oldest an `age_ms` can date an edit, as the wire contract sets it.
+MAX_EDIT_AGE = timedelta(days=365)
 CLOCK_HEADER = "X-TigerSync-Clock"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _TICK = timedelta(microseconds=1)
+_MS = timedelta(milliseconds=1)
 #: What a value sent without a time counts as: older than any stamp.
 OLDEST = _EPOCH
 
@@ -53,11 +60,15 @@ def clamp_ts(
     return min(client_ts, now + skew)
 
 
-def edit_time(clock: int | None, now: datetime) -> datetime:
-    """A request's stamp as a time: arrival when it sent none. A stamp later
-    than `now + MAX_CLOCK_SKEW` is refused before anything is written, and
-    compared as an integer, so one past year 9999 never builds a datetime.
+def edit_time(clock: int | None, now: datetime, age_ms: int | None = None) -> datetime:
+    """A request's stamp as a time. With `age_ms`, `now` less that age held
+    to 0 through `MAX_EDIT_AGE`, whatever `clock` says. Otherwise `clock`, or
+    arrival when it sent none. A `clock` later than `now + MAX_CLOCK_SKEW`
+    is refused before anything is written, and compared as an integer, so
+    one past year 9999 never builds a datetime.
     """
+    if age_ms is not None:
+        return now - min(max(age_ms, 0), MAX_EDIT_AGE // _MS) * _MS
     if clock is None:
         return now
     if clock > to_clock(now + MAX_CLOCK_SKEW):
@@ -72,14 +83,23 @@ def _speaks_clock_protocol(
     return x_tigersync_protocol == "2" or speaks_v4(request)
 
 
+def _arrival(request: Request) -> datetime:
+    return request.state.arrived_at
+
+
+#: When the request reached the app (`main.py`), before authentication or a
+#: handler waited on anything: the `now` its edits are stamped against.
+ArrivalDep = Annotated[datetime, Depends(_arrival)]
+
+
 #: True for a request from an app that stamps its edits: one sending
 #: `X-TigerSync-Protocol: 2`, and every `/v4` request whatever it sends.
 ClockProtocolDep = Annotated[bool, Depends(_speaks_clock_protocol)]
 
 
-def require_stamp(speaks_clock: bool, clock: int | None) -> None:
-    """An app that stamps its edits must stamp each one."""
-    if speaks_clock and clock is None:
+def require_stamp(speaks_clock: bool, clock: int | None, age_ms: int | None = None) -> None:
+    """An app that stamps its edits must send each one's `age_ms` or `hlc`."""
+    if speaks_clock and clock is None and age_ms is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="hlc_required"
         )

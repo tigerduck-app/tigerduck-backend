@@ -100,8 +100,7 @@ async def test_an_add_without_its_hlc_is_hlc_required(client) -> None:
     assert (v4.status_code, v4.json()) == (
         422, {"error": "hlc_required", "message": CODES["hlc_required"]},
     )
-    assert v3.status_code == 422
-    assert v3.json()["detail"][0]["loc"] == ["body", "adds", 0, "hlc"]
+    assert (v3.status_code, v3.json()) == (422, {"detail": "hlc_required"})
     snapshot = (await client.get("/v4/sync/full", headers=bearer(session))).json()
     assert snapshot["courses"] == []
 

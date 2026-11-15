@@ -32,6 +32,17 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.3.0
+
+- **TigerSync edit stamps from `age_ms`.** Every write that takes `hlc` also
+  takes `age_ms`, the milliseconds the device counted from the edit to this
+  send. The backend stamps the edit at the request's arrival less that age,
+  held to 0 through 365 days, and never answers `409 clock_ahead` for it.
+  With both fields, `age_ms` wins. `hlc` alone works as before, and `/v3`
+  without either is unchanged.
+- No migration and no `.env` change.
+- Rollback: check out 4.2.1 and run `./start.sh`.
+
 ## Upgrading to 4.2.1
 
 - **v3 bulletin subscription PATCH.** `PATCH /v3/bulletin-subscriptions/{id}`

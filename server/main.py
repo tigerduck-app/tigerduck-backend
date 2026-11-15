@@ -423,9 +423,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.headers[CLOCK_HEADER] = str(to_clock(datetime.now(UTC)))
         return response
 
-    # A /v4 error goes out in its envelope (`server/api_v4.py`).
+    # A /v4 error goes out in its envelope (`server/api_v4.py`), and edits
+    # are stamped against the arrival time (`ArrivalDep`).
     @app.middleware("http")
     async def _tigersync_clock(request, call_next):
+        request.state.arrived_at = datetime.now(UTC)
         response = await call_next(request)
         if response.status_code >= 400 and api_v4.under(
             request.url.path, settings.api_v4_base_path

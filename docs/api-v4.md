@@ -20,13 +20,13 @@ On every Bearer endpoint: 401 `missing_bearer_token`, `invalid_access_token` or 
 | 8 | GET `/sync/revision` | Bearer | | `revision` | | iOS, Mac |
 | 9 | GET `/sync?since_revision&limit` | Bearer | | `current_revision, returned_until_revision, has_more, changes[{revision, entity_type, entity_id, operation, payload}]` | 410 `{error:"sync_revision_expired", min_available_revision, current_revision, full_sync_required}` | iOS, Mac |
 | 10 | GET `/sync/full` | Bearer | | revision, `server_hlc`, resets, tombstones, courses, overrides, skipped dates, assignments, settings documents, holidays, `roster_requests`; without the protocol header (iOS today) 30 days of tombstones with `deleted_by_reset, deleted_by_this_device` | | iOS, Mac |
-| 11 | POST `/sync/courses/upload` | Bearer; protocol 2 with `adds` | `courses[{semester, course_no, course_name, moodle_id?, credits?, classroom?, instructors, schedule_json, classroom_map, …}], course_overrides[{course_key, color_hex}], force_keys, adds?[{course_key, hlc}], roster_terms?` | `upserted, skipped_tombstoned, overrides_applied, accepted_keys, adds?` | 409 `clock_ahead`, 422 `add_not_in_courses` | iOS; Mac with course sync |
-| 12 | DELETE `/sync/courses?semester&hlc` | Bearer | | `deleted, reset_hlc, applied?` | 400 `device_id_required`, 409 | iOS, Mac |
-| 13 | DELETE `/sync/courses/{course_key}?hlc&kind` | Bearer | | `deleted, applied, hlc` | 409 | iOS, Mac |
+| 11 | POST `/sync/courses/upload` | Bearer; protocol 2 with `adds` | `courses[{semester, course_no, course_name, moodle_id?, credits?, classroom?, instructors, schedule_json, classroom_map, …}], course_overrides[{course_key, color_hex}], force_keys, adds?[{course_key, age_ms or hlc}], roster_terms?` | `upserted, skipped_tombstoned, overrides_applied, accepted_keys, adds?` | 409 `clock_ahead`, 422 `add_not_in_courses` | iOS; Mac with course sync |
+| 12 | DELETE `/sync/courses?semester&age_ms&hlc` | Bearer | | `deleted, reset_hlc, applied?` | 400 `device_id_required`, 409 | iOS, Mac |
+| 13 | DELETE `/sync/courses/{course_key}?age_ms&hlc&kind` | Bearer | | `deleted, applied, hlc` | 409 | iOS, Mac |
 | 14 | POST `/sync/assignments/upload` | Bearer | `assignments[{moodle_assignment_id, course_no, course_name, title, due_at?, moodle_url?, is_submitted, grade?}]` | `upserted` | | iOS, Mac |
-| 15 | PATCH `/sync/assignments/{moodle_assignment_id}/override` | Bearer | `local_status, hlc?` | set: `id, updated_at, local_status, local_status_hlc, applied`; clear: `deleted:true` + last three | 404 `assignment_not_found`, 409 | iOS, Mac |
-| 16 | PATCH `/sync/courses/{moodle_id}/override` | Bearer | `color_hex?, custom_name?, locale?, ignore_assignments?, moodle_course_id?, hlc?` | values, `*_hlc`, `applied[]` | 404 `course_not_found`, 409 | iOS, Mac |
-| 17 | PUT `/sync/holiday-overrides/{holiday_id}` | Bearer | `notify, hlc?` | `holiday_id, notify, hlc, applied` | 404 `holiday_not_found` | iOS, Mac |
+| 15 | PATCH `/sync/assignments/{moodle_assignment_id}/override` | Bearer | `local_status, age_ms?, hlc?` | set: `id, updated_at, local_status, local_status_hlc, applied`; clear: `deleted:true` + last three | 404 `assignment_not_found`, 409 | iOS, Mac |
+| 16 | PATCH `/sync/courses/{moodle_id}/override` | Bearer | `color_hex?, custom_name?, locale?, ignore_assignments?, moodle_course_id?, age_ms?, hlc?` | values, `*_hlc`, `applied[]` | 404 `course_not_found`, 409 | iOS, Mac |
+| 17 | PUT `/sync/holiday-overrides/{holiday_id}` | Bearer | `notify, age_ms?, hlc?` | `holiday_id, notify, hlc, applied` | 404 `holiday_not_found` | iOS, Mac |
 | 18 | GET `/settings/{namespace}` | Bearer | | `namespace, schema_version, document, revision, updated_at` | 404 (never written), 422 | iOS |
 | 19 | PUT `/settings/{namespace}` | Bearer | `schema_version, document, base_revision\|null` | as 18 | 409 `{error:"settings_conflict", namespace, server}` | iOS |
 | 20 | POST `/schedule/sync` | Bearer | `events[{source_id, scenario, fire_at, snapshot}]` (≤200), replaces the device's list | `pending, replaced` | 400 `device_id_required` | iOS |
@@ -46,7 +46,7 @@ Unversioned and untouched: `/ping`, `/links/{name}`, `/.well-known/tigerduck/tls
 
 ### Mapping
 
-Protocol 2 is implied on `/v4`: the header is ignored, every write that takes `hlc` must send it (422 `hlc_required`), and protocol 2's last-writer-wins rules apply (`server/AGENTS.md`).
+Protocol 2 is implied on `/v4`: the header is ignored, every write that takes a stamp must send `age_ms` or `hlc` (422 `hlc_required`), and protocol 2's last-writer-wins rules apply (`server/AGENTS.md`).
 
 | v3 | v4 | Change |
 |---|---|---|
@@ -55,7 +55,7 @@ Protocol 2 is implied on `/v4`: the header is ignored, every write that takes `h
 | 11 courses/upload | same | changed |
 | 16 `courses/{moodle_id}/override` | `courses/{course_key}/override` | renamed, changed |
 | 15 assignment override | same | changed |
-| 12, 13, 17 deletes, holiday PUT | same | changed: `hlc` required |
+| 12, 13, 17 deletes, holiday PUT | same | changed: `age_ms` or `hlc` required |
 | 9 `/sync`, 10 `/sync/full` | same | changed |
 | 25, 26 subscriptions | same | changed |
 
@@ -63,13 +63,15 @@ Changed: 10 endpoints (9–13, 15–17, 25, 26). Dropped: the per-rule subscript
 
 ### Changed endpoints
 
-**Course upload.** Request `courses`, `adds[{course_key, hlc}]` (≤50, every hand-added course listed), `roster_terms`. Sending `course_overrides` or `force_keys` is 422 `invalid_request`. Response `upserted, skipped_tombstoned, accepted_keys, adds[{course_key, applied, hlc}]`. Why: colours take two routes that disagree on both apps. iOS uploads every colour while TigerSync is on, ignoring the colour switch, while its PATCH queue follows it. Android uploads `course_overrides.color_hex` for every custom colour, gated only on the master and course switches, while its PATCH queue follows the colour switch.
+**Course upload.** Request `courses`, `adds[{course_key, age_ms or hlc}]` (≤50, every hand-added course listed), `roster_terms`. Sending `course_overrides` or `force_keys` is 422 `invalid_request`. Response `upserted, skipped_tombstoned, accepted_keys, adds[{course_key, applied, hlc}]`. Why: colours take two routes that disagree on both apps. iOS uploads every colour while TigerSync is on, ignoring the colour switch, while its PATCH queue follows it. Android uploads `course_overrides.color_hex` for every custom colour, gated only on the master and course switches, while its PATCH queue follows the colour switch.
 
-**Course override, `PATCH /sync/courses/{course_key}/override`.** The key is `client:{semester}:{course_no}`, which both apps build; a `/` in it may go raw or as `%2F`. Body `color_hex?, custom_name?, locale?, ignore_assignments?, moodle_course_id?, hlc` (needed with any value). Response as v3. Why: iOS can PATCH only courses with a Moodle id, so other colours reach the backend only through the upload. A `moodle_id` also names no term, and the lookup picks one row by preference (`server/routes/overrides.py`, `_get_course_by_moodle_id`). The override row points at the course row, so the client sends the PATCH after the upload that adds the course, and retries a 404 `course_not_found` after the next upload. On both apps the colour switch needs the course switch, so the row exists.
+**Course override, `PATCH /sync/courses/{course_key}/override`.** The key is `client:{semester}:{course_no}`, which both apps build; a `/` in it may go raw or as `%2F`. Body `color_hex?, custom_name?, locale?, ignore_assignments?, moodle_course_id?` and `age_ms` or `hlc` (needed with any value). Response as v3. Why: iOS can PATCH only courses with a Moodle id, so other colours reach the backend only through the upload. A `moodle_id` also names no term, and the lookup picks one row by preference (`server/routes/overrides.py`, `_get_course_by_moodle_id`). The override row points at the course row, so the client sends the PATCH after the upload that adds the course, and retries a 404 `course_not_found` after the next upload. On both apps the colour switch needs the course switch, so the row exists.
 
-**Assignment override.** Body `local_status, hlc`. Every reply, a clear included, is `{local_status, local_status_hlc, applied}`. Why: v3 answers a clear in another shape, so iOS does not read the reply.
+**Assignment override.** Body `local_status` and `age_ms` or `hlc`. Every reply, a clear included, is `{local_status, local_status_hlc, applied}`. Why: v3 answers a clear in another shape, so iOS does not read the reply.
 
-**Deletes and holiday PUT.** These are v3's protocol-2 forms with `hlc` required. The client answers a 409 `clock_ahead` by stamping the edit again one tick (1 µs) after the clock the reply carries and resending it, which replaces iOS's retry without a stamp and its protocol header, sent today only with adds.
+**Deletes and holiday PUT.** These are v3's protocol-2 forms with `age_ms` or `hlc` required. A client sending `hlc` answers a 409 `clock_ahead` by stamping the edit again one tick (1 µs) after the clock the reply carries and resending it, which replaces iOS's retry without a stamp and its protocol header, sent today only with adds.
+
+**Edit stamps.** A write sends `age_ms` where it sends `hlc` (body field or query parameter): the milliseconds from the edit to this send, measured on the device and recomputed on every send and retry. The backend takes the arrival time once per request and stamps each edit `arrival − clamp(age_ms, 0, 365 days)`, so a retry with its grown age lands on about the same stamp. With `age_ms` any `hlc` sent beside it is ignored and no 409 `clock_ahead` is sent. `hlc` alone keeps the rules above until both apps send `age_ms`; `/v3` without `age_ms` is unchanged. Responses still carry `X-TigerSync-Clock`, `server_hlc`, `reset_hlc` and `*_hlc`.
 
 **`GET /sync/full`.** Always the protocol-2 shape: all tombstones with `hlc, kind`, `term_resets`, `courses_reset_hlc`, `server_hlc`, and no 30-day window, `deleted_by_reset` or `deleted_by_this_device`. `course_overrides[]` gains `course_key`.
 
@@ -128,7 +130,7 @@ They are identical, and the backend does not track a device's API version. No v4
 
 ## 3. Keeping `/v3` unchanged
 
-`/v4` mounts the same handlers with `ClockProtocolDep` forced true, which alone makes 12, 13 and 17 require `hlc`; 9, 10, 11, 15, 16, 25 and 26 get `/v4` variants. Both versions share one database: users and auth (`users`, `auth_sessions`, `user_devices`, `device_push_tokens`, `device_registrations`), courses (`user_courses`, `user_course_tombstones`, `user_semester_resets`, `user_course_rosters`, `user_course_overrides`), assignments (`user_assignments`, `user_assignment_overrides`), `user_holiday_overrides`, `user_settings_documents`, sync state (`user_sync_state`, `user_change_log`), `user_bulletin_subscriptions` and push (`push_jobs`, `push_deliveries`). These must not drift:
+`/v4` mounts the same handlers with `ClockProtocolDep` forced true, which alone makes 12, 13 and 17 require `age_ms` or `hlc`; 9, 10, 11, 15, 16, 25 and 26 get `/v4` variants. Both versions share one database: users and auth (`users`, `auth_sessions`, `user_devices`, `device_push_tokens`, `device_registrations`), courses (`user_courses`, `user_course_tombstones`, `user_semester_resets`, `user_course_rosters`, `user_course_overrides`), assignments (`user_assignments`, `user_assignment_overrides`), `user_holiday_overrides`, `user_settings_documents`, sync state (`user_sync_state`, `user_change_log`), `user_bulletin_subscriptions` and push (`push_jobs`, `push_deliveries`). These must not drift:
 
 - **Change log.** A v4 write appends the same entries and queues the same `sync_trigger` as its v3 twin. One account can have Android or a 3.x Mac on `/v3` beside a 4.0 iPhone.
 - **Merge.** `apply_field`, `membership` and the clock code are shared. v3 requests without the header keep arrival stamps and `force_keys`, and `_released_tombstones` still leaves out removals beside a roster row from v3 snapshots.
