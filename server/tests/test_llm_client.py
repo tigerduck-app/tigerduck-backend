@@ -30,7 +30,7 @@ PROMPT = "Prompt text: Chen Example asked whether Friday's lab is held."
 ANSWER = "Answer text: Chen Example, the lab is held"
 
 
-def _answer(content: str) -> httpx.Response:
+def _answer(content: str | None) -> httpx.Response:
     return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
 
@@ -62,8 +62,9 @@ def _messages() -> list[dict[str, str]]:
     return [{"role": "user", "content": PROMPT}]
 
 
-def _rendered(exc: BaseException) -> str:
-    return "".join(traceback.format_exception(exc)) + repr(exc)
+def _assert_no_text(exc: BaseException) -> None:
+    assert exc.__context__ is None and exc.__cause__ is None
+    assert "Chen Example" not in "".join(traceback.format_exception(exc)) + repr(exc)
 
 
 async def test_schema_and_parameters_reach_the_request() -> None:
@@ -127,6 +128,42 @@ async def test_an_answer_the_parse_refuses_is_retried() -> None:
     assert len(requests) == 2
 
 
+def _raise(error: Exception):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise error
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    ("handler", "code"),
+    [
+        (_raise(httpx.ReadTimeout("timed out")), "timeout"),
+        (_raise(httpx.ConnectError("refused")), "transport"),
+        (lambda request: httpx.Response(200, text="Chen Example"), "invalid_response"),
+        (lambda request: httpx.Response(200, json=["Chen Example"]), "invalid_response"),
+        (lambda request: _answer(None), "invalid_response"),
+    ],
+    ids=["timeout", "transport", "body-not-json", "body-not-object", "null-content"],
+)
+async def test_each_failure_raises_its_code(handler, code: str) -> None:
+    client = OpenAICompatibleClient(
+        base_url="http://mock/v1",
+        api_key="sk-test",
+        model="test-model",
+        max_retries=0,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    with pytest.raises(LLMError) as raised:
+        await client.complete_json(
+            messages=_messages(), schema_name="HeldCheck", schema=SCHEMA
+        )
+
+    assert (raised.value.code, raised.value.status) == (code, None)
+    _assert_no_text(raised.value)
+
+
 async def test_http_error_carries_its_status() -> None:
     client, _, _ = _client([httpx.Response(503)], max_retries=0)
 
@@ -161,8 +198,8 @@ async def test_no_prompt_or_answer_in_logs_or_the_error(monkeypatch) -> None:
         ("invalid_json", None),
     ]
     assert raised.value.code == "invalid_response"
-    for text in (str(logs), _rendered(raised.value)):
-        assert "Chen Example" not in text
+    assert "Chen Example" not in str(logs)
+    _assert_no_text(raised.value)
 
 
 async def test_bulletin_answer_and_title_stay_out_of_logs_and_errors(monkeypatch) -> None:
@@ -202,4 +239,4 @@ async def test_bulletin_answer_and_title_stay_out_of_logs_and_errors(monkeypatch
         }
     ]
     assert raised.value.code == "invalid_answer"
-    assert "Chen Example" not in _rendered(raised.value)
+    _assert_no_text(raised.value)

@@ -123,11 +123,19 @@ class OpenAICompatibleClient:
         started = time.perf_counter()
         try:
             value = parse(await self._content(payload))
+        except LLMError as exc:
+            error = LLMError(exc.code, exc.status)
         except Exception:
             observe_llm_request("error", time.perf_counter() - started)
             raise
-        observe_llm_request("success", time.perf_counter() - started)
-        return value
+        else:
+            observe_llm_request("success", time.perf_counter() - started)
+            return value
+        observe_llm_request("error", time.perf_counter() - started)
+        # Raised outside the handler, the copy has no __context__: that would
+        # hold the httpx response or the parse's exception, and so the answer,
+        # which `from None` only hides from tracebacks.
+        raise error
 
     async def _content(self, payload: dict[str, Any]) -> str:
         try:
@@ -259,12 +267,11 @@ def _parse_response(content: str) -> BulletinMetadata:
         canonical_org = CanonicalOrg(obj["canonical_org"])
         importance = Importance(obj.get("importance", Importance.normal.value))
         content_tags = tuple(ContentTag(t) for t in obj.get("content_tags", []))
-    except (KeyError, ValueError, TypeError):
+        title = str(obj.get("title", "")).strip()
+        summary = str(obj.get("summary", "")).strip()
+        body_clean = str(obj.get("body_clean", "")).strip()
+    except (KeyError, ValueError, TypeError, RecursionError):
         raise LLMError("invalid_answer") from None
-
-    title = str(obj.get("title", "")).strip()
-    summary = str(obj.get("summary", "")).strip()
-    body_clean = str(obj.get("body_clean", "")).strip()
     if not title or not summary or not body_clean:
         raise LLMError("invalid_answer")
 
