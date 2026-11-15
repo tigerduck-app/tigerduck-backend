@@ -302,7 +302,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     sync_worker = None
     if cipher is not None:
-        budget = RequestBudget(settings.sync_job_requests_per_minute)
+        budget = RequestBudget(
+            settings.sync_job_requests_per_minute,
+            observe=metrics.observe_sync_moodle_request,
+        )
         sync_worker = SyncWorker(
             session_factory=jobs_session_factory,
             settings=settings,

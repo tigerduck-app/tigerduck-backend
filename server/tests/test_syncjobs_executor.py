@@ -29,6 +29,7 @@ from server.db import build_session_factory
 from server.push.reminders import CHANNEL as REMINDER_CHANNEL
 from server.push.reminders import _dedupe_key, scan_assignment_reminders
 from server.logging_setup import configure
+from server.metrics import observe_sync_moodle_request
 from server.auth import service as auth_service
 from server.sync.models import (
     UserAssignment,
@@ -142,6 +143,7 @@ def _worker(
         worker_id="test-worker",
         budget=RequestBudget(
             settings.sync_job_requests_per_minute,
+            observe=observe_sync_moodle_request,
             clock=clock if clock is not None else _Clock(),
         ),
     )

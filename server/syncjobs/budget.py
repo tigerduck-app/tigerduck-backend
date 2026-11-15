@@ -1,8 +1,9 @@
-"""The sync worker's pace toward Moodle (tigerduck-backend#80).
+"""A pace toward Moodle (tigerduck-backend#80).
 
 Every job in flight sends its Moodle requests through one `RequestBudget`,
 so the school sees the same rate however many jobs run at once, and one
-HTTP 429 holds all of them back.
+HTTP 429 holds all of them back. The sync worker and the course
+announcement poll each have one, counted on a metric of its own.
 """
 
 from __future__ import annotations
@@ -13,24 +14,26 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from server.metrics import observe_sync_moodle_request
 
 
 class RequestBudget:
     """Lets a request go at most `per_minute` times a minute, each at least
     `60 / per_minute` seconds after the one before, and none while paused.
 
-    Pass `event_hooks` to the httpx clients whose requests it paces.
+    Pass `event_hooks` to the httpx clients whose requests it paces;
+    `observe` counts each request as it goes.
     """
 
     def __init__(
         self,
         per_minute: int,
         *,
+        observe: Callable[[], object],
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
     ) -> None:
         self._spacing = 60.0 / per_minute
+        self._observe = observe
         self._clock = clock
         self._sleep = sleep
         self._last_at = float("-inf")
@@ -57,4 +60,4 @@ class RequestBudget:
 
     async def _before_request(self, _request: httpx.Request) -> None:
         await self.acquire()
-        observe_sync_moodle_request()
+        self._observe()
