@@ -24,7 +24,6 @@ from portal.app.routes.course_announcements import (  # noqa: E402
     get_announcement,
     list_announcements,
     list_reviews,
-    reextract,
     reject_item,
 )
 from portal.app.routes.course_changes import (  # noqa: E402
@@ -405,30 +404,48 @@ async def test_a_replace_whose_change_is_gone_cannot_be_approved(term, pool, db_
     assert (await _item_row(pool, item.id))["state"] == "pending"
 
 
-async def test_reextract_queues_the_stored_version_once(term, pool, db_session):
-    announcement = await _announcement(db_session, route="not_sent")
-    waiting = await _announcement(db_session, "102-902", route="unclassified")
+async def test_approving_a_replace_does_not_wait_for_a_store_reading_its_change(
+    term, pool, db_session
+):
+    """A store reads the course's sourced changes FOR KEY SHARE; a replace
+    locks its change FOR NO KEY UPDATE, which that lock lets through."""
+    change_id = await _applied_change(db_session, "room", room="IB-201")
+    announcement = await _announcement(db_session)
+    item = await _item(
+        db_session, await _extraction(db_session, announcement),
+        _change("room", room="IB-302"), action="replace", change_id=change_id,
+    )
     await db_session.commit()
 
-    first = await reextract(announcement.id, _request(), pool=pool)
-    again = await reextract(announcement.id, _request(), pool=pool)
-    unclassified = await reextract(waiting.id, _request(), pool=pool)
-    missing = await reextract("1-1", _request(), pool=pool)
-
-    assert first.status_code == 200
-    assert (again.status_code, unclassified.status_code, missing.status_code) == (409, 409, 404)
-    rows = await pool.fetch(
-        "SELECT id, version, status FROM course_announcement_extractions"
-        " WHERE announcement_id = $1",
-        announcement.id,
-    )
-    assert [(r["version"], r["status"]) for r in rows] == [(POSTED, "queued")]
-    assert await _audit(pool) == [
-        (
-            "course_announcement.reextract",
-            {"announcement_id": announcement.id, "extraction_id": rows[0]["id"]},
+    async with pool.acquire() as store, store.transaction():
+        await store.execute(
+            "SELECT 1 FROM course_changes WHERE id = $1 FOR KEY SHARE", change_id
         )
-    ]
+        response = await asyncio.wait_for(approve_item(item.id, _request(), pool=pool), 10)
+
+    assert response.status_code == 200, _body(response)
+
+
+async def test_approving_a_removal_does_not_wait_for_the_course_lock(term, pool, db_session):
+    """A store holds the course's lock while it waits for items; deleting a
+    change does not take that lock, as the Course changes delete does not."""
+    change_id = await _applied_change(db_session)
+    announcement = await _announcement(db_session)
+    item = await _item(
+        db_session, await _extraction(db_session, announcement), action="remove",
+        change_id=change_id,
+    )
+    await db_session.commit()
+
+    async with pool.acquire() as store, store.transaction():
+        await store.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            f"course_changes|1151|{COURSE}",
+        )
+        response = await asyncio.wait_for(approve_item(item.id, _request(), pool=pool), 10)
+
+    assert response.status_code == 200, _body(response)
+    assert await pool.fetchval("SELECT count(*) FROM course_changes") == 0
 
 
 # --- Course changes carrying an item, and editing or deleting a sourced change ---
@@ -601,9 +618,13 @@ async def test_the_announcement_list_searches_filters_and_pages(term, pool, db_s
     assert listed["labels"] == [{"label": "class_cancel", "score": 0.97}]
     bad = [
         await list_announcements("1151", _request(), pool=pool, **query)
-        for query in ({"extraction": "x"}, {"page": 0}, {"page": 2**62}, {"q": "停\x00課"})
+        for query in (
+            {"extraction": "x"}, {"page": 0}, {"page": 2**62}, {"q": "停\x00課"},
+            {"q": "停" * 201},
+        )
     ]
-    assert [r.status_code for r in bad] == [400] * 4
+    assert [r.status_code for r in bad] == [400] * 5
+    assert (await page(q="停" * 200))["counts"]["all"] == 0
 
 
 async def test_the_detail_shows_the_newest_extraction_and_skipped_codes(term, pool, db_session):

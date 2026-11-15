@@ -96,6 +96,7 @@ export function AnnouncementList({
             type="search"
             aria-label="Search announcements"
             placeholder="Code, name or subject"
+            maxLength={200}
             value={state.query}
             onChange={(e) => onState({ ...state, query: e.target.value, page: 1 })}
             className="min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-3"

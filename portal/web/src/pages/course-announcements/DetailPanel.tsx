@@ -152,7 +152,7 @@ export function DetailPanel({
       )}
 
       <div className="flex justify-end border-t border-line pt-3.5">
-        <Button variant="line" size="bar" disabled={reextracting || detail.route === "unclassified"} onClick={onReextract}>
+        <Button variant="line" size="bar" disabled={reextracting || detail.route !== "sent"} onClick={onReextract}>
           <RefreshCw />
           Re-extract
         </Button>

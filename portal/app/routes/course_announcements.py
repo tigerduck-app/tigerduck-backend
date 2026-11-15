@@ -11,6 +11,7 @@ Approving an item writes through the course-changes write path
 from __future__ import annotations
 
 import json
+import re
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
@@ -28,14 +29,19 @@ from .course_changes import (
     remove_change,
     replace_change,
 )
+from .moodle.push import forward_to_backend
 
 router = APIRouter(prefix="/api/course-announcements")
 
 PER_PAGE = 10
 EXTRACTION_FILTERS = ("all", "extracted", "failed", "differs")
 _REASON_MAX = 500
+# strpos runs over every listed row, so a search stays short.
+_SEARCH_MAX = 200
 _ITEM_COUNTS = ("pending", "applied", "rejected", "removed", "past", "exams")
 _TERM = "SELECT 1 FROM semester_terms WHERE code = $1"
+# "{discussion id}-{first post id}"; anything else could rewrite the forwarded path.
+_ANNOUNCEMENT_ID = re.compile(r"[0-9]{1,20}-[0-9]{1,20}")
 
 _REVIEW = """
 SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.evidence, i.checks,
@@ -129,15 +135,6 @@ SELECT count(*) AS all, count(done_id) AS extracted,
 FROM listed
 """
 
-# A version that already has a queued or running extraction keeps it
-# (`ux_course_announcement_extractions_live`).
-_QUEUE = """
-INSERT INTO course_announcement_extractions (announcement_id, version)
-VALUES ($1, $2)
-ON CONFLICT (announcement_id, version) WHERE status IN ('queued', 'running') DO NOTHING
-RETURNING id
-"""
-
 
 def _iso(value) -> str | None:
     return value and value.isoformat()
@@ -226,8 +223,8 @@ async def list_announcements(
         return _bad(f"extraction must be one of {', '.join(EXTRACTION_FILTERS)}")
     if not 1 <= page <= BIGINT_MAX // PER_PAGE:
         return _bad("page out of range")
-    if q and _UNHELD.search(q):
-        return _bad("q must be text")
+    if q and (len(q) > _SEARCH_MAX or _UNHELD.search(q)):
+        return _bad(f"q must be at most {_SEARCH_MAX} characters of text")
     search = q.strip() if q and q.strip() else None
     async with pool.acquire() as conn:
         if not await conn.fetchval(_TERM, term):
@@ -411,26 +408,11 @@ async def reject_item(
 
 
 @router.post("/announcements/{announcement_id}/reextract")
-async def reextract(
-    announcement_id: str, request: Request, pool=Depends(get_pool)
-) -> JSONResponse:
-    """Queues the stored version for extraction again."""
-    async with pool.acquire() as conn, conn.transaction():
-        # Holds a newer version's store back until the queued row is in, so
-        # the store supersedes it rather than leaving it queued for an old one.
-        row = await conn.fetchrow(
-            "SELECT modified_at, route FROM course_announcements WHERE id = $1 FOR SHARE",
-            announcement_id,
-        )
-        if row is None:
-            return _bad("announcement not found", 404)
-        if row["route"] == "unclassified":
-            return _bad("the announcement is not classified yet", 409)
-        queued = await conn.fetchval(_QUEUE, announcement_id, row["modified_at"])
-        if queued is None:
-            return _bad("an extraction of this version is already waiting", 409)
-        await audit(
-            conn, request, "course_announcement.reextract",
-            announcement_id=announcement_id, extraction_id=queued,
-        )
-    return JSONResponse(content={"extraction_id": queued})
+async def reextract(announcement_id: str, request: Request) -> JSONResponse:
+    """Queues the stored version for extraction again, through the backend's
+    admin listener, which queues it as the poller does."""
+    if not _ANNOUNCEMENT_ID.fullmatch(announcement_id):
+        return _bad("announcement not found", 404)
+    return await forward_to_backend(
+        request, "POST", f"/admin/course-announcements/{announcement_id}/extract"
+    )

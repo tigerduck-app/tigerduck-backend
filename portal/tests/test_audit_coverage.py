@@ -14,8 +14,10 @@ WRITE_METHODS = {"post", "put", "patch", "delete"}
 # POSTs that only read.
 READ_ONLY_WRITES = {("custom_push.py", "preview")}
 # Writes the backend's admin listener records in admin_audit_log itself, in
-# the change's transaction, with the operator `_forward` names in X-Admin-Actor.
+# the change's transaction, with the operator `forward_to_backend` names in
+# X-Admin-Actor.
 BACKEND_AUDITED_WRITES = {
+    ("course_announcements.py", "reextract"),
     ("links.py", "create_link"),
     ("links.py", "test_link"),
     ("links.py", "update_link"),
@@ -102,7 +104,9 @@ def test_every_write_route_calls_audit() -> None:
     unforwarded = [
         (module, name)
         for module, name, _, body in writes
-        if (module, name) in BACKEND_AUDITED_WRITES and "await _forward(" not in body
+        if (module, name) in BACKEND_AUDITED_WRITES
+        and "await _forward(" not in body
+        and "await forward_to_backend(" not in body
     ]
 
     assert len(writes) > 20
