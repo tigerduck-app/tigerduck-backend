@@ -243,7 +243,8 @@ class CourseAnnouncementItem(Base):
     action: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # The fact in `course_changes` field names.
     payload: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
-    # The applied change it replaces or removes.
+    # The applied change it replaces or removes, or the change it wrote once
+    # applied or approved; editing or deleting that change marks the item.
     course_change_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("course_changes.id", ondelete="SET NULL"), nullable=True
     )
