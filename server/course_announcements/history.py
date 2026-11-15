@@ -16,6 +16,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.terms import current_term_code
@@ -25,7 +26,7 @@ from server.course_announcements.ingest import (
     queue_extractions,
     store_announcements,
 )
-from server.db import BIGINT_VALUES, session_scope, storable_text
+from server.db import BIGINT_VALUES, is_deadlock, session_scope, storable_text
 from server.syncjobs.assignments import course_nos, moodle_semester
 from server.syncjobs.moodle_client import FetchedDiscussion, parse_discussion
 
@@ -147,6 +148,19 @@ async def queue_reextraction(
     session_factory: async_sessionmaker[AsyncSession], now: datetime
 ) -> int:
     """Queue every announcement of the current term the route rule sends for
-    extraction again, as a model change needs. Returns how many were queued."""
+    extraction again, as a model change needs, trying once more if Postgres
+    aborts it as a deadlock. Returns how many were queued."""
+    try:
+        return await _queue_current_term(session_factory, now)
+    except DBAPIError as exc:
+        if not is_deadlock(exc):
+            raise
+    # A classify tick updates the same rows oldest first while this locks them in id order.
+    return await _queue_current_term(session_factory, now)
+
+
+async def _queue_current_term(
+    session_factory: async_sessionmaker[AsyncSession], now: datetime
+) -> int:
     async with session_scope(session_factory) as session:
         return await queue_extractions(session, await current_term_code(session, now))

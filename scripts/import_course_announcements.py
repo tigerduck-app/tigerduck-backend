@@ -45,7 +45,11 @@ async def main_async(args: argparse.Namespace) -> int:
     session_factory = build_session_factory(engine)
     try:
         if args.reextract:
-            queued = await queue_reextraction(session_factory, datetime.now(UTC))
+            try:
+                queued = await queue_reextraction(session_factory, datetime.now(UTC))
+            except Exception as exc:
+                print(f"! re-extract failed, nothing queued: {type(exc).__name__}")
+                return 1
             print(f"queued for extraction {queued}")
             return 0
         try:

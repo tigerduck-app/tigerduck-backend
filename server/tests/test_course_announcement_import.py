@@ -10,8 +10,10 @@ from datetime import UTC, date, datetime
 import pytest
 import pytest_asyncio
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError
 
 from server.academic_calendar.models import SemesterTerm
+from server.course_announcements import history
 from server.course_announcements.history import (
     ExportRefused,
     import_history,
@@ -258,3 +260,35 @@ async def test_reextract_waits_for_a_newer_version_being_stored(
 
     assert await reextract == 0
     assert await _extractions(db_session) == [("101-901", POSTED, "done")]
+
+
+class _Deadlock(Exception):
+    sqlstate = "40P01"
+
+
+@pytest.mark.parametrize("deadlocks", [1, 2])
+async def test_reextract_tries_once_more_after_a_deadlock(
+    db_session, factory, classifier, term, monkeypatch, deadlocks
+):
+    await import_history(factory, classifier, read_export([CURRENT]))
+    await _finish_extractions(db_session)
+    real, calls = history.queue_extractions, 0
+
+    async def deadlocking(session, current_term):
+        nonlocal calls
+        calls += 1
+        if calls <= deadlocks:
+            await real(session, current_term)
+            raise DBAPIError("INSERT", {}, _Deadlock())
+        return await real(session, current_term)
+
+    monkeypatch.setattr(history, "queue_extractions", deadlocking)
+
+    if deadlocks == 1:
+        assert await queue_reextraction(factory, NOW) == 1
+    else:
+        with pytest.raises(DBAPIError):
+            await queue_reextraction(factory, NOW)
+    assert calls == 2
+    queued = [e for e in await _extractions(db_session) if e[2] == "queued"]
+    assert len(queued) == (1 if deadlocks == 1 else 0)
