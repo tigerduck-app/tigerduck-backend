@@ -21,7 +21,6 @@ from .course_changes import (
     _UNHELD,
     _bad,
     add_change,
-    clashing_change,
     item_body,
     pending_item,
     remove_change,
@@ -34,7 +33,7 @@ PER_PAGE = 10
 EXTRACTION_FILTERS = ("all", "extracted", "failed", "differs")
 _REASON_MAX = 500
 _ITEM_COUNTS = ("pending", "applied", "rejected", "removed", "past", "exams")
-_TERM = "SELECT code, start_date, end_date FROM semester_terms WHERE code = $1"
+_TERM = "SELECT 1 FROM semester_terms WHERE code = $1"
 
 _REVIEW = """
 SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.evidence, i.checks,
@@ -128,17 +127,6 @@ SELECT count(*) AS all, count(done_id) AS extracted,
 FROM listed
 """
 
-# The course codes no student has a schedule for, so no item is made for them.
-_SKIPPED = """
-SELECT code FROM unnest($2::text[]) WITH ORDINALITY AS c(code, n)
-WHERE NOT EXISTS (
-    SELECT 1 FROM term_courses AS t
-    WHERE t.semester = $1 AND t.course_no = c.code
-      AND EXISTS (SELECT 1 FROM course_meetings(t.schedule_json))
-)
-ORDER BY n
-"""
-
 # A version that already has a queued or running extraction keeps it
 # (`ux_course_announcement_extractions_live`).
 _QUEUE = """
@@ -161,7 +149,8 @@ def _labels(row) -> list[dict]:
     )
 
 
-def _item_to_dict(row, existing: int | None) -> dict:
+def _item_to_dict(row) -> dict:
+    checks = json.loads(row["checks"]) if row["checks"] else None
     return {
         "id": row["id"],
         "course_no": row["course_no"],
@@ -169,21 +158,16 @@ def _item_to_dict(row, existing: int | None) -> dict:
         "action": row["action"],
         "payload": json.loads(row["payload"]),
         "evidence": row["evidence"],
-        "checks": json.loads(row["checks"]) if row["checks"] else None,
+        "checks": checks,
         "passes_checks": row["passes_checks"],
-        # The change a replace or remove item acts on, or an add item clashes with.
-        "existing_change_id": existing,
+        # The change a replace or remove item acts on or an item wrote, or
+        # for a pending add, the first it clashed with when extracted.
+        "existing_change_id": (
+            next(iter((checks or {}).get("rules", {}).get("change_ids") or ()), None)
+            if (row["state"], row["action"]) == ("pending", "add")
+            else row["course_change_id"]
+        ),
     }
-
-
-async def _existing(conn, term_row, item) -> int | None:
-    """The change the item acts on or wrote, or for a pending add, the one it
-    clashes with now."""
-    if (item["state"], item["action"], item["kind"]) != ("pending", "add", "course_change"):
-        return item["course_change_id"]
-    if term_row is None:
-        return None
-    return await clashing_change(conn, term_row, item["course_no"], item_body(item))
 
 
 @router.get("/pending")
@@ -200,14 +184,13 @@ async def pending_count(pool=Depends(get_pool)) -> JSONResponse:
 async def list_reviews(term: str, request: Request, pool=Depends(get_pool)) -> JSONResponse:
     """The term's pending items, newest announcement first."""
     async with pool.acquire() as conn:
-        term_row = await conn.fetchrow(_TERM, term)
-        if term_row is None:
+        if not await conn.fetchval(_TERM, term):
             return _bad("term not found", 404)
         rows = await conn.fetch(_REVIEW, term)
         counts = await conn.fetchrow(_REVIEW_COUNTS, term)
         items = [
             {
-                **_item_to_dict(r, await _existing(conn, term_row, r)),
+                **_item_to_dict(r),
                 "announcement_id": r["announcement_id"],
                 "subject": r["subject"],
                 "posted_at": r["posted_at"].isoformat(),
@@ -243,7 +226,7 @@ async def list_announcements(
         return _bad("page must be 1 or more")
     search = q.strip() if q and q.strip() and not _UNHELD.search(q) else None
     async with pool.acquire() as conn:
-        if not await conn.fetchval("SELECT 1 FROM semester_terms WHERE code = $1", term):
+        if not await conn.fetchval(_TERM, term):
             return _bad("term not found", 404)
         counts = await conn.fetchrow(_COUNTS, term, search)
         rows = await conn.fetch(
@@ -298,22 +281,21 @@ async def get_announcement(
             " WHERE announcement_id = $1 AND status = 'done' ORDER BY id DESC LIMIT 1",
             announcement_id,
         )
-        term_row = await conn.fetchrow(_TERM, a["term_code"])
         rows = done and await conn.fetch(
             "SELECT * FROM course_announcement_items WHERE extraction_id = $1 ORDER BY id",
             done["id"],
         )
         items = [
             {
-                **_item_to_dict(r, await _existing(conn, term_row, r)),
+                **_item_to_dict(r),
                 "state": r["state"],
                 "decided_by": r["decided_by"],
                 "decided_at": _iso(r["decided_at"]),
                 "reason": r["reason"],
             }
             for r in rows or ()
+            if r["state"] != "skipped"
         ]
-        skipped = await conn.fetch(_SKIPPED, a["term_code"], a["course_codes"])
         await audit(conn, request, "user.list", count=1)
     discussion = announcement_id.partition("-")[0]
     return JSONResponse(
@@ -342,7 +324,8 @@ async def get_announcement(
             "model": done and done["model"],
             "certain": done and done["certain"],
             "items": items,
-            "skipped_codes": [r["code"] for r in skipped],
+            # The codes no student had a schedule for, so no item was made.
+            "skipped_codes": [r["course_no"] for r in rows or () if r["state"] == "skipped"],
             "moodle_url": (
                 f"{request.app.state.settings.moodle_base_url}/mod/forum/discuss.php?d={discussion}"
             ),

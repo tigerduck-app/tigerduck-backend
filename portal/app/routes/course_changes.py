@@ -244,26 +244,6 @@ def _parse(body: dict, term) -> dict | JSONResponse:
     }
 
 
-async def _broken(conn, term: str, course_no: str, columns: dict | None, change_id: int | None):
-    """The first day each rule is broken on, by code, and the periods Postgres
-    cannot hold. With no `columns`, only whether the course has class times."""
-    periods = columns["periods"] if columns else None
-    # The course has no class in a period Postgres cannot hold, so the function
-    # takes NULL, which no list of periods contains, in its place.
-    unheld = {p for p in periods or () if _UNHELD.search(p)}
-    broken = {}
-    for row in await conn.fetch(
-        _VIOLATIONS,
-        term,
-        course_no,
-        *(columns[f] if columns else None for f in _CANDIDATE),
-        periods and [None if p in unheld else p for p in periods],
-        change_id,
-    ):
-        broken.setdefault(row["code"], row)
-    return broken, unheld
-
-
 async def _check(
     conn, term: str, course_no: str, body: dict, change_id: int | None = None
 ) -> dict | JSONResponse:
@@ -287,9 +267,22 @@ async def _check(
         return _bad("term not found", 404)
     columns = _parse(body, term_row)
     parsed = not isinstance(columns, JSONResponse)
-    # A body that does not parse still asks: a course without class times is
-    # refused before the body's format.
-    broken, unheld = await _broken(conn, term, course_no, columns if parsed else None, change_id)
+    periods = columns["periods"] if parsed else None
+    # The course has no class in a period Postgres cannot hold, so the function
+    # takes NULL, which no list of periods contains, in its place.
+    unheld = {p for p in periods or () if _UNHELD.search(p)}
+    # The first day each rule is broken on. A body that does not parse still
+    # asks: a course without class times is refused before the body's format.
+    broken = {}
+    for row in await conn.fetch(
+        _VIOLATIONS,
+        term,
+        course_no,
+        *(columns[f] if parsed else None for f in _CANDIDATE),
+        periods and [None if p in unheld else p for p in periods],
+        change_id,
+    ):
+        broken.setdefault(row["code"], row)
     if "no_meetings" in broken:
         if change_id is None:
             return _bad(f"no student has {course_no} with class times in {term}", 404)
@@ -326,16 +319,6 @@ async def _check(
             content={"detail": f"{day} already has a {columns['kind']} change", "day": day},
         )
     return columns
-
-
-async def clashing_change(conn, term_row, course_no: str, body: dict) -> int | None:
-    """The change of the term `term_row` that the change `body` describes would
-    clash with, without the lock a write takes."""
-    columns = _parse(body, term_row)
-    if isinstance(columns, JSONResponse):
-        return None
-    clash = (await _broken(conn, term_row["code"], course_no, columns, None))[0].get("clash")
-    return clash and clash["change_id"]
 
 
 def item_body(item) -> dict:

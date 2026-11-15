@@ -50,7 +50,7 @@ export function DetailPanel({
   reextracting: boolean;
 }) {
   const course = detail.course_codes.map((c) => courses.get(c)).find(Boolean);
-  const changeItems = detail.items.filter((i) => i.kind === "course_change" && i.state !== "skipped");
+  const changeItems = detail.items.filter((i) => i.kind === "course_change");
   const unique = (kind: DetailItem["kind"]) => [
     ...new Map(
       detail.items.filter((i) => i.kind === kind).map((i) => [JSON.stringify(i.payload), i.payload]),
@@ -270,7 +270,7 @@ function Extraction({
   onSelect,
 }: {
   detail: Detail;
-  items: DetailItem[];
+  items: Item[];
   course: Course | undefined;
   changes: ReadonlyMap<number, Change>;
   onSelect: (id: string) => void;
@@ -311,8 +311,7 @@ function Extraction({
         <div className="flex flex-col">
           {checks.map((c) => {
             const change = asChange(c.item, detail.term);
-            const existing = c.item.existing_change_id === null ? undefined : changes.get(c.item.existing_change_id);
-            const note = checkNote(c, change, course, existing, detail.labels);
+            const note = checkNote(c, change, course, c.clash === null ? undefined : changes.get(c.clash), detail.labels);
             return (
               <div key={c.code} className="flex min-h-[26px] items-center gap-2 text-[13px]">
                 {c.ok ? (

@@ -170,7 +170,7 @@ async def _extraction(
 
 async def _item(
     db_session, extraction, payload: dict | None = None, *, action: str | None = "add",
-    state: str = "pending", kind: str = "course_change", course_no: str = COURSE,
+    state: str = "pending", kind: str = "course_change", course_no: str | None = COURSE,
     change_id: int | None = None, checks: dict | None = None,
 ) -> CourseAnnouncementItem:
     row = CourseAnnouncementItem(
@@ -537,10 +537,13 @@ async def test_the_review_list_shows_pending_items_with_the_change_each_meets(
     room = await _applied_change(db_session, "room", room="IB-201")
     announcement = await _announcement(db_session)
     extraction = await _extraction(db_session, announcement)
-    clashing = await _item(db_session, extraction, _change("room", room="IB-302"))
+    clashing = await _item(
+        db_session, extraction, _change("room", room="IB-302"),
+        checks={"rules": {"ok": False, "codes": ["clash"], "change_ids": [room]}},
+    )
     replacing = await _item(db_session, extraction, _change("room", day=THU, room="IB-303"),
                             action="replace", change_id=room)
-    unreadable = await _item(db_session, extraction, _change(day="2026-13-45"))
+    unchecked = await _item(db_session, extraction, _change(day=THU))
     await _item(db_session, extraction, state="rejected")
     await db_session.commit()
 
@@ -549,7 +552,7 @@ async def test_the_review_list_shows_pending_items_with_the_change_each_meets(
     body = _body(response)
     assert body["auto_apply"] is False
     existing = {i["id"]: i["existing_change_id"] for i in body["items"]}
-    assert existing == {clashing.id: room, replacing.id: room, unreadable.id: None}
+    assert existing == {clashing.id: room, replacing.id: room, unchecked.id: None}
     assert body["items"][0]["subject"] == "11/17 停課"
     assert (await list_reviews("1150", _request(), pool=pool)).status_code == 404
     assert await _audit(pool) == [("user.list", {"route": "/api/r", "count": 3})]
@@ -594,8 +597,9 @@ async def test_the_detail_shows_the_newest_extraction_and_skipped_codes(term, po
     item = await _item(db_session, done)
     exam = await _item(
         db_session, done, {"kind": "midterm", "date": "2026-11-26"}, action=None,
-        kind="exam", state="info",
+        kind="exam", state="info", course_no=None,
     )
+    await _item(db_session, done, {}, action=None, state="skipped", course_no="CS2001302")
     await _extraction(db_session, announcement, status="failed")
     await db_session.commit()
 

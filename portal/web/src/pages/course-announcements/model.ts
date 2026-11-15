@@ -13,22 +13,30 @@ export type ItemState =
   | "pending" | "applied" | "approved" | "rejected" | "past" | "superseded"
   | "info" | "skipped" | "edited" | "removed";
 export type Action = "add" | "replace" | "remove";
-/** A check code to whether the item passed it. */
-export type Checks = Record<string, boolean | { ok?: boolean; announcement_id?: string }>;
+/** Each check by name. `rules` lists the rules the change breaks and the
+ * changes it clashes with; `contradiction` names the announcement that
+ * contradicts the item. */
+export type Checks = Record<
+  string,
+  { ok: boolean; codes?: string[]; change_ids?: number[]; announcement_id?: string | null }
+>;
 
-export type Item = {
+type ItemFields = {
   id: number;
-  course_no: string;
-  kind: "course_change" | "makeup" | "exam";
   action: Action | null;
   /** A change in `course_changes` column names, or an exam or make-up class. */
   payload: Record<string, unknown>;
   evidence: string | null;
   checks: Checks | null;
   passes_checks: boolean;
-  /** The change a replace or remove acts on, an add clashes with, or an item wrote. */
+  /** The change a replace or remove acts on, a pending add clashed with, or an item wrote. */
   existing_change_id: number | null;
 };
+
+/** A course change item. */
+export type Item = ItemFields & { kind: "course_change"; course_no: string };
+/** An exam or make-up class, which names no course. */
+export type InfoItem = ItemFields & { kind: "makeup" | "exam"; course_no: null };
 
 export type ReviewItem = Item & { announcement_id: string; subject: string; posted_at: string };
 
@@ -64,7 +72,7 @@ export type AnnouncementPage = {
   announcements: Listed[];
 };
 
-export type DetailItem = Item & {
+export type DetailItem = (Item | InfoItem) & {
   state: ItemState;
   decided_by: string | null;
   decided_at: string | null;
@@ -157,11 +165,11 @@ const CHECKS: [string, string, string][] = [
   ["term", "Within term", "Outside term"],
   ["class_day", "Class day", "Not a class day"],
   ["weekday", "Weekday matches date", "Weekday differs"],
-  ["clash", "No existing change", "Existing change"],
+  ["rules", "Change rules", "Breaks a rule"],
   ["labels", "Labels agree", "Labels disagree"],
   ["certain", "Marked certain", "Not certain"],
   ["visibility", "Whole course", "Group post"],
-  ["contradicted", "Not contradicted", "Contradicted"],
+  ["contradiction", "Not contradicted", "Contradicted"],
 ];
 
 export type Check = {
@@ -171,9 +179,9 @@ export type Check = {
   ok: boolean;
   /** The announcement that contradicts the item. */
   by: string | null;
+  /** The change the item clashes with. */
+  clash: number | null;
 };
-
-const passed = (v: Checks[string]) => v === true || (typeof v === "object" && v !== null && v.ok === true);
 
 /** An item's checks in a fixed order, codes this page does not know last. */
 export function checksOf(checks: Checks | null): Check[] {
@@ -185,12 +193,14 @@ export function checksOf(checks: Checks | null): Check[] {
   ];
   return codes.map((code) => {
     const v = checks[code];
+    const clash = v.change_ids?.[0] ?? null;
     return {
       code,
       label: known.get(code)?.label ?? code,
-      failed: known.get(code)?.failed ?? code,
-      ok: passed(v),
-      by: typeof v === "object" && v !== null && typeof v.announcement_id === "string" ? v.announcement_id : null,
+      failed: clash !== null ? "Existing change" : (known.get(code)?.failed ?? code),
+      ok: v.ok === true,
+      by: v.announcement_id ?? null,
+      clash,
     };
   });
 }
@@ -215,7 +225,7 @@ export function checkNote(
   check: Check,
   change: Change | null,
   course: Course | undefined,
-  existing: Change | undefined,
+  clashing: Change | undefined,
   labels: readonly string[],
 ): string {
   if (check.ok || !change) return "";
@@ -227,8 +237,8 @@ export function checkNote(
       return day ? `${shortDate(day)} is a ${LONG_WEEKDAY(day)}` : "";
     case "labels":
       return [labels.join(", "), KIND[change.kind]?.label.toLowerCase()].filter(Boolean).join(" · ");
-    case "clash":
-      return existing ? `${KIND[existing.kind].label} · ${dateText(existing)}` : "";
+    case "rules":
+      return clashing ? `${KIND[clashing.kind].label} · ${dateText(clashing)}` : "";
     default:
       return "";
   }
