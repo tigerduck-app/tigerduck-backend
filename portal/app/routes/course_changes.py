@@ -5,13 +5,15 @@ notes for one course in a term (tigerduck-backend#177), in `course_changes`
 A change covers one class day, or every class day of a range but the ISO
 weekdays it leaves out. A class day is a day of the term, not a holiday, on
 which the course meets by its `user_courses.schedule_json`; the database's
-`course_class_days` (server/academic_calendar/models.py) works them out.
+`course_class_days` (server/academic_calendar/models.py) works them out, and its
+`course_change_violations` checks a change against the course's class times and
+its other changes.
 """
 from __future__ import annotations
 
 import json
 import re
-from datetime import date, timedelta
+from datetime import date
 
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse
@@ -30,17 +32,17 @@ _FIELDS = (
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _ROOM_MAX = 128
+# What Postgres text cannot hold: a NUL, or a lone surrogate, which UTF-8 cannot encode.
+_UNHELD = re.compile(r"[\x00\ud800-\udfff]")
 
 # The term's enrolled rows with a course number, as the class reminder scan reads
-# them, and each course's row: a school row first, then the latest, as the page,
-# the apps' feed and the class pushes take it (server/academic_calendar/changes.py).
+# them, and each course's row (`term_courses`, server/academic_calendar/models.py).
 _LATEST = """
 WITH taken AS (
     SELECT * FROM user_courses
     WHERE semester = $1 AND course_no IS NOT NULL AND enrollment_status = 'enrolled'
 ), latest AS (
-    SELECT DISTINCT ON (course_no) * FROM taken
-    ORDER BY course_no, (source = 'ntust_portal') DESC, updated_at DESC
+    SELECT * FROM term_courses WHERE semester = $1
 )
 """
 
@@ -77,11 +79,23 @@ LEFT JOIN latest l USING (course_no)
 WHERE c.term_code = $1
 """
 
-_SCHEDULE = _LATEST + "SELECT schedule_json FROM latest WHERE course_no = $2"
+# The candidate's columns in the order course_change_violations takes them,
+# up to its periods.
+_CANDIDATE = ("kind", "mode", "start_date", "end_date", "excluded_weekdays")
+_VIOLATIONS = (
+    "SELECT * FROM course_change_violations($1, $2, $3, $4, $5, $6, $7, $8, $9) ORDER BY day"
+)
+
+
+class _Refusal(JSONResponse):
+    # ASCII JSON, as for the backend's 422 (server/main.py): a lone surrogate
+    # a request's JSON carried would fail to encode as UTF-8.
+    def render(self, content) -> bytes:
+        return json.dumps(content).encode()
 
 
 def _bad(detail: str, status: int = 400) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"detail": detail})
+    return _Refusal(status_code=status, content={"detail": detail})
 
 
 def _period_key(period: str) -> tuple:
@@ -89,22 +103,6 @@ def _period_key(period: str) -> tuple:
     # digits such as "\u00b2" that int() rejects.
     numeric = period.isascii() and period.isdigit()
     return (not numeric, int(period) if numeric else 0, period)
-
-
-# NTUST's period order; periods next to each other in it make one meeting, as in the apps.
-_ORDER = (*(str(n) for n in range(1, 11)), "A", "B", "C", "D")
-
-
-def _meetings(periods) -> list[list[str]]:
-    """A day's periods as its meetings: runs of periods back to back in `_ORDER`."""
-    runs: list[list[str]] = []
-    for period in sorted(periods, key=_period_key):
-        last = runs[-1][-1] if runs else None
-        if last in _ORDER and period in _ORDER and _ORDER.index(period) == _ORDER.index(last) + 1:
-            runs[-1].append(period)
-        else:
-            runs.append([period])
-    return runs
 
 
 def _change_to_dict(r) -> dict:
@@ -224,25 +222,6 @@ def _parse(body: dict, term) -> dict | JSONResponse:
     }
 
 
-async def _class_days(conn, term: str, schedule, columns: dict) -> list[date]:
-    return await conn.fetchval(
-        "SELECT course_class_days($1, $2::jsonb, $3, $4, $5, NULL)",
-        term,
-        schedule,
-        columns["start_date"],
-        columns["end_date"],
-        columns["excluded_weekdays"],
-    )
-
-
-def _meeting_days(term_row, meets: dict, first: date, last: date, excluded) -> list[date]:
-    """The term's days from `first` to `last` the course meets on, holidays
-    too: the apps apply a change on a holiday the user put back."""
-    first, last = max(first, term_row["start_date"]), min(last, term_row["end_date"])
-    days = (first + timedelta(days=n) for n in range((last - first).days + 1))
-    return [d for d in days if d.isoweekday() in meets and d.isoweekday() not in excluded]
-
-
 async def _check(
     conn, term: str, course_no: str, body: dict, change_id: int | None = None
 ) -> dict | JSONResponse:
@@ -264,12 +243,25 @@ async def _check(
     )
     if term_row is None:
         return _bad("term not found", 404)
-    schedule = await conn.fetchval(_SCHEDULE, term, course_no)
-    meets = {
-        r["weekday"]: set(r["periods"])
-        for r in await conn.fetch("SELECT * FROM course_meetings($1::jsonb)", schedule)
-    }
-    if not meets:
+    columns = _parse(body, term_row)
+    parsed = not isinstance(columns, JSONResponse)
+    periods = columns["periods"] if parsed else None
+    # The course has no class in a period Postgres cannot hold, so the function
+    # takes NULL, which no list of periods contains, in its place.
+    unheld = {p for p in periods or () if _UNHELD.search(p)}
+    # The first day each rule is broken on. A body that does not parse still
+    # asks: a course without class times is refused before the body's format.
+    broken = {}
+    for row in await conn.fetch(
+        _VIOLATIONS,
+        term,
+        course_no,
+        *(columns[f] if parsed else None for f in _CANDIDATE),
+        periods and [None if p in unheld else p for p in periods],
+        change_id,
+    ):
+        broken.setdefault(row["code"], row)
+    if "no_meetings" in broken:
         if change_id is None:
             return _bad(f"no student has {course_no} with class times in {term}", 404)
         return _bad(
@@ -277,65 +269,29 @@ async def _check(
             " so the change can only be deleted",
             409,
         )
-    columns = _parse(body, term_row)
-    if isinstance(columns, JSONResponse):
+    if not parsed:
         return columns
-    if not await _class_days(conn, term, schedule, columns):
-        first = columns["start_date"]
+    first = columns["start_date"]
+    if "no_class_day" in broken:
         if columns["mode"] == "range":
             return _bad("the range covers no class day of the course")
-        if await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM academic_holidays"
-            " WHERE $1 BETWEEN start_date AND end_date)",
-            first,
-        ):
-            return _bad(f"{first} is a holiday")
         return _bad(f"the course has no class on {first}")
-    days = _meeting_days(
-        term_row, meets, columns["start_date"], columns["end_date"], columns["excluded_weekdays"]
-    )
-    for day in days:
-        if missing := set(columns["periods"] or ()) - meets[day.isoweekday()]:
-            listed = ", ".join(sorted(missing, key=_period_key))
-            return _bad(f"the course has no class in period {listed} on {day}")
+    if "holiday" in broken:
+        return _bad(f"{first} is a holiday")
+    if missing := broken.get("missing_periods"):
+        listed = ", ".join(sorted((set(missing["periods"]) - {None}) | unheld, key=_period_key))
+        return _bad(f"the course has no class in period {listed} on {missing['day']}")
     # A new start or end is one meeting's, so the apps and pushes know which.
-    if columns["kind"] in ("start", "end"):
-        for day in days:
-            meetings = _meetings(meets[day.isoweekday()])
-            if columns["periods"] is None and len(meetings) > 1:
-                return _bad(
-                    f"the course meets more than once on {day};"
-                    f" a {columns['kind']} change needs the periods of one meeting"
-                )
-            if columns["periods"] is not None and columns["periods"] not in meetings:
-                listed = ", ".join(columns["periods"])
-                return _bad(f"period {listed} is not one meeting of the course on {day}")
-    # An exam and a make-up class can share a day; two values of another kind cannot.
-    if columns["kind"] == "note":
-        return columns
-    periods = set(columns["periods"] or ())
-    others = await conn.fetch(
-        "SELECT periods, start_date, end_date, excluded_weekdays FROM course_changes"
-        " WHERE term_code = $1 AND course_no = $2 AND kind = $3"
-        " AND id IS DISTINCT FROM $4",
-        term,
-        course_no,
-        columns["kind"],
-        change_id,
-    )
-    # Changes of a kind clash on a shared class day unless both name periods
-    # and none in common: a course can meet twice a day.
-    clashes = [
-        day
-        for other in others
-        if not (periods and other["periods"] and periods.isdisjoint(other["periods"]))
-        for day in _meeting_days(
-            term_row, meets, other["start_date"], other["end_date"], other["excluded_weekdays"]
+    if several := broken.get("several_meetings"):
+        return _bad(
+            f"the course meets more than once on {several['day']};"
+            f" a {columns['kind']} change needs the periods of one meeting"
         )
-        if day in days and set(other["periods"] or ()) <= meets[day.isoweekday()]
-    ]
-    if clashes:
-        day = min(clashes).isoformat()
+    if split := broken.get("not_one_meeting"):
+        listed = ", ".join(columns["periods"])
+        return _bad(f"period {listed} is not one meeting of the course on {split['day']}")
+    if clash := broken.get("clash"):
+        day = clash["day"].isoformat()
         return JSONResponse(
             status_code=409,
             content={"detail": f"{day} already has a {columns['kind']} change", "day": day},

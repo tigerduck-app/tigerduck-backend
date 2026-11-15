@@ -120,13 +120,13 @@ SELECT coalesce(
 """
 
 # A course's takers are its enrolled rows in the term, as the class reminder
-# scan reads them; its name comes from a school row first, then the latest.
+# scan reads them; its name is its row's in `term_courses`
+# (server/academic_calendar/models.py).
 _TAKES = (
     "semester = ${term} AND course_no = ${code} AND enrollment_status = 'enrolled'"
 )
 _COURSE = f"""
-SELECT (array_agg(course_name ORDER BY (source = 'ntust_portal') DESC,
-                  updated_at DESC))[1] AS name,
+SELECT (SELECT course_name FROM term_courses WHERE semester = $1 AND course_no = $2) AS name,
        count(DISTINCT user_id) AS students
 FROM user_courses WHERE {_TAKES.format(term=1, code=2)}
 """
