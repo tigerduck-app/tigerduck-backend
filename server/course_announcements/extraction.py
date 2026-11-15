@@ -18,6 +18,7 @@ from server.academic_calendar.terms import SCHOOL_TZ
 from server.bulletins.llm.base import LLMError
 from server.bulletins.llm.openai_compat import OpenAICompatibleClient, parse_json_object
 from server.course_announcements.checks import ZH_WEEKDAYS
+from server.db import storable_text
 
 RULES = """# 課程公告抽取規則
 
@@ -192,9 +193,10 @@ async def extract(
 
 
 def parse_extraction(content: str) -> dict[str, Any]:
-    """The answer, if it conforms to `SCHEMA` and its dates exist. A server
-    that does not enforce the schema can answer anything."""
-    answer = parse_json_object(content)
+    """The answer, if it conforms to `SCHEMA` and its dates exist, with
+    every string storable. A server that does not enforce the schema can
+    answer anything."""
+    answer = _storable(parse_json_object(content))
     if not _conforms(answer, SCHEMA) or not all(
         _is_day(fact[field])
         for key, field in (
@@ -209,6 +211,16 @@ def parse_extraction(content: str) -> dict[str, Any]:
     ):
         raise LLMError("invalid_answer")
     return answer
+
+
+def _storable(value: Any) -> Any:
+    if isinstance(value, str):
+        return storable_text(value)
+    if isinstance(value, list):
+        return [_storable(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _storable(item) for key, item in value.items()}
+    return value
 
 
 def _is_day(value: str) -> bool:

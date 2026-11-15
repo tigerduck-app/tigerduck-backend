@@ -4,6 +4,7 @@ invented."""
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -361,6 +362,38 @@ async def test_a_slow_failure_still_waits_its_ticks_after_it_failed(
     await run_extraction_tick(make_extractor(_SlowLLM(clock, timedelta(minutes=6))))
     (extraction,) = await _extractions(db_session)
     assert extraction.next_attempt_at == started + timedelta(minutes=6 + 3)
+
+
+async def test_text_a_column_cannot_hold_is_dropped_from_the_answer(
+    db_session, factory, make_extractor
+):
+    await _queued(factory)
+    makeup = {
+        "date": "2026-11-21",
+        "start_time": None,
+        "end_time": None,
+        "periods": None,
+        "room": "IB-302\x00",
+        "evidence": "11/19（四）停課\ud800",
+    }
+    answer = extraction_answer(
+        labels=["class_cancel"],
+        course_changes=[extracted_change(evidence="11/19（四）\x00停課")],
+        makeup_classes=[makeup],
+    )
+
+    # Escaped, as a server sends them: a NUL and a lone surrogate.
+    await run_extraction_tick(make_extractor(ScriptedLLM(json.dumps(answer))))
+
+    (extraction,) = await _extractions(db_session)
+    assert extraction.status == "done"
+    assert extraction.raw_output["course_changes"][0]["evidence"] == "11/19（四）停課"
+    item = (
+        await db_session.scalars(
+            select(CourseAnnouncementItem).where(CourseAnnouncementItem.kind == "makeup")
+        )
+    ).one()
+    assert (item.payload["room"], item.evidence) == ("IB-302", "11/19（四）停課")
 
 
 async def test_an_answer_that_fails_the_schema_logs_and_stores_a_code_alone(
