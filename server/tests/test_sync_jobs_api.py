@@ -11,6 +11,7 @@ from sqlalchemy import select, text, update
 from server.auth.models import UserDevice
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier
 from server.db import build_session_factory
+from server.metrics import observe_sync_moodle_request
 from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, _claim_due_job
 from server.syncjobs.models import SyncJob
@@ -95,7 +96,10 @@ def _claimer(client) -> SyncWorker:
         fetcher=None,
         course_fetcher=None,
         worker_id="test-worker",
-        budget=RequestBudget(client.app.state.settings.sync_job_requests_per_minute),
+        budget=RequestBudget(
+            client.app.state.settings.sync_job_requests_per_minute,
+            observe=observe_sync_moodle_request,
+        ),
     )
 
 

@@ -22,6 +22,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.course_announcements.poller import build_poller, run_poll_tick
 from server.course_catalog.refresh import refresh_course_catalog
 from server.links.checker import run_link_checks
 from server.metrics import instrument_scheduler
@@ -77,6 +78,10 @@ def build_scheduler(
       04:00 Taipei.
     * `sync_jobs_tick` — server-side academic sync executor every 30s
       (only when a `sync_worker` is provided, i.e. credential keys exist).
+    * `course_announcement_poll` — poll the course news forums that are due
+      and classify what is stored, every minute (only with a `sync_worker`,
+      whose tokens and budget it shares, and an
+      `announcement_classifier_url`).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
     * `session_reauth_scan` — ask devices left without a session to sign in
@@ -206,6 +211,20 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=30,
         )
+        if settings.announcement_classifier_url:
+            poller = build_poller(settings, sync_worker)
+
+            async def course_announcement_poll() -> None:
+                await run_poll_tick(poller)
+
+            scheduler.add_job(
+                course_announcement_poll,
+                trigger=IntervalTrigger(minutes=1),
+                id="course_announcement_poll",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
     if push_worker is not None:
 
         async def push_pipeline_tick() -> None:

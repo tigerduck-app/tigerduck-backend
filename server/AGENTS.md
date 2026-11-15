@@ -52,6 +52,9 @@ server/
 │                              #   prunes the sync log and finished runs
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
+├── course_announcements/      # first posts of Moodle course news forums: models,
+│                              #   the classifier service client, ingest (store,
+│                              #   classify, route to the LLM) and the poll job
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
@@ -349,6 +352,33 @@ into the backend container via `docker-compose.yml`.
   `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
   pauses the whole worker for `sync_job_backoff_base_seconds`. The push
   pipeline's pre-send check has a fetcher of its own, outside the budget.
+- Course announcements take three settings: `announcement_classifier_url`
+  (the host's classifier service, `deploy/launchd/ai.tigerduck.classifier.plist`;
+  empty turns them off), `course_announcement_requests_per_minute` (20, Moodle
+  requests on a budget of their own beside the sync worker's) and
+  `course_announcements_auto_apply` (false, read at start: a change that passes
+  every check still waits for review in the portal).
+- The `course_announcement_poll` job runs every minute when the classifier URL
+  and credential keys are set (`course_announcements/poller.py`). It polls the
+  news forums of the current term's Moodle courses in `user_moodle_courses`,
+  which every `moodle_assignments` run refreshes from the course list it already
+  fetches, that have an eligible holder: enrolled, an active credential and a
+  device `has_syncing_device` accepts. Never-polled courses go first, then the
+  longest overdue, as many as its budget allows; a course is due again 15
+  minutes, 3 hours, 12 hours or a day after a poll, by the age of its latest
+  post. It sends nothing while `is_moodle_available` says no or either budget
+  is paused, and a 429 pauses both, since they share one Moodle limit. A
+  rejected token, refused course or unseen news forum moves the course to the
+  next holder, polled 15 minutes later until every holder has failed once
+  since a poll that read the forum, then after its usual interval; Moodle
+  failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
+  invalid. Each tick then classifies what is
+  stored (`ingest.classify_pending`); a version the service gives no result
+  for waits an hour and goes after the others.
+- Course announcement text may name students: it stays in the
+  `course_announcements` tables and the portal, never in a log line, an
+  exception, an error column or an app-facing response. Errors carry fixed
+  codes, and tests use invented announcements only.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for

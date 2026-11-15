@@ -29,7 +29,10 @@ const GROUPS: [string, string[]][] = [
   ["Bulletins", ["user_bulletin_states", "user_bulletin_subscriptions"]],
   ["Push", ["push_jobs", "device_push_tokens"]],
   ["Assignments", ["user_assignments", "user_assignment_overrides"]],
-  ["Courses", ["user_courses", "user_course_overrides", "user_course_skipped_dates"]],
+  [
+    "Courses",
+    ["user_courses", "user_course_overrides", "user_course_skipped_dates", "user_moodle_courses"],
+  ],
   ["Sessions", ["auth_sessions"]],
   [
     "Settings and school account",
