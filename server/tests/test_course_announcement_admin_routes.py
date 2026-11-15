@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from server.academic_calendar.models import SemesterTerm
 from server.admin_audit import AdminAuditLog
+from server.course_announcements.ingest import queue_extractions
 from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementExtraction,
@@ -25,7 +26,7 @@ POSTED = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
 
 async def _seed(client: AsyncClient) -> None:
     """Terms 1151, current, and 1142, with a sent, a not-sent, an
-    unclassified and an earlier term's announcement."""
+    unclassified and an earlier term's sent announcement."""
     async with client.app.state.session_factory() as session:
         session.add_all(
             [
@@ -75,31 +76,34 @@ async def _audit(client: AsyncClient) -> list[tuple[str, str, dict]]:
         return [(r.actor, r.action, r.detail) for r in rows]
 
 
-async def test_queues_a_current_term_announcement_once(admin_client) -> None:
+@pytest.mark.parametrize("key", ["101-901", "102-902", "104-904"])
+async def test_queues_a_classified_announcement_of_any_route_or_term_once(
+    admin_client, key
+) -> None:
     await _seed(admin_client)
 
-    first = await admin_client.post("/admin/course-announcements/101-901/extract", headers=ACTOR)
-    again = await admin_client.post("/admin/course-announcements/101-901/extract", headers=ACTOR)
+    first = await admin_client.post(f"/admin/course-announcements/{key}/extract", headers=ACTOR)
+    again = await admin_client.post(f"/admin/course-announcements/{key}/extract", headers=ACTOR)
 
     assert first.status_code == 200
     assert again.status_code == 409
     assert again.json()["detail"] == "an extraction of this version is already waiting"
-    assert await _queued(admin_client) == [("101-901", POSTED, "queued")]
+    assert await _queued(admin_client) == [(key, POSTED, "queued")]
     assert await _audit(admin_client) == [
-        ("ops@example.com", "course_announcement.reextract", {"announcement_id": "101-901"})
+        ("ops@example.com", "course_announcement.reextract", {"announcement_id": key})
     ]
 
 
 @pytest.mark.parametrize(
     ("key", "code", "detail"),
     [
-        ("102-902", 409, "the announcement is not sent for extraction"),
-        ("103-903", 409, "the announcement is not sent for extraction"),
-        ("104-904", 409, "the announcement is not of the current term"),
+        ("103-903", 409, "the announcement is not classified yet"),
         ("1-1", 404, "announcement not found"),
     ],
 )
-async def test_refuses_what_the_route_rule_does_not_send(admin_client, key, code, detail) -> None:
+async def test_refuses_an_unclassified_or_missing_announcement(
+    admin_client, key, code, detail
+) -> None:
     await _seed(admin_client)
 
     resp = await admin_client.post(f"/admin/course-announcements/{key}/extract", headers=ACTOR)
@@ -107,6 +111,16 @@ async def test_refuses_what_the_route_rule_does_not_send(admin_client, key, code
     assert (resp.status_code, resp.json()["detail"]) == (code, detail)
     assert await _queued(admin_client) == []
     assert await _audit(admin_client) == []
+
+
+async def test_the_poll_still_queues_only_what_the_route_rule_sends(admin_client) -> None:
+    await _seed(admin_client)
+
+    async with admin_client.app.state.session_factory() as session:
+        assert await queue_extractions(session, "1151") == 1
+        await session.commit()
+
+    assert await _queued(admin_client) == [("101-901", POSTED, "queued")]
 
 
 async def test_needs_the_operator(admin_client) -> None:

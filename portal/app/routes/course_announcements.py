@@ -409,8 +409,8 @@ async def reject_item(
 
 @router.post("/announcements/{announcement_id}/reextract")
 async def reextract(announcement_id: str, request: Request) -> JSONResponse:
-    """Queues the stored version for extraction again, through the backend's
-    admin listener, which queues it as the poller does."""
+    """Queues the stored version of a classified announcement for extraction
+    again, whatever its term or route, through the backend's admin listener."""
     if not _ANNOUNCEMENT_ID.fullmatch(announcement_id):
         return _bad("announcement not found", 404)
     return await forward_to_backend(

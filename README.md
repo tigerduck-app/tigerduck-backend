@@ -360,7 +360,7 @@ TIGERDUCK_LLM_MODEL=qwen3.5-9b
 | `POST` | `/admin/links` | 新增轉址連結（只在 admin port） | shared secret |
 | `PATCH` | `/admin/links/{name}` | 修改、啟用或停用轉址連結（只在 admin port） | shared secret |
 | `POST` | `/admin/links/{name}/test` | 立刻檢查轉址連結（只在 admin port） | shared secret |
-| `POST` | `/admin/course-announcements/{id}/extract` | 把本學期的一則課程公告重新排入抽取（只在 admin port，portal 呼叫） | shared secret |
+| `POST` | `/admin/course-announcements/{id}/extract` | 把一則已分類的課程公告（不限學期與路由）重新排入抽取（只在 admin port，portal 呼叫） | shared secret |
 | `POST`/`PUT` | `/tls-pins/*` | TLS pin 的增刪、監看主機、到期日、auto_publish、立即發布或重簽（只在 admin port，portal 呼叫） | shared secret |
 
 ### 基礎

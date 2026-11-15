@@ -290,13 +290,22 @@ async def _store_classification(
 
 
 async def queue_extractions(
-    session: AsyncSession, term: str | None, *where: sa.ColumnElement[bool]
+    session: AsyncSession,
+    term: str | None,
+    *where: sa.ColumnElement[bool],
+    any_route: bool = False,
 ) -> int:
     """Queue an extraction of the stored version of each announcement of
-    `term` that `where` picks and the route rule sends, unless one is queued
-    or running already. Returns how many were queued."""
+    `term` that `where` picks and the route rule sends, or with `any_route`
+    each classified one, as an operator's re-extract overrides the rule,
+    unless one is queued or running already. Returns how many were queued."""
     if term is None:
         return 0
+    routed = (
+        CourseAnnouncement.route != AnnouncementRoute.unclassified.value
+        if any_route
+        else CourseAnnouncement.route == AnnouncementRoute.sent.value
+    )
     queued = await session.scalars(
         pg_insert(CourseAnnouncementExtraction)
         .from_select(
@@ -304,7 +313,7 @@ async def queue_extractions(
             select(CourseAnnouncement.id, CourseAnnouncement.modified_at)
             .where(
                 CourseAnnouncement.term_code == term,
-                CourseAnnouncement.route == AnnouncementRoute.sent.value,
+                routed,
                 *where,
             )
             # Waits for a store of a newer version to commit, then reads that
