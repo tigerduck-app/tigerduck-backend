@@ -4,7 +4,8 @@ calendar leaves it.
 
 The portal writes the changes (portal/app/routes/course_changes.py) and reads
 them with the same rule; the portal image cannot import `server`, so both
-work the class days out in the database, with `course_class_days`.
+take a course from `term_courses` and work the class days out with
+`course_class_days`, in the database.
 """
 
 from __future__ import annotations
@@ -18,17 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.models import CourseChange
 
-# A course's schedule is its latest enrolled row's in the term, a school row
-# first, as the portal's `_LATEST` reads it.
 _CHANGES = text(
     """
 WITH latest AS (
-    SELECT DISTINCT ON (semester, course_no) semester, course_no, schedule_json
-    FROM user_courses
-    WHERE semester = ANY(:terms) AND course_no IS NOT NULL
+    SELECT semester, course_no, schedule_json FROM term_courses
+    WHERE semester = ANY(:terms)
       AND (CAST(:course_no AS text) IS NULL OR course_no = :course_no)
-      AND enrollment_status = 'enrolled'
-    ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
 )
 SELECT c.*, course_class_days(c.term_code, l.schedule_json, c.start_date,
                               c.end_date, c.excluded_weekdays, c.periods) AS class_days,
