@@ -26,7 +26,7 @@ from pathlib import Path
 import certifi
 import httpx
 import structlog
-from sqlalchemy import delete, select, update
+from sqlalchemy import ColumnElement, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins.dedup import (
@@ -206,6 +206,16 @@ async def _mark_stale_deleted(
     return result.rowcount or 0
 
 
+def claimable_bulletins(max_attempts: int) -> tuple[ColumnElement[bool], ...]:
+    """The bulletins `claim_pending_bulletins` takes: pending, under the
+    attempt limit and not deleted."""
+    return (
+        Bulletin.processing_state == BulletinProcessingState.pending.value,
+        Bulletin.processing_attempts < max_attempts,
+        Bulletin.is_deleted.is_(False),
+    )
+
+
 async def claim_pending_bulletins(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -230,12 +240,7 @@ async def claim_pending_bulletins(
         claim_ids = (
             await session.execute(
                 select(Bulletin.id)
-                .where(
-                    Bulletin.processing_state
-                    == BulletinProcessingState.pending.value,
-                    Bulletin.processing_attempts < max_attempts,
-                    Bulletin.is_deleted.is_(False),
-                )
+                .where(*claimable_bulletins(max_attempts))
                 .order_by(Bulletin.id)
                 .limit(limit)
                 .with_for_update(skip_locked=True)

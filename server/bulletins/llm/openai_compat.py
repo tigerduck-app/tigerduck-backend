@@ -16,7 +16,7 @@ import json
 import re
 import time
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -31,6 +31,7 @@ from server.bulletins.llm.prompts import (
     build_user_prompt,
 )
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag, Importance
+from server.config import Settings
 from server.metrics import observe_llm_request
 
 logger = structlog.get_logger(__name__)
@@ -81,6 +82,10 @@ class OpenAICompatibleClient:
             headers={"User-Agent": "TigerDuckBot/0.1"},
         )
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def complete_json(
         self,
         *,
@@ -88,11 +93,14 @@ class OpenAICompatibleClient:
         schema_name: str,
         schema: dict[str, Any],
         parse: Callable[[str], Any] | None = None,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> Any:
         """The answer to `messages` under `schema`, as `parse` reads it from
         the message content: the JSON object by default. `parse` raises
-        `LLMError` for an answer to retry."""
+        `LLMError` for an answer to retry. `extra_body` adds request fields
+        the server reads beyond the standard ones."""
         payload: dict[str, Any] = {
+            **(extra_body or {}),
             "model": self._model,
             "temperature": self._temperature,
             "response_format": {
@@ -223,6 +231,19 @@ class OpenAICompatibleProvider:
 
     async def close(self) -> None:
         await self._llm.close()
+
+
+def llm_options(settings: Settings) -> dict[str, Any]:
+    """The client's arguments from the LLM settings, which bulletins and
+    course announcements share."""
+    return {
+        "base_url": settings.llm_base_url,
+        "api_key": settings.llm_api_key,
+        "model": settings.llm_model,
+        "timeout_seconds": settings.llm_timeout_seconds,
+        "max_retries": settings.llm_max_retries,
+        "temperature": settings.llm_temperature,
+    }
 
 
 def _backoff_seconds(attempt: int) -> float:

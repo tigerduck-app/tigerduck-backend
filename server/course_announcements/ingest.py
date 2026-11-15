@@ -27,8 +27,10 @@ from server.course_announcements.classifier import (
     ClassifierError,
     Post,
 )
+from server.course_announcements.items import refresh_contradictions
 from server.course_announcements.models import (
     EXTRACTION_LIVE_WHERE,
+    SUPERSEDABLE_ITEM_STATES,
     AnnouncementRoute,
     CourseAnnouncement,
     CourseAnnouncementExtraction,
@@ -142,12 +144,14 @@ async def store_announcements(
         stored += (await session.scalars(upsert)).all()
     if stored:
         await _retire_older_versions(session, stored)
+        await refresh_contradictions(session, term_code, course_codes)
     return stored
 
 
 async def _retire_older_versions(session: AsyncSession, ids: Sequence[str]) -> None:
-    """Supersede the unfinished extractions and pending items of every
-    version before the stored one, whatever the stored one's route."""
+    """Supersede the unfinished extractions and the pending and informational
+    items of every version before the stored one, whatever the stored one's
+    route."""
     older = (
         select(CourseAnnouncementExtraction.id)
         .join(
@@ -163,7 +167,7 @@ async def _retire_older_versions(session: AsyncSession, ids: Sequence[str]) -> N
         update(CourseAnnouncementItem)
         .where(
             CourseAnnouncementItem.extraction_id.in_(older),
-            CourseAnnouncementItem.state == ItemState.pending.value,
+            CourseAnnouncementItem.state.in_(SUPERSEDABLE_ITEM_STATES),
         )
         .values(state=ItemState.superseded.value)
     )

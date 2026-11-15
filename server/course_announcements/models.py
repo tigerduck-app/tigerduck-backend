@@ -70,6 +70,9 @@ class ItemState(StrEnum):
     removed = "removed"
 
 
+SUPERSEDABLE_ITEM_STATES = (ItemState.pending.value, ItemState.info.value)
+
+
 # The predicate of `ux_course_announcement_extractions_live`, as SQL text for
 # an ON CONFLICT to repeat (server/AGENTS.md on partial unique indexes).
 EXTRACTION_LIVE_WHERE = "status IN ('queued', 'running')"
