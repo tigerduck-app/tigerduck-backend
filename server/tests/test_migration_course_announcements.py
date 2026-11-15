@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.tests.conftest import _alembic
@@ -82,9 +83,10 @@ async def test_upgrade_builds_the_tables_the_models_declare(
 async def test_one_unfinished_extraction_per_version(db_session) -> None:
     await db_session.execute(
         text(
-            "INSERT INTO course_announcements (id, term_code, moodle_course_id, subject,"
-            " posted_at, modified_at, group_id, has_attachment)"
-            " VALUES ('1-2', '1151', 7, 'Invented', now(), now(), -1, false)"
+            "INSERT INTO course_announcements (id, term_code, moodle_course_id, raw_subject,"
+            " raw_message, subject, posted_at, modified_at, group_id, has_attachment)"
+            " VALUES ('1-2', '1151', 7, 'Invented', '<p>Invented</p>', 'Invented', now(),"
+            " now(), -1, false)"
         )
     )
     version = await db_session.scalar(
@@ -100,4 +102,26 @@ async def test_one_unfinished_extraction_per_version(db_session) -> None:
     assert await db_session.scalar(insert, {"version": version, "status": "queued"}) is None
     assert await db_session.scalar(insert, {"version": version, "status": "done"})
     assert await db_session.scalar(insert, {"version": version, "status": "failed"})
+    await db_session.rollback()
+
+
+async def test_an_announcement_keeps_its_raw_post_exactly_while_unclassified(db_session) -> None:
+    insert = text(
+        "INSERT INTO course_announcements (id, term_code, moodle_course_id, raw_subject,"
+        " raw_message, subject, text, scores, labels, route, posted_at, modified_at,"
+        " group_id, has_attachment)"
+        " VALUES ('1-2', '1151', 7, :raw, :raw, 'Invented', :text, CAST(:scores AS jsonb),"
+        " :labels, :route, now(), now(), -1, false)"
+    )
+    classified = {"text": "Invented", "scores": "{}", "labels": []}
+    refused = [
+        {"raw": None, "route": "unclassified", "text": None, "scores": None, "labels": None},
+        {"raw": "<p>Invented</p>", "route": "sent", **classified},
+        {"raw": None, "route": "not_sent", **classified, "text": None},
+    ]
+    for values in refused:
+        with pytest.raises(IntegrityError):
+            async with db_session.begin_nested():
+                await db_session.execute(insert, values)
+    await db_session.execute(insert, {"raw": None, "route": "sent", **classified})
     await db_session.rollback()

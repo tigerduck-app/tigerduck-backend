@@ -122,8 +122,10 @@ def upgrade() -> None:
             name="chk_course_announcement_route",
         ),
         sa.CheckConstraint(
-            "route = 'unclassified' OR (raw_subject IS NULL AND raw_message IS NULL"
-            " AND text IS NOT NULL AND scores IS NOT NULL AND labels IS NOT NULL)",
+            "CASE WHEN route = 'unclassified'"
+            " THEN raw_subject IS NOT NULL AND raw_message IS NOT NULL"
+            " ELSE raw_subject IS NULL AND raw_message IS NULL"
+            " AND text IS NOT NULL AND scores IS NOT NULL AND labels IS NOT NULL END",
             name="chk_course_announcement_classified",
         ),
         if_not_exists=True,
