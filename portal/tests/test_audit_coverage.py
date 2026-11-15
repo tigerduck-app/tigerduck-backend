@@ -31,6 +31,9 @@ BACKEND_AUDITED_WRITES = {
 # devices (user.list).
 PERSONAL_READS = {
     ("audit.py", "list_audit"),
+    ("course_announcements.py", "get_announcement"),
+    ("course_announcements.py", "list_announcements"),
+    ("course_announcements.py", "list_reviews"),
     ("deregister.py", "lookup_students"),
     ("deregister.py", "preview_student"),
     ("device_lists.py", "list_members"),
@@ -52,6 +55,7 @@ OTHER_READS = {
     ("announcement.py", "get_bulletin"),
     ("announcement.py", "list_bulletins"),
     ("announcement.py", "taxonomy"),
+    ("course_announcements.py", "pending_count"),
     ("course_changes.py", "list_changes"),
     ("course_changes.py", "list_courses"),
     ("custom_push.py", "recent"),

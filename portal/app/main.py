@@ -34,6 +34,7 @@ from .routes import (
     announcement,
     audit,
     backup,
+    course_announcements,
     course_changes,
     custom_push,
     deregister,
@@ -93,6 +94,7 @@ if (_WEB_DIST / "assets").exists():
 
 app.include_router(academic_calendar.router)
 app.include_router(course_changes.router)
+app.include_router(course_announcements.router)
 app.include_router(status.router)
 app.include_router(status.liveness_router)
 app.include_router(logs.router)
