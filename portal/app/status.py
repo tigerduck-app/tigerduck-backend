@@ -50,7 +50,9 @@ async def backend_version(timeout_s: float = 2.0) -> dict[str, Any]:
     }
 
 
-async def llm_health(llm_base_url: str, timeout_s: float = 3.0) -> dict[str, Any]:
+async def llm_health(
+    llm_base_url: str, llm_api_key: str, timeout_s: float = 3.0
+) -> dict[str, Any]:
     """Try a single GET against the configured LLM /models endpoint."""
     if not llm_base_url:
         return {"reachable": False, "detail": "TIGERDUCK_LLM_BASE_URL not set"}
@@ -58,7 +60,8 @@ async def llm_health(llm_base_url: str, timeout_s: float = 3.0) -> dict[str, Any
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            r = await client.get(url)
+            auth = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else {}
+            r = await client.get(url, headers=auth)
             return {
                 "reachable": r.status_code < 400,
                 "status_code": r.status_code,

@@ -54,10 +54,10 @@ server/
 │                              #   rules and the scheduled link checker
 ├── course_announcements/      # first posts of Moodle course news forums: models,
 │                              #   the classifier service client, ingest (store,
-│                              #   classify, route to the LLM), the poll job, the
-│                              #   LLM's question (extraction.py) and its job
-│                              #   (extractor.py), checks, review items and
-│                              #   automatic apply
+│                              #   classify, route to the LLM), the poll job,
+│                              #   the history import, the LLM's question
+│                              #   (extraction.py) and its job (extractor.py),
+│                              #   checks, review items and automatic apply
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
@@ -171,9 +171,11 @@ Grafana is the only monitoring service on `proxy-net`, served at
 `<portal host>/grafana` behind Cloudflare Access (it checks the Access
 JWT itself).
 
-`llama-server` stays NATIVE on the host (Docker on Mac can't get Metal
-GPU). The backend reaches it via `host.docker.internal:40001`. See
-`deploy/launchd/ai.tigerduck.llm.plist` for the launchd service.
+The LLM is an OpenAI-compatible server outside this repository. In
+production it is a service on the host shared with other apps, running
+natively (Docker on Mac can't get Metal GPU); the backend reaches it via
+`host.docker.internal:40001` with `TIGERDUCK_LLM_API_KEY` as its Bearer
+key. `deploy/launchd/README.md` shows how to check it.
 
 ### One-shot backfill
 ```bash
@@ -377,7 +379,15 @@ into the backend container via `docker-compose.yml`.
   failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
-  for waits an hour and goes after the others.
+  for waits an hour and goes after the others. Ingest queues an extraction when
+  it classifies a version, and only for one of the current term, so a post
+  first classified after its term ended is never extracted; `--reextract`
+  queues the current term's posts alone and does not bring it back.
+- `scripts/import_course_announcements.py` imports the announcement history
+  from a local export through the same store and classification, and refuses
+  the whole export, before storing anything, if a record holds a field outside
+  its format, such as an author's (`course_announcements/history.py`).
+  `--reextract` queues the current term's announcements again for a new model.
 - The `course_announcement_extract` job runs every minute when the classifier
   URL is set (`course_announcements/extractor.py`). While no bulletin is
   claimable (`claimable_bulletins`, the LLM's one slot goes to bulletins first)
