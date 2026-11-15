@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -13,11 +14,19 @@ from server.course_announcements.classifier import (
     HttpClassifier,
     Post,
     RecordingClassifier,
+    _without_inline_images,
 )
+from server.course_announcements.ingest import classify_pending, store_announcements
+from server.course_announcements.models import CourseAnnouncement
+from server.db import build_session_factory
+from server.syncjobs.moodle_client import FetchedDiscussion
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 BASE = "http://classifier.test:40002"
+# serve.py's MAX_BODY_BYTES.
+MAX_BODY_BYTES = 4 * 1024 * 1024
+LARGE_IMAGE = "data:image/png;base64," + "A" * (5 * 1024 * 1024)
 
 
 def _result(post: dict) -> dict:
@@ -29,13 +38,15 @@ def _result(post: dict) -> dict:
 
 
 def _service(*, max_posts: int = 64, sizes: list[int] | None = None):
-    """Answers like serve.py, with 413 for a request of more than
-    `max_posts` posts; records each request's size in `sizes`."""
+    """Answers like serve.py, with 413 for a body over its limit or a request
+    of more than `max_posts` posts; records each request's size in `sizes`."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
             health = {"status": "ok", "threshold": 0.35, "release": "model-2026-11-15"}
             return httpx.Response(200, json=health)
+        if len(request.content) > MAX_BODY_BYTES:
+            return httpx.Response(413, json={"error": "body must be 1 to 4194304 bytes"})
         posts = json.loads(request.content)["posts"]
         if sizes is not None:
             sizes.append(len(posts))
@@ -87,6 +98,57 @@ async def test_a_batch_too_large_is_split_in_half_and_sent_again():
 async def test_one_post_too_large_on_its_own_gets_no_result():
     classifier = HttpClassifier(BASE, transport=_service(max_posts=0))
     assert await classifier.classify(_posts(1)) == [None]
+
+
+@pytest.mark.parametrize(
+    ("html", "sent"),
+    [
+        ('<p>a</p><img alt="x" src="data:image/png;base64,iV">', '<p>a</p><img alt="x" src="">'),
+        ("<IMG SRC = 'data:image/gif;base64,R0lG' width=2>", '<IMG SRC = "" width=2>'),
+        ("<img src=data:image/gif;base64,R0lG>", '<img src="">'),
+        ('<img title="a > b" src=" data:x">', '<img title="a > b" src="">'),
+        ('<img src="https://moodle.test/a.png">', None),
+        ('<img data-src="data:x" srcset="data:y">', None),
+        ('<p>src="data:x"</p>', None),
+    ],
+)
+async def test_only_the_data_of_inline_images_is_left_out(html, sent):
+    assert _without_inline_images(html) == (sent or html)
+
+
+async def test_a_post_with_a_large_inline_image_is_stored_as_the_service_reads_it(
+    db_session, prepared_engine
+):
+    subject, before = "Room moved", "<p>Invented: room moved to T2-202</p>"
+    created = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
+    discussion = FetchedDiscussion(
+        discussion_id=101,
+        post_id=901,
+        subject=subject,
+        message=f'{before}<img src="{LARGE_IMAGE}">',
+        created_at=created,
+        modified_at=created,
+        group_id=-1,
+        visible_from=None,
+        has_attachment=False,
+        pinned=False,
+        starred=False,
+    )
+    await store_announcements(
+        db_session,
+        term_code="1151",
+        moodle_course_id=7001,
+        course_codes=["CS1001301"],
+        discussions=[discussion],
+    )
+    await db_session.commit()
+    classifier = HttpClassifier(BASE, transport=_service())
+
+    assert await classify_pending(build_session_factory(prepared_engine), classifier) == 1
+
+    [without_data] = await classifier.classify([Post(subject, f'{before}<img src="">')])
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert (row.route, row.text) == ("sent", without_data.text)
 
 
 async def test_a_refused_request_raises_its_status_without_the_text():

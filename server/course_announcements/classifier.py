@@ -10,6 +10,7 @@ an error or a log line.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -20,6 +21,11 @@ import httpx
 MAX_POSTS = 64
 # serve.py scores about 35 ms a post on the CPU, one request at a time.
 _TIMEOUT_SECONDS = 60.0
+
+_IMG_TAG = re.compile(r"""<img\b(?:[^>"']|"[^"]*"|'[^']*')*>""", re.IGNORECASE)
+_DATA_SRC = re.compile(
+    r"""(\ssrc\s*=\s*)(?:"\s*data:[^"]*"|'\s*data:[^']*'|data:[^\s>]*)""", re.IGNORECASE
+)
 
 
 class ClassifierError(Exception):
@@ -59,6 +65,13 @@ class Classifier(Protocol):
 def _number(value: object) -> bool:
     # Python's JSON parser takes NaN and Infinity, which jsonb refuses.
     return type(value) in (int, float) and math.isfinite(value)
+
+
+def _without_inline_images(html: str) -> str:
+    """`html` with every `<img>` whose source is a `data:` URI given an empty
+    `src`, and nothing else changed."""
+    # The classifier's scripts/moodle_text.py replaces each <img> without reading its src.
+    return _IMG_TAG.sub(lambda tag: _DATA_SRC.sub(r'\1""', tag[0]), html)
 
 
 def _parse_result(item: object) -> Classification | None:
@@ -113,11 +126,12 @@ class HttpClassifier:
         return ClassifierInfo(threshold=float(threshold), release=release or None)
 
     async def classify(self, posts: Sequence[Post]) -> list[Classification | None]:
+        sent = [Post(p.subject, _without_inline_images(p.message)) for p in posts]
         results: list[Classification | None] = []
         try:
             async with self._client() as client:
-                for start in range(0, len(posts), MAX_POSTS):
-                    results += await self._batch(client, posts[start : start + MAX_POSTS])
+                for start in range(0, len(sent), MAX_POSTS):
+                    results += await self._batch(client, sent[start : start + MAX_POSTS])
         except httpx.HTTPError as exc:
             raise ClassifierError(type(exc).__name__) from None
         return results
