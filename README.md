@@ -180,6 +180,7 @@ docker compose exec backend python -c "import urllib.request; print(urllib.reque
 - 註銷裝置（撤銷 session、失效 push token）、管理裝置清單；Deregister 頁刪除學生與他的所有資料
 - 在 Moodle 頁暫停與恢復伺服器同步、重新排入失敗的同步工作、立刻跑推播 tick、取消某位學生排隊中的推播、送出同步觸發推播
 - 編輯學期起訖與校曆假日、轉址連結和 TLS pin
+- 審核從 Moodle 課程公告抽出的課程異動：核准、修改後核准、附理由駁回，或把公告重新排入抽取
 - 顯示 Access token 裡的登入者 email 與 Sign out 連結，按下會結束其 Access session；dev 模式沒有 Access session，連結不會出現
 
 ### 監控（Grafana）

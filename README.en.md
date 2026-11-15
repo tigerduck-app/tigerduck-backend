@@ -180,6 +180,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Deregister devices (revoking their sessions and push tokens) and manage device lists; the Deregister page deletes a student with all their data
 - On the Moodle page, suspend and resume the server's sync, requeue failed sync jobs, run a push tick, cancel a student's queued pushes and send a sync trigger push
 - Edit semester dates and school holidays, redirect links and TLS pins
+- Review the course changes extracted from Moodle course announcements: approve one, edit it before approving, reject it with a reason, or queue an announcement for extraction again
 - Show who signed in, from the Access token, with a Sign out link that ends their Access session. Development has no Access session, so the link stays hidden there
 
 ### Monitoring (Grafana)

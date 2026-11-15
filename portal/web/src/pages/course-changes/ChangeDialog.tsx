@@ -55,6 +55,7 @@ export function ChangeDialog({
   today,
   existing,
   change,
+  prefill,
   initDay,
   pending,
   error,
@@ -69,26 +70,29 @@ export function ChangeDialog({
   /** The course's other changes, marked in the calendar. */
   existing: readonly Change[];
   change: Change | null;
+  /** A review item's change to start from, in place of `change`'s. */
+  prefill?: Change;
   initDay: string | null;
   pending: boolean;
   error: string | null;
   onClose: () => void;
   onSave: (body: ChangeBody) => void;
-  onDelete: () => void;
+  onDelete?: () => void;
 }) {
-  const [mode, setMode] = useState(change?.mode ?? "day");
-  const [kind, setKind] = useState<Kind | null>(change?.kind ?? null);
-  const [day, setDay] = useState(change?.day ?? initDay);
-  const [from, setFrom] = useState(change?.from ?? null);
-  const [to, setTo] = useState(change?.to ?? null);
-  const [off, setOff] = useState<number[]>(change?.excluded_weekdays ?? []);
+  const init = prefill ?? change;
+  const [mode, setMode] = useState(init?.mode ?? "day");
+  const [kind, setKind] = useState<Kind | null>(init?.kind ?? null);
+  const [day, setDay] = useState(init?.day ?? initDay);
+  const [from, setFrom] = useState(init?.from ?? null);
+  const [to, setTo] = useState(init?.to ?? null);
+  const [off, setOff] = useState<number[]>(init?.excluded_weekdays ?? []);
   // null: every period of the day.
-  const [chosen, setChosen] = useState<string[] | null>(change?.periods ?? null);
-  const [room, setRoom] = useState(change?.room ?? "");
-  const [start, setStart] = useState(change?.start ?? "");
-  const [end, setEnd] = useState(change?.end ?? "");
-  const [noteZh, setNoteZh] = useState(change?.note_zh ?? "");
-  const [noteEn, setNoteEn] = useState(change?.note_en ?? "");
+  const [chosen, setChosen] = useState<string[] | null>(init?.periods ?? null);
+  const [room, setRoom] = useState(init?.room ?? "");
+  const [start, setStart] = useState(init?.start ?? "");
+  const [end, setEnd] = useState(init?.end ?? "");
+  const [noteZh, setNoteZh] = useState(init?.note_zh ?? "");
+  const [noteEn, setNoteEn] = useState(init?.note_en ?? "");
   const firstMonth = term.start_date.slice(0, 7);
   const lastMonth = term.end_date.slice(0, 7);
   const [month, setMonth] = useState(() => {
@@ -123,7 +127,7 @@ export function ChangeDialog({
   const oneMeeting = timeKind && (rangePicks || runs.length > 1);
   const pickedRun = runs.find((r) => r.length === chosen?.length && r.every((p) => chosen.includes(p)));
   // Any other range shows no chips, so an edited range keeps the periods it has.
-  const keptPeriods = isRange && !rangePicks && change?.mode === "range" ? change.periods : null;
+  const keptPeriods = isRange && !rangePicks && init?.mode === "range" ? init.periods : null;
   const sentPeriods = keptPeriods ?? (oneMeeting ? (pickedRun ?? []) : showChips ? chosen : null);
   const periods = sentPeriods ?? meeting?.periods ?? [];
   const span = periodSpan(periods);
@@ -197,7 +201,7 @@ export function ChangeDialog({
       }
       footer={
         <>
-          {editing && (
+          {editing && onDelete && (
             <Button
               variant="line"
               size="form"
