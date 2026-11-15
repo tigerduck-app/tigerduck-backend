@@ -477,7 +477,7 @@ async def test_a_refused_holder_hands_the_course_on_and_keeps_their_credential(
     assert await _tick(poller, NOW) == 1
     state = await _state(db_session)
     assert state.holder_user_id == second.id
-    assert state.next_due_at == NOW + timedelta(days=1)
+    assert state.next_due_at == NOW + timedelta(minutes=15)
     assert state.forum_id == (30 if isinstance(error, MoodleTokenInvalid) else None)
 
     assert await _tick(poller, state.next_due_at) == 1
@@ -529,6 +529,29 @@ async def test_one_lookup_finds_the_forums_of_the_holders_other_courses(
     lookups = [call for call in moodle.calls if call[0] == "forums"]
     assert lookups == [("forums", "token-alice", (7001, 7002))]
     assert sorted(call[2] for call in moodle.polled()) == [30, 31]
+
+
+async def test_a_holder_who_sees_no_news_forum_hands_the_course_on(
+    db_session, poller, moodle, holder, term
+):
+    first = await holder("alice", DS)
+    second = await holder("bob", DS)
+    await _set_state(db_session, holder_user_id=first.id)
+    moodle.forums[7001] = 30
+    lookup = moodle.fetch_news_forums
+
+    async def hidden_from_alice(*, token, course_ids):
+        found = await lookup(token=token, course_ids=course_ids)
+        return {} if token == "token-alice" else found
+
+    moodle.fetch_news_forums = hidden_from_alice
+
+    assert await _tick(poller, NOW) == 1
+    state = await _state(db_session)
+    assert (state.holder_user_id, state.next_due_at) == (second.id, NOW + timedelta(minutes=15))
+
+    assert await _tick(poller, state.next_due_at) == 1
+    assert moodle.polled() == [("discussions", "token-bob", 30)]
 
 
 async def test_a_course_without_a_news_forum_tries_again_tomorrow(

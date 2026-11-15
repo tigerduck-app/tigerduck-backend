@@ -306,6 +306,8 @@ async def _poll_course(
         return _Outcome.polled
 
     next_holder = course.holders[(course.holders.index(holder) + 1) % len(course.holders)]
+    # Where this holder is the cause, another one is tried soon.
+    retry_soon = next_holder != holder
     forums: dict[int, int] = {}
     try:
         if course.forum_id is None:
@@ -330,7 +332,14 @@ async def _poll_course(
             course = replace(course, forum_id=None)
             forums = {other: forum for other, forum in forums.items() if other != course_id}
         await _record_poll(
-            poller, course, term, now, holder=next_holder, discussions=[], forums=forums
+            poller,
+            course,
+            term,
+            now,
+            holder=next_holder,
+            discussions=[],
+            forums=forums,
+            retry_soon=retry_soon,
         )
         return _Outcome.polled
     except MoodleRateLimited:
@@ -348,7 +357,14 @@ async def _poll_course(
     if discussions is None:
         # No news forum this holder sees: maybe one who can sees it.
         await _record_poll(
-            poller, course, term, now, holder=next_holder, discussions=[], forums=forums
+            poller,
+            course,
+            term,
+            now,
+            holder=next_holder,
+            discussions=[],
+            forums=forums,
+            retry_soon=retry_soon,
         )
         return _Outcome.polled
     await _record_poll(
@@ -411,9 +427,10 @@ async def _record_poll(
     holder: uuid.UUID | None,
     discussions: Sequence[FetchedDiscussion],
     forums: dict[int, int] | None = None,
+    retry_soon: bool = False,
 ) -> None:
-    """Store what one poll read and when the course is due again, in one
-    transaction."""
+    """Store what one poll read and when the course is due again, after the
+    shortest interval if `retry_soon`, in one transaction."""
     latest = max(
         [course.latest_post_at, *(d.created_at for d in discussions)],
         key=lambda moment: moment or datetime.min.replace(tzinfo=UTC),
@@ -434,7 +451,7 @@ async def _record_poll(
             "course_codes": course.codes,
             "forum_id": (forums or {}).get(course.moodle_course_id, course.forum_id),
             "latest_post_at": latest,
-            "next_due_at": now + poll_interval(latest, now),
+            "next_due_at": now + (ACTIVE_INTERVAL if retry_soon else poll_interval(latest, now)),
             "holder_user_id": holder,
         }
         await session.execute(

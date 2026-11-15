@@ -366,8 +366,10 @@ into the backend container via `docker-compose.yml`.
   minutes, 3 hours, 12 hours or a day after a poll, by the age of its latest
   post. It sends nothing while `is_moodle_available` says no or either budget
   is paused, and a 429 pauses both, since they share one Moodle limit. A
-  rejected token or refused course moves the course to the next holder; the
-  poll never marks a credential invalid. Each tick then classifies what is
+  rejected token, refused course or unseen news forum moves the course to the
+  next holder, polled 15 minutes later; Moodle failing on a course, or any
+  other failure, defers it 15 minutes. The poll never marks a credential
+  invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
   for waits an hour and goes after the others.
 - Course announcement text may name students: it stays in the
