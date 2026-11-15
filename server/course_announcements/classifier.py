@@ -60,7 +60,8 @@ class Classifier(Protocol):
     async def info(self) -> ClassifierInfo: ...
 
     async def classify(self, posts: Sequence[Post]) -> list[Classification | None]:
-        """One result per post, None for a post too large for the service."""
+        """One result per post, None for a post too large for the service or
+        whose result is malformed."""
         ...
 
 
@@ -159,7 +160,4 @@ class HttpClassifier:
         items = body.get("results") if isinstance(body, dict) else None
         if not isinstance(items, list) or len(items) != len(posts):
             raise ClassifierError("unexpected_shape")
-        parsed = [_parse_result(item) for item in items]
-        if any(result is None for result in parsed):
-            raise ClassifierError("unexpected_shape")
-        return parsed
+        return [_parse_result(item) for item in items]

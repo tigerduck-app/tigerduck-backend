@@ -10,9 +10,10 @@ Moodle request.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import structlog
+import sqlalchemy as sa
 from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -56,6 +57,8 @@ CONFIDENT_FROM = 0.90
 
 # Announcements classified in one tick, at most.
 CLASSIFY_PER_TICK = 4 * MAX_POSTS
+# A version the service answered with no result is sent again after this.
+CLASSIFY_RETRY_AFTER = timedelta(hours=1)
 
 
 def route_for(scores: Mapping[str, float]) -> AnnouncementRoute:
@@ -129,6 +132,7 @@ async def store_announcements(
                 "scores": None,
                 "labels": None,
                 "route": AnnouncementRoute.unclassified.value,
+                "classify_failed_at": None,
                 "updated_at": func.now(),
             },
             where=new.modified_at > CourseAnnouncement.modified_at,
@@ -179,10 +183,11 @@ async def classify_pending(
     *,
     limit: int = CLASSIFY_PER_TICK,
 ) -> int:
-    """Classify stored versions that are not yet, oldest first, and queue an
-    extraction for each the route rule sends. No transaction is open while
-    the service answers; a version replaced meanwhile keeps the newer one.
-    Returns how many were classified."""
+    """Classify stored versions that are not yet, oldest first and those the
+    service gave no result last, and queue an extraction for each the route
+    rule sends. A version with no result waits CLASSIFY_RETRY_AFTER. No
+    transaction is open while the service answers; a version replaced
+    meanwhile keeps the newer one. Returns how many were classified."""
     async with session_scope(session_factory) as session:
         pending = (
             await session.execute(
@@ -192,8 +197,19 @@ async def classify_pending(
                     CourseAnnouncement.raw_subject,
                     CourseAnnouncement.raw_message,
                 )
-                .where(CourseAnnouncement.route == AnnouncementRoute.unclassified.value)
-                .order_by(CourseAnnouncement.posted_at, CourseAnnouncement.id)
+                .where(
+                    CourseAnnouncement.route == AnnouncementRoute.unclassified.value,
+                    sa.or_(
+                        CourseAnnouncement.classify_failed_at.is_(None),
+                        CourseAnnouncement.classify_failed_at
+                        <= func.now() - CLASSIFY_RETRY_AFTER,
+                    ),
+                )
+                .order_by(
+                    CourseAnnouncement.classify_failed_at.asc().nulls_first(),
+                    CourseAnnouncement.posted_at,
+                    CourseAnnouncement.id,
+                )
                 .limit(limit)
             )
         ).all()
@@ -211,8 +227,11 @@ async def classify_pending(
     async with session_scope(session_factory) as session:
         for row, result in zip(pending, results, strict=True):
             if result is None:
-                logger.warning(
-                    "course_announcements.too_large_to_classify", announcement_id=row.id
+                logger.warning("course_announcements.no_classification", announcement_id=row.id)
+                await session.execute(
+                    _unclassified_version(row.id, row.modified_at).values(
+                        classify_failed_at=func.now()
+                    )
                 )
                 continue
             if await _store_classification(
@@ -220,6 +239,15 @@ async def classify_pending(
             ):
                 classified += 1
     return classified
+
+
+def _unclassified_version(key: str, version: datetime) -> sa.Update:
+    """An update of `key` if `version` is still its stored, unclassified one."""
+    return update(CourseAnnouncement).where(
+        CourseAnnouncement.id == key,
+        CourseAnnouncement.modified_at == version,
+        CourseAnnouncement.route == AnnouncementRoute.unclassified.value,
+    )
 
 
 async def _store_classification(
@@ -233,12 +261,7 @@ async def _store_classification(
     stored, unclassified one."""
     route = route_for(result.scores)
     stored = await session.scalar(
-        update(CourseAnnouncement)
-        .where(
-            CourseAnnouncement.id == key,
-            CourseAnnouncement.modified_at == version,
-            CourseAnnouncement.route == AnnouncementRoute.unclassified.value,
-        )
+        _unclassified_version(key, version)
         .values(
             text=result.text,
             scores=result.scores,
@@ -247,6 +270,7 @@ async def _store_classification(
             route=route.value,
             raw_subject=None,
             raw_message=None,
+            classify_failed_at=None,
         )
         .returning(CourseAnnouncement.id)
     )

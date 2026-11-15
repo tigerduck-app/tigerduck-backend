@@ -193,13 +193,27 @@ async def test_the_recording_fake_scores_by_subject_and_can_go_down():
         await fake.info()
 
 
-async def test_a_score_jsonb_cannot_hold_is_refused():
+async def test_a_score_jsonb_cannot_hold_is_no_result():
     def handler(request: httpx.Request) -> httpx.Response:
         body = '{"results": [{"labels": [], "scores": {"materials": NaN}, "text": "a"}]}'
         return httpx.Response(200, content=body, headers={"content-type": "application/json"})
 
-    with pytest.raises(ClassifierError, match="unexpected_shape"):
-        await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(_posts(1))
+    classifier = HttpClassifier(BASE, transport=httpx.MockTransport(handler))
+    assert await classifier.classify(_posts(1)) == [None]
+
+
+async def test_a_malformed_result_is_no_result_for_its_post_alone():
+    def handler(request: httpx.Request) -> httpx.Response:
+        posts = json.loads(request.content)["posts"]
+        results = [_result(p) for p in posts]
+        results[1] = {"labels": "class_cancel", "scores": {}, "text": "x"}
+        return httpx.Response(200, json={"results": results})
+
+    results = await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(
+        _posts(3)
+    )
+
+    assert [r and r.text.split("\n")[0] for r in results] == ["Notice 0", None, "Notice 2"]
 
 
 async def test_characters_postgres_refuses_are_dropped_from_the_text():

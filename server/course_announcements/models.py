@@ -147,6 +147,10 @@ class CourseAnnouncement(Base):
         default=AnnouncementRoute.unclassified.value,
         server_default=AnnouncementRoute.unclassified.value,
     )
+    # When the service last answered this version with no result.
+    classify_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

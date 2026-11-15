@@ -368,7 +368,8 @@ into the backend container via `docker-compose.yml`.
   is paused, and a 429 pauses both, since they share one Moodle limit. A
   rejected token or refused course moves the course to the next holder; the
   poll never marks a credential invalid. Each tick then classifies what is
-  stored (`ingest.classify_pending`).
+  stored (`ingest.classify_pending`); a version the service gives no result
+  for waits an hour and goes after the others.
 - Course announcement text may name students: it stays in the
   `course_announcements` tables and the portal, never in a log line, an
   exception, an error column or an app-facing response. Errors carry fixed

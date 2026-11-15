@@ -387,7 +387,8 @@ _LABELS = (
 class RecordingClassifier:
     """Test double: scores a post by its subject from `scores` (every label
     0 otherwise), converts it as the service does, and records the posts it
-    was sent. Set `down` to make every call fail as an unreachable service."""
+    was sent. Set `down` to make every call fail as an unreachable service,
+    and put a subject in `unanswered` to get no result for its posts."""
 
     def __init__(
         self,
@@ -400,6 +401,7 @@ class RecordingClassifier:
         self.threshold = threshold
         self.release = release
         self.down = False
+        self.unanswered: set[str] = set()
         self.posts: list[Post] = []
 
     async def info(self) -> ClassifierInfo:
@@ -413,6 +415,9 @@ class RecordingClassifier:
         self.posts += posts
         results: list[Classification | None] = []
         for post in posts:
+            if post.subject in self.unanswered:
+                results.append(None)
+                continue
             scores = {label: 0.0 for label in _LABELS} | dict(self.scores.get(post.subject, {}))
             results.append(
                 Classification(

@@ -116,6 +116,7 @@ def upgrade() -> None:
         sa.Column(
             "route", sa.String(length=16), nullable=False, server_default="unclassified"
         ),
+        sa.Column("classify_failed_at", sa.DateTime(timezone=True), nullable=True),
         *_timestamps(),
         sa.CheckConstraint(
             "route IN ('unclassified', 'not_sent', 'sent')",

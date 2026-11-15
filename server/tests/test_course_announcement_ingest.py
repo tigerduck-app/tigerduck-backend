@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from server.course_announcements.ingest import (
     classify_pending,
@@ -270,3 +270,53 @@ async def test_an_edit_while_the_classifier_answered_keeps_the_edit(db_session, 
 )
 async def test_the_route_rule(scores, route):
     assert route_for(scores) == route
+
+
+async def _fail_an_hour_ago(session, key: str = "101-901") -> None:
+    await session.execute(
+        update(CourseAnnouncement)
+        .where(CourseAnnouncement.id == key)
+        .values(classify_failed_at=func.now() - timedelta(hours=1, seconds=1))
+    )
+    await session.commit()
+
+
+async def test_a_post_with_no_result_waits_an_hour(db_session, factory):
+    await _store(db_session, _discussion())
+    classifier = RecordingClassifier({"Class cancelled": CANCELLED})
+    classifier.unanswered = {"Class cancelled"}
+
+    assert await classify_pending(factory, classifier) == 0
+    assert await classify_pending(factory, classifier) == 0
+    assert len(classifier.posts) == 1
+
+    classifier.unanswered = set()
+    await _fail_an_hour_ago(db_session)
+    assert await classify_pending(factory, classifier) == 1
+    row = await _announcement(db_session)
+    assert (row.route, row.classify_failed_at) == ("sent", None)
+
+
+async def test_posts_that_had_no_result_go_after_the_others(db_session, factory):
+    await _store(db_session, _discussion(1, subject="Too long"))
+    classifier = RecordingClassifier()
+    classifier.unanswered = {"Too long"}
+    await classify_pending(factory, classifier)
+    await _fail_an_hour_ago(db_session)
+    await _store(db_session, _discussion(2, subject="Later", edited=timedelta(hours=1)))
+
+    assert await classify_pending(factory, classifier, limit=1) == 1
+
+    assert [p.subject for p in classifier.posts] == ["Too long", "Later"]
+
+
+async def test_an_edit_of_a_post_with_no_result_is_classified_at_once(db_session, factory):
+    await _store(db_session, _discussion(subject="Too long"))
+    classifier = RecordingClassifier()
+    classifier.unanswered = {"Too long"}
+    await classify_pending(factory, classifier)
+
+    await _store(db_session, _discussion(subject="Shorter", edited=timedelta(minutes=5)))
+
+    assert await classify_pending(factory, classifier) == 1
+    assert (await _announcement(db_session)).route == "not_sent"
