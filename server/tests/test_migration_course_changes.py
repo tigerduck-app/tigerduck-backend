@@ -43,7 +43,12 @@ _FUNCTIONS = text(
 async def test_upgrade_builds_the_table_the_model_declares(
     migration_db_url: str, db_session
 ) -> None:
-    declared = set((await db_session.scalars(_SHAPE)).all())
+    # A later revision (22370b5daa3b) adds the source column and its key.
+    declared = {
+        shape
+        for shape in (await db_session.scalars(_SHAPE)).all()
+        if "source_announcement_id" not in shape
+    }
     assert len([shape for shape in declared if "FUNCTION" in shape]) == 2
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)

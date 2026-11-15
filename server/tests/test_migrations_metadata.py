@@ -36,6 +36,7 @@ from server.academic_calendar import models as _academic_calendar_models
 from server import system_settings as _system_settings_models
 from server import admin_audit as _admin_audit_models
 from server.tls_pins import models as _tls_pin_models
+from server.course_announcements import models as _course_announcement_models
 """
 
 

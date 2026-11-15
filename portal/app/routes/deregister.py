@@ -218,6 +218,7 @@ async def _snapshot(conn, user_id) -> tuple[list[dict], dict]:
         "user_bulletin_subscriptions",
         "user_bulletin_states",
         "user_course_skipped_dates",
+        "user_moodle_courses",
         "auth_sessions",
         "device_push_tokens",
         "push_jobs",

@@ -43,6 +43,7 @@ from server.academic_calendar.models import (  # noqa: F401
     SemesterTerm as _SemesterTerm,
     UserHolidayOverride as _UserHolidayOverride,
 )
+from server.course_announcements import models as _course_announcement_models  # noqa: F401
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
@@ -301,7 +302,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     sync_worker = None
     if cipher is not None:
-        budget = RequestBudget(settings.sync_job_requests_per_minute)
+        budget = RequestBudget(
+            settings.sync_job_requests_per_minute,
+            observe=metrics.observe_sync_moodle_request,
+        )
         sync_worker = SyncWorker(
             session_factory=jobs_session_factory,
             settings=settings,

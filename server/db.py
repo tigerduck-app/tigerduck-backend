@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -34,6 +35,19 @@ class Base(DeclarativeBase):
 #: asyncpg refuses a statement with more than 32,767 bind parameters, and a
 #: row binds one per column it sets, so 2,000 rows leave room for 16.
 INSERT_CHUNK_ROWS = 2000
+
+#: The values a `BIGINT` column holds.
+BIGINT_VALUES = range(-(2**63), 2**63)
+
+# asyncpg sends text as UTF-8, which has no lone UTF-16 surrogate, and
+# Postgres text refuses NUL.
+_UNSTORABLE_CHARACTERS = re.compile("[\x00\ud800-\udfff]")
+
+
+def storable_text(value: str) -> str:
+    """`value` without the characters a text column cannot hold: NUL, and the
+    lone surrogates a JSON `\\ud800` escape decodes to."""
+    return _UNSTORABLE_CHARACTERS.sub("", value)
 
 
 def in_array(

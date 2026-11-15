@@ -5,11 +5,15 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+import structlog
+from structlog.testing import capture_logs
 from sqlalchemy import select
 
 from server.auth.models import User
 from server.sync.models import UserChangeLog, UserCourse
-from server.syncjobs.courses import apply_fetched_courses
+from server.syncjobs import courses
+from server.syncjobs.courses import apply_fetched_courses, store_moodle_courses
+from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import FetchedCourse
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -173,3 +177,29 @@ async def test_fetch_does_not_hijack_client_row_sharing_moodle_id(db_session):
     assert rows["client:1141:CS3001301"].course_name == "客戶端課程 CS3001301"
     # Only the insert of moodle:777 is a change; the client row is untouched.
     assert stats.changed_count == 1
+
+
+async def test_moodle_courses_keep_only_what_postgres_can_store(db_session, monkeypatch):
+    user = await _make_user(db_session)
+    enrolled = [
+        _fc(7001, idnumber="1151CS\x002006301", full_name="Data\x00 Structures\ud800"),
+        _fc(2**63, idnumber="1151CS2007301", full_name="Algorithms"),
+    ]
+    monkeypatch.setattr(courses, "logger", structlog.get_logger(courses.__name__))
+
+    with capture_logs() as logs:
+        await store_moodle_courses(db_session, user_id=user.id, enrolled=enrolled, now=NOW)
+
+    assert logs == [
+        {"event": "syncjobs.moodle_courses_dropped", "count": 1, "log_level": "warning"}
+    ]
+    await db_session.commit()
+
+    rows = await db_session.execute(
+        select(
+            UserMoodleCourse.moodle_course_id,
+            UserMoodleCourse.idnumber,
+            UserMoodleCourse.full_name,
+        ).where(UserMoodleCourse.user_id == user.id)
+    )
+    assert [tuple(row) for row in rows] == [(7001, "1151CS2006301", "Data Structures")]

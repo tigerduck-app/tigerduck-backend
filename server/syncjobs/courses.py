@@ -8,15 +8,19 @@ fetch soft-delete, previously-deleted rows that reappear resurrect.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.db import BIGINT_VALUES, storable_text
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import ChangeEntityType, UserCourse
+from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import FetchedCourse
 
 logger = structlog.get_logger(__name__)
@@ -125,3 +129,54 @@ async def apply_fetched_courses(
         changed=changed,
     )
     return CourseSyncStats(fetched_count=len(fetched), changed_count=changed)
+
+
+async def store_moodle_courses(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    enrolled: Sequence[FetchedCourse],
+    now: datetime,
+) -> None:
+    """Keep `user_moodle_courses` as the user's Moodle course list, without
+    what Postgres cannot hold. An empty list keeps the stored rows, as
+    `apply_fetched_assignments` reads it: beside the assignments it settles
+    nothing."""
+    by_id = {
+        course.moodle_course_id: course
+        for course in enrolled
+        if course.moodle_course_id in BIGINT_VALUES
+    }
+    dropped = sum(course.moodle_course_id not in BIGINT_VALUES for course in enrolled)
+    if dropped:
+        logger.warning("syncjobs.moodle_courses_dropped", count=dropped)
+    if not by_id:
+        return
+    insert = pg_insert(UserMoodleCourse).values(
+        [
+            {
+                "user_id": user_id,
+                "moodle_course_id": course_id,
+                "idnumber": storable_text(course.idnumber),
+                "full_name": storable_text(course.full_name),
+                "last_seen_at": now,
+            }
+            for course_id, course in by_id.items()
+        ]
+    )
+    await session.execute(
+        insert.on_conflict_do_update(
+            index_elements=[UserMoodleCourse.user_id, UserMoodleCourse.moodle_course_id],
+            set_={
+                "idnumber": insert.excluded.idnumber,
+                "full_name": insert.excluded.full_name,
+                "last_seen_at": insert.excluded.last_seen_at,
+            },
+        )
+    )
+    await session.execute(
+        delete(UserMoodleCourse).where(
+            UserMoodleCourse.user_id == user_id,
+            UserMoodleCourse.moodle_course_id.not_in(list(by_id)),
+        )
+    )

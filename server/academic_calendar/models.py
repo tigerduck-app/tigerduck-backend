@@ -149,7 +149,7 @@ class UserHolidayOverride(Base):
 class CourseChange(Base):
     """One exception to a course's classes: on one day, or on every class
     day of a range but the weekdays left out. Keep in step with
-    `ea77513de257_course_changes.py`."""
+    `ea77513de257_course_changes.py` and `22370b5daa3b_course_announcements.py`."""
 
     __tablename__ = "course_changes"
 
@@ -187,6 +187,12 @@ class CourseChange(Base):
     # The operator's Cloudflare Access email.
     created_by: Mapped[str] = mapped_column(Text)
     updated_by: Mapped[str] = mapped_column(Text)
+    # The course announcement the change was taken from, if any.
+    source_announcement_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("course_announcements.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # A check passes on NULL, so each blank or format test binds only a value
     # that is there.
