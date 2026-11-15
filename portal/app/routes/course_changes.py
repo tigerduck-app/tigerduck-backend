@@ -32,6 +32,8 @@ _FIELDS = (
 _DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 _HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _ROOM_MAX = 128
+# What Postgres text cannot hold: a NUL, or a lone surrogate, which UTF-8 cannot encode.
+_UNHELD = re.compile(r"[\x00\ud800-\udfff]")
 
 # The term's enrolled rows with a course number, as the class reminder scan reads
 # them, and each course's row (`term_courses`, server/academic_calendar/models.py).
@@ -77,15 +79,23 @@ LEFT JOIN latest l USING (course_no)
 WHERE c.term_code = $1
 """
 
-# The candidate's columns in the order course_change_violations takes them.
-_CANDIDATE = ("kind", "mode", "start_date", "end_date", "excluded_weekdays", "periods")
+# The candidate's columns in the order course_change_violations takes them,
+# up to its periods.
+_CANDIDATE = ("kind", "mode", "start_date", "end_date", "excluded_weekdays")
 _VIOLATIONS = (
     "SELECT * FROM course_change_violations($1, $2, $3, $4, $5, $6, $7, $8, $9) ORDER BY day"
 )
 
 
+class _Refusal(JSONResponse):
+    # ASCII JSON, as for the backend's 422 (server/main.py): a lone surrogate
+    # a request's JSON carried would fail to encode as UTF-8.
+    def render(self, content) -> bytes:
+        return json.dumps(content).encode()
+
+
 def _bad(detail: str, status: int = 400) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"detail": detail})
+    return _Refusal(status_code=status, content={"detail": detail})
 
 
 def _period_key(period: str) -> tuple:
@@ -235,6 +245,10 @@ async def _check(
         return _bad("term not found", 404)
     columns = _parse(body, term_row)
     parsed = not isinstance(columns, JSONResponse)
+    periods = columns["periods"] if parsed else None
+    # The course has no class in a period Postgres cannot hold, so the function
+    # takes NULL, which no list of periods contains, in its place.
+    unheld = {p for p in periods or () if _UNHELD.search(p)}
     # The first day each rule is broken on. A body that does not parse still
     # asks: a course without class times is refused before the body's format.
     broken = {}
@@ -243,6 +257,7 @@ async def _check(
         term,
         course_no,
         *(columns[f] if parsed else None for f in _CANDIDATE),
+        periods and [None if p in unheld else p for p in periods],
         change_id,
     ):
         broken.setdefault(row["code"], row)
@@ -264,7 +279,7 @@ async def _check(
     if "holiday" in broken:
         return _bad(f"{first} is a holiday")
     if missing := broken.get("missing_periods"):
-        listed = ", ".join(sorted(missing["periods"], key=_period_key))
+        listed = ", ".join(sorted((set(missing["periods"]) - {None}) | unheld, key=_period_key))
         return _bad(f"the course has no class in period {listed} on {missing['day']}")
     # A new start or end is one meeting's, so the apps and pushes know which.
     if several := broken.get("several_meetings"):

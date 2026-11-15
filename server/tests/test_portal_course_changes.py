@@ -353,6 +353,21 @@ async def test_periods_are_ones_the_course_meets_on_every_day(
     assert (await _create(pool, **fields))[0] == status
 
 
+@pytest.mark.parametrize("period", ["\u0000", "\ud800"])
+async def test_a_period_postgres_cannot_hold_is_no_class_of_the_course(
+    term, pool, period
+) -> None:
+    status, body = await _create(
+        pool, mode="range", **{"from": "2026-11-16", "to": "2026-11-30"}, periods=["3", period]
+    )
+    nobody = await _create(pool, course_no="MA1001703", day="2026-11-05", periods=[period])
+
+    assert (status, body["detail"]) == (
+        400, f"the course has no class in period {period} on 2026-11-17"
+    )
+    assert nobody[0] == 404
+
+
 async def test_a_course_reads_its_school_row_before_a_later_hand_added_one(
     term, pool, db_session
 ) -> None:
