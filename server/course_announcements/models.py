@@ -104,10 +104,6 @@ class CourseAnnouncementCourse(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    __table_args__ = (
-        Index("ix_course_announcement_courses_due", "term_code", "next_due_at"),
-    )
-
 
 class CourseAnnouncement(Base):
     """One version of an announcement: the one with the latest `modified_at`
@@ -172,9 +168,12 @@ class CourseAnnouncement(Base):
             name="chk_course_announcement_classified",
         ),
         Index("ix_course_announcements_term_posted", "term_code", "posted_at"),
+        # In `ingest.classify_pending`'s order.
         Index(
             "ix_course_announcements_unclassified",
+            sa.text("classify_failed_at NULLS FIRST"),
             "posted_at",
+            "id",
             postgresql_where=sa.text("route = 'unclassified'"),
         ),
     )

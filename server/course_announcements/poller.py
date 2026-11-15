@@ -38,7 +38,7 @@ from server.db import session_scope
 from server.metrics import observe_course_announcement_moodle_request
 from server.syncjobs.assignments import course_nos
 from server.syncjobs.availability import is_moodle_available
-from server.syncjobs.budget import RequestBudget
+from server.syncjobs.budget import BudgetPaused, RequestBudget
 from server.syncjobs.credentials import CredentialInvalid, load_moodle_token
 from server.syncjobs.devices import has_syncing_device
 from server.syncjobs.executor import SyncWorker
@@ -87,6 +87,7 @@ def build_poller(settings: Settings, sync_worker: SyncWorker) -> CourseAnnouncem
     budget = RequestBudget(
         settings.course_announcement_requests_per_minute,
         observe=observe_course_announcement_moodle_request,
+        stopped_by=(sync_worker.budget,),
     )
     return CourseAnnouncementPoller(
         session_factory=sync_worker.session_factory,
@@ -342,6 +343,8 @@ async def _poll_course(
             holder_failed=True,
         )
         return _Outcome.polled
+    except BudgetPaused:
+        return _Outcome.stop
     except MoodleRateLimited:
         pause = poller.settings.sync_job_backoff_base_seconds
         poller.budget.pause(pause)
