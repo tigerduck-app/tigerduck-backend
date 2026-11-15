@@ -4,6 +4,7 @@
   "baseBranchPatterns": ["dev"],
   "enabledManagers": ["github-actions", "pep621", "npm", "dockerfile", "docker-compose", "git-submodules"],
   "labels": ["dependencies"],
+  "ignoreDeps": ["app-translation"],
   "git-submodules": { "enabled": true },
   "timezone": "Asia/Taipei",
   "schedule": ["before 9am on monday"],
