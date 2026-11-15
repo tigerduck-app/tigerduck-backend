@@ -22,9 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins.jobs import claimable_bulletins
 from server.bulletins.llm.base import LLMError
-from server.bulletins.llm.openai_compat import OpenAICompatibleClient
+from server.bulletins.llm.openai_compat import OpenAICompatibleClient, llm_options
 from server.config import Settings
-from server.course_announcements.extraction import build_extraction_llm, extract
+from server.course_announcements.extraction import extract
 from server.course_announcements.items import record_items, refresh_contradictions
 from server.course_announcements.models import (
     EXTRACTION_LIVE_WHERE,
@@ -59,7 +59,9 @@ def build_extractor(
     settings: Settings, session_factory: async_sessionmaker[AsyncSession]
 ) -> Extractor:
     return Extractor(
-        session_factory=session_factory, settings=settings, llm=build_extraction_llm(settings)
+        session_factory=session_factory,
+        settings=settings,
+        llm=OpenAICompatibleClient(**llm_options(settings)),
     )
 
 

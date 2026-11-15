@@ -362,10 +362,6 @@ class Settings(BaseSettings):
     # check is written to course_changes; off, every one waits for review in
     # the portal. Read at start.
     course_announcements_auto_apply: bool = False
-    # The OpenAI-compatible server and model that extract course changes from
-    # announcements; empty takes llm_base_url and llm_model, the bulletins'.
-    course_announcement_llm_base_url: str = ""
-    course_announcement_llm_model: str = ""
 
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"

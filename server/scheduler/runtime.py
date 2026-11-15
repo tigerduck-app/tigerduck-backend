@@ -20,7 +20,7 @@ from server.auth.retirement import retire_dead_devices
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
-from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
+from server.bulletins.llm.openai_compat import OpenAICompatibleProvider, llm_options
 from server.config import Settings
 from server.course_announcements.extractor import TICK, build_extractor, run_extraction_tick
 from server.course_announcements.items import mark_past_items
@@ -44,14 +44,7 @@ from server.tls_pins.watcher import run_pin_watch
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
-    return OpenAICompatibleProvider(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        temperature=settings.llm_temperature,
-    )
+    return OpenAICompatibleProvider(**llm_options(settings))
 
 
 def build_scheduler(

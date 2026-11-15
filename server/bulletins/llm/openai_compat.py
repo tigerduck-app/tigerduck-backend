@@ -32,6 +32,7 @@ from server.bulletins.llm.prompts import (
     build_user_prompt,
 )
 from server.bulletins.taxonomy import CanonicalOrg, ContentTag, Importance
+from server.config import Settings
 from server.metrics import observe_llm_request
 
 logger = structlog.get_logger(__name__)
@@ -231,6 +232,19 @@ class OpenAICompatibleProvider:
 
     async def close(self) -> None:
         await self._llm.close()
+
+
+def llm_options(settings: Settings) -> dict[str, Any]:
+    """The client's arguments from the LLM settings, which bulletins and
+    course announcements share."""
+    return {
+        "base_url": settings.llm_base_url,
+        "api_key": settings.llm_api_key,
+        "model": settings.llm_model,
+        "timeout_seconds": settings.llm_timeout_seconds,
+        "max_retries": settings.llm_max_retries,
+        "temperature": settings.llm_temperature,
+    }
 
 
 def _backoff_seconds(attempt: int) -> float:

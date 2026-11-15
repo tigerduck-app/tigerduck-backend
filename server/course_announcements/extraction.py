@@ -17,7 +17,6 @@ from typing import Any
 from server.academic_calendar.terms import SCHOOL_TZ
 from server.bulletins.llm.base import LLMError
 from server.bulletins.llm.openai_compat import OpenAICompatibleClient, parse_json_object
-from server.config import Settings
 from server.course_announcements.checks import ZH_WEEKDAYS
 
 RULES = """# 課程公告抽取規則
@@ -151,22 +150,6 @@ SCHEMA: dict[str, Any] = {
 
 # Thinking off, as benchmarked, and an answer cut where the benchmark cut it.
 REQUEST_OPTIONS = {"chat_template_kwargs": {"enable_thinking": False}, "max_tokens": 1536}
-
-
-def build_extraction_llm(
-    settings: Settings, **kwargs: Any
-) -> OpenAICompatibleClient:
-    """The client extraction asks: its own server and model when set, else
-    the bulletins'."""
-    return OpenAICompatibleClient(
-        base_url=settings.course_announcement_llm_base_url or settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.course_announcement_llm_model or settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        temperature=settings.llm_temperature,
-        **kwargs,
-    )
 
 
 def build_messages(

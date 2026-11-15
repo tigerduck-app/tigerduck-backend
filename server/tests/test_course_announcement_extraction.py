@@ -7,19 +7,15 @@ from __future__ import annotations
 import traceback
 from datetime import UTC, datetime
 
-import httpx
 import pytest
 
 from server.bulletins.llm.base import LLMError
-from server.config import Settings
 from server.course_announcements.extraction import (
     RULES,
     SCHEMA,
-    build_extraction_llm,
     extract,
 )
 from server.tests.conftest import (
-    PRODUCTION_SECRETS,
     ScriptedLLM,
     extracted_change,
     extraction_answer,
@@ -138,44 +134,3 @@ async def test_an_invalid_answer_is_retried_then_refused_without_its_text(answer
     assert len(llm.requests) == 3
     printed = "".join(traceback.format_exception(raised.value)) + repr(raised.value)
     assert "11/19" not in printed and "停課" not in printed
-
-
-async def test_extraction_takes_the_bulletin_llm_unless_it_has_its_own():
-    sent: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(request)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
-
-    async def ask(settings: Settings) -> tuple[str, str]:
-        llm = build_extraction_llm(
-            settings, client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        )
-        await llm.complete_json(messages=[], schema_name="probe", schema={})
-        return str(sent[-1].url), llm.model
-
-    shared = Settings(
-        _env_file=None,
-        llm_base_url="http://bulletins.test:40001/v1",
-        llm_model="bulletin-model",
-        **PRODUCTION_SECRETS,
-    )
-    own = shared.model_copy(
-        update={
-            "course_announcement_llm_base_url": "http://extraction.test:40003/v1",
-            "course_announcement_llm_model": "extraction-model",
-        }
-    )
-
-    assert await ask(shared) == ("http://bulletins.test:40001/v1/chat/completions", "bulletin-model")
-    assert await ask(own) == ("http://extraction.test:40003/v1/chat/completions", "extraction-model")
-
-
-async def test_the_extraction_llm_settings_read_their_variables(monkeypatch):
-    monkeypatch.setenv("TIGERDUCK_COURSE_ANNOUNCEMENT_LLM_BASE_URL", "http://extraction.test/v1")
-    monkeypatch.setenv("TIGERDUCK_COURSE_ANNOUNCEMENT_LLM_MODEL", "extraction-model")
-
-    settings = Settings(_env_file=None, **PRODUCTION_SECRETS)
-
-    assert settings.course_announcement_llm_base_url == "http://extraction.test/v1"
-    assert settings.course_announcement_llm_model == "extraction-model"
