@@ -359,7 +359,8 @@ into the backend container via `docker-compose.yml`.
   requests on a budget of their own beside the sync worker's) and
   `course_announcements_auto_apply` (false, read at start: a change that passes
   every check still waits for review in the portal). Extraction asks the
-  bulletins' LLM (`llm_base_url`, `llm_model`).
+  bulletins' LLM (`llm_base_url`, `llm_model`); each extraction stores its
+  model, so a model change needs a `--reextract` run.
 - The `course_announcement_poll` job runs every minute when the classifier URL
   and credential keys are set (`course_announcements/poller.py`). It polls the
   news forums of the current term's Moodle courses in `user_moodle_courses`,
