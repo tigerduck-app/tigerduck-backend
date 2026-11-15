@@ -4,7 +4,7 @@
 
 import type { ReactNode } from "react";
 import { Check as CheckIcon, ExternalLink, Paperclip, RefreshCw, Send, TriangleAlert, X } from "lucide-react";
-import { dayDate } from "@/lib/academic";
+import { dayDate, periodsText } from "@/lib/academic";
 import { cn } from "@/lib/cn";
 import { monthDayTime } from "@/lib/format";
 import { Pill } from "@/components/page";
@@ -173,11 +173,13 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 function Fact({ label, fact, extra }: { label?: string; fact: Record<string, unknown>; extra?: unknown }) {
   const date = typeof fact.date === "string" ? fact.date : null;
   const time = [fact.start_time, fact.end_time].filter((t) => typeof t === "string").join("–");
+  const periods = Array.isArray(fact.periods) ? fact.periods.filter((p) => typeof p === "string") : [];
   return (
     <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-line px-3 py-2.5">
       {label && <Pill tone="info">{label}</Pill>}
       {date && <span className="font-medium">{dayDate(date)}</span>}
       {time && <span className="font-mono text-xs text-ink-2">{time}</span>}
+      {periods.length > 0 && <span className="text-xs text-ink-3">{periodsText(periods)}</span>}
       {typeof fact.room === "string" && <span className="font-mono text-xs text-ink-2">{fact.room}</span>}
       {typeof extra === "string" && <span className="text-[13px] text-ink-3">{extra}</span>}
     </div>
