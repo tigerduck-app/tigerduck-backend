@@ -351,10 +351,8 @@ async def approve_item(item_id: int, request: Request, pool=Depends(get_pool)) -
         # Payload and links never change once an item is stored; the locks
         # come inside the write, items before the change they name.
         item = await conn.fetchrow(
-            "SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.course_change_id,"
-            " c.note_zh AS replaced_note_zh, c.note_en AS replaced_note_en"
-            " FROM course_announcement_items AS i"
-            " LEFT JOIN course_changes AS c ON c.id = i.course_change_id WHERE i.id = $1",
+            "SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.course_change_id"
+            " FROM course_announcement_items AS i WHERE i.id = $1",
             item_id,
         )
         if item is None:
@@ -369,7 +367,9 @@ async def approve_item(item_id: int, request: Request, pool=Depends(get_pool)) -
             )
             action = "course_change.create"
         elif item["action"] == "replace" and change_id is not None:
-            written = await replace_change(conn, actor, change_id, item_body(item), item_id)
+            written = await replace_change(
+                conn, actor, change_id, item_body(item), item_id, keep_note_en=True
+            )
             action = "course_change.update"
         elif item["action"] == "remove" and change_id is not None:
             written = await remove_change(conn, actor, change_id, item_id)

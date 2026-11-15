@@ -17,6 +17,7 @@ from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementExtraction,
 )
+from server.course_announcements.routes import TURNED_OFF
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -25,8 +26,12 @@ POSTED = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
 
 
 async def _seed(client: AsyncClient) -> None:
-    """Terms 1151, current, and 1142, with a sent, a not-sent, an
-    unclassified and an earlier term's sent announcement."""
+    """Course announcements turned on, and terms 1151, current, and 1142,
+    with a sent, a not-sent, an unclassified and an earlier term's sent
+    announcement."""
+    client.app.state.settings = client.app.state.settings.model_copy(
+        update={"announcement_classifier_url": "http://classifier.test:40002"}
+    )
     async with client.app.state.session_factory() as session:
         session.add_all(
             [
@@ -109,6 +114,19 @@ async def test_refuses_an_unclassified_or_missing_announcement(
     resp = await admin_client.post(f"/admin/course-announcements/{key}/extract", headers=ACTOR)
 
     assert (resp.status_code, resp.json()["detail"]) == (code, detail)
+    assert await _queued(admin_client) == []
+    assert await _audit(admin_client) == []
+
+
+async def test_refuses_while_course_announcements_are_turned_off(admin_client) -> None:
+    await _seed(admin_client)
+    admin_client.app.state.settings = admin_client.app.state.settings.model_copy(
+        update={"announcement_classifier_url": ""}
+    )
+
+    resp = await admin_client.post("/admin/course-announcements/101-901/extract", headers=ACTOR)
+
+    assert (resp.status_code, resp.json()["detail"]) == (409, TURNED_OFF)
     assert await _queued(admin_client) == []
     assert await _audit(admin_client) == []
 

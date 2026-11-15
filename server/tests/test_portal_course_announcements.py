@@ -19,6 +19,7 @@ import pytest_asyncio
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from portal.app.db import _asyncpg_dsn  # noqa: E402
+from portal.app.routes import course_announcements as announcement_routes  # noqa: E402
 from portal.app.routes.course_announcements import (  # noqa: E402
     approve_item,
     get_announcement,
@@ -398,6 +399,37 @@ async def test_a_replace_keeps_the_english_note_while_the_chinese_one_stays(
         "SELECT note_zh, note_en, periods FROM course_changes WHERE id = $1", change_id
     )
     assert tuple(row) == (note_zh, note_en, ["3"])
+
+
+async def test_approving_a_replace_keeps_a_translation_saved_meanwhile(
+    term, pool, db_session, monkeypatch
+):
+    change_id = await _applied_change(
+        db_session, "note", note_zh="改為線上上課", note_en="Online class"
+    )
+    announcement = await _announcement(db_session)
+    item = await _item(
+        db_session, await _extraction(db_session, announcement),
+        _change("note", periods=["3"], note_zh="改為線上上課", note_en=None), action="replace",
+        change_id=change_id,
+    )
+    await db_session.commit()
+    replace_change = announcement_routes.replace_change
+
+    async def translated_meanwhile(*args, **kwargs):
+        # Another operator saves a translation after the approval read the item.
+        await pool.execute(
+            "UPDATE course_changes SET note_en = 'Class moves online' WHERE id = $1", change_id
+        )
+        return await replace_change(*args, **kwargs)
+
+    monkeypatch.setattr(announcement_routes, "replace_change", translated_meanwhile)
+
+    response = await approve_item(item.id, _request(), pool=pool)
+
+    assert response.status_code == 200, _body(response)
+    note_en = await pool.fetchval("SELECT note_en FROM course_changes WHERE id = $1", change_id)
+    assert note_en == "Class moves online"
 
 
 async def test_approving_a_remove_item_deletes_the_change_and_marks_its_add(

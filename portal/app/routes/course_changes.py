@@ -323,24 +323,28 @@ async def _check(
     return columns
 
 
+def kept_note_en(fields: dict, note_zh: str | None, note_en: str | None) -> dict:
+    """`fields`, a replace item's change, with the English note `note_en` of
+    the change it replaces kept while its Chinese note stays `note_zh`; the
+    extraction never states an English note."""
+    if fields.get("note_en") is None and fields.get("note_zh") == note_zh:
+        return {**fields, "note_en": note_en}
+    return fields
+
+
 def item_payload(item) -> dict:
-    """A review item's change in `course_changes` column names. The extraction
-    never states an English note, so a replace keeps the replaced change's
-    while the Chinese note it translates stays the same; the item's row
-    carries that change's notes as `replaced_note_zh` and `replaced_note_en`."""
+    """A review item's change in `course_changes` column names, a replace's as
+    approving it would write it; the item's row carries the replaced change's
+    notes as `replaced_note_zh` and `replaced_note_en`."""
     payload = json.loads(item["payload"])
-    if (
-        item["action"] == "replace"
-        and payload.get("note_en") is None
-        and payload.get("note_zh") == item["replaced_note_zh"]
-    ):
-        return {**payload, "note_en": item["replaced_note_en"]}
-    return payload
+    if item["action"] != "replace":
+        return payload
+    return kept_note_en(payload, item["replaced_note_zh"], item["replaced_note_en"])
 
 
 def item_body(item) -> dict:
-    """A review item's change as a request body."""
-    payload = item_payload(item)
+    """A review item's change as a request body, as the item states it."""
+    payload = json.loads(item["payload"])
     first, last = payload.get("start_date"), payload.get("end_date")
     return {
         "course_no": item["course_no"],
@@ -436,20 +440,24 @@ async def add_change(
 
 
 async def replace_change(
-    conn, actor: str, change_id: int, body: dict, item_id=None
+    conn, actor: str, change_id: int, body: dict, item_id=None, keep_note_en=False
 ) -> dict | JSONResponse:
     """Replaces change `change_id` with the one `body` describes, approving
-    the replace item `item_id` when it comes from one. Returns its term,
-    course and columns."""
+    the replace item `item_id` when it comes from one. With `keep_note_en`,
+    `body` is the item's own change, which keeps the change's English note as
+    `kept_note_en` does. Returns its term, course and columns."""
     await _lock_items(conn, change_id)
     # NO KEY UPDATE, since the id stays: a term delete's foreign key check
     # then still reads this row, and cannot deadlock with the term lock below.
     current = await conn.fetchrow(
-        "SELECT term_code, course_no FROM course_changes WHERE id = $1 FOR NO KEY UPDATE",
+        "SELECT term_code, course_no, note_zh, note_en FROM course_changes"
+        " WHERE id = $1 FOR NO KEY UPDATE",
         change_id,
     )
     if current is None:
         return _bad("change not found", 404)
+    if keep_note_en:
+        body = kept_note_en(body, current["note_zh"], current["note_en"])
     item = None
     if item_id is not None:
         item = await pending_item(conn, item_id)
