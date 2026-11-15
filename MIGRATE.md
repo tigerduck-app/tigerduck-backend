@@ -32,6 +32,23 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.5.0
+
+- **Portal, Course announcements page** (under Moodle): the review queue of
+  extracted changes with approve, edit and approve, and reject with a
+  reason; the term's announcements with search and extraction filters; each
+  announcement's scores, checks and extracted facts, its text behind the
+  reveal; and Re-extract. The nav shows how many items wait for review.
+- **Course changes.** Approving an item writes the change through the same
+  check as a manual one. Editing or deleting a change an announcement wrote
+  marks its item edited or removed, and a delete supersedes the pending
+  replace and remove items naming that change.
+- **Admin route** `POST /admin/course-announcements/{id}/extract`, on the
+  internal admin listener: queues a classified announcement of any term or
+  route for extraction again. The portal's Re-extract calls it.
+- No migration and no `.env` change.
+- Rollback: check out 4.4.0 and run `./start.sh`.
+
 ## Upgrading to 4.4.0
 
 - **Course announcements.** With `TIGERDUCK_ANNOUNCEMENT_CLASSIFIER_URL`
