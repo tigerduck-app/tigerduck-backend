@@ -15,7 +15,6 @@ from collections.abc import Awaitable, Callable
 import httpx
 
 
-
 class RequestBudget:
     """Lets a request go at most `per_minute` times a minute, each at least
     `60 / per_minute` seconds after the one before, and none while paused.

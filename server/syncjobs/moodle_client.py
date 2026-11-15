@@ -923,7 +923,6 @@ class HttpCourseFetcher:
         ]
 
 
-
 # Moodle's default `perpage` of 0 answers with every discussion of the forum.
 _DISCUSSIONS_PER_PAGE = 20
 # A page only of pinned and starred discussions is followed this far.
