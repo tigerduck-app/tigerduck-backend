@@ -44,9 +44,19 @@ class BulletinMetadata:
 
 
 class LLMError(RuntimeError):
-    """Raised when the provider cannot produce a valid classification after
-    exhausting retries. The dispatcher catches this and marks the bulletin
-    `failed`, leaving `body_md` intact so a later model can retry."""
+    """Raised when the LLM gives no usable answer after its retries. The
+    bulletin job catches this and marks the bulletin `failed`, leaving
+    `body_md` intact so a later model can retry.
+
+    It holds a fixed `code` and, for an HTTP error, the `status`, never
+    prompt or answer text: `http_status`, `timeout`, `transport`,
+    `invalid_response` (no message content), `invalid_json` (the content is
+    not a JSON object) or `invalid_answer` (the caller's parse refused it)."""
+
+    def __init__(self, code: str, status: int | None = None) -> None:
+        super().__init__(code if status is None else f"{code} (HTTP {status})")
+        self.code = code
+        self.status = status
 
 
 @runtime_checkable
