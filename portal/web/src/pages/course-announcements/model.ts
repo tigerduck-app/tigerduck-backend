@@ -79,6 +79,10 @@ export type DetailItem = (Item | InfoItem) & {
   reason: string | null;
 };
 
+/** Whether the announcement's newest extraction has yet to finish. */
+export const isExtracting = (detail: Detail | undefined) =>
+  detail?.extraction?.status === "queued" || detail?.extraction?.status === "running";
+
 export type Detail = {
   id: string;
   term: string;

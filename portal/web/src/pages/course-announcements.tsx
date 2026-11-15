@@ -1,7 +1,7 @@
 // Course announcements: the Moodle course announcements the backend polls,
 // classifies and extracts, and the review items an operator decides.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -19,10 +19,11 @@ import { changeError, KIND, type Change, type Course } from "./course-changes/mo
 import { AnnouncementList, type ListState } from "./course-announcements/AnnouncementList";
 import { DetailPanel } from "./course-announcements/DetailPanel";
 import type { ItemHandlers } from "./course-announcements/items";
-import { asChange, KEY, type Detail, type Item, type Review } from "./course-announcements/model";
+import { asChange, isExtracting, KEY, type Detail, type Item, type Review } from "./course-announcements/model";
 import { RejectDialog } from "./course-announcements/RejectDialog";
 import { ReviewTable } from "./course-announcements/ReviewPanel";
 
+const EXTRACTING_POLL_MS = 3000;
 const APPROVED = { add: "Change added", replace: "Change updated", remove: "Change deleted" } as const;
 
 export function CourseAnnouncementsPage() {
@@ -64,6 +65,7 @@ export function CourseAnnouncementsPage() {
     queryKey: [KEY, "announcement", shown],
     queryFn: () => api<Detail>(`/api/course-announcements/announcements/${encodeURIComponent(shown!)}`),
     enabled: shown !== null,
+    refetchInterval: (q) => (isExtracting(q.state.data) ? EXTRACTING_POLL_MS : false),
   });
 
   const courses = new Map((coursesQ.data?.courses ?? []).map((c) => [c.course_no, c]));
@@ -72,6 +74,18 @@ export function CourseAnnouncementsPage() {
     qc.invalidateQueries({ queryKey: [KEY] });
     qc.invalidateQueries({ queryKey: [CHANGES_KEY, code] });
   };
+  // The extraction the open detail waits on: when it ends, its items reach
+  // the review list, the counts and, applied, the term's changes.
+  const extracting = isExtracting(detailQ.data);
+  const awaited = useRef<string | null>(null);
+  useEffect(() => {
+    if (!detailQ.data) return;
+    if (extracting) awaited.current = detailQ.data.id;
+    else if (awaited.current === detailQ.data.id) {
+      awaited.current = null;
+      refresh();
+    }
+  }, [detailQ.data, extracting]);
 
   const approveMut = useMutation({
     mutationFn: (item: Item) => api(`/api/course-announcements/items/${item.id}/approve`, { method: "POST" }),
