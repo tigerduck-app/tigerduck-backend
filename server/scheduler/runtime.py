@@ -20,8 +20,10 @@ from server.auth.retirement import retire_dead_devices
 from server.bulletins import jobs as bulletin_jobs
 from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
-from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
+from server.bulletins.llm.openai_compat import OpenAICompatibleProvider, llm_options
 from server.config import Settings
+from server.course_announcements.extractor import TICK, build_extractor, run_extraction_tick
+from server.course_announcements.items import mark_past_items
 from server.course_announcements.poller import build_poller, run_poll_tick
 from server.course_catalog.refresh import refresh_course_catalog
 from server.links.checker import run_link_checks
@@ -42,14 +44,7 @@ from server.tls_pins.watcher import run_pin_watch
 
 
 def build_llm_provider(settings: Settings) -> LLMProvider:
-    return OpenAICompatibleProvider(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        max_retries=settings.llm_max_retries,
-        temperature=settings.llm_temperature,
-    )
+    return OpenAICompatibleProvider(**llm_options(settings))
 
 
 def build_scheduler(
@@ -82,6 +77,11 @@ def build_scheduler(
       and classify what is stored, every minute (only with a `sync_worker`,
       whose tokens and budget it shares, and an
       `announcement_classifier_url`).
+    * `course_announcement_extract` — send one queued course announcement to
+      the LLM every minute while no bulletin waits for it (only with an
+      `announcement_classifier_url`).
+    * `course_announcement_past` — mark past the course announcement items
+      whose days have all passed, daily at 00:05 Taipei (likewise).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
     * `session_reauth_scan` — ask devices left without a session to sign in
@@ -225,6 +225,33 @@ def build_scheduler(
                 coalesce=True,
                 misfire_grace_time=30,
             )
+    if settings.announcement_classifier_url:
+        extractor = build_extractor(settings, session_factory)
+
+        async def course_announcement_extract() -> None:
+            await run_extraction_tick(extractor)
+
+        scheduler.add_job(
+            course_announcement_extract,
+            trigger=IntervalTrigger(seconds=TICK.total_seconds()),
+            id="course_announcement_extract",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+
+        async def course_announcement_past() -> None:
+            await mark_past_items(session_factory, datetime.now(UTC))
+
+        scheduler.add_job(
+            course_announcement_past,
+            # Just after midnight in Taipei, when the day's items become past.
+            trigger=CronTrigger(hour=0, minute=5, timezone="Asia/Taipei"),
+            id="course_announcement_past",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
     if push_worker is not None:
 
         async def push_pipeline_tick() -> None:

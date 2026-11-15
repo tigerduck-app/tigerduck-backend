@@ -20,7 +20,7 @@ from server.academic_calendar.models import SemesterTerm
 # The calendar's dates are NTUST school days, which both apps read in Taipei
 # time. Fixed rather than `course_reminder_timezone`, so that a bad value
 # there cannot stop the assignment reminder scan, which reads the term.
-_SCHOOL_TZ = ZoneInfo("Asia/Taipei")
+SCHOOL_TZ = ZoneInfo("Asia/Taipei")
 
 #: A term's first and last day of classes, both inclusive.
 TermDates = tuple[date, date]
@@ -43,7 +43,7 @@ async def current_term_code(session: AsyncSession, now: datetime) -> str | None:
     recently, so a break belongs to the term before it, or the earliest
     term while none has begun.
     """
-    today = now.astimezone(_SCHOOL_TZ).date()
+    today = now.astimezone(SCHOOL_TZ).date()
     began = await session.scalar(
         select(SemesterTerm.code)
         .where(SemesterTerm.start_date <= today)

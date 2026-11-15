@@ -44,7 +44,6 @@ from server.syncjobs.devices import has_syncing_device
 from server.syncjobs.executor import SyncWorker
 from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import (
-    FetchedCourse,
     FetchedDiscussion,
     ForumFetcher,
     HttpForumFetcher,
@@ -260,19 +259,9 @@ async def _load_course(
     ).first()
     if listed is None:
         return None
-    codes = course_nos(
-        FetchedCourse(
-            moodle_course_id=course_id,
-            short_name=None,
-            full_name=listed.full_name,
-            category_id=None,
-            enrolled_user_count=None,
-            idnumber=listed.idnumber,
-        )
-    )
     return _Course(
         moodle_course_id=course_id,
-        codes=codes,
+        codes=course_nos(listed.idnumber, listed.full_name),
         forum_id=state.forum_id if state else None,
         latest_post_at=state.latest_post_at if state else None,
         holders=_starting_at(list(holders), state.holder_user_id if state else None),

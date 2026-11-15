@@ -54,7 +54,7 @@ logger = structlog.get_logger(__name__)
 _ISO_WEEKDAYS = range(1, 8)
 _WEEKDAY_KEYS = {str(day) for day in _ISO_WEEKDAYS}
 # NTUST's period order; periods next to each other in it make one meeting, as in the apps.
-_PERIOD_RANK = {
+PERIOD_RANK = {
     period: rank
     for rank, period in enumerate((*(str(n) for n in range(1, 11)), "A", "B", "C", "D"))
 }
@@ -110,8 +110,8 @@ def _schedule_entries(schedule_json: object) -> list:
         if day not in _WEEKDAY_KEYS or not isinstance(periods, list):
             continue
         run: list[str] = []
-        for period in sorted({str(p) for p in periods if str(p) in _PERIOD_RANK}, key=_PERIOD_RANK.get):
-            if run and _PERIOD_RANK[period] != _PERIOD_RANK[run[-1]] + 1:
+        for period in sorted({str(p) for p in periods if str(p) in PERIOD_RANK}, key=PERIOD_RANK.get):
+            if run and PERIOD_RANK[period] != PERIOD_RANK[run[-1]] + 1:
                 entries.append({"day": int(day), "periods": run})
                 run = []
             run.append(period)

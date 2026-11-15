@@ -844,7 +844,7 @@ L.add(stat("Live bulletins", PG, [sql(f"SELECT count(*) AS \"bulletins\" FROM bu
 L.add(stat("New in range", PG, [sql(f"SELECT count(*) AS \"new\" FROM bulletins WHERE $__timeFilter(first_seen_at) AND {SRC}")]), 4, 4)
 L.add(stat("Waiting for the LLM", PG, [sql(f"SELECT count(*) AS \"pending\" FROM bulletins WHERE processing_state = 'pending' AND NOT is_deleted AND {SRC}")],
            thresholds=steps(("orange", 20), ("red", 100)),
-           desc="Bulletins scraped but not yet classified. Grows when llama-server is down."), 4, 4)
+           desc="Bulletins scraped but not yet classified. Grows when the LLM server is down."), 4, 4)
 L.add(stat("Processing failed", PG, [sql(f"SELECT count(*) AS \"failed\" FROM bulletins WHERE processing_state = 'failed' AND NOT is_deleted AND {SRC}")],
            thresholds=steps(("orange", 1))), 4, 4)
 L.add(stat("Last scrape", PROM, [prom('time() - (max(tigerduck_bulletin_last_nonempty_scrape_timestamp_seconds > 0) or max(process_start_time_seconds{job="backend"}))')], unit="s",
@@ -882,7 +882,7 @@ ORDER BY 1
 """, fmt="time_series")], bars=True), 12, 8)
 L.add(series("LLM request time, p95", PROM, [prom(
     "histogram_quantile(0.95, sum by (le, outcome) (rate(tigerduck_llm_request_duration_seconds_bucket[$__rate_interval])))", "{{outcome}}")],
-    unit="s", colors=True, desc="From the backend's own metrics: one classify request to llama-server."), 12, 8)
+    unit="s", colors=True, desc="From the backend's own metrics: one classify request to the LLM server."), 12, 8)
 
 L.row("Details")
 L.add(table("Recent bulletins", PG, [sql(f"""

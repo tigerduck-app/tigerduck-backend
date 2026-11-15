@@ -54,7 +54,10 @@ server/
 │                              #   rules and the scheduled link checker
 ├── course_announcements/      # first posts of Moodle course news forums: models,
 │                              #   the classifier service client, ingest (store,
-│                              #   classify, route to the LLM) and the poll job
+│                              #   classify, route to the LLM), the poll job,
+│                              #   the history import, the LLM's question
+│                              #   (extraction.py) and its job (extractor.py),
+│                              #   checks, review items and automatic apply
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
@@ -168,9 +171,11 @@ Grafana is the only monitoring service on `proxy-net`, served at
 `<portal host>/grafana` behind Cloudflare Access (it checks the Access
 JWT itself).
 
-`llama-server` stays NATIVE on the host (Docker on Mac can't get Metal
-GPU). The backend reaches it via `host.docker.internal:40001`. See
-`deploy/launchd/ai.tigerduck.llm.plist` for the launchd service.
+The LLM is an OpenAI-compatible server outside this repository. In
+production it is a service on the host shared with other apps, running
+natively (Docker on Mac can't get Metal GPU); the backend reaches it via
+`host.docker.internal:40001` with `TIGERDUCK_LLM_API_KEY` as its Bearer
+key. `deploy/launchd/README.md` shows how to check it.
 
 ### One-shot backfill
 ```bash
@@ -355,7 +360,9 @@ into the backend container via `docker-compose.yml`.
   empty turns them off), `course_announcement_requests_per_minute` (20, Moodle
   requests on a budget of their own beside the sync worker's) and
   `course_announcements_auto_apply` (false, read at start: a change that passes
-  every check still waits for review in the portal).
+  every check still waits for review in the portal). Extraction asks the
+  bulletins' LLM (`llm_base_url`, `llm_model`); each extraction stores its
+  model, so a model change needs a `--reextract` run.
 - The `course_announcement_poll` job runs every minute when the classifier URL
   and credential keys are set (`course_announcements/poller.py`). It polls the
   news forums of the current term's Moodle courses in `user_moodle_courses`,
@@ -372,7 +379,30 @@ into the backend container via `docker-compose.yml`.
   failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
-  for waits an hour and goes after the others.
+  for waits an hour and goes after the others. Ingest queues an extraction when
+  it classifies a version, and only for one of the current term, so a post
+  first classified after its term ended is never extracted; `--reextract`
+  queues the current term's posts alone and does not bring it back.
+- `scripts/import_course_announcements.py` imports the announcement history
+  from a local export through the same store and classification, and refuses
+  the whole export, before storing anything, if a record holds a field outside
+  its format, such as an author's (`course_announcements/history.py`).
+  `--reextract` queues the current term's announcements again for a new model.
+- The `course_announcement_extract` job runs every minute when the classifier
+  URL is set (`course_announcements/extractor.py`). While no bulletin is
+  claimable (`claimable_bulletins`, the LLM's one slot goes to bulletins first)
+  it claims one queued extraction, the latest post first, asks the LLM with no
+  transaction open and keeps the answer only while the extraction still runs
+  for the announcement's stored version. A failed attempt waits 1, 4 and 16
+  ticks, then the extraction fails; a claim older than 10 minutes counts as a
+  failed attempt. A stored result supersedes the announcement's earlier pending
+  items and becomes review items (`items.py`) under the lock every
+  `course_changes` writer takes (`checks.lock_courses`), checked with the
+  database's `course_change_violations`. With automatic apply on, an
+  extraction's add items are written all or none (`apply.py`), by and audited
+  as `course-announcements`; replace and remove items always wait for review.
+  `course_announcement_past` marks past the items whose days have passed,
+  daily at 00:05 Taipei.
 - Course announcement text may name students: it stays in the
   `course_announcements` tables and the portal, never in a log line, an
   exception, an error column or an app-facing response. Errors carry fixed

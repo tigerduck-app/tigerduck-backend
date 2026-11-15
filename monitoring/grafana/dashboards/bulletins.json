@@ -226,7 +226,7 @@
     {
       "type": "stat",
       "title": "Waiting for the LLM",
-      "description": "Bulletins scraped but not yet classified. Grows when llama-server is down.",
+      "description": "Bulletins scraped but not yet classified. Grows when the LLM server is down.",
       "datasource": {
         "type": "grafana-postgresql-datasource",
         "uid": "tigerduck-db"
@@ -1305,7 +1305,7 @@
     {
       "type": "timeseries",
       "title": "LLM request time, p95",
-      "description": "From the backend's own metrics: one classify request to llama-server.",
+      "description": "From the backend's own metrics: one classify request to the LLM server.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"

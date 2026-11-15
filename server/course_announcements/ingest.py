@@ -4,13 +4,14 @@ The poll and the history import both store through `store_announcements`,
 which keeps the version with the latest `modified_at` whichever arrives
 first, and `classify_pending` classifies what is stored, on every poll tick,
 so an announcement stored while the classifier was down needs no second
-Moodle request.
+Moodle request. Only the current term's versions are queued for extraction,
+so the history the import stores never reaches the LLM.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import structlog
 import sqlalchemy as sa
@@ -18,6 +19,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.terms import current_term_code
 from server.course_announcements.classifier import (
     MAX_POSTS,
     Classification,
@@ -25,6 +27,7 @@ from server.course_announcements.classifier import (
     ClassifierError,
     Post,
 )
+from server.course_announcements.items import refresh_contradictions
 from server.course_announcements.models import (
     EXTRACTION_LIVE_WHERE,
     AnnouncementRoute,
@@ -140,6 +143,7 @@ async def store_announcements(
         stored += (await session.scalars(upsert)).all()
     if stored:
         await _retire_older_versions(session, stored)
+        await refresh_contradictions(session, term_code, course_codes)
     return stored
 
 
@@ -184,10 +188,11 @@ async def classify_pending(
     limit: int = CLASSIFY_PER_TICK,
 ) -> int:
     """Classify stored versions that are not yet, oldest first and those the
-    service gave no result last, and queue an extraction for each the route
-    rule sends. A version with no result waits CLASSIFY_RETRY_AFTER. No
-    transaction is open while the service answers; a version replaced
-    meanwhile keeps the newer one. Returns how many were classified."""
+    service gave no result last, and queue an extraction for each of the
+    current term the route rule sends. A version with no result waits
+    CLASSIFY_RETRY_AFTER. No transaction is open while the service answers;
+    a version replaced meanwhile keeps the newer one. Returns how many were
+    classified."""
     async with session_scope(session_factory) as session:
         pending = (
             await session.execute(
@@ -225,6 +230,7 @@ async def classify_pending(
         return 0
     classified = 0
     async with session_scope(session_factory) as session:
+        term = await current_term_code(session, datetime.now(UTC))
         for row, result in zip(pending, results, strict=True):
             if result is None:
                 logger.warning("course_announcements.no_classification", announcement_id=row.id)
@@ -235,7 +241,7 @@ async def classify_pending(
                 )
                 continue
             if await _store_classification(
-                session, row.id, row.modified_at, result, info.release
+                session, row.id, row.modified_at, result, info.release, term
             ):
                 classified += 1
     return classified
@@ -256,9 +262,10 @@ async def _store_classification(
     version: datetime,
     result: Classification,
     release: str | None,
+    term: str | None,
 ) -> bool:
     """Store `result` on the version it was asked for, if that is still the
-    stored, unclassified one."""
+    stored, unclassified one, and queue it if it is of `term`."""
     route = route_for(result.scores)
     stored = await session.scalar(
         _unclassified_version(key, version)
@@ -276,16 +283,41 @@ async def _store_classification(
     )
     if stored is None:
         return False
-    if route is AnnouncementRoute.sent:
-        await session.execute(
-            pg_insert(CourseAnnouncementExtraction)
-            .values(announcement_id=key, version=version)
-            .on_conflict_do_nothing(
-                index_elements=[
-                    CourseAnnouncementExtraction.announcement_id,
-                    CourseAnnouncementExtraction.version,
-                ],
-                index_where=text(EXTRACTION_LIVE_WHERE),
-            )
-        )
+    await queue_extractions(session, term, CourseAnnouncement.id == key)
     return True
+
+
+async def queue_extractions(
+    session: AsyncSession, term: str | None, *where: sa.ColumnElement[bool]
+) -> int:
+    """Queue an extraction of the stored version of each announcement of
+    `term` that `where` picks and the route rule sends, unless one is queued
+    or running already. Returns how many were queued."""
+    if term is None:
+        return 0
+    queued = await session.scalars(
+        pg_insert(CourseAnnouncementExtraction)
+        .from_select(
+            ["announcement_id", "version"],
+            select(CourseAnnouncement.id, CourseAnnouncement.modified_at)
+            .where(
+                CourseAnnouncement.term_code == term,
+                CourseAnnouncement.route == AnnouncementRoute.sent.value,
+                *where,
+            )
+            # Waits for a store of a newer version to commit, then reads that
+            # version, so its supersede step cannot miss what is queued here.
+            # In id order, as store_announcements locks rows.
+            .order_by(CourseAnnouncement.id)
+            .with_for_update(),
+        )
+        .on_conflict_do_nothing(
+            index_elements=[
+                CourseAnnouncementExtraction.announcement_id,
+                CourseAnnouncementExtraction.version,
+            ],
+            index_where=text(EXTRACTION_LIVE_WHERE),
+        )
+        .returning(CourseAnnouncementExtraction.id)
+    )
+    return len(queued.all())

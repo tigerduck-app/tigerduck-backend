@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     api_shared_secret: str = ""
     skip_llm_probe: bool = False
     llm_base_url: str = ""
+    # The LLM server's Bearer key, for the status page's check only.
+    llm_api_key: str = ""
     # The backend reads both at start too; the Course announcements page shows
     # shadow mode and links each announcement to Moodle.
     course_announcements_auto_apply: bool = False
@@ -78,6 +80,7 @@ class Settings(BaseSettings):
                 in {"true", "1", "yes"}
             ),
             llm_base_url=env.get("TIGERDUCK_LLM_BASE_URL", ""),
+            llm_api_key=env.get("TIGERDUCK_LLM_API_KEY", ""),
             course_announcements_auto_apply=(
                 env.get("TIGERDUCK_COURSE_ANNOUNCEMENTS_AUTO_APPLY", "false").lower()
                 in {"true", "1", "yes"}

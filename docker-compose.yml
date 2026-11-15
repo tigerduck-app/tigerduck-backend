@@ -23,8 +23,9 @@
 # the one monitoring service on proxy-net, served under the portal host at
 # /grafana.
 #
-# llama-server stays NATIVE on the host (Docker Desktop on Mac can't surface
-# Metal GPU). The backend reaches it via Docker Desktop's host-gateway:
+# The LLM is an OpenAI-compatible server outside this stack. In production it
+# runs natively on the host (Docker Desktop on Mac can't surface Metal GPU),
+# and the backend reaches it via Docker Desktop's host-gateway:
 # TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1 in .env.
 
 name: tigerduck
