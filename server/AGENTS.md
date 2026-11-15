@@ -382,7 +382,9 @@ into the backend container via `docker-compose.yml`.
   for waits an hour and goes after the others. Ingest queues an extraction when
   it classifies a version, and only for one of the current term, so a post
   first classified after its term ended is never extracted; `--reextract`
-  queues the current term's posts alone and does not bring it back.
+  queues the current term's posts alone and does not bring it back. Both queue
+  a post a course change came from whatever its route (`SENT_OR_SOURCED`), so
+  an edit routed `not_sent` can still remove the change.
 - `scripts/import_course_announcements.py` imports the announcement history
   from a local export through the same store and classification, and refuses
   the whole export, before storing anything, if a record holds a field outside

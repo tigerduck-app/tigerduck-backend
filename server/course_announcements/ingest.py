@@ -19,6 +19,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from server.academic_calendar.models import CourseChange
 from server.academic_calendar.terms import current_term_code
 from server.course_announcements.classifier import (
     MAX_POSTS,
@@ -58,6 +59,13 @@ UNCERTAIN_LABELS = (
 FACT_LABELS = ("class_cancel", "class_change", "exam_info", "exam_change", "exam_seating")
 UNCERTAIN_FROM = 0.10
 CONFIDENT_FROM = 0.90
+
+# An edit of a post a course change came from must reach the LLM whatever its
+# route, since only an extraction of it can ask to remove the change.
+SENT_OR_SOURCED = sa.or_(
+    CourseAnnouncement.route == AnnouncementRoute.sent.value,
+    sa.exists().where(CourseChange.source_announcement_id == CourseAnnouncement.id),
+)
 
 # Announcements classified in one tick, at most.
 CLASSIFY_PER_TICK = 4 * MAX_POSTS
@@ -191,10 +199,10 @@ async def classify_pending(
 ) -> int:
     """Classify stored versions that are not yet, oldest first and those the
     service gave no result last, and queue an extraction for each of the
-    current term the route rule sends. A version with no result waits
-    CLASSIFY_RETRY_AFTER. No transaction is open while the service answers;
-    a version replaced meanwhile keeps the newer one. Returns how many were
-    classified."""
+    current term the route rule sends or a course change came from. A
+    version with no result waits CLASSIFY_RETRY_AFTER. No transaction is
+    open while the service answers; a version replaced meanwhile keeps the
+    newer one. Returns how many were classified."""
     async with session_scope(session_factory) as session:
         pending = (
             await session.execute(
@@ -285,16 +293,22 @@ async def _store_classification(
     )
     if stored is None:
         return False
-    await queue_extractions(session, term, CourseAnnouncement.id == key)
+    await queue_extractions(
+        session, term, CourseAnnouncement.id == key, SENT_OR_SOURCED, any_route=True
+    )
     return True
 
 
 async def queue_extractions(
-    session: AsyncSession, term: str | None, *where: sa.ColumnElement[bool]
+    session: AsyncSession,
+    term: str | None,
+    *where: sa.ColumnElement[bool],
+    any_route: bool = False,
 ) -> int:
     """Queue an extraction of the stored version of each announcement of
-    `term` that `where` picks and the route rule sends, unless one is queued
-    or running already. Returns how many were queued."""
+    `term` that `where` picks and the route rule sends, or with `any_route`
+    each classified one, unless one is queued or running already. Returns
+    how many were queued."""
     if term is None:
         return 0
     queued = await session.scalars(
@@ -304,7 +318,9 @@ async def queue_extractions(
             select(CourseAnnouncement.id, CourseAnnouncement.modified_at)
             .where(
                 CourseAnnouncement.term_code == term,
-                CourseAnnouncement.route == AnnouncementRoute.sent.value,
+                CourseAnnouncement.route != AnnouncementRoute.unclassified.value
+                if any_route
+                else CourseAnnouncement.route == AnnouncementRoute.sent.value,
                 *where,
             )
             # Waits for a store of a newer version to commit, then reads that
