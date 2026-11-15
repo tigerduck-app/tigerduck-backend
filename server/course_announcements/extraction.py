@@ -248,7 +248,8 @@ def _conforms(value: Any, schema: dict[str, Any]) -> bool:
     if types and not any(_is_type(value, name) for name in types):
         return False
     if isinstance(value, str) and "pattern" in schema:
-        return re.search(schema["pattern"], value) is not None
+        # Every pattern is anchored; a search would let `$` pass a final newline.
+        return re.fullmatch(schema["pattern"], value) is not None
     if _is_type(value, "integer"):
         return schema.get("minimum", value) <= value <= schema.get("maximum", value)
     if isinstance(value, list):

@@ -334,6 +334,35 @@ async def test_failures_wait_1_4_and_16_ticks_then_fail_until_queued_again(
     assert [e.status for e in await _extractions(db_session)] == ["failed", "done"]
 
 
+class _SlowLLM(ScriptedLLM):
+    """Fails after the clock has moved on by `takes`."""
+
+    def __init__(self, clock: _Clock, takes: timedelta) -> None:
+        super().__init__(500)
+        self.clock, self.takes = clock, takes
+
+    async def complete_json(self, **kwargs):
+        self.clock.now += self.takes
+        return await super().complete_json(**kwargs)
+
+
+async def test_a_slow_failure_still_waits_its_ticks_after_it_failed(
+    db_session, factory, make_extractor, clock
+):
+    await _queued(factory)
+    started = clock.now
+
+    await run_extraction_tick(make_extractor(_SlowLLM(clock, timedelta(minutes=6))))
+    (extraction,) = await _extractions(db_session)
+    # The first retry is the next tick, whenever the call ended.
+    assert extraction.next_attempt_at == started + timedelta(minutes=6)
+
+    started = clock.now
+    await run_extraction_tick(make_extractor(_SlowLLM(clock, timedelta(minutes=6))))
+    (extraction,) = await _extractions(db_session)
+    assert extraction.next_attempt_at == started + timedelta(minutes=6 + 3)
+
+
 async def test_an_answer_that_fails_the_schema_logs_and_stores_a_code_alone(
     db_session, factory, make_extractor
 ):

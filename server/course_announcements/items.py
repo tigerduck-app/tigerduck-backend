@@ -301,6 +301,9 @@ async def _sourced_changes(
         .join(CourseAnnouncement, CourseAnnouncement.id == CourseChange.source_announcement_id)
         .where(CourseChange.term_code == term, CourseChange.course_no == course_no)
         .order_by(CourseChange.id)
+        # The portal deletes a change without the course lock; this keeps the
+        # ones an item will name until the items are stored.
+        .with_for_update(of=CourseChange, key_share=True)
     )
     return [(change, posted_at) for change, posted_at in rows.all()]
 

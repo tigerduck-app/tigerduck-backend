@@ -25,6 +25,7 @@ from server.course_announcements.models import (
     CourseAnnouncementExtraction,
     CourseAnnouncementItem,
     ItemAction,
+    ItemKind,
     ItemState,
 )
 
@@ -134,7 +135,7 @@ async def _decided_against(
     session: AsyncSession, announcement_id: str, adds: Sequence[CourseAnnouncementItem]
 ) -> bool:
     """Whether an operator rejected or removed an earlier item of the
-    announcement for the course, day and kind of one of `adds`."""
+    announcement for the course and kind of one of `adds` on one of its days."""
     decided = await session.execute(
         select(CourseAnnouncementItem.course_no, CourseAnnouncementItem.payload)
         .join(
@@ -143,16 +144,17 @@ async def _decided_against(
         )
         .where(
             CourseAnnouncementExtraction.announcement_id == announcement_id,
+            CourseAnnouncementItem.kind == ItemKind.course_change.value,
             CourseAnnouncementItem.state.in_(
                 [ItemState.rejected.value, ItemState.removed.value]
             ),
         )
     )
-    refused = {
-        (course_no, payload.get("kind"), payload.get("start_date"))
-        for course_no, payload in decided.all()
-    }
+    refused = [(course_no, payload["kind"], *days_of(payload)) for course_no, payload in decided]
     return any(
-        (item.course_no, item.payload["kind"], item.payload["start_date"]) in refused
+        (course_no, kind) == (item.course_no, item.payload["kind"])
+        and first <= days_of(item.payload)[1]
+        and days_of(item.payload)[0] <= last
+        for course_no, kind, first, last in refused
         for item in adds
     )

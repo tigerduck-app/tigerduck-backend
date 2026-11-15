@@ -181,6 +181,32 @@ async def test_a_rejected_change_is_not_applied_after_a_re_extract(announcement_
     assert await announcement_course.changes() == []
 
 
+async def test_a_day_inside_a_rejected_range_is_not_applied(announcement_course):
+    key = await announcement_course.post(text="11/16 到 11/30 停課；11/19（四）停課")
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_cancel"],
+            course_changes=[
+                extracted_change(
+                    mode="range", start_date="2026-11-16", end_date="2026-11-30",
+                    evidence="11/16 到 11/30 停課",
+                )
+            ],
+        )
+    )
+    async with announcement_course.factory() as session:
+        await session.execute(update(CourseAnnouncementItem).values(state="rejected"))
+        assert await queue_extraction(session, key)
+        await session.commit()
+    announcement_course.now += timedelta(minutes=1)
+
+    await announcement_course.extract(CANCEL_19, auto_apply=True)
+
+    items = await announcement_course.items()
+    assert [(i.state, i.passes_checks) for i in items] == [("rejected", True), ("pending", True)]
+    assert await announcement_course.changes() == []
+
+
 async def test_a_contradicted_change_is_not_applied(announcement_course):
     await announcement_course.post()
     await announcement_course.post(

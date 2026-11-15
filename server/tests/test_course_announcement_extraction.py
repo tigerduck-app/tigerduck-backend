@@ -120,9 +120,13 @@ async def test_an_exam_without_a_date_is_kept():
         {key: value for key, value in extraction_answer().items() if key != "held_as_usual"},
         extraction_answer(certain="yes"),
         extraction_answer(course_changes=[_change(excluded_weekdays=[8])]),
+        extraction_answer(course_changes=[_change(kind="start", start_time="08:00\n")]),
         "下週四（11/19）停課一次",
     ],
-    ids=["kind", "impossible-date", "extra-field", "missing-key", "type", "weekday", "not-json"],
+    ids=[
+        "kind", "impossible-date", "extra-field", "missing-key", "type", "weekday",
+        "final-newline", "not-json",
+    ],
 )
 async def test_an_invalid_answer_is_retried_then_refused_without_its_text(answer):
     llm = ScriptedLLM(answer)

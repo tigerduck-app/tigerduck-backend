@@ -104,7 +104,7 @@ async def run_extraction_tick(extractor: Extractor) -> bool:
             error=exc.code,
             status=exc.status,
         )
-        await _attempt_failed(extractor.session_factory, claim.id, exc.code, now)
+        await _attempt_failed(extractor, claim.id, exc.code, now)
         return True
     failed: str | None = None
     try:
@@ -112,7 +112,7 @@ async def run_extraction_tick(extractor: Extractor) -> bool:
     except Exception as exc:
         failed = type(exc).__name__
     if failed is not None:
-        await _attempt_failed(extractor.session_factory, claim.id, "store_failed", now)
+        await _attempt_failed(extractor, claim.id, "store_failed", now)
         # Raised outside the handler, so the scheduler's log has no cause to print.
         raise ExtractionTickFailed(failed)
     return True
@@ -222,24 +222,29 @@ async def _expire_claims(
         )
         for extraction_id in stale.all():
             logger.warning("course_announcements.extraction_abandoned", extraction_id=extraction_id)
-            await _record_failure(session, extraction_id, "abandoned", now)
+            await _record_failure(session, extraction_id, "abandoned", now, failed_at=now)
 
 
 async def _attempt_failed(
-    session_factory: async_sessionmaker[AsyncSession],
-    extraction_id: int,
-    code: str,
-    now: datetime,
+    extractor: Extractor, extraction_id: int, code: str, now: datetime
 ) -> None:
-    async with session_scope(session_factory) as session:
-        await _record_failure(session, extraction_id, code, now)
+    async with session_scope(extractor.session_factory) as session:
+        await _record_failure(
+            session, extraction_id, code, now, failed_at=extractor.clock()
+        )
 
 
 async def _record_failure(
-    session: AsyncSession, extraction_id: int, code: str, now: datetime
+    session: AsyncSession,
+    extraction_id: int,
+    code: str,
+    now: datetime,
+    *,
+    failed_at: datetime,
 ) -> None:
-    """Queue the running extraction for its next attempt, or fail it after
-    the last; one superseded meanwhile stays superseded."""
+    """Queue the running extraction for its next attempt, `RETRY_TICKS`
+    after the tick that began at `now`, or fail it after the last; one
+    superseded meanwhile stays superseded."""
     row = await session.get(
         CourseAnnouncementExtraction, extraction_id, with_for_update=True, populate_existing=True
     )
@@ -248,7 +253,9 @@ async def _record_failure(
     row.error_code = code
     if row.attempts <= len(RETRY_TICKS):
         row.status = ExtractionStatus.queued.value
-        row.next_attempt_at = now + TICK * RETRY_TICKS[row.attempts - 1]
+        wait = RETRY_TICKS[row.attempts - 1]
+        # The LLM can take minutes to fail, and those minutes count for no tick.
+        row.next_attempt_at = max(now + TICK * wait, failed_at + TICK * (wait - 1))
     else:
         row.status = ExtractionStatus.failed.value
         row.next_attempt_at = None
