@@ -956,8 +956,9 @@ def _parse_discussion(item: object) -> FetchedDiscussion | None:
     return FetchedDiscussion(
         discussion_id=discussion_id,
         post_id=post_id,
-        subject=subject,
-        message=message,
+        # Postgres refuses NUL in text.
+        subject=subject.replace("\x00", ""),
+        message=message.replace("\x00", ""),
         created_at=created_at,
         modified_at=modified_at,
         group_id=group_id,

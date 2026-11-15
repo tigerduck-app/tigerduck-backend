@@ -9,6 +9,7 @@ an error or a log line.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -56,7 +57,8 @@ class Classifier(Protocol):
 
 
 def _number(value: object) -> bool:
-    return type(value) in (int, float)
+    # Python's JSON parser takes NaN and Infinity, which jsonb refuses.
+    return type(value) in (int, float) and math.isfinite(value)
 
 
 def _parse_result(item: object) -> Classification | None:
@@ -71,7 +73,10 @@ def _parse_result(item: object) -> Classification | None:
         and isinstance(text, str)
     ):
         return None
-    return Classification(labels=tuple(labels), scores=dict(scores), text=text)
+    # Postgres refuses NUL in text.
+    return Classification(
+        labels=tuple(labels), scores=dict(scores), text=text.replace("\x00", "")
+    )
 
 
 class HttpClassifier:

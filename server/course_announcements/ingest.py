@@ -102,7 +102,8 @@ async def store_announcements(
             "visible_from": d.visible_from,
             "has_attachment": d.has_attachment,
         }
-        for key, d in latest.items()
+        # In id order, so two writers storing the same rows lock them alike.
+        for key, d in sorted(latest.items())
     ]
     stored: list[str] = []
     for start in range(0, len(rows), INSERT_CHUNK_ROWS):

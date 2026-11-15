@@ -138,6 +138,11 @@ def _paused(poller: CourseAnnouncementPoller) -> bool:
     return poller.budget.paused or poller.sync_budget.paused
 
 
+class PollTickFailed(Exception):
+    """A tick failed. Carries the failure's type alone: a database error's
+    message holds its statement's parameters, announcement text among them."""
+
+
 async def run_poll_tick(
     poller: CourseAnnouncementPoller, now: datetime | None = None
 ) -> int:
@@ -145,8 +150,19 @@ async def run_poll_tick(
     waiting for it, whether or not Moodle may be polled. Returns the
     courses polled."""
     now = now or datetime.now(UTC)
-    polled = await _poll_due_courses(poller, now)
-    await classify_pending(poller.session_factory, poller.classifier)
+    failed: str | None = None
+    polled = 0
+    try:
+        polled = await _poll_due_courses(poller, now)
+    except Exception as exc:
+        failed = type(exc).__name__
+    try:
+        await classify_pending(poller.session_factory, poller.classifier)
+    except Exception as exc:
+        failed = failed or type(exc).__name__
+    if failed is not None:
+        # Raised outside the handlers, so the scheduler's log has no cause to print.
+        raise PollTickFailed(failed)
     return polled
 
 
@@ -297,7 +313,9 @@ async def _poll_course(
             moodle_course_id=course_id,
             error=str(exc),
         )
-        await _record_poll(poller, course, term, now, holder=next_holder, discussions=[])
+        await _record_poll(
+            poller, course, term, now, holder=next_holder, discussions=[], forums=forums
+        )
         return _Outcome.polled
     except MoodleRateLimited:
         pause = poller.settings.sync_job_backoff_base_seconds

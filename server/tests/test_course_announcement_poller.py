@@ -19,8 +19,10 @@ from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementCourse,
 )
+from server.course_announcements import poller as poller_module
 from server.course_announcements.poller import (
     CourseAnnouncementPoller,
+    PollTickFailed,
     build_poller,
     poll_interval,
     run_poll_tick,
@@ -536,3 +538,27 @@ async def test_the_poll_sends_on_its_own_budget_and_pauses_with_the_sync_one(tes
     assert poller.budget is not worker.budget
     assert poller.fetcher._event_hooks is poller.budget.event_hooks
     assert poller.cipher is worker.cipher
+
+
+async def test_a_failed_poll_names_no_announcement_text_and_still_classifies(
+    db_session, poller, moodle, classifier, holder, term, monkeypatch
+):
+    await holder("alice", DS)
+    moodle.forums[7001] = 30
+    moodle.discussions[30] = [_discussion(1, NOW)]
+    classifier.down = True
+    await run_poll_tick(poller, NOW)
+    classifier.down = False
+
+    async def refused(*args, **kwargs):
+        raise RuntimeError("[parameters: ('Invented secret subject',)]")
+
+    monkeypatch.setattr(poller_module, "store_announcements", refused)
+
+    with pytest.raises(PollTickFailed) as caught:
+        await run_poll_tick(poller, NOW + timedelta(minutes=15))
+
+    assert caught.value.args == ("RuntimeError",)
+    assert caught.value.__cause__ is None and caught.value.__context__ is None
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert row.route == "sent"

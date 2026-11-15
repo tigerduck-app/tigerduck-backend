@@ -129,3 +129,23 @@ async def test_the_recording_fake_scores_by_subject_and_can_go_down():
     fake.down = True
     with pytest.raises(ClassifierError):
         await fake.info()
+
+
+async def test_a_score_jsonb_cannot_hold_is_refused():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = '{"results": [{"labels": [], "scores": {"materials": NaN}, "text": "a"}]}'
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    with pytest.raises(ClassifierError, match="unexpected_shape"):
+        await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(_posts(1))
+
+
+async def test_a_nul_character_in_the_text_is_dropped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        result = {"labels": [], "scores": {"materials": 0.1}, "text": "Notice\u0000 0"}
+        return httpx.Response(200, json={"results": [result]})
+
+    [result] = await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(
+        _posts(1)
+    )
+    assert result.text == "Notice 0"

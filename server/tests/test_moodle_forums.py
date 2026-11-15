@@ -218,3 +218,13 @@ async def test_a_failed_request_keeps_the_token_out_of_the_error(call):
     assert error.args == ("ConnectError",)
     assert error.__cause__ is None and error.__context__ is None
     assert TOKEN not in repr(error)
+
+
+async def test_a_nul_character_postgres_refuses_is_dropped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        nul = _discussion(1, subject="Notice\u00001", message="<p>a\u0000b</p>")
+        return httpx.Response(200, json={"discussions": [nul]})
+
+    [found] = await _fetcher(handler).fetch_discussions(token=TOKEN, forum_id=30)
+
+    assert (found.subject, found.message) == ("Notice1", "<p>ab</p>")
