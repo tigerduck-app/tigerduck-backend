@@ -360,6 +360,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `POST` | `/admin/links` | Add a redirect link (admin port only) | shared secret |
 | `PATCH` | `/admin/links/{name}` | Edit, enable or disable a redirect link (admin port only) | shared secret |
 | `POST` | `/admin/links/{name}/test` | Check a redirect link now (admin port only) | shared secret |
+| `POST` | `/admin/course-announcements/{id}/extract` | Queue a current-term course announcement for extraction again (admin port only; the portal calls it) | shared secret |
 | `POST`/`PUT` | `/tls-pins/*` | Add or remove a TLS pin, edit monitored hosts, extend an expiry, toggle auto_publish, publish or re-sign now (admin port only; the portal calls them) | shared secret |
 
 ### Meta
