@@ -3,12 +3,13 @@ Every announcement here is invented."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, date, datetime
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from server.academic_calendar.models import SemesterTerm
 from server.course_announcements.history import (
@@ -17,7 +18,7 @@ from server.course_announcements.history import (
     queue_reextraction,
     read_export,
 )
-from server.course_announcements.ingest import classify_pending
+from server.course_announcements.ingest import classify_pending, store_announcements
 from server.course_announcements.models import CourseAnnouncement, CourseAnnouncementExtraction
 from server.db import build_session_factory
 from server.tests.conftest import RecordingClassifier
@@ -168,6 +169,15 @@ async def test_an_author_field_stops_the_run_before_anything_is_stored(
     assert classifier.posts == []
 
 
+async def test_course_strings_lose_what_a_text_column_cannot_hold():
+    idnumber, fullname = "1151CS2006301\u0000", "Data \ud800Structures EE2006301"
+    line = _line(7001, idnumber, fullname, _post(1, "Slides"))
+
+    (course,) = read_export([line])
+
+    assert (course.term_code, course.course_codes) == ("1151", ["CS2006301", "EE2006301"])
+
+
 @pytest.mark.parametrize(
     "line",
     ["{not json", json.dumps({"course": {"id": 1}, "discussions": [{"id": 1}]})],
@@ -204,3 +214,47 @@ async def test_reextract_queues_the_current_terms_sent_announcements_again(
         ("106-906", POSTED, "queued"),
     ]
     assert await queue_reextraction(factory, NOW) == 0
+
+
+async def _until_blocked_or_done(session, task: asyncio.Task) -> None:
+    """Returns once `task` is done or a statement of this database waits on a
+    lock, or after 5 seconds."""
+    for _ in range(200):
+        if task.done():
+            return
+        waiting = await session.scalar(
+            text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            )
+        )
+        # A transaction keeps the first pg_stat_activity it read.
+        await session.rollback()
+        if waiting:
+            return
+        await asyncio.sleep(0.025)
+
+
+async def test_reextract_waits_for_a_newer_version_being_stored(
+    db_session, factory, classifier, term
+):
+    await import_history(factory, classifier, read_export([CURRENT]))
+    await _finish_extractions(db_session)
+    edited = int(POSTED.timestamp()) + 600
+    post = _post(1, "Class cancelled", modified=edited)
+    (edit,) = read_export([_line(7001, "1151CS2006301", "Data Structures", post)])
+
+    async with factory() as poll:
+        await store_announcements(
+            poll,
+            term_code="1151",
+            moodle_course_id=7001,
+            course_codes=edit.course_codes,
+            discussions=edit.discussions,
+        )
+        reextract = asyncio.create_task(queue_reextraction(factory, NOW))
+        await _until_blocked_or_done(db_session, reextract)
+        await poll.commit()
+
+    assert await reextract == 0
+    assert await _extractions(db_session) == [("101-901", POSTED, "done")]

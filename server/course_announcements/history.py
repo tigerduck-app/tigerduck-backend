@@ -25,7 +25,7 @@ from server.course_announcements.ingest import (
     queue_extractions,
     store_announcements,
 )
-from server.db import BIGINT_VALUES, session_scope
+from server.db import BIGINT_VALUES, session_scope, storable_text
 from server.syncjobs.assignments import course_nos, moodle_semester
 from server.syncjobs.moodle_client import FetchedDiscussion, parse_discussion
 
@@ -98,6 +98,7 @@ def _course(number: int, line: str) -> ExportedCourse:
         or None in discussions
     ):
         raise ExportRefused(f"line {number}: a value is missing or malformed")
+    idnumber, full_name = storable_text(idnumber), storable_text(full_name)
     return ExportedCourse(
         moodle_course_id=course_id,
         term_code=moodle_semester(idnumber),

@@ -253,6 +253,17 @@ async def test_one_answer_listing_a_discussion_twice_keeps_its_latest_version(db
     assert (await _announcement(db_session)).subject == "Later words"
 
 
+async def test_the_newest_post_is_classified_first(db_session, factory):
+    history = _discussion(1, subject="History", created_at=POSTED - timedelta(days=400))
+    await _store(db_session, history)
+    await _store(db_session, _discussion(2, subject="Fresh"))
+    classifier = RecordingClassifier()
+
+    assert await classify_pending(factory, classifier, limit=1) == 1
+
+    assert [p.subject for p in classifier.posts] == ["Fresh"]
+
+
 async def test_a_classifier_down_leaves_the_raw_post_for_a_later_tick(db_session, factory):
     await _store(db_session, _discussion())
     classifier = RecordingClassifier({"Class cancelled": CANCELLED})

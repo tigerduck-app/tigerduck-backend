@@ -185,7 +185,7 @@ async def classify_pending(
     *,
     limit: int = CLASSIFY_PER_TICK,
 ) -> int:
-    """Classify stored versions that are not yet, oldest first and those the
+    """Classify stored versions that are not yet, newest first and those the
     service gave no result last, and queue an extraction for each of the
     current term the route rule sends. A version with no result waits
     CLASSIFY_RETRY_AFTER. No transaction is open while the service answers;
@@ -210,7 +210,8 @@ async def classify_pending(
                 )
                 .order_by(
                     CourseAnnouncement.classify_failed_at.asc().nulls_first(),
-                    CourseAnnouncement.posted_at,
+                    # Newest first, so a fresh post never waits behind imported history.
+                    CourseAnnouncement.posted_at.desc(),
                     CourseAnnouncement.id,
                 )
                 .limit(limit)
@@ -297,11 +298,17 @@ async def queue_extractions(
         pg_insert(CourseAnnouncementExtraction)
         .from_select(
             ["announcement_id", "version"],
-            select(CourseAnnouncement.id, CourseAnnouncement.modified_at).where(
+            select(CourseAnnouncement.id, CourseAnnouncement.modified_at)
+            .where(
                 CourseAnnouncement.term_code == term,
                 CourseAnnouncement.route == AnnouncementRoute.sent.value,
                 *where,
-            ),
+            )
+            # Waits for a store of a newer version to commit, then reads that
+            # version, so its supersede step cannot miss what is queued here.
+            # In id order, as store_announcements locks rows.
+            .order_by(CourseAnnouncement.id)
+            .with_for_update(),
         )
         .on_conflict_do_nothing(
             index_elements=[
