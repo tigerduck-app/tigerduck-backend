@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import sqlalchemy as sa
 from sqlalchemy import func, select, update
 
 from server.course_announcements.ingest import (
@@ -320,3 +321,28 @@ async def test_an_edit_of_a_post_with_no_result_is_classified_at_once(db_session
 
     assert await classify_pending(factory, classifier) == 1
     assert (await _announcement(db_session)).route == "not_sent"
+
+
+async def test_the_unclassified_query_reads_its_index_in_order(factory, prepared_engine):
+    asked: list[tuple[str, object]] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and "classify_failed_at" in statement:
+            asked.append((statement, parameters))
+
+    sa.event.listen(prepared_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        await classify_pending(factory, RecordingClassifier())
+    finally:
+        sa.event.remove(prepared_engine.sync_engine, "before_cursor_execute", record)
+
+    [(statement, parameters)] = asked
+    async with prepared_engine.connect() as conn:
+        await conn.exec_driver_sql("SET LOCAL enable_seqscan = off")
+        await conn.exec_driver_sql("SET LOCAL enable_sort = off")
+        plan = "\n".join(
+            row[0] for row in await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
+        )
+        await conn.rollback()
+    assert "ix_course_announcements_unclassified" in plan
+    assert "Sort" not in plan
