@@ -78,9 +78,11 @@ def _fields(number: int, value: object, allowed: frozenset[str]) -> dict:
     return value
 
 
-def _course(number: int, line: str) -> ExportedCourse:
+def _course(number: int, line: bytes) -> ExportedCourse:
     try:
-        parsed = json.loads(line)
+        parsed = json.loads(line.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ExportRefused(f"line {number}: not UTF-8") from None
     except ValueError:
         raise ExportRefused(f"line {number}: not JSON") from None
     record = _fields(number, parsed, RECORD_FIELDS)
@@ -108,7 +110,7 @@ def _course(number: int, line: str) -> ExportedCourse:
     )
 
 
-def read_export(lines: Iterable[str]) -> list[ExportedCourse]:
+def read_export(lines: Iterable[bytes]) -> list[ExportedCourse]:
     """Every course of the export, or ExportRefused for the first line that
     is not as the export writes it."""
     return [_course(number, line) for number, line in enumerate(lines, 1) if line.strip()]

@@ -717,7 +717,7 @@ async def test_the_history_import_and_a_poll_keep_the_later_version_whichever_co
         "attachment": False,
     }
     course = {"id": 7001, "idnumber": "1151CS2006301", "fullname": "Data Structures"}
-    export = read_export([json.dumps({"course": course, "discussions": [original]})])
+    export = read_export([json.dumps({"course": course, "discussions": [original]}).encode()])
 
     async def poll() -> None:
         assert await _tick(poller, NOW) == 1

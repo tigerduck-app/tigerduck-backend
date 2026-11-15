@@ -79,7 +79,7 @@ def main() -> int:
     parser.add_argument(
         "export",
         nargs="?",
-        type=argparse.FileType("r", encoding="utf-8"),
+        type=argparse.FileType("rb"),
         help="the export's JSON lines, or - for stdin",
     )
     parser.add_argument(

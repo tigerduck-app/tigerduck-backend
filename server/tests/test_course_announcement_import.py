@@ -4,6 +4,7 @@ Every announcement here is invented."""
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 from datetime import UTC, date, datetime
 
@@ -47,9 +48,9 @@ def _post(n: int, subject: str, *, posted: datetime = POSTED, **fields) -> dict:
     }
 
 
-def _line(course_id: int, idnumber: str, fullname: str, *posts: dict) -> str:
+def _line(course_id: int, idnumber: str, fullname: str, *posts: dict) -> bytes:
     course = {"id": course_id, "idnumber": idnumber, "fullname": fullname}
-    return json.dumps({"course": course, "discussions": list(posts)})
+    return json.dumps({"course": course, "discussions": list(posts)}).encode()
 
 
 CURRENT = _line(
@@ -63,7 +64,7 @@ EARLIER = _line(
     6001, "1141CS2006301", "Data Structures", _post(3, "Class cancelled", posted=LAST_YEAR)
 )
 NO_TERM = _line(5001, "", "Invented club", _post(4, "Class cancelled"))
-EXPORT = [CURRENT, "\n", EARLIER, NO_TERM]
+EXPORT = [CURRENT, b"\n", EARLIER, NO_TERM]
 
 
 @pytest.fixture
@@ -182,12 +183,19 @@ async def test_course_strings_lose_what_a_text_column_cannot_hold():
 
 @pytest.mark.parametrize(
     "line",
-    ["{not json", json.dumps({"course": {"id": 1}, "discussions": [{"id": 1}]})],
+    [b"{not json", json.dumps({"course": {"id": 1}, "discussions": [{"id": 1}]}).encode()],
     ids=["not-json", "missing-values"],
 )
 async def test_a_malformed_line_stops_the_run(line):
     with pytest.raises(ExportRefused, match="^line 2: "):
         read_export([CURRENT, line])
+
+
+async def test_an_undecodable_line_stops_the_run():
+    export = io.BytesIO(CURRENT + b"\n" + b'{"course": "\xff"}\n')
+
+    with pytest.raises(ExportRefused, match="^line 2: not UTF-8$"):
+        read_export(export)
 
 
 async def test_reextract_queues_the_current_terms_sent_announcements_again(
