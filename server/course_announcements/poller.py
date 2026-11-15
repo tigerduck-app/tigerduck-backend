@@ -436,7 +436,8 @@ async def _record_poll(
         key=lambda moment: moment or datetime.min.replace(tzinfo=UTC),
     )
     async with session_scope(poller.session_factory) as session:
-        for other, forum_id in (forums or {}).items():
+        # In id order, so two writers storing the same rows lock them alike.
+        for other, forum_id in sorted((forums or {}).items()):
             if other != course.moodle_course_id:
                 await session.execute(
                     pg_insert(CourseAnnouncementCourse)

@@ -555,6 +555,33 @@ async def test_one_lookup_finds_the_forums_of_the_holders_other_courses(
     assert sorted(call[2] for call in moodle.polled()) == [30, 31]
 
 
+async def test_the_forums_one_lookup_finds_are_stored_in_course_order(
+    db_session, prepared_engine, poller, moodle, holder, term
+):
+    others = {7004: "1151CS2009301", 7003: "1151CS2008301", 7002: "1151CS2007301"}
+    await holder("alice", {7001: DS[7001]} | {c: (i, "Elective") for c, i in others.items()})
+    moodle.forums.update({7001: 30, 7002: 31, 7003: 32, 7004: 33})
+    lookup = moodle.fetch_news_forums
+
+    async def in_reverse(*, token, course_ids):
+        return dict(reversed((await lookup(token=token, course_ids=course_ids)).items()))
+
+    moodle.fetch_news_forums = in_reverse
+    upserted: list[int] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO course_announcement_courses"):
+            upserted.append(parameters[0])
+
+    sa.event.listen(prepared_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        await _tick(poller, NOW)
+    finally:
+        sa.event.remove(prepared_engine.sync_engine, "before_cursor_execute", record)
+
+    assert upserted[:3] == [7002, 7003, 7004]
+
+
 async def test_a_holder_who_sees_no_news_forum_hands_the_course_on(
     db_session, poller, moodle, holder, term
 ):
