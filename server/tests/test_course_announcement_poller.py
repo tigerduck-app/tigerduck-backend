@@ -8,8 +8,10 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from structlog.testing import capture_logs
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher
@@ -644,7 +646,7 @@ async def test_a_failed_poll_names_no_announcement_text_and_still_classifies(
     async def refused(*args, **kwargs):
         raise RuntimeError("[parameters: ('Invented secret subject',)]")
 
-    monkeypatch.setattr(poller_module, "store_announcements", refused)
+    monkeypatch.setattr(poller_module, "_due_courses", refused)
 
     with pytest.raises(PollTickFailed) as caught:
         await _tick(poller, NOW + timedelta(minutes=15))
@@ -653,3 +655,26 @@ async def test_a_failed_poll_names_no_announcement_text_and_still_classifies(
     assert caught.value.__cause__ is None and caught.value.__context__ is None
     row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
     assert row.route == "sent"
+
+
+async def test_a_course_that_fails_is_rolled_back_and_deferred_and_the_tick_goes_on(
+    db_session, poller, moodle, holder, term, monkeypatch
+):
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    for course_id in (7001, 7002):
+        await _set_state(db_session, course_id, forum_id=course_id, next_due_at=NOW)
+    # Past the parser, so Postgres refuses the NUL for real.
+    moodle.discussions[7001] = [_discussion(1, NOW, subject="Invented\x00 secret")]
+    moodle.discussions[7002] = [_discussion(2, NOW)]
+    monkeypatch.setattr(poller_module, "logger", structlog.get_logger(poller_module.__name__))
+
+    with capture_logs() as logs:
+        assert await _tick(poller, NOW) == 1
+
+    failed = await _state(db_session, 7001)
+    assert (failed.latest_post_at, failed.next_due_at) == (None, NOW + timedelta(minutes=15))
+    assert (await _state(db_session, 7002)).latest_post_at == NOW
+    assert await db_session.get(CourseAnnouncement, "101-901") is None
+    [entry] = [e for e in logs if e["event"] == "course_announcements.course_failed"]
+    assert entry["moodle_course_id"] == 7001 and entry["error"].isidentifier()
+    assert "secret" not in repr(logs)

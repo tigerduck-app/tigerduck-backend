@@ -179,7 +179,18 @@ async def _poll_due_courses(poller: CourseAnnouncementPoller, now: datetime) -> 
     for course_id in due:
         if _paused(poller):
             break
-        if await _poll_course(poller, course_id, term, now) is _Outcome.stop:
+        try:
+            outcome = await _poll_course(poller, course_id, term, now)
+        except Exception as exc:
+            # The type alone: a database error's message holds the statement's parameters.
+            logger.warning(
+                "course_announcements.course_failed",
+                moodle_course_id=course_id,
+                error=type(exc).__name__,
+            )
+            await _defer(poller, course_id, term, now)
+            continue
+        if outcome is _Outcome.stop:
             break
         polled += 1
     return polled
