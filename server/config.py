@@ -353,20 +353,19 @@ class Settings(BaseSettings):
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "sk-local"
-    llm_model: str = "gemma-4-e4b-it"
-    # 120s is generous because multi-slot llama.cpp fans one backend
-    # GPU across concurrent requests, so effective per-request latency
-    # scales with the backfill `--concurrency`. 30s was too tight for
-    # Gemma-4 E4B on Apple Silicon at 3× concurrency.
+    llm_model: str = "qwen3.5-9b"
+    # Generous because a server sharing one GPU across concurrent requests
+    # slows each of them, so per-request latency grows with the backfill
+    # `--concurrency`.
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
     llm_temperature: float = 0.2
     # Dev-only escape hatch: when true, server/main.py's _wait_for_llm
     # returns immediately instead of polling the LLM /models endpoint
-    # for up to 60s. Useful when iterating locally without llama-server
+    # for up to 60s. Useful when iterating locally without an LLM server
     # running (e.g. UI / push work that doesn't touch bulletins). The
     # bulletin classification job still tries the LLM on its own ticks
-    # and self-heals once llama-server is back up.
+    # and self-heals once the LLM server is back up.
     skip_llm_probe: bool = False
 
     @model_validator(mode="after")
