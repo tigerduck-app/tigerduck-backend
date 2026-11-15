@@ -406,12 +406,14 @@ async def test_a_refused_holder_hands_the_course_on_and_keeps_their_credential(
     first = await holder("alice", DS)
     second = await holder("bob", DS)
     await _set_state(db_session, forum_id=30, holder_user_id=first.id)
+    moodle.forums[7001] = 30
     moodle.errors["token-alice"] = error
 
     assert await run_poll_tick(poller, NOW) == 1
     state = await _state(db_session)
     assert state.holder_user_id == second.id
     assert state.next_due_at == NOW + timedelta(days=1)
+    assert state.forum_id == (30 if isinstance(error, MoodleTokenInvalid) else None)
 
     assert await run_poll_tick(poller, state.next_due_at) == 1
     assert [call[1] for call in moodle.polled()] == ["token-alice", "token-bob"]
@@ -420,6 +422,32 @@ async def test_a_refused_holder_hands_the_course_on_and_keeps_their_credential(
     )
     assert set(statuses) == {"active"}
     assert (await _state(db_session)).holder_user_id == second.id
+
+
+async def test_a_refused_forum_is_looked_up_again_on_the_next_poll(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+    await _set_state(db_session, forum_id=30)
+    moodle.forums[7001] = 31
+    answer = moodle.fetch_discussions
+
+    async def deleted_forum(*, token, forum_id):
+        discussions = await answer(token=token, forum_id=forum_id)
+        if forum_id == 30:
+            raise MoodleRefused("Unable to find forum with id 30")
+        return discussions
+
+    moodle.fetch_discussions = deleted_forum
+
+    assert await run_poll_tick(poller, NOW) == 1
+    state = await _state(db_session)
+    assert (state.forum_id, state.next_due_at) == (None, NOW + timedelta(days=1))
+
+    assert await run_poll_tick(poller, state.next_due_at) == 1
+    assert [call[0] for call in moodle.calls] == ["discussions", "forums", "discussions"]
+    assert [call[2] for call in moodle.polled()] == [30, 31]
+    assert (await _state(db_session)).forum_id == 31
 
 
 # --- Forums and courses --------------------------------------------------------------

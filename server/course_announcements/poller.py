@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import sqlalchemy as sa
@@ -313,6 +313,11 @@ async def _poll_course(
             moodle_course_id=course_id,
             error=str(exc),
         )
+        if isinstance(exc, MoodleRefused):
+            # Moodle refuses a forum deleted since it was stored (get_forum_discussions,
+            # moodle/moodle mod/forum/externallib.php), so the next poll looks it up again.
+            course = replace(course, forum_id=None)
+            forums = {other: forum for other, forum in forums.items() if other != course_id}
         await _record_poll(
             poller, course, term, now, holder=next_holder, discussions=[], forums=forums
         )
