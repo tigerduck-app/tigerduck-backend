@@ -1,5 +1,6 @@
 """course_change_violations: the rules a course change keeps against the
-course's class times and its other changes
+course's class times and its other changes, and term_courses, each course's
+row in a term
 
 Revision ID: bbb33844e87e
 Revises: 9e90a76a367e
@@ -16,6 +17,16 @@ down_revision: str | Sequence[str] | None = '9e90a76a367e'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_TERM_COURSES = """
+CREATE OR REPLACE VIEW term_courses AS
+SELECT DISTINCT ON (semester, course_no)
+       semester, course_no, course_name, course_name_en, instructors, credits,
+       classroom, classroom_map, schedule_json
+FROM user_courses
+WHERE course_no IS NOT NULL AND enrollment_status = 'enrolled'
+ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
+"""
+
 _COURSE_CHANGE_VIOLATIONS = """
 CREATE OR REPLACE FUNCTION course_change_violations(
     term text, course text, change_kind text, change_mode text,
@@ -27,11 +38,8 @@ LANGUAGE sql STABLE
 AS $$
     WITH schedule AS (
         SELECT (
-            SELECT schedule_json FROM user_courses
+            SELECT schedule_json FROM term_courses
             WHERE semester = term AND course_no = course
-              AND enrollment_status = 'enrolled'
-            ORDER BY (source = 'ntust_portal') DESC, updated_at DESC
-            LIMIT 1
         ) AS schedule_json
     ), meets AS (
         SELECT m.weekday, m.periods
@@ -123,8 +131,10 @@ $$
 
 
 def upgrade() -> None:
-    """The function `COURSE_CHANGE_VIOLATIONS_SQL` in
-    server/academic_calendar/models.py declares. A second run changes nothing."""
+    """The view `TERM_COURSES_SQL` and the function
+    `COURSE_CHANGE_VIOLATIONS_SQL` in server/academic_calendar/models.py
+    declare. A second run changes nothing."""
+    op.execute(_TERM_COURSES)
     op.execute(_COURSE_CHANGE_VIOLATIONS)
 
 
@@ -133,3 +143,4 @@ def downgrade() -> None:
         "DROP FUNCTION IF EXISTS course_change_violations("
         "text, text, text, text, date, date, smallint[], text[], integer)"
     )
+    op.execute("DROP VIEW IF EXISTS term_courses")

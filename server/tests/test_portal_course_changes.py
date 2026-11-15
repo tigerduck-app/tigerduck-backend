@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +29,7 @@ from portal.app.routes.course_changes import (  # noqa: E402
     list_courses,
     update_change,
 )
+from server.academic_calendar.changes import load_course_changes  # noqa: E402
 from server.academic_calendar.models import AcademicHoliday, SemesterTerm  # noqa: E402
 from server.auth.models import User, UserDevice  # noqa: E402
 from server.sync.models import UserCourse  # noqa: E402
@@ -350,6 +351,34 @@ async def test_periods_are_ones_the_course_meets_on_every_day(
     term, pool, fields, status
 ) -> None:
     assert (await _create(pool, **fields))[0] == status
+
+
+async def test_a_course_reads_its_school_row_before_a_later_hand_added_one(
+    term, pool, db_session
+) -> None:
+    """The courses table, the change check and the apps' feed agree."""
+    student = await _user(db_session, "b4")
+    db_session.add(
+        _course(
+            student, "CS2001301", source="user_added", course_name="自訂",
+            schedule_json={"3": ["5"]}, updated_at=datetime.now(UTC) + timedelta(days=1),
+        )
+    )
+    await db_session.commit()
+
+    ds = _body(await list_courses("1151", pool=pool))["courses"][0]
+    wednesday = await _create(pool, day="2026-11-04")
+    status, change = await _create(pool, day="2026-11-05")
+    feed = await load_course_changes(db_session, ["1151"])
+
+    assert (ds["name"], ds["meetings"]) == (
+        "資料結構", [{"day": 2, "periods": ["3", "4"]}, {"day": 4, "periods": ["2", "3"]}]
+    )
+    assert wednesday == (400, {"detail": "the course has no class on 2026-11-04"})
+    assert (status, change["class_days"]) == (200, ["2026-11-05"])
+    assert [(r.id, r.class_days, sorted(r.meeting_weekdays)) for r in feed] == [
+        (change["id"], [date(2026, 11, 5)], [2, 4]),
+    ]
 
 
 async def test_a_change_of_a_kind_clashes_only_where_its_periods_meet(term, pool) -> None:

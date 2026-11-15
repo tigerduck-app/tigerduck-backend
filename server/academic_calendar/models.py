@@ -289,6 +289,19 @@ AS $$
 $$
 """
 
+# Each course of each term as its students took it: of its enrolled rows, the
+# latest school row, else the latest row. A query about a course as a whole,
+# rather than one student's row of it, reads the course here.
+TERM_COURSES_SQL = """
+CREATE OR REPLACE VIEW term_courses AS
+SELECT DISTINCT ON (semester, course_no)
+       semester, course_no, course_name, course_name_en, instructors, credits,
+       classroom, classroom_map, schedule_json
+FROM user_courses
+WHERE course_no IS NOT NULL AND enrollment_status = 'enrolled'
+ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
+"""
+
 # The rules a course change keeps against the course's class times and its
 # other changes, for every writer of `course_changes`: a row per rule the
 # change breaks and day it breaks it on, by `code`:
@@ -305,8 +318,6 @@ $$
 # The days are the ones the course meets on, holidays too: the apps apply a
 # change on a holiday the user put back. `editing` is the change being
 # replaced, so it is no clash; with a NULL kind only no_meetings is checked.
-# The course's class times are its latest enrolled row's, a school row first,
-# as the portal's `_LATEST` and `load_course_changes` read them.
 #
 # A writer takes, in the transaction that writes the change and before it
 # calls this, pg_advisory_xact_lock(hashtextextended('course_changes|' || term
@@ -324,11 +335,8 @@ LANGUAGE sql STABLE
 AS $$
     WITH schedule AS (
         SELECT (
-            SELECT schedule_json FROM user_courses
+            SELECT schedule_json FROM term_courses
             WHERE semester = term AND course_no = course
-              AND enrollment_status = 'enrolled'
-            ORDER BY (source = 'ntust_portal') DESC, updated_at DESC
-            LIMIT 1
         ) AS schedule_json
     ), meets AS (
         SELECT m.weekday, m.periods
@@ -421,4 +429,7 @@ $$
 # After every table: a sql function's body names tables that must exist.
 event.listen(Base.metadata, "after_create", DDL(COURSE_MEETINGS_SQL))
 event.listen(Base.metadata, "after_create", DDL(COURSE_CLASS_DAYS_SQL))
+event.listen(Base.metadata, "after_create", DDL(TERM_COURSES_SQL))
 event.listen(Base.metadata, "after_create", DDL(COURSE_CHANGE_VIOLATIONS_SQL))
+# Postgres drops no table a view reads; `drop_all` drops tables only.
+event.listen(Base.metadata, "before_drop", DDL("DROP VIEW IF EXISTS term_courses"))

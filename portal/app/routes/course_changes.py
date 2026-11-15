@@ -34,15 +34,13 @@ _HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _ROOM_MAX = 128
 
 # The term's enrolled rows with a course number, as the class reminder scan reads
-# them, and each course's row: a school row first, then the latest, as the page,
-# the apps' feed and the class pushes take it (server/academic_calendar/changes.py).
+# them, and each course's row (`term_courses`, server/academic_calendar/models.py).
 _LATEST = """
 WITH taken AS (
     SELECT * FROM user_courses
     WHERE semester = $1 AND course_no IS NOT NULL AND enrollment_status = 'enrolled'
 ), latest AS (
-    SELECT DISTINCT ON (course_no) * FROM taken
-    ORDER BY course_no, (source = 'ntust_portal') DESC, updated_at DESC
+    SELECT * FROM term_courses WHERE semester = $1
 )
 """
 
