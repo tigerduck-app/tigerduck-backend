@@ -147,6 +147,9 @@ async def store_moodle_courses(
         for course in enrolled
         if course.moodle_course_id in BIGINT_VALUES
     }
+    dropped = sum(course.moodle_course_id not in BIGINT_VALUES for course in enrolled)
+    if dropped:
+        logger.warning("syncjobs.moodle_courses_dropped", count=dropped)
     if not by_id:
         return
     insert = pg_insert(UserMoodleCourse).values(

@@ -1057,6 +1057,7 @@ class HttpForumFetcher:
         https://github.com/moodle/moodle/tree/MOODLE_405_STABLE/mod/forum.
         """
         discussions: list[FetchedDiscussion] = []
+        dropped = 0
         for page in range(_DISCUSSION_PAGES):
             body = await self._call(
                 token,
@@ -1069,8 +1070,11 @@ class HttpForumFetcher:
                 raise MoodleRefused("unexpected_shape")
             parsed = [d for d in map(_parse_discussion, items) if d is not None]
             discussions += parsed
+            dropped += len(items) - len(parsed)
             if len(items) < _DISCUSSIONS_PER_PAGE or not all(
                 d.pinned or d.starred for d in parsed
             ):
                 break
+        if dropped:
+            logger.warning("syncjobs.moodle.discussions_dropped", count=dropped)
         return discussions
