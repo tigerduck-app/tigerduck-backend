@@ -37,7 +37,7 @@ jobs:
       web: ${{ steps.paths.outputs.web }}
       app: ${{ steps.paths.outputs.app }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The merge commit and its base.
           fetch-depth: 2
@@ -92,7 +92,7 @@ jobs:
       TIGERDUCK_TEST_DATABASE_URL: postgresql+asyncpg://tigerduck:tigerduck@localhost:5432/tigerduck_test
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # server/i18n.py reads its push-copy bundles from the
           # app-translation submodule. Without it every test that composes
@@ -100,7 +100,7 @@ jobs:
           submodules: true
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
@@ -122,14 +122,14 @@ jobs:
         working-directory: portal/web
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           # Vite 8 requires Node 20.19+/22.12+, and vite.config.ts uses
           # `import.meta.dirname`, which needs 20.11+. 22 clears both.
-          node-version: '22'
+          node-version: '26'
           cache: npm
           cache-dependency-path: portal/web/package-lock.json
 
@@ -150,10 +150,10 @@ jobs:
         working-directory: portal
 
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: portal/uv.lock
