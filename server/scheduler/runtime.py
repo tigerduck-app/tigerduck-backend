@@ -22,6 +22,7 @@ from server.bulletins.llm.base import LLMProvider
 from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
+from server.course_announcements.extractor import TICK, build_extractor, run_extraction_tick
 from server.course_announcements.poller import build_poller, run_poll_tick
 from server.course_catalog.refresh import refresh_course_catalog
 from server.links.checker import run_link_checks
@@ -81,6 +82,9 @@ def build_scheduler(
     * `course_announcement_poll` — poll the course news forums that are due
       and classify what is stored, every minute (only with a `sync_worker`,
       whose tokens and budget it shares, and an
+      `announcement_classifier_url`).
+    * `course_announcement_extract` — send one queued course announcement to
+      the LLM every minute while no bulletin waits for it (only with an
       `announcement_classifier_url`).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
@@ -225,6 +229,20 @@ def build_scheduler(
                 coalesce=True,
                 misfire_grace_time=30,
             )
+    if settings.announcement_classifier_url:
+        extractor = build_extractor(settings, session_factory)
+
+        async def course_announcement_extract() -> None:
+            await run_extraction_tick(extractor)
+
+        scheduler.add_job(
+            course_announcement_extract,
+            trigger=IntervalTrigger(seconds=TICK.total_seconds()),
+            id="course_announcement_extract",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
     if push_worker is not None:
 
         async def push_pipeline_tick() -> None:

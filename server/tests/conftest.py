@@ -460,3 +460,36 @@ class ScriptedLLM(OpenAICompatibleClient):
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
             sleep=no_sleep,
         )
+
+
+def extracted_change(**fields) -> dict:
+    """A course change as the extraction schema shapes it: a cancellation on
+    Thursday 2026-11-19 unless `fields` say otherwise."""
+    return {
+        "kind": "cancelled",
+        "mode": "day",
+        "start_date": "2026-11-19",
+        "end_date": "2026-11-19",
+        "excluded_weekdays": [],
+        "periods": None,
+        "room": None,
+        "start_time": None,
+        "end_time": None,
+        "note_zh": None,
+        "evidence": "11/19（四）停課",
+        **fields,
+    }
+
+
+def extraction_answer(**fields) -> dict:
+    """An answer under the extraction schema, certain and with no fact
+    unless `fields` add them."""
+    return {
+        "labels": [],
+        "course_changes": [],
+        "held_as_usual": [],
+        "makeup_classes": [],
+        "exams": [],
+        "certain": True,
+        **fields,
+    }
