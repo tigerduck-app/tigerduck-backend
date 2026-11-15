@@ -35,6 +35,31 @@ def _internal_headers(request: Request | None) -> dict[str, str]:
     return {"X-Push-Token": token} if token else {}
 
 
+async def forward_to_backend(
+    request: Request, method: str, path: str, json=None, timeout: float = 30
+) -> JSONResponse:
+    """Sends an operator's action to the backend's admin listener, naming the
+    operator, which the backend records in admin_audit_log, and answers what
+    it answered."""
+    headers = {**_internal_headers(request), "X-Admin-Actor": request.state.actor}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.request(
+                method, f"{BACKEND_ADMIN_URL}{path}", headers=headers, json=json
+            )
+    except httpx.HTTPError as exc:
+        logger.exception("admin call %s %s to the backend failed", method, path)
+        return JSONResponse({"detail": f"backend unreachable: {type(exc).__name__}"}, 502)
+    try:
+        payload = resp.json()
+    except ValueError:
+        payload = {"detail": f"HTTP {resp.status_code}: {resp.text[:300]}"}
+    # A validation error's detail is a list; the SPA shows a string.
+    if isinstance(payload, dict) and isinstance(payload.get("detail"), list):
+        payload["detail"] = "; ".join(str(e.get("msg", e)) for e in payload["detail"])
+    return JSONResponse(payload, status_code=resp.status_code)
+
+
 async def run_pipeline_now(request: Request | None, *, what: str) -> None:
     """Run a push tick now, for a job the caller has just written.
 

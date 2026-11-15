@@ -11,6 +11,7 @@ import { ListsPage, ListDetailPage } from "@/pages/lists";
 import { MoodlePage, DataInspectionPage } from "@/pages/moodle";
 import { SemesterDatesPage } from "@/pages/semester-dates";
 import { CourseChangesPage } from "@/pages/course-changes";
+import { CourseAnnouncementsPage } from "@/pages/course-announcements";
 import { DeregisterPage } from "@/pages/deregister";
 import { LinksPage } from "@/pages/links";
 import { TlsPinsPage } from "@/pages/tls-pins";
@@ -33,6 +34,7 @@ export function App() {
         <Route path="inspect" element={<DataInspectionPage />} />
         <Route path="semester-dates" element={<SemesterDatesPage />} />
         <Route path="course-changes" element={<CourseChangesPage />} />
+        <Route path="course-announcements" element={<CourseAnnouncementsPage />} />
         <Route path="links" element={<LinksPage />} />
         <Route path="deregister" element={<DeregisterPage />} />
         <Route path="tls-pins" element={<TlsPinsPage />} />

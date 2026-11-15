@@ -180,6 +180,7 @@ All four scripts read `TIGERDUCK_ENV` from `.env`; when it's `development` they 
 - Deregister devices (revoking their sessions and push tokens) and manage device lists; the Deregister page deletes a student with all their data
 - On the Moodle page, suspend and resume the server's sync, requeue failed sync jobs, run a push tick, cancel a student's queued pushes and send a sync trigger push
 - Edit semester dates and school holidays, redirect links and TLS pins
+- Review the course changes extracted from Moodle course announcements: approve one, edit it before approving, reject it with a reason, or queue an announcement for extraction again
 - Show who signed in, from the Access token, with a Sign out link that ends their Access session. Development has no Access session, so the link stays hidden there
 
 ### Monitoring (Grafana)
@@ -359,6 +360,7 @@ All v3 routes use `Authorization: Bearer <JWT>` unless noted below.
 | `POST` | `/admin/links` | Add a redirect link (admin port only) | shared secret |
 | `PATCH` | `/admin/links/{name}` | Edit, enable or disable a redirect link (admin port only) | shared secret |
 | `POST` | `/admin/links/{name}/test` | Check a redirect link now (admin port only) | shared secret |
+| `POST` | `/admin/course-announcements/{id}/extract` | Queue a classified course announcement of any term or route for extraction again (admin port only; the portal calls it) | shared secret |
 | `POST`/`PUT` | `/tls-pins/*` | Add or remove a TLS pin, edit monitored hosts, extend an expiry, toggle auto_publish, publish or re-sign now (admin port only; the portal calls them) | shared secret |
 
 ### Meta

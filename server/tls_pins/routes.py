@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from server import metrics
 from server.admin_audit import AdminAuditLog
 from server.db import SessionDep
-from server.security import require_shared_secret
+from server.security import AdminActor, require_shared_secret
 from server.tls_pins import targets
 from server.tls_pins.document import (
     current_document,
@@ -64,8 +64,6 @@ admin_router = APIRouter(
 
 # Two years, leap day included; a mistyped year would make a set that never expires.
 MAX_EXPIRY_AHEAD = timedelta(days=731)
-
-ActorDep = Annotated[str, Header(alias="X-Admin-Actor", min_length=1, max_length=320)]
 
 
 class PinIn(BaseModel):
@@ -156,7 +154,7 @@ async def _finish(
 
 @admin_router.post("/sets/{set_id}/pins")
 async def add_pin(
-    set_id: str, body: PinIn, request: Request, session: SessionDep, actor: ActorDep
+    set_id: str, body: PinIn, request: Request, session: SessionDep, actor: AdminActor
 ) -> dict:
     pin_set = await _locked_set(session, set_id)
     if any(pin["spki"] == body.spki for pin in pin_set.pins):
@@ -179,7 +177,7 @@ async def add_pin(
 
 @admin_router.post("/sets/{set_id}/pins/remove")
 async def remove_pin(
-    set_id: str, body: SpkiIn, request: Request, session: SessionDep, actor: ActorDep
+    set_id: str, body: SpkiIn, request: Request, session: SessionDep, actor: AdminActor
 ) -> dict:
     pin_set = await _locked_set(session, set_id)
     remaining = [pin for pin in pin_set.pins if pin["spki"] != body.spki]
@@ -205,7 +203,7 @@ async def _resolve_refusal(target: str) -> str | None:
 
 @admin_router.put("/sets/{set_id}/monitored-hosts")
 async def set_monitored_hosts(
-    set_id: str, body: HostsIn, request: Request, session: SessionDep, actor: ActorDep
+    set_id: str, body: HostsIn, request: Request, session: SessionDep, actor: AdminActor
 ) -> dict:
     # Resolved before the transaction opens; a lookup can take seconds.
     refusals = await asyncio.gather(*(_resolve_refusal(t) for t in body.hosts))
@@ -233,7 +231,7 @@ async def set_monitored_hosts(
 
 @admin_router.put("/sets/{set_id}/expires-at")
 async def extend_expiry(
-    set_id: str, body: ExpiryIn, request: Request, session: SessionDep, actor: ActorDep
+    set_id: str, body: ExpiryIn, request: Request, session: SessionDep, actor: AdminActor
 ) -> dict:
     pin_set = await _locked_set(session, set_id)
     # The apps take the later of their built-in expiry and the document's.
@@ -251,7 +249,7 @@ async def extend_expiry(
 
 @admin_router.put("/sets/{set_id}/auto-publish")
 async def set_auto_publish(
-    set_id: str, body: AutoPublishIn, request: Request, session: SessionDep, actor: ActorDep
+    set_id: str, body: AutoPublishIn, request: Request, session: SessionDep, actor: AdminActor
 ) -> dict:
     pin_set = await _locked_set(session, set_id)
     pin_set.auto_publish = body.enabled
@@ -270,7 +268,7 @@ def _require_signer(request: Request) -> None:
 
 @admin_router.post("/publish")
 async def publish_document(
-    request: Request, session: SessionDep, actor: ActorDep, body: PublishIn | None = None
+    request: Request, session: SessionDep, actor: AdminActor, body: PublishIn | None = None
 ) -> dict:
     """Sign the stored sets, approving the pending pins the operator was
     shown. A pin the watcher added since then stays pending."""
@@ -294,7 +292,7 @@ async def publish_document(
 
 
 @admin_router.post("/resign")
-async def resign_document(request: Request, session: SessionDep, actor: ActorDep) -> dict:
+async def resign_document(request: Request, session: SessionDep, actor: AdminActor) -> dict:
     """Sign the current document's sets again under a new serial."""
     _require_signer(request)
     await lock_pin_state(session)

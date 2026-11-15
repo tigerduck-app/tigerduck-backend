@@ -10,12 +10,10 @@ from __future__ import annotations
 
 import re
 
-import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .moodle._shared import logger
-from .moodle.push import BACKEND_ADMIN_URL, _internal_headers
+from .moodle.push import forward_to_backend
 
 router = APIRouter(prefix="/api/links")
 
@@ -27,20 +25,9 @@ _NAME = re.compile(r"[a-z0-9-]{1,64}")
 
 
 async def _forward(request: Request, method: str, path: str = "", json=None) -> JSONResponse:
-    headers = {**_internal_headers(request), "X-Admin-Actor": request.state.actor}
-    try:
-        async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-            resp = await client.request(
-                method, f"{BACKEND_ADMIN_URL}/admin/links{path}", headers=headers, json=json
-            )
-    except httpx.HTTPError as exc:
-        logger.exception("links call to the backend failed")
-        return JSONResponse({"detail": f"backend unreachable: {exc}"}, status_code=502)
-    try:
-        payload = resp.json()
-    except ValueError:
-        payload = {"detail": f"HTTP {resp.status_code}: {resp.text[:300]}"}
-    return JSONResponse(payload, status_code=resp.status_code)
+    return await forward_to_backend(
+        request, method, f"/admin/links{path}", json, timeout=_TIMEOUT_SECONDS
+    )
 
 
 def _unknown() -> JSONResponse:

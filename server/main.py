@@ -44,6 +44,7 @@ from server.academic_calendar.models import (  # noqa: F401
     UserHolidayOverride as _UserHolidayOverride,
 )
 from server.course_announcements import models as _course_announcement_models  # noqa: F401
+from server.course_announcements import routes as course_announcement_routes
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
@@ -581,6 +582,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.tls_pin_signer = None
 
     admin.include_router(links_routes.admin_router)
+    admin.include_router(course_announcement_routes.admin_router)
 
     if settings.api_v3_base_path:
         _mount_api_v3(app, settings.api_v3_base_path)
