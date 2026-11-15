@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import enum
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 import sqlalchemy as sa
 import structlog
@@ -77,6 +78,7 @@ class CourseAnnouncementPoller:
     budget: RequestBudget
     # The sync worker's: both share one Moodle limit.
     sync_budget: RequestBudget
+    clock: Callable[[], datetime] = partial(datetime.now, UTC)
 
 
 def build_poller(settings: Settings, sync_worker: SyncWorker) -> CourseAnnouncementPoller:
@@ -143,13 +145,11 @@ class PollTickFailed(Exception):
     message holds its statement's parameters, announcement text among them."""
 
 
-async def run_poll_tick(
-    poller: CourseAnnouncementPoller, now: datetime | None = None
-) -> int:
+async def run_poll_tick(poller: CourseAnnouncementPoller) -> int:
     """Poll the due courses, then classify every stored announcement still
     waiting for it, whether or not Moodle may be polled. Returns the
     courses polled."""
-    now = now or datetime.now(UTC)
+    now = poller.clock()
     failed: str | None = None
     polled = 0
     try:
@@ -269,12 +269,12 @@ async def _load_course(
 async def _poll_course(
     poller: CourseAnnouncementPoller, course_id: int, term: str, now: datetime
 ) -> _Outcome:
+    checked_at = poller.clock()
     async with session_scope(poller.session_factory) as session:
-        # Checked again for every course: a suspend takes effect mid-tick.
-        available, _ = await is_moodle_available(session, poller.settings, now)
+        available, _ = await is_moodle_available(session, poller.settings, checked_at)
         if not available:
             return _Outcome.stop
-        course = await _load_course(session, poller.settings, course_id, now)
+        course = await _load_course(session, poller.settings, course_id, checked_at)
         if course is None:
             return _Outcome.polled
         holder, token = None, None
