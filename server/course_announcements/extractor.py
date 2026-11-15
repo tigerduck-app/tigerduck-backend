@@ -26,6 +26,7 @@ from server.config import Settings
 from server.course_announcements.extraction import extract
 from server.course_announcements.items import record_items, refresh_contradictions
 from server.course_announcements.models import (
+    SUPERSEDABLE_ITEM_STATES,
     CourseAnnouncement,
     CourseAnnouncementExtraction,
     CourseAnnouncementItem,
@@ -239,8 +240,8 @@ async def store_result(
     extractor: Extractor, extraction_id: int, output: dict[str, Any], now: datetime
 ) -> bool:
     """Store `output` if the extraction is still running and its announcement
-    still at that version, superseding what earlier extractions of the
-    announcement left pending. Returns whether it was stored."""
+    still at that version, superseding the pending and informational items of
+    the announcement's earlier extractions. Returns whether it was stored."""
     async with session_scope(extractor.session_factory) as session:
         announcement_id = await session.scalar(
             select(CourseAnnouncementExtraction.announcement_id).where(
@@ -284,7 +285,7 @@ async def store_result(
             update(CourseAnnouncementItem)
             .where(
                 CourseAnnouncementItem.extraction_id.in_(earlier),
-                CourseAnnouncementItem.state == ItemState.pending.value,
+                CourseAnnouncementItem.state.in_(SUPERSEDABLE_ITEM_STATES),
             )
             .values(state=ItemState.superseded.value)
         )

@@ -396,7 +396,7 @@ into the backend container via `docker-compose.yml`.
   for the announcement's stored version. A failed attempt waits 1, 4 and 16
   ticks, then the extraction fails; a claim older than 10 minutes counts as a
   failed attempt. A stored result supersedes the announcement's earlier pending
-  items and becomes review items (`items.py`) under the lock every
+  and informational items and becomes review items (`items.py`) under the lock every
   `course_changes` writer takes (`checks.lock_courses`), checked with the
   database's `course_change_violations`. With automatic apply on, an
   extraction's add items are written all or none (`apply.py`), by and audited
