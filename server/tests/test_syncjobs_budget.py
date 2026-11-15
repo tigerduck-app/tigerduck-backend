@@ -16,8 +16,8 @@ from server.metrics import (
     observe_course_announcement_moodle_request,
     observe_sync_moodle_request,
 )
-from server.syncjobs.budget import RequestBudget
-from server.syncjobs.moodle_client import HttpAssignmentFetcher
+from server.syncjobs.budget import BudgetPaused, RequestBudget
+from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpForumFetcher
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -166,3 +166,41 @@ async def test_each_budget_counts_its_requests_on_its_own_metric(observe, counte
         await clock.run(client.get("https://moodle.example.edu/a"), client.get("https://moodle.example.edu/b"))
 
     assert (_count(counted), _count(untouched)) == (before[0] + 2, before[1])
+
+
+async def test_a_request_stops_unsent_when_a_budget_sharing_the_limit_pauses_meanwhile():
+    clock = VirtualClock()
+    sync = RequestBudget(30, observe=_unobserved, clock=clock, sleep=clock.sleep)
+    counted: list[float] = []
+    budget = RequestBudget(
+        30,
+        observe=lambda: counted.append(clock.now),
+        clock=clock,
+        sleep=clock.sleep,
+        stopped_by=(sync,),
+    )
+    sent: list[float] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(clock.now)
+        return httpx.Response(200, json={"discussions": []})
+
+    fetcher = HttpForumFetcher(
+        "https://moodle.example.test",
+        5.0,
+        transport=httpx.MockTransport(answer),
+        event_hooks=budget.event_hooks,
+    )
+    await clock.run(fetcher.fetch_discussions(token="t", forum_id=30))
+    await clock.run(sync.acquire())
+    assert clock.now == 0.0
+
+    async def a_sync_429_meanwhile() -> None:
+        await clock.sleep(1.0)
+        sync.pause(60)
+
+    with pytest.raises(BudgetPaused):
+        await clock.run(
+            fetcher.fetch_discussions(token="t", forum_id=30), a_sync_429_meanwhile()
+        )
+    assert sent == [0.0] and counted == [0.0]

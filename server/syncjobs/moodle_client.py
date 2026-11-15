@@ -973,7 +973,8 @@ def parse_discussion(item: object) -> FetchedDiscussion | None:
 class HttpForumFetcher:
     """Course news forums for the course announcement poll. Raises as
     `_checked_call` does, with no cause or context attached: the httpx error
-    a failure came from may name the request, token included."""
+    a failure came from may name the request, token included. A request
+    `event_hooks` stop raises what they raise, BudgetPaused for a budget's."""
 
     def __init__(
         self,
@@ -1056,6 +1057,7 @@ class HttpForumFetcher:
         https://github.com/moodle/moodle/tree/MOODLE_405_STABLE/mod/forum.
         """
         discussions: list[FetchedDiscussion] = []
+        dropped = 0
         for page in range(_DISCUSSION_PAGES):
             body = await self._call(
                 token,
@@ -1068,8 +1070,11 @@ class HttpForumFetcher:
                 raise MoodleRefused("unexpected_shape")
             parsed = [d for d in map(parse_discussion, items) if d is not None]
             discussions += parsed
+            dropped += len(items) - len(parsed)
             if len(items) < _DISCUSSIONS_PER_PAGE or not all(
                 d.pinned or d.starred for d in parsed
             ):
                 break
+        if dropped:
+            logger.warning("syncjobs.moodle.discussions_dropped", count=dropped)
         return discussions

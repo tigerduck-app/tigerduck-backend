@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+import sqlalchemy as sa
 from sqlalchemy import func, select, update
 
 from server.academic_calendar.models import SemesterTerm
@@ -253,17 +254,6 @@ async def test_one_answer_listing_a_discussion_twice_keeps_its_latest_version(db
     assert (await _announcement(db_session)).subject == "Later words"
 
 
-async def test_the_newest_post_is_classified_first(db_session, factory):
-    history = _discussion(1, subject="History", created_at=POSTED - timedelta(days=400))
-    await _store(db_session, history)
-    await _store(db_session, _discussion(2, subject="Fresh"))
-    classifier = RecordingClassifier()
-
-    assert await classify_pending(factory, classifier, limit=1) == 1
-
-    assert [p.subject for p in classifier.posts] == ["Fresh"]
-
-
 async def test_a_classifier_down_leaves_the_raw_post_for_a_later_tick(db_session, factory):
     await _store(db_session, _discussion())
     classifier = RecordingClassifier({"Class cancelled": CANCELLED})
@@ -358,3 +348,28 @@ async def test_an_edit_of_a_post_with_no_result_is_classified_at_once(db_session
 
     assert await classify_pending(factory, classifier) == 1
     assert (await _announcement(db_session)).route == "not_sent"
+
+
+async def test_the_unclassified_query_reads_its_index_in_order(factory, prepared_engine):
+    asked: list[tuple[str, object]] = []
+
+    def record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("SELECT") and "classify_failed_at" in statement:
+            asked.append((statement, parameters))
+
+    sa.event.listen(prepared_engine.sync_engine, "before_cursor_execute", record)
+    try:
+        await classify_pending(factory, RecordingClassifier())
+    finally:
+        sa.event.remove(prepared_engine.sync_engine, "before_cursor_execute", record)
+
+    [(statement, parameters)] = asked
+    async with prepared_engine.connect() as conn:
+        await conn.exec_driver_sql("SET LOCAL enable_seqscan = off")
+        await conn.exec_driver_sql("SET LOCAL enable_sort = off")
+        plan = "\n".join(
+            row[0] for row in await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
+        )
+        await conn.rollback()
+    assert "ix_course_announcements_unclassified" in plan
+    assert "Sort" not in plan

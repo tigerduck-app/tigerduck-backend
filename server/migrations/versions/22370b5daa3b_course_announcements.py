@@ -87,13 +87,6 @@ def upgrade() -> None:
         ),
         if_not_exists=True,
     )
-    op.create_index(
-        "ix_course_announcement_courses_due",
-        "course_announcement_courses",
-        ["term_code", "next_due_at"],
-        if_not_exists=True,
-    )
-
     op.create_table(
         "course_announcements",
         sa.Column("id", sa.String(length=64), primary_key=True),
@@ -141,7 +134,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_course_announcements_unclassified",
         "course_announcements",
-        ["posted_at"],
+        [sa.text("classify_failed_at NULLS FIRST"), "posted_at", "id"],
         postgresql_where=sa.text("route = 'unclassified'"),
         if_not_exists=True,
     )

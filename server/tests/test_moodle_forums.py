@@ -8,7 +8,10 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
+from server.syncjobs import moodle_client
 from server.syncjobs.moodle_client import (
     HttpForumFetcher,
     MoodleRateLimited,
@@ -162,7 +165,7 @@ async def test_a_pinned_forum_with_a_new_post_on_its_page_costs_one_request():
     assert found[-1].discussion_id == 150
 
 
-async def test_a_malformed_entry_is_skipped():
+async def test_a_malformed_entry_is_skipped_and_counted(monkeypatch):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -170,14 +173,20 @@ async def test_a_malformed_entry_is_skipped():
                 "discussions": [
                     _discussion(1, created=0),
                     _discussion(2, id="x"),
+                    _discussion(4, groupid="7"),
                     _discussion(3),
                 ]
             },
         )
 
-    found = await _fetcher(handler).fetch_discussions(token=TOKEN, forum_id=30)
+    monkeypatch.setattr(moodle_client, "logger", structlog.get_logger(moodle_client.__name__))
+    with capture_logs() as logs:
+        found = await _fetcher(handler).fetch_discussions(token=TOKEN, forum_id=30)
 
     assert [d.discussion_id for d in found] == [103]
+    assert logs == [
+        {"event": "syncjobs.moodle.discussions_dropped", "count": 3, "log_level": "warning"}
+    ]
 
 
 def _moodle_error(code: str) -> httpx.Response:

@@ -60,8 +60,8 @@ class Classifier(Protocol):
     async def info(self) -> ClassifierInfo: ...
 
     async def classify(self, posts: Sequence[Post]) -> list[Classification | None]:
-        """One result per post, None for a post too large for the service or
-        whose result is malformed."""
+        """One result per post, None for a post too large for the service,
+        one it fails on alone, or one whose result is malformed."""
         ...
 
 
@@ -143,8 +143,9 @@ class HttpClassifier:
             "/v1/classify",
             json={"posts": [{"subject": p.subject, "message": p.message} for p in posts]},
         )
-        if response.status_code == 413:
-            # The body is over the service's 4 MB.
+        # 413: the body is over the service's 4 MB. A 5xx is taken as a post
+        # the model fails on; `classify_pending` asks /health first.
+        if response.status_code == 413 or response.status_code >= 500:
             if len(posts) == 1:
                 return [None]
             half = len(posts) // 2

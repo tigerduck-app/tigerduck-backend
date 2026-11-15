@@ -185,7 +185,7 @@ async def classify_pending(
     *,
     limit: int = CLASSIFY_PER_TICK,
 ) -> int:
-    """Classify stored versions that are not yet, newest first and those the
+    """Classify stored versions that are not yet, oldest first and those the
     service gave no result last, and queue an extraction for each of the
     current term the route rule sends. A version with no result waits
     CLASSIFY_RETRY_AFTER. No transaction is open while the service answers;
@@ -210,8 +210,7 @@ async def classify_pending(
                 )
                 .order_by(
                     CourseAnnouncement.classify_failed_at.asc().nulls_first(),
-                    # Newest first, so a fresh post never waits behind imported history.
-                    CourseAnnouncement.posted_at.desc(),
+                    CourseAnnouncement.posted_at,
                     CourseAnnouncement.id,
                 )
                 .limit(limit)
