@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TigerDuck course announcement classifier (tigerduck-app/announcement-classifier,
+  scripts/serve.py, e5-base on the CPU).
+
+  Runs NATIVE on the host beside ai.tigerduck.llm, for the same reason: the model
+  would add over a gigabyte to the backend image. The FastAPI backend (in Docker)
+  reaches it via host.docker.internal on port 40002. It has no authentication, so
+  keep the macOS firewall closed to the LAN.
+
+  Install (README.md in this folder: a clone of the classifier repository at
+  ~/models/tigerduck/announcement-classifier, set up by its deploy/install.sh <tag>):
+    ln -sf "$(pwd)/deploy/launchd/ai.tigerduck.classifier.plist" ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.tigerduck.classifier.plist
+    curl -s localhost:40002/health
+
+  Tear down:
+    launchctl bootout gui/$UID ~/Library/LaunchAgents/ai.tigerduck.classifier.plist
+    rm ~/Library/LaunchAgents/ai.tigerduck.classifier.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.tigerduck.classifier</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/xinshoutw/models/tigerduck/announcement-classifier/.venv/bin/python</string>
+        <string>/Users/xinshoutw/models/tigerduck/announcement-classifier/scripts/serve.py</string>
+        <string>/Users/xinshoutw/models/tigerduck/announcement-classifier/model</string>
+        <string>--host</string>
+        <!-- 0.0.0.0 so the backend container can reach it via host.docker.internal.
+             LAN exposure depends on the macOS firewall setting. -->
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>40002</string>
+        <string>--threads</string>
+        <string>2</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Restart on unclean exit; respect manual stops. -->
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/xinshoutw/Library/Logs/tigerduck-classifier.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/xinshoutw/Library/Logs/tigerduck-classifier.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
