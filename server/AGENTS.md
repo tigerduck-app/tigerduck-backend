@@ -484,6 +484,10 @@ into the backend container via `docker-compose.yml`.
   `server/migrations/versions/` without reviewing first (migrations are
   fine to commit; the warning is to avoid accidentally committing test
   SQL dumps).
+- Do not alter or drop a `user_courses` column the `term_courses` view reads
+  without dropping the view first and creating it again in the same
+  migration: Postgres refuses the change while the view depends on it, and
+  autogenerate does not see views.
 - Do not use the standard `apns-topic: {bundle_id}` for Live
   Activities; iOS will silently drop the push.
 - Do not commit `docker-compose.override.yml` — it's the gitignored
