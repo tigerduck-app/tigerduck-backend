@@ -25,6 +25,7 @@ from .course_changes import (
     add_change,
     is_id,
     item_body,
+    item_payload,
     pending_item,
     remove_change,
     replace_change,
@@ -46,10 +47,12 @@ _ANNOUNCEMENT_ID = re.compile(r"[0-9]{1,20}-[0-9]{1,20}")
 _REVIEW = """
 SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.evidence, i.checks,
        i.passes_checks, i.course_change_id, i.state,
+       c.note_zh AS replaced_note_zh, c.note_en AS replaced_note_en,
        a.id AS announcement_id, a.subject, a.posted_at
 FROM course_announcement_items AS i
 JOIN course_announcement_extractions AS e ON e.id = i.extraction_id
 JOIN course_announcements AS a ON a.id = e.announcement_id
+LEFT JOIN course_changes AS c ON c.id = i.course_change_id
 WHERE a.term_code = $1 AND i.state = 'pending'
 ORDER BY a.posted_at DESC, i.id
 """
@@ -155,7 +158,7 @@ def _item_to_dict(row) -> dict:
         "course_no": row["course_no"],
         "kind": row["kind"],
         "action": row["action"],
-        "payload": json.loads(row["payload"]),
+        "payload": item_payload(row),
         "evidence": row["evidence"],
         "checks": checks,
         "passes_checks": row["passes_checks"],
@@ -283,7 +286,10 @@ async def get_announcement(
             announcement_id,
         )
         rows = done and await conn.fetch(
-            "SELECT * FROM course_announcement_items WHERE extraction_id = $1 ORDER BY id",
+            "SELECT i.*, c.note_zh AS replaced_note_zh, c.note_en AS replaced_note_en"
+            " FROM course_announcement_items AS i"
+            " LEFT JOIN course_changes AS c ON c.id = i.course_change_id"
+            " WHERE i.extraction_id = $1 ORDER BY i.id",
             done["id"],
         )
         items = [
@@ -345,8 +351,10 @@ async def approve_item(item_id: int, request: Request, pool=Depends(get_pool)) -
         # Payload and links never change once an item is stored; the locks
         # come inside the write, items before the change they name.
         item = await conn.fetchrow(
-            "SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.course_change_id"
-            " FROM course_announcement_items AS i WHERE i.id = $1",
+            "SELECT i.id, i.course_no, i.kind, i.action, i.payload, i.course_change_id,"
+            " c.note_zh AS replaced_note_zh, c.note_en AS replaced_note_en"
+            " FROM course_announcement_items AS i"
+            " LEFT JOIN course_changes AS c ON c.id = i.course_change_id WHERE i.id = $1",
             item_id,
         )
         if item is None:

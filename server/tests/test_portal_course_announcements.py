@@ -372,6 +372,34 @@ async def test_approving_a_replace_item_updates_the_change(term, pool, db_sessio
     assert [a for a, _ in await _audit(pool)] == ["course_change.update"]
 
 
+@pytest.mark.parametrize(
+    ("note_zh", "note_en"), [("改為線上上課", "Online class"), ("改為實體上課", None)]
+)
+async def test_a_replace_keeps_the_english_note_while_the_chinese_one_stays(
+    term, pool, db_session, note_zh, note_en
+):
+    change_id = await _applied_change(
+        db_session, "note", note_zh="改為線上上課", note_en="Online class"
+    )
+    announcement = await _announcement(db_session)
+    item = await _item(
+        db_session, await _extraction(db_session, announcement),
+        _change("note", periods=["3"], note_zh=note_zh, note_en=None), action="replace",
+        change_id=change_id,
+    )
+    await db_session.commit()
+
+    listed = _body(await list_reviews("1151", _request(), pool=pool))["items"]
+    response = await approve_item(item.id, _request(), pool=pool)
+
+    assert listed[0]["payload"]["note_en"] == note_en
+    assert response.status_code == 200, _body(response)
+    row = await pool.fetchrow(
+        "SELECT note_zh, note_en, periods FROM course_changes WHERE id = $1", change_id
+    )
+    assert tuple(row) == (note_zh, note_en, ["3"])
+
+
 async def test_approving_a_remove_item_deletes_the_change_and_marks_its_add(
     term, pool, db_session
 ):

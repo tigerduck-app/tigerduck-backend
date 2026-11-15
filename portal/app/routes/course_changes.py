@@ -323,10 +323,24 @@ async def _check(
     return columns
 
 
-def item_body(item) -> dict:
-    """A review item's change as a request body; the item holds it in
-    `course_changes` column names."""
+def item_payload(item) -> dict:
+    """A review item's change in `course_changes` column names. The extraction
+    never states an English note, so a replace keeps the replaced change's
+    while the Chinese note it translates stays the same; the item's row
+    carries that change's notes as `replaced_note_zh` and `replaced_note_en`."""
     payload = json.loads(item["payload"])
+    if (
+        item["action"] == "replace"
+        and payload.get("note_en") is None
+        and payload.get("note_zh") == item["replaced_note_zh"]
+    ):
+        return {**payload, "note_en": item["replaced_note_en"]}
+    return payload
+
+
+def item_body(item) -> dict:
+    """A review item's change as a request body."""
+    payload = item_payload(item)
     first, last = payload.get("start_date"), payload.get("end_date")
     return {
         "course_no": item["course_no"],
