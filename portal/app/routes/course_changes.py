@@ -39,6 +39,8 @@ _HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _ROOM_MAX = 128
 # What Postgres text cannot hold: a NUL, or a lone surrogate, which UTF-8 cannot encode.
 _UNHELD = re.compile(r"[\x00\ud800-\udfff]")
+# The largest id a bigint holds; asyncpg refuses a larger int.
+BIGINT_MAX = 2**63 - 1
 
 # The term's enrolled rows with a course number, as the class reminder scan reads
 # them, and each course's row (`term_courses`, server/academic_calendar/models.py).
@@ -343,11 +345,15 @@ def item_body(item) -> dict:
     }
 
 
+def is_id(value) -> bool:
+    return type(value) is int and 0 < value <= BIGINT_MAX
+
+
 async def pending_item(conn, item_id) -> asyncpg.Record | JSONResponse:
     """Locks review item `item_id` until the transaction ends. Refuses one
     that is no longer pending, or whose extraction a newer version of the
     announcement or a later extraction of it replaced."""
-    if type(item_id) is not int:
+    if not is_id(item_id):
         return _bad("item_id must be an integer")
     item = await conn.fetchrow(_ITEM, item_id)
     if item is None:
@@ -452,10 +458,9 @@ async def replace_change(
         *(parsed[f] for f in _FIELDS),
         actor,
     )
+    await _record_on_items(conn, change_id, "edited", actor)
     if item:
         await _approve(conn, item["id"], change_id, actor)
-    else:
-        await _record_on_items(conn, change_id, "edited", actor)
     return {**parsed, "term_code": current["term_code"], "course_no": current["course_no"]}
 
 

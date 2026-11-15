@@ -19,8 +19,10 @@ from ..audit import audit
 from ..db import get_pool
 from .course_changes import (
     _UNHELD,
+    BIGINT_MAX,
     _bad,
     add_change,
+    is_id,
     item_body,
     pending_item,
     remove_change,
@@ -222,9 +224,11 @@ async def list_announcements(
     extraction filter would list."""
     if extraction not in EXTRACTION_FILTERS:
         return _bad(f"extraction must be one of {', '.join(EXTRACTION_FILTERS)}")
-    if page < 1:
-        return _bad("page must be 1 or more")
-    search = q.strip() if q and q.strip() and not _UNHELD.search(q) else None
+    if not 1 <= page <= BIGINT_MAX // PER_PAGE:
+        return _bad("page out of range")
+    if q and _UNHELD.search(q):
+        return _bad("q must be text")
+    search = q.strip() if q and q.strip() else None
     async with pool.acquire() as conn:
         if not await conn.fetchval(_TERM, term):
             return _bad("term not found", 404)
@@ -338,6 +342,8 @@ async def approve_item(item_id: int, request: Request, pool=Depends(get_pool)) -
     """Adds, replaces or removes the item's change as the Course changes page
     would, with its announcement as the source."""
     actor = request.state.actor
+    if not is_id(item_id):
+        return _bad("item not found", 404)
     async with pool.acquire() as conn, conn.transaction():
         # Payload and links never change once an item is stored; the locks
         # come inside the write, items before the change they name.
@@ -381,6 +387,8 @@ async def reject_item(
     item_id: int, request: Request, pool=Depends(get_pool), body: dict = Body(...)
 ) -> JSONResponse:
     """Rejects a pending item, keeping the operator's reason with it."""
+    if not is_id(item_id):
+        return _bad("item not found", 404)
     reason = body.get("reason")
     if reason is not None and not isinstance(reason, str):
         return _bad("reason must be text")

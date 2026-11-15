@@ -352,6 +352,10 @@ async def test_an_add_that_clashes_is_refused_and_stays_pending(term, pool, db_s
 async def test_approving_a_replace_item_updates_the_change(term, pool, db_session):
     change_id = await _applied_change(db_session, "room", room="IB-201")
     announcement = await _announcement(db_session)
+    wrote = await _item(
+        db_session, await _extraction(db_session, announcement, model="m1"),
+        _change("room", room="IB-201"), state="applied", change_id=change_id,
+    )
     item = await _item(
         db_session, await _extraction(db_session, announcement),
         _change("room", room="IB-302"), action="replace", change_id=change_id,
@@ -364,6 +368,7 @@ async def test_approving_a_replace_item_updates_the_change(term, pool, db_sessio
     room = await pool.fetchval("SELECT room FROM course_changes WHERE id = $1", change_id)
     assert room == "IB-302"
     assert tuple(await _item_row(pool, item.id))[:2] == ("approved", change_id)
+    assert (await _item_row(pool, wrote.id))["state"] == "edited"
     assert [a for a, _ in await _audit(pool)] == ["course_change.update"]
 
 
@@ -462,13 +467,22 @@ async def test_saving_with_an_item_of_another_course_writes_nothing(term, pool, 
         body={"course_no": COURSE, "kind": "cancelled", "mode": "day", "day": TUE,
               "item_id": item.id},
     )
-    bad_id = await create_change(
-        "1151", _request(), pool=pool,
-        body={"course_no": COURSE, "kind": "cancelled", "mode": "day", "day": TUE,
-              "item_id": "7"},
-    )
+    bad_ids = [
+        await create_change(
+            "1151", _request(), pool=pool,
+            body={"course_no": COURSE, "kind": "cancelled", "mode": "day", "day": TUE,
+                  "item_id": item_id},
+        )
+        for item_id in ("7", 2**63)
+    ]
+    huge = [
+        await approve_item(2**63, _request(), pool=pool),
+        await reject_item(2**63, _request(), pool=pool, body={}),
+    ]
 
-    assert (response.status_code, bad_id.status_code) == (409, 400)
+    assert response.status_code == 409
+    assert [r.status_code for r in bad_ids] == [400, 400]
+    assert [r.status_code for r in huge] == [404, 404]
     assert await pool.fetchval("SELECT count(*) FROM course_changes") == 0
     assert (await _item_row(pool, item.id))["state"] == "pending"
 
@@ -585,8 +599,11 @@ async def test_the_announcement_list_searches_filters_and_pages(term, pool, db_s
     listed = (await page(q="11/19"))["announcements"][0]
     assert listed["excerpt"].startswith("同學好")
     assert listed["labels"] == [{"label": "class_cancel", "score": 0.97}]
-    bad = await list_announcements("1151", _request(), pool=pool, extraction="x")
-    assert bad.status_code == 400
+    bad = [
+        await list_announcements("1151", _request(), pool=pool, **query)
+        for query in ({"extraction": "x"}, {"page": 0}, {"page": 2**62}, {"q": "停\x00課"})
+    ]
+    assert [r.status_code for r in bad] == [400] * 4
 
 
 async def test_the_detail_shows_the_newest_extraction_and_skipped_codes(term, pool, db_session):
