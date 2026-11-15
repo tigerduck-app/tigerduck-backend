@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 
 import httpx
+
+
+class BudgetPaused(Exception):
+    """A budget that shares the request's Moodle limit is paused."""
 
 
 class RequestBudget:
@@ -20,7 +24,8 @@ class RequestBudget:
     `60 / per_minute` seconds after the one before, and none while paused.
 
     Pass `event_hooks` to the httpx clients whose requests it paces;
-    `observe` counts each request as it goes.
+    `observe` counts each request as it goes. A request raises BudgetPaused,
+    unsent, while a budget in `stopped_by` is paused.
     """
 
     def __init__(
@@ -30,8 +35,10 @@ class RequestBudget:
         observe: Callable[[], object],
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[object]] = asyncio.sleep,
+        stopped_by: Sequence[RequestBudget] = (),
     ) -> None:
         self._spacing = 60.0 / per_minute
+        self._stopped_by = tuple(stopped_by)
         self._observe = observe
         self._clock = clock
         self._sleep = sleep
@@ -59,4 +66,7 @@ class RequestBudget:
 
     async def _before_request(self, _request: httpx.Request) -> None:
         await self.acquire()
+        # After the wait: the other budget may have paused during it.
+        if any(other.paused for other in self._stopped_by):
+            raise BudgetPaused
         self._observe()

@@ -973,7 +973,8 @@ def _parse_discussion(item: object) -> FetchedDiscussion | None:
 class HttpForumFetcher:
     """Course news forums for the course announcement poll. Raises as
     `_checked_call` does, with no cause or context attached: the httpx error
-    a failure came from may name the request, token included."""
+    a failure came from may name the request, token included. A request
+    `event_hooks` stop raises what they raise, BudgetPaused for a budget's."""
 
     def __init__(
         self,

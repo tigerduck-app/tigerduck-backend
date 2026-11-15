@@ -6,6 +6,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, date, datetime, timedelta
 
+import httpx
 import pytest
 import sqlalchemy as sa
 import pytest_asyncio
@@ -35,7 +36,7 @@ from server.tests.conftest import RecordingClassifier
 from server.scheduler.runtime import build_scheduler
 from server.syncjobs.assignments import moodle_semester
 from server.syncjobs.availability import SUSPENDED_UNTIL_KEY
-from server.syncjobs.budget import RequestBudget
+from server.syncjobs.budget import BudgetPaused, RequestBudget
 from server.syncjobs.executor import SyncWorker
 from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import (
@@ -440,6 +441,21 @@ async def test_a_rate_limit_pauses_both_budgets_and_ends_the_tick(
     assert (await _state(db_session)).next_due_at == NOW
 
 
+async def test_a_budget_paused_during_a_course_ends_the_tick_without_deferring_it(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    for course_id in (7001, 7002):
+        await _set_state(db_session, course_id, forum_id=course_id, next_due_at=NOW)
+    moodle.errors["token-alice"] = BudgetPaused()
+
+    assert await _tick(poller, NOW) == 0
+
+    assert [call[2] for call in moodle.polled()] == [7001]
+    assert (await _state(db_session, 7001)).next_due_at == NOW
+    assert not poller.budget.paused and not poller.sync_budget.paused
+
+
 async def test_moodle_failing_on_a_course_ends_the_tick_and_defers_that_course(
     db_session, poller, moodle, holder, term
 ):
@@ -731,6 +747,9 @@ async def test_the_poll_sends_on_its_own_budget_and_pauses_with_the_sync_one(tes
 
     assert poller.sync_budget is worker.budget
     assert poller.budget is not worker.budget
+    worker.budget.pause(60)
+    with pytest.raises(BudgetPaused):
+        await poller.budget.event_hooks["request"][0](httpx.Request("GET", "https://m.test"))
     assert poller.fetcher._event_hooks is poller.budget.event_hooks
     assert poller.cipher is worker.cipher
 
