@@ -30,20 +30,23 @@ from server.auth.crypto import CredentialCipher
 from server.auth.models import CredentialStatus, ExternalAccount
 from server.auth.service import PROVIDER_NTUST_SSO
 from server.config import Settings
-from server.course_announcements.classifier import Classifier
+from server.course_announcements.classifier import Classifier, HttpClassifier
 from server.course_announcements.ingest import classify_pending, store_announcements
 from server.course_announcements.models import CourseAnnouncementCourse
 from server.db import session_scope
+from server.metrics import observe_course_announcement_moodle_request
 from server.syncjobs.assignments import course_nos
 from server.syncjobs.availability import is_moodle_available
 from server.syncjobs.budget import RequestBudget
 from server.syncjobs.credentials import CredentialInvalid, load_moodle_token
 from server.syncjobs.devices import has_syncing_device
+from server.syncjobs.executor import SyncWorker
 from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import (
     FetchedCourse,
     FetchedDiscussion,
     ForumFetcher,
+    HttpForumFetcher,
     MoodleRateLimited,
     MoodleRefused,
     MoodleTokenInvalid,
@@ -74,6 +77,28 @@ class CourseAnnouncementPoller:
     budget: RequestBudget
     # The sync worker's: both share one Moodle limit.
     sync_budget: RequestBudget
+
+
+def build_poller(settings: Settings, sync_worker: SyncWorker) -> CourseAnnouncementPoller:
+    """The poll beside `sync_worker`, whose sessions, cipher and budget it
+    shares, on a budget of its own."""
+    budget = RequestBudget(
+        settings.course_announcement_requests_per_minute,
+        observe=observe_course_announcement_moodle_request,
+    )
+    return CourseAnnouncementPoller(
+        session_factory=sync_worker.session_factory,
+        settings=settings,
+        cipher=sync_worker.cipher,
+        fetcher=HttpForumFetcher(
+            base_url=settings.moodle_base_url,
+            timeout_seconds=settings.moodle_fetch_timeout_seconds,
+            event_hooks=budget.event_hooks,
+        ),
+        classifier=HttpClassifier(settings.announcement_classifier_url),
+        budget=budget,
+        sync_budget=sync_worker.budget,
+    )
 
 
 class _Outcome(enum.Enum):

@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher
@@ -20,12 +21,15 @@ from server.course_announcements.models import (
 )
 from server.course_announcements.poller import (
     CourseAnnouncementPoller,
+    build_poller,
     poll_interval,
     run_poll_tick,
 )
 from server.db import build_session_factory
+from server.scheduler.runtime import build_scheduler
 from server.syncjobs.availability import SUSPENDED_UNTIL_KEY
 from server.syncjobs.budget import RequestBudget
+from server.syncjobs.executor import SyncWorker
 from server.syncjobs.models import UserMoodleCourse
 from server.syncjobs.moodle_client import (
     FetchedDiscussion,
@@ -475,3 +479,60 @@ async def test_a_classifier_down_classifies_later_without_asking_moodle_again(
     row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
     assert row.route == "sent"
     assert len(moodle.polled()) == 1
+
+
+# --- Wiring ----------------------------------------------------------------------
+
+
+def _sync_worker(settings) -> SyncWorker:
+    return SyncWorker(
+        session_factory=async_sessionmaker(),
+        settings=settings,
+        cipher=CredentialCipher.from_settings(settings),
+        fetcher=object(),
+        course_fetcher=object(),
+        worker_id="w",
+        budget=RequestBudget(10, observe=lambda: None),
+    )
+
+
+@pytest.mark.parametrize(
+    ("url", "with_cipher", "scheduled"),
+    [
+        ("http://classifier.test:40002", True, True),
+        ("http://classifier.test:40002", False, False),
+        ("", True, False),
+        ("", False, False),
+    ],
+    ids=["url-and-cipher", "url-only", "cipher-only", "neither"],
+)
+async def test_the_poll_is_scheduled_only_with_a_classifier_and_credential_keys(
+    test_settings, url, with_cipher, scheduled
+):
+    settings = test_settings.model_copy(update={"announcement_classifier_url": url})
+    scheduler = build_scheduler(
+        async_sessionmaker(),
+        object(),
+        settings,
+        llm=object(),
+        sync_worker=_sync_worker(settings) if with_cipher else None,
+    )
+
+    job = scheduler.get_job("course_announcement_poll")
+    assert (job is not None) == scheduled
+    if scheduled:
+        assert job.trigger.interval == timedelta(minutes=1)
+
+
+async def test_the_poll_sends_on_its_own_budget_and_pauses_with_the_sync_one(test_settings):
+    settings = test_settings.model_copy(
+        update={"announcement_classifier_url": "http://classifier.test:40002"}
+    )
+    worker = _sync_worker(settings)
+
+    poller = build_poller(settings, worker)
+
+    assert poller.sync_budget is worker.budget
+    assert poller.budget is not worker.budget
+    assert poller.fetcher._event_hooks is poller.budget.event_hooks
+    assert poller.cipher is worker.cipher

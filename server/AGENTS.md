@@ -356,6 +356,23 @@ into the backend container via `docker-compose.yml`.
   requests on a budget of their own beside the sync worker's) and
   `course_announcements_auto_apply` (false, read at start: a change that passes
   every check still waits for review in the portal).
+- The `course_announcement_poll` job runs every minute when the classifier URL
+  and credential keys are set (`course_announcements/poller.py`). It polls the
+  news forums of the current term's Moodle courses in `user_moodle_courses`,
+  which every `moodle_assignments` run refreshes from the course list it already
+  fetches, that have an eligible holder: enrolled, an active credential and a
+  device `has_syncing_device` accepts. Never-polled courses go first, then the
+  longest overdue, as many as its budget allows; a course is due again 15
+  minutes, 3 hours, 12 hours or a day after a poll, by the age of its latest
+  post. It sends nothing while `is_moodle_available` says no or either budget
+  is paused, and a 429 pauses both, since they share one Moodle limit. A
+  rejected token or refused course moves the course to the next holder; the
+  poll never marks a credential invalid. Each tick then classifies what is
+  stored (`ingest.classify_pending`).
+- Course announcement text may name students: it stays in the
+  `course_announcements` tables and the portal, never in a log line, an
+  exception, an error column or an app-facing response. Errors carry fixed
+  codes, and tests use invented announcements only.
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for
