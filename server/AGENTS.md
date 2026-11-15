@@ -373,8 +373,10 @@ into the backend container via `docker-compose.yml`.
   failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
-  for waits an hour and goes after the others. Only a version of the current
-  term is queued for extraction.
+  for waits an hour and goes after the others. Ingest queues an extraction when
+  it classifies a version, and only for one of the current term, so a post
+  first classified after its term ended is never extracted; `--reextract`
+  queues the current term's posts alone and does not bring it back.
 - `scripts/import_course_announcements.py` imports the announcement history
   from a local export through the same store and classification, and refuses
   the whole export, before storing anything, if a record holds a field outside
