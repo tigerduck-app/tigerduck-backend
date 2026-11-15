@@ -52,6 +52,9 @@ server/
 │                              #   prunes the sync log and finished runs
 ├── links/                     # /links/{name} redirects: model, target checks,
 │                              #   rules and the scheduled link checker
+├── course_announcements/      # first posts of Moodle course news forums: models,
+│                              #   the classifier service client, ingest (store,
+│                              #   classify, route to the LLM) and the poll job
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes

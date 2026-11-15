@@ -1,0 +1,477 @@
+"""The course announcement poll, against a fake Moodle and classifier.
+Every announcement here is invented."""
+
+from __future__ import annotations
+
+import dataclasses
+from datetime import UTC, date, datetime, timedelta
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import select
+
+from server.academic_calendar.models import SemesterTerm
+from server.auth.crypto import CredentialCipher
+from server.auth.models import ExternalAccount, User, UserDevice
+from server.course_announcements.classifier import RecordingClassifier
+from server.course_announcements.models import (
+    CourseAnnouncement,
+    CourseAnnouncementCourse,
+)
+from server.course_announcements.poller import (
+    CourseAnnouncementPoller,
+    poll_interval,
+    run_poll_tick,
+)
+from server.db import build_session_factory
+from server.syncjobs.availability import SUSPENDED_UNTIL_KEY
+from server.syncjobs.budget import RequestBudget
+from server.syncjobs.models import UserMoodleCourse
+from server.syncjobs.moodle_client import (
+    FetchedDiscussion,
+    MoodleRateLimited,
+    MoodleRefused,
+    MoodleTokenInvalid,
+    MoodleUnavailable,
+)
+from server.system_settings import SystemSetting
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+# 10:00 in Taipei, a Monday of term 1151.
+NOW = datetime(2026, 11, 16, 2, 0, tzinfo=UTC)
+
+
+class FakeMoodle:
+    """Each course's news forum and each forum's discussions; `errors` maps a
+    token to what every call with it raises. Records every call."""
+
+    def __init__(self) -> None:
+        self.forums: dict[int, int] = {}
+        self.discussions: dict[int, list[FetchedDiscussion]] = {}
+        self.errors: dict[str, Exception] = {}
+        self.calls: list[tuple] = []
+
+    async def fetch_news_forums(self, *, token, course_ids):
+        self.calls.append(("forums", token, tuple(course_ids)))
+        if token in self.errors:
+            raise self.errors[token]
+        return {c: self.forums[c] for c in course_ids if c in self.forums}
+
+    async def fetch_discussions(self, *, token, forum_id):
+        self.calls.append(("discussions", token, forum_id))
+        if token in self.errors:
+            raise self.errors[token]
+        return self.discussions.get(forum_id, [])
+
+    def polled(self) -> list[tuple]:
+        return [call for call in self.calls if call[0] == "discussions"]
+
+
+class _Clock:
+    now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _discussion(
+    n: int, posted: datetime, subject: str = "Class cancelled"
+) -> FetchedDiscussion:
+    return FetchedDiscussion(
+        discussion_id=100 + n,
+        post_id=900 + n,
+        subject=subject,
+        message=f"<p>Invented notice {n}</p>",
+        created_at=posted,
+        modified_at=posted,
+        group_id=-1,
+        visible_from=None,
+        has_attachment=False,
+        pinned=False,
+        starred=False,
+    )
+
+
+@pytest.fixture
+def moodle() -> FakeMoodle:
+    return FakeMoodle()
+
+
+@pytest.fixture
+def classifier() -> RecordingClassifier:
+    return RecordingClassifier({"Class cancelled": {"class_cancel": 0.98}})
+
+
+@pytest.fixture
+def poller(prepared_engine, test_settings, moodle, classifier) -> CourseAnnouncementPoller:
+    settings = test_settings.model_copy(update={"course_announcement_requests_per_minute": 20})
+    clock = _Clock()
+    return CourseAnnouncementPoller(
+        session_factory=build_session_factory(prepared_engine),
+        settings=settings,
+        cipher=CredentialCipher.from_settings(test_settings),
+        fetcher=moodle,
+        classifier=classifier,
+        budget=RequestBudget(20, observe=lambda: None, clock=clock),
+        sync_budget=RequestBudget(10, observe=lambda: None, clock=clock),
+    )
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def term(db_session):
+    db_session.add(
+        SemesterTerm(code="1151", start_date=date(2026, 9, 7), end_date=date(2027, 1, 15))
+    )
+    await db_session.commit()
+
+
+@pytest.fixture
+def holder(db_session, store_moodle_token):
+    """A user enrolled in the given Moodle courses, with a token and, unless
+    told otherwise, a device the sync worker serves."""
+
+    async def _make(
+        name: str,
+        courses: dict[int, tuple[str, str]],
+        *,
+        syncing: bool = True,
+        status: str = "active",
+    ) -> User:
+        user = User(student_id=name)
+        db_session.add(user)
+        await db_session.flush()
+        db_session.add(
+            UserDevice(
+                user_id=user.id,
+                client_device_id=f"{name}-phone",
+                platform="ios",
+                cloud_sync_enabled=syncing,
+                last_seen_at=NOW - timedelta(days=1),
+            )
+        )
+        await store_moodle_token(user.id, token=f"token-{name}", status=status)
+        db_session.add_all(
+            UserMoodleCourse(
+                user_id=user.id,
+                moodle_course_id=course_id,
+                idnumber=idnumber,
+                full_name=full_name,
+                last_seen_at=NOW,
+            )
+            for course_id, (idnumber, full_name) in courses.items()
+        )
+        await db_session.commit()
+        return user
+
+    return _make
+
+
+DS = {7001: ("1151CS2006301", "Data Structures")}
+
+
+async def _state(db_session, course_id: int = 7001) -> CourseAnnouncementCourse | None:
+    return await db_session.get(CourseAnnouncementCourse, course_id, populate_existing=True)
+
+
+async def _set_state(db_session, course_id: int = 7001, **values) -> None:
+    db_session.add(
+        CourseAnnouncementCourse(moodle_course_id=course_id, term_code="1151", **values)
+    )
+    await db_session.commit()
+
+
+# --- Interval ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("age", "interval"),
+    [
+        (None, timedelta(days=1)),
+        (timedelta(0), timedelta(minutes=15)),
+        (timedelta(days=7) - timedelta(seconds=1), timedelta(minutes=15)),
+        (timedelta(days=7), timedelta(hours=3)),
+        (timedelta(days=14), timedelta(hours=3)),
+        (timedelta(days=14, seconds=1), timedelta(hours=12)),
+    ],
+    ids=["none", "new", "under-7-days", "7-days", "14-days", "past-14-days"],
+)
+async def test_the_interval_follows_the_latest_post(age, interval):
+    assert poll_interval(None if age is None else NOW - age, NOW) == interval
+
+
+async def test_a_poll_stores_the_posts_and_schedules_by_the_latest(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+    moodle.forums[7001] = 30
+    moodle.discussions[30] = [_discussion(1, NOW - timedelta(days=2))]
+
+    assert await run_poll_tick(poller, NOW) == 1
+
+    state = await _state(db_session)
+    assert (state.forum_id, state.latest_post_at, state.next_due_at) == (
+        30,
+        NOW - timedelta(days=2),
+        NOW + timedelta(minutes=15),
+    )
+    assert state.course_codes == ["CS2006301"]
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert (row.term_code, row.moodle_course_id, row.route) == ("1151", 7001, "sent")
+
+
+async def test_an_active_course_is_due_15_minutes_after_its_poll(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+    await _set_state(
+        db_session,
+        forum_id=30,
+        latest_post_at=NOW - timedelta(days=2),
+        next_due_at=NOW - timedelta(seconds=1),
+    )
+
+    assert await run_poll_tick(poller, NOW) == 1
+    assert moodle.polled() == [("discussions", "token-alice", 30)]
+
+
+async def test_a_course_that_never_posted_waits_a_day(db_session, poller, moodle, holder, term):
+    await holder("alice", DS)
+    moodle.forums[7001] = 30
+
+    assert await run_poll_tick(poller, NOW) == 1
+    assert await run_poll_tick(poller, NOW + timedelta(hours=6)) == 0
+    assert await run_poll_tick(poller, NOW + timedelta(hours=24)) == 1
+    assert len(moodle.polled()) == 2
+
+
+# --- When Moodle may be polled ---------------------------------------------------
+
+
+async def test_nothing_goes_to_moodle_in_the_maintenance_window(poller, moodle, holder, term):
+    await holder("alice", DS)
+    half_past_two_in_taipei = datetime(2026, 11, 15, 18, 30, tzinfo=UTC)
+
+    assert await run_poll_tick(poller, half_past_two_in_taipei) == 0
+    assert moodle.calls == []
+
+
+async def test_nothing_goes_to_moodle_while_an_operator_suspends_it(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+    db_session.add(
+        SystemSetting(
+            key=SUSPENDED_UNTIL_KEY,
+            value={"until": (NOW + timedelta(hours=1)).isoformat()},
+        )
+    )
+    await db_session.commit()
+
+    assert await run_poll_tick(poller, NOW) == 0
+    assert moodle.calls == []
+    assert await run_poll_tick(poller, NOW + timedelta(hours=1)) == 1
+
+
+async def test_a_suspend_during_a_tick_stops_the_rest_of_it(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    for course_id in (7001, 7002):
+        await _set_state(db_session, course_id, forum_id=course_id, next_due_at=NOW)
+    answer = moodle.fetch_discussions
+
+    async def suspended_meanwhile(*, token, forum_id):
+        db_session.add(
+            SystemSetting(
+                key=SUSPENDED_UNTIL_KEY,
+                value={"until": (NOW + timedelta(hours=1)).isoformat()},
+            )
+        )
+        await db_session.commit()
+        return await answer(token=token, forum_id=forum_id)
+
+    moodle.fetch_discussions = suspended_meanwhile
+
+    assert await run_poll_tick(poller, NOW) == 1
+    assert [call[2] for call in moodle.polled()] == [7001]
+
+
+async def test_a_course_of_another_term_is_not_polled(poller, moodle, holder, term):
+    await holder("alice", {7009: ("1142CS2006301", "Data Structures")})
+    assert await run_poll_tick(poller, NOW) == 0
+    assert moodle.calls == []
+
+
+# --- Budget and order --------------------------------------------------------------
+
+
+async def test_the_longest_due_go_first_and_the_rest_wait(
+    db_session, poller, moodle, holder, term
+):
+    courses = {course_id: (f"1151CS{course_id}01", "Course") for course_id in (1, 2, 3, 4)}
+    await holder("alice", courses)
+    due = {
+        1: NOW - timedelta(minutes=1),
+        2: NOW - timedelta(hours=2),
+        3: NOW + timedelta(minutes=5),
+    }
+    for course_id, next_due_at in due.items():
+        await _set_state(db_session, course_id, forum_id=course_id * 10, next_due_at=next_due_at)
+    moodle.forums[4] = 40
+    two = poller.settings.model_copy(update={"course_announcement_requests_per_minute": 2})
+    limited = dataclasses.replace(poller, settings=two)
+
+    assert await run_poll_tick(limited, NOW) == 2
+    assert [call[2] for call in moodle.polled()] == [40, 20]
+    assert await run_poll_tick(limited, NOW) == 1
+    assert [call[2] for call in moodle.polled()] == [40, 20, 10]
+
+
+@pytest.mark.parametrize("paused", ["sync_budget", "budget"])
+async def test_no_poll_while_either_budget_is_paused(poller, moodle, holder, term, paused):
+    await holder("alice", DS)
+    getattr(poller, paused).pause(300)
+
+    assert await run_poll_tick(poller, NOW) == 0
+    assert moodle.calls == []
+
+
+async def test_a_rate_limit_pauses_both_budgets_and_ends_the_tick(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    for course_id in (7001, 7002):
+        await _set_state(db_session, course_id, forum_id=course_id, next_due_at=NOW)
+    moodle.errors["token-alice"] = MoodleRateLimited("http_429")
+
+    assert await run_poll_tick(poller, NOW) == 0
+
+    assert len(moodle.polled()) == 1
+    assert poller.budget.paused and poller.sync_budget.paused
+    assert (await _state(db_session)).next_due_at == NOW
+
+
+async def test_moodle_down_ends_the_tick_and_keeps_the_course_due(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+    await _set_state(db_session, forum_id=30, next_due_at=NOW)
+    moodle.errors["token-alice"] = MoodleUnavailable("http_503")
+
+    assert await run_poll_tick(poller, NOW) == 0
+    assert (await _state(db_session)).next_due_at == NOW
+    assert not poller.budget.paused
+
+
+# --- Holders -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ineligible", ["sync_off", "credential_invalid"])
+async def test_a_course_without_an_eligible_holder_is_not_polled(
+    poller, moodle, holder, term, ineligible
+):
+    if ineligible == "sync_off":
+        await holder("alice", DS, syncing=False)
+    else:
+        await holder("alice", DS, status="invalid")
+
+    assert await run_poll_tick(poller, NOW) == 0
+    assert moodle.calls == []
+
+
+async def test_only_an_eligible_holder_lends_a_token(db_session, poller, moodle, holder, term):
+    await holder("alice", DS, syncing=False)
+    await holder("bob", DS, status="invalid")
+    await holder("carol", DS)
+    await _set_state(db_session, forum_id=30)
+
+    await run_poll_tick(poller, NOW)
+
+    assert moodle.polled() == [("discussions", "token-carol", 30)]
+
+
+@pytest.mark.parametrize(
+    "error", [MoodleTokenInvalid("invalidtoken"), MoodleRefused("requireloginerror")]
+)
+async def test_a_refused_holder_hands_the_course_on_and_keeps_their_credential(
+    db_session, poller, moodle, holder, term, error
+):
+    first = await holder("alice", DS)
+    second = await holder("bob", DS)
+    await _set_state(db_session, forum_id=30, holder_user_id=first.id)
+    moodle.errors["token-alice"] = error
+
+    assert await run_poll_tick(poller, NOW) == 1
+    state = await _state(db_session)
+    assert state.holder_user_id == second.id
+    assert state.next_due_at == NOW + timedelta(days=1)
+
+    assert await run_poll_tick(poller, state.next_due_at) == 1
+    assert [call[1] for call in moodle.polled()] == ["token-alice", "token-bob"]
+    statuses = await db_session.scalars(
+        select(ExternalAccount.credential_status).execution_options(populate_existing=True)
+    )
+    assert set(statuses) == {"active"}
+    assert (await _state(db_session)).holder_user_id == second.id
+
+
+# --- Forums and courses --------------------------------------------------------------
+
+
+async def test_one_lookup_finds_the_forums_of_the_holders_other_courses(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", {7001: DS[7001], 7002: ("1151CS2007301", "Algorithms")})
+    moodle.forums.update({7001: 30, 7002: 31})
+
+    assert await run_poll_tick(poller, NOW) == 2
+
+    lookups = [call for call in moodle.calls if call[0] == "forums"]
+    assert lookups == [("forums", "token-alice", (7001, 7002))]
+    assert sorted(call[2] for call in moodle.polled()) == [30, 31]
+
+
+async def test_a_course_without_a_news_forum_tries_again_tomorrow(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", DS)
+
+    assert await run_poll_tick(poller, NOW) == 1
+
+    state = await _state(db_session)
+    assert (state.forum_id, state.next_due_at) == (None, NOW + timedelta(days=1))
+    assert moodle.polled() == []
+
+
+async def test_an_announcement_of_merged_sections_belongs_to_each_code(
+    db_session, poller, moodle, holder, term
+):
+    await holder("alice", {7001: ("1151CS2006301", "Data Structures CS2006301 EE2006301")})
+    moodle.forums[7001] = 30
+    moodle.discussions[30] = [_discussion(1, NOW - timedelta(hours=1))]
+
+    await run_poll_tick(poller, NOW)
+
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert row.course_codes == ["CS2006301", "EE2006301"]
+
+
+async def test_a_classifier_down_classifies_later_without_asking_moodle_again(
+    db_session, poller, moodle, classifier, holder, term
+):
+    await holder("alice", DS)
+    moodle.forums[7001] = 30
+    moodle.discussions[30] = [_discussion(1, NOW - timedelta(hours=1))]
+    classifier.down = True
+
+    await run_poll_tick(poller, NOW)
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert row.route == "unclassified"
+
+    classifier.down = False
+    await run_poll_tick(poller, NOW + timedelta(minutes=1))
+
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert row.route == "sent"
+    assert len(moodle.polled()) == 1
