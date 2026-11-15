@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from server.academic_calendar.terms import current_term_code
 from server.course_announcements.classifier import Classifier
 from server.course_announcements.ingest import (
+    SENT_OR_SOURCED,
     classify_pending,
     queue_extractions,
     store_announcements,
@@ -149,9 +150,10 @@ async def import_history(
 async def queue_reextraction(
     session_factory: async_sessionmaker[AsyncSession], now: datetime
 ) -> int:
-    """Queue every announcement of the current term the route rule sends for
-    extraction again, as a model change needs, trying once more if Postgres
-    aborts it as a deadlock. Returns how many were queued."""
+    """Queue every announcement of the current term the route rule sends or a
+    course change came from for extraction again, as a model change needs,
+    trying once more if Postgres aborts it as a deadlock. Returns how many
+    were queued."""
     try:
         return await _queue_current_term(session_factory, now)
     except DBAPIError as exc:
@@ -165,4 +167,6 @@ async def _queue_current_term(
     session_factory: async_sessionmaker[AsyncSession], now: datetime
 ) -> int:
     async with session_scope(session_factory) as session:
-        return await queue_extractions(session, await current_term_code(session, now))
+        return await queue_extractions(
+            session, await current_term_code(session, now), SENT_OR_SOURCED, any_route=True
+        )

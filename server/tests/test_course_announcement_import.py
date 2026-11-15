@@ -282,13 +282,13 @@ async def test_reextract_tries_once_more_after_a_deadlock(
     await _finish_extractions(db_session)
     real, calls = history.queue_extractions, 0
 
-    async def deadlocking(session, current_term):
+    async def deadlocking(*args, **kwargs):
         nonlocal calls
         calls += 1
         if calls <= deadlocks:
-            await real(session, current_term)
+            await real(*args, **kwargs)
             raise DBAPIError("INSERT", {}, _Deadlock())
-        return await real(session, current_term)
+        return await real(*args, **kwargs)
 
     monkeypatch.setattr(history, "queue_extractions", deadlocking)
 
