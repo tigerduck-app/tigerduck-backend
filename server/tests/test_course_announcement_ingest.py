@@ -3,12 +3,14 @@ announcement here is invented."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
+import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy import func, select, update
 
+from server.academic_calendar.models import SemesterTerm
 from server.course_announcements.ingest import (
     classify_pending,
     route_for,
@@ -51,10 +53,21 @@ def _discussion(
     )
 
 
-async def _store(session, *discussions, course_codes=("CS1001301",)) -> list[str]:
+@pytest_asyncio.fixture(loop_scope="session")
+async def term(db_session):
+    """1151 is the current term."""
+    db_session.add(
+        SemesterTerm(code="1151", start_date=date(2026, 9, 7), end_date=date(2027, 1, 15))
+    )
+    await db_session.commit()
+
+
+async def _store(
+    session, *discussions, course_codes=("CS1001301",), term_code="1151"
+) -> list[str]:
     stored = await store_announcements(
         session,
-        term_code="1151",
+        term_code=term_code,
         moodle_course_id=7001,
         course_codes=list(course_codes),
         discussions=list(discussions),
@@ -108,7 +121,7 @@ async def test_a_new_announcement_is_stored_unclassified_with_its_raw_text(db_se
 
 
 async def test_classifying_keeps_the_text_drops_the_raw_post_and_queues_a_sent_one(
-    db_session, factory
+    db_session, factory, term
 ):
     await _store(db_session, _discussion())
     classifier = RecordingClassifier({"Class cancelled": CANCELLED}, release="model-2026-11-15")
@@ -125,6 +138,18 @@ async def test_classifying_keeps_the_text_drops_the_raw_post_and_queues_a_sent_o
     assert await classify_pending(factory, classifier) == 0
 
 
+async def test_an_earlier_terms_announcement_is_classified_but_never_queued(
+    db_session, factory, term
+):
+    await _store(db_session, _discussion(), term_code="1141")
+    classifier = RecordingClassifier({"Class cancelled": CANCELLED})
+
+    assert await classify_pending(factory, classifier) == 1
+
+    assert (await _announcement(db_session)).route == "sent"
+    assert await _extractions(db_session) == []
+
+
 async def test_a_not_sent_announcement_queues_nothing(db_session, factory):
     await _store(db_session, _discussion(subject="Slides"))
 
@@ -134,7 +159,7 @@ async def test_a_not_sent_announcement_queues_nothing(db_session, factory):
     assert await _extractions(db_session) == []
 
 
-async def test_an_edit_replaces_the_text_scores_and_extraction(db_session, factory):
+async def test_an_edit_replaces_the_text_scores_and_extraction(db_session, factory, term):
     classifier = RecordingClassifier(
         {"Class cancelled": CANCELLED, "Class cancelled, moved": CANCELLED}
     )
@@ -164,7 +189,9 @@ async def test_an_edit_replaces_the_text_scores_and_extraction(db_session, facto
     ]
 
 
-async def test_an_edit_sent_nowhere_still_supersedes_the_pending_items(db_session, factory):
+async def test_an_edit_sent_nowhere_still_supersedes_the_pending_items(
+    db_session, factory, term
+):
     """The new version no longer reads as a class change, so nothing would
     replace the old version's items: storing it retires them at once."""
     await _store(db_session, _discussion())
@@ -202,7 +229,7 @@ async def test_an_edit_sent_nowhere_still_supersedes_the_pending_items(db_sessio
 @pytest.mark.parametrize(
     "late", [timedelta(minutes=-5), timedelta(0)], ids=["older", "unchanged"]
 )
-async def test_an_older_or_unchanged_copy_changes_nothing(db_session, factory, late):
+async def test_an_older_or_unchanged_copy_changes_nothing(db_session, factory, term, late):
     edited = timedelta(minutes=30)
     await _store(db_session, _discussion(edited=edited))
     await classify_pending(factory, RecordingClassifier({"Class cancelled": CANCELLED}))

@@ -929,7 +929,7 @@ _DISCUSSIONS_PER_PAGE = 20
 _DISCUSSION_PAGES = 5
 
 
-def _parse_discussion(item: object) -> FetchedDiscussion | None:
+def parse_discussion(item: object) -> FetchedDiscussion | None:
     """One entry of `mod_forum_get_forum_discussions`, None when malformed.
     The author's name, picture and ids in it are never read."""
     if not isinstance(item, dict):
@@ -1068,7 +1068,7 @@ class HttpForumFetcher:
             items = body.get("discussions")
             if not isinstance(items, list):
                 raise MoodleRefused("unexpected_shape")
-            parsed = [d for d in map(_parse_discussion, items) if d is not None]
+            parsed = [d for d in map(parse_discussion, items) if d is not None]
             discussions += parsed
             dropped += len(items) - len(parsed)
             if len(items) < _DISCUSSIONS_PER_PAGE or not all(

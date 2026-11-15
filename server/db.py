@@ -113,6 +113,11 @@ PRUNE_BATCH_ATTEMPTS = 3
 _DEADLOCK = "40P01"
 
 
+def is_deadlock(exc: DBAPIError) -> bool:
+    """Whether Postgres aborted the statement's transaction as a deadlock."""
+    return getattr(exc.orig, "sqlstate", None) == _DEADLOCK
+
+
 async def delete_in_batches(
     factory: async_sessionmaker[AsyncSession],
     model: Any,
@@ -142,7 +147,7 @@ async def delete_in_batches(
                 )
                 break
             except DBAPIError as exc:
-                if getattr(exc.orig, "sqlstate", None) != _DEADLOCK:
+                if not is_deadlock(exc):
                     raise
                 logger.warning(
                     "retention.batch.deadlock",

@@ -54,7 +54,8 @@ server/
 │                              #   rules and the scheduled link checker
 ├── course_announcements/      # first posts of Moodle course news forums: models,
 │                              #   the classifier service client, ingest (store,
-│                              #   classify, route to the LLM) and the poll job
+│                              #   classify, route to the LLM), the poll job and
+│                              #   the history import
 ├── course_catalog/            # NTUST's course list per term and language: models
 │                              #   and the 2-hourly refresh from its course query
 ├── academic_calendar/         # semester terms, school holidays and course changes
@@ -374,7 +375,15 @@ into the backend container via `docker-compose.yml`.
   failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
-  for waits an hour and goes after the others.
+  for waits an hour and goes after the others. Ingest queues an extraction when
+  it classifies a version, and only for one of the current term, so a post
+  first classified after its term ended is never extracted; `--reextract`
+  queues the current term's posts alone and does not bring it back.
+- `scripts/import_course_announcements.py` imports the announcement history
+  from a local export through the same store and classification, and refuses
+  the whole export, before storing anything, if a record holds a field outside
+  its format, such as an author's (`course_announcements/history.py`).
+  `--reextract` queues the current term's announcements again for a new model.
 - Course announcement text may name students: it stays in the
   `course_announcements` tables and the portal, never in a log line, an
   exception, an error column or an app-facing response. Errors carry fixed
