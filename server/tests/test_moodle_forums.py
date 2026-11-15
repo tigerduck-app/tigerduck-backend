@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -220,11 +221,40 @@ async def test_a_failed_request_keeps_the_token_out_of_the_error(call):
     assert TOKEN not in repr(error)
 
 
-async def test_a_nul_character_postgres_refuses_is_dropped():
+async def test_characters_postgres_refuses_are_dropped():
     def handler(request: httpx.Request) -> httpx.Response:
-        nul = _discussion(1, subject="Notice\u00001", message="<p>a\u0000b</p>")
-        return httpx.Response(200, json={"discussions": [nul]})
+        bad = _discussion(1, subject="Notice\u00001\ud800", message="<p>a\u0000b\udfff</p>")
+        # Escaped, as Moodle's JSON carries a lone surrogate.
+        body = json.dumps({"discussions": [bad]})
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
 
     [found] = await _fetcher(handler).fetch_discussions(token=TOKEN, forum_id=30)
 
     assert (found.subject, found.message) == ("Notice1", "<p>ab</p>")
+
+
+@pytest.mark.parametrize("field", ["id", "discussion", "groupid"])
+async def test_an_entry_with_an_id_postgres_cannot_hold_is_skipped(field):
+    def handler(request: httpx.Request) -> httpx.Response:
+        too_large = _discussion(1, **{field: 2**63})
+        return httpx.Response(200, json={"discussions": [too_large, _discussion(2)]})
+
+    found = await _fetcher(handler).fetch_discussions(token=TOKEN, forum_id=30)
+
+    assert [d.discussion_id for d in found] == [102]
+
+
+async def test_a_forum_with_an_id_postgres_cannot_hold_is_left_out():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 2**63, "course": 7001, "type": "news"},
+                {"id": 40, "course": -(2**63) - 1, "type": "news"},
+                {"id": 41, "course": 7002, "type": "news"},
+            ],
+        )
+
+    found = await _fetcher(handler).fetch_news_forums(token=TOKEN, course_ids=[7001, 7002])
+
+    assert found == {7002: 41}

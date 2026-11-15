@@ -42,6 +42,8 @@ from typing import Any, Protocol
 import httpx
 import structlog
 
+from server.db import BIGINT_VALUES, storable_text
+
 logger = structlog.get_logger(__name__)
 
 _WS_PATH = "/webservice/rest/server.php"
@@ -943,6 +945,7 @@ def _parse_discussion(item: object) -> FetchedDiscussion | None:
         and isinstance(message, str)
         and type(group_id) is int
         and type(time_start) is int
+        and all(v in BIGINT_VALUES for v in (post_id, discussion_id, group_id))
     ):
         return None
     try:
@@ -956,9 +959,8 @@ def _parse_discussion(item: object) -> FetchedDiscussion | None:
     return FetchedDiscussion(
         discussion_id=discussion_id,
         post_id=post_id,
-        # Postgres refuses NUL in text.
-        subject=subject.replace("\x00", ""),
-        message=message.replace("\x00", ""),
+        subject=storable_text(subject),
+        message=storable_text(message),
         created_at=created_at,
         modified_at=modified_at,
         group_id=group_id,
@@ -1027,7 +1029,12 @@ class HttpForumFetcher:
             if not isinstance(forum, dict) or forum.get("type") != "news":
                 continue
             course_id, forum_id = forum.get("course"), forum.get("id")
-            if type(course_id) is int and type(forum_id) is int:
+            if (
+                type(course_id) is int
+                and type(forum_id) is int
+                and course_id in BIGINT_VALUES
+                and forum_id in BIGINT_VALUES
+            ):
                 found[course_id] = min(forum_id, found.get(course_id, forum_id))
         return found
 

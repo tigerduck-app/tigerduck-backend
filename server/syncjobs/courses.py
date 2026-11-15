@@ -17,6 +17,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from server.db import BIGINT_VALUES, storable_text
 from server.sync.changelog import append_change, lock_sync_state
 from server.sync.models import ChangeEntityType, UserCourse
 from server.syncjobs.models import UserMoodleCourse
@@ -137,19 +138,24 @@ async def store_moodle_courses(
     enrolled: Sequence[FetchedCourse],
     now: datetime,
 ) -> None:
-    """Keep `user_moodle_courses` as the user's Moodle course list. An empty
-    list keeps the stored rows, as `apply_fetched_assignments` reads it:
-    beside the assignments it settles nothing."""
-    if not enrolled:
+    """Keep `user_moodle_courses` as the user's Moodle course list, without
+    what Postgres cannot hold. An empty list keeps the stored rows, as
+    `apply_fetched_assignments` reads it: beside the assignments it settles
+    nothing."""
+    by_id = {
+        course.moodle_course_id: course
+        for course in enrolled
+        if course.moodle_course_id in BIGINT_VALUES
+    }
+    if not by_id:
         return
-    by_id = {course.moodle_course_id: course for course in enrolled}
     insert = pg_insert(UserMoodleCourse).values(
         [
             {
                 "user_id": user_id,
                 "moodle_course_id": course_id,
-                "idnumber": course.idnumber,
-                "full_name": course.full_name,
+                "idnumber": storable_text(course.idnumber),
+                "full_name": storable_text(course.full_name),
                 "last_seen_at": now,
             }
             for course_id, course in by_id.items()

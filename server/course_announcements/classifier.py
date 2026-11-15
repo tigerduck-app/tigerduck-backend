@@ -17,6 +17,8 @@ from typing import Protocol
 
 import httpx
 
+from server.db import storable_text
+
 # The most posts serve.py takes in one request (its MAX_TEXTS).
 MAX_POSTS = 64
 # serve.py scores about 35 ms a post on the CPU, one request at a time.
@@ -86,10 +88,7 @@ def _parse_result(item: object) -> Classification | None:
         and isinstance(text, str)
     ):
         return None
-    # Postgres refuses NUL in text.
-    return Classification(
-        labels=tuple(labels), scores=dict(scores), text=text.replace("\x00", "")
-    )
+    return Classification(labels=tuple(labels), scores=dict(scores), text=storable_text(text))
 
 
 class HttpClassifier:

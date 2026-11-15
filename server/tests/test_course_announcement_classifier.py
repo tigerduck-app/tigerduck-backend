@@ -202,10 +202,11 @@ async def test_a_score_jsonb_cannot_hold_is_refused():
         await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(_posts(1))
 
 
-async def test_a_nul_character_in_the_text_is_dropped():
+async def test_characters_postgres_refuses_are_dropped_from_the_text():
     def handler(request: httpx.Request) -> httpx.Response:
-        result = {"labels": [], "scores": {"materials": 0.1}, "text": "Notice\u0000 0"}
-        return httpx.Response(200, json={"results": [result]})
+        result = {"labels": [], "scores": {"materials": 0.1}, "text": "Notice\u0000 0\ud800"}
+        body = json.dumps({"results": [result]})
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
 
     [result] = await HttpClassifier(BASE, transport=httpx.MockTransport(handler)).classify(
         _posts(1)
