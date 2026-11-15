@@ -226,6 +226,7 @@ class _Course:
     latest_post_at: datetime | None
     # Eligible holders, the one to try first leading.
     holders: list[uuid.UUID]
+    holder_failures: int
 
 
 def _starting_at(
@@ -274,6 +275,7 @@ async def _load_course(
         forum_id=state.forum_id if state else None,
         latest_post_at=state.latest_post_at if state else None,
         holders=_starting_at(list(holders), state.holder_user_id if state else None),
+        holder_failures=state.holder_failures if state else 0,
     )
 
 
@@ -306,8 +308,6 @@ async def _poll_course(
         return _Outcome.polled
 
     next_holder = course.holders[(course.holders.index(holder) + 1) % len(course.holders)]
-    # Where this holder is the cause, another one is tried soon.
-    retry_soon = next_holder != holder
     forums: dict[int, int] = {}
     try:
         if course.forum_id is None:
@@ -339,7 +339,7 @@ async def _poll_course(
             holder=next_holder,
             discussions=[],
             forums=forums,
-            retry_soon=retry_soon,
+            holder_failed=True,
         )
         return _Outcome.polled
     except MoodleRateLimited:
@@ -364,7 +364,7 @@ async def _poll_course(
             holder=next_holder,
             discussions=[],
             forums=forums,
-            retry_soon=retry_soon,
+            holder_failed=True,
         )
         return _Outcome.polled
     await _record_poll(
@@ -427,14 +427,23 @@ async def _record_poll(
     holder: uuid.UUID | None,
     discussions: Sequence[FetchedDiscussion],
     forums: dict[int, int] | None = None,
-    retry_soon: bool = False,
+    holder_failed: bool = False,
 ) -> None:
-    """Store what one poll read and when the course is due again, after the
-    shortest interval if `retry_soon`, in one transaction."""
+    """Store what one poll read and when the course is due again, in one
+    transaction. After a holder failed, the next one is tried after the
+    shortest interval until every holder has failed once since a poll that
+    read the forum."""
     latest = max(
         [course.latest_post_at, *(d.created_at for d in discussions)],
         key=lambda moment: moment or datetime.min.replace(tzinfo=UTC),
     )
+    if holder_failed:
+        failures = course.holder_failures + 1
+    elif holder is not None:
+        failures = 0
+    else:
+        failures = course.holder_failures
+    retry_soon = holder_failed and failures < len(course.holders)
     async with session_scope(poller.session_factory) as session:
         # In id order, so two writers storing the same rows lock them alike.
         for other, forum_id in sorted((forums or {}).items()):
@@ -454,6 +463,7 @@ async def _record_poll(
             "latest_post_at": latest,
             "next_due_at": now + (ACTIVE_INTERVAL if retry_soon else poll_interval(latest, now)),
             "holder_user_id": holder,
+            "holder_failures": failures,
         }
         await session.execute(
             pg_insert(CourseAnnouncementCourse)

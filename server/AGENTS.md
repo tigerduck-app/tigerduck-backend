@@ -367,8 +367,9 @@ into the backend container via `docker-compose.yml`.
   post. It sends nothing while `is_moodle_available` says no or either budget
   is paused, and a 429 pauses both, since they share one Moodle limit. A
   rejected token, refused course or unseen news forum moves the course to the
-  next holder, polled 15 minutes later; Moodle failing on a course, or any
-  other failure, defers it 15 minutes. The poll never marks a credential
+  next holder, polled 15 minutes later until every holder has failed once
+  since a poll that read the forum, then after its usual interval; Moodle
+  failing on a course, or any other failure, defers it 15 minutes. The poll never marks a credential
   invalid. Each tick then classifies what is
   stored (`ingest.classify_pending`); a version the service gives no result
   for waits an hour and goes after the others.

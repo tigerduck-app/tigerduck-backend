@@ -78,6 +78,7 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="SET NULL"),
             nullable=True,
         ),
+        sa.Column("holder_failures", sa.Integer(), nullable=False, server_default="0"),
         sa.Column(
             "updated_at",
             sa.DateTime(timezone=True),

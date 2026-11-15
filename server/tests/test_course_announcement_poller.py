@@ -582,6 +582,34 @@ async def test_the_forums_one_lookup_finds_are_stored_in_course_order(
     assert upserted[:3] == [7002, 7003, 7004]
 
 
+async def test_after_every_holder_fails_once_the_course_waits_its_interval(
+    db_session, poller, moodle, holder, term
+):
+    names = ("alice", "bob", "carol")
+    for name in names:
+        await holder(name, DS)
+        moodle.errors[f"token-{name}"] = MoodleTokenInvalid("invalidtoken")
+    await _set_state(db_session, forum_id=30)
+
+    at = NOW
+    for _ in names:
+        assert await _tick(poller, at) == 1
+        at = (await _state(db_session)).next_due_at
+    assert sorted(call[1] for call in moodle.polled()) == [f"token-{n}" for n in names]
+    # Two retries 15 minutes apart, then a never-posted course's day.
+    assert at == NOW + timedelta(minutes=30) + timedelta(days=1)
+
+    for name in names:
+        del moodle.errors[f"token-{name}"]
+    assert await _tick(poller, at) == 1
+    succeeded_at, at = at, (await _state(db_session)).next_due_at
+    assert at == succeeded_at + timedelta(days=1)
+    for name in names:
+        moodle.errors[f"token-{name}"] = MoodleTokenInvalid("invalidtoken")
+    assert await _tick(poller, at) == 1
+    assert (await _state(db_session)).next_due_at == at + timedelta(minutes=15)
+
+
 async def test_a_holder_who_sees_no_news_forum_hands_the_course_on(
     db_session, poller, moodle, holder, term
 ):
