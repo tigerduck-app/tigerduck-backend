@@ -14,7 +14,7 @@ from server.tests.conftest import _alembic
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 REVISION = "22370b5daa3b"
-BEFORE = "9e90a76a367e"
+BEFORE = "bbb33844e87e"
 
 _TABLES = (
     "user_moodle_courses",

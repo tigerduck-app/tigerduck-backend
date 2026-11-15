@@ -2,7 +2,7 @@
 extractions, review items and course_changes.source_announcement_id
 
 Revision ID: 22370b5daa3b
-Revises: 9e90a76a367e
+Revises: bbb33844e87e
 Create Date: 2026-11-15 18:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = '22370b5daa3b'
-down_revision: str | Sequence[str] | None = '9e90a76a367e'
+down_revision: str | Sequence[str] | None = 'bbb33844e87e'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
