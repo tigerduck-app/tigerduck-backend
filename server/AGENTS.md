@@ -168,9 +168,11 @@ Grafana is the only monitoring service on `proxy-net`, served at
 `<portal host>/grafana` behind Cloudflare Access (it checks the Access
 JWT itself).
 
-`llama-server` stays NATIVE on the host (Docker on Mac can't get Metal
-GPU). The backend reaches it via `host.docker.internal:40001`. See
-`deploy/launchd/ai.tigerduck.llm.plist` for the launchd service.
+The LLM is an OpenAI-compatible server outside this repository. In
+production it is a service on the host shared with other apps, running
+natively (Docker on Mac can't get Metal GPU); the backend reaches it via
+`host.docker.internal:40001` with `TIGERDUCK_LLM_API_KEY` as its Bearer
+key. `deploy/launchd/README.md` shows how to check it.
 
 ### One-shot backfill
 ```bash

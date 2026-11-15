@@ -5,9 +5,8 @@ with `response_format.json_schema` support: llama.cpp server, vLLM, Ollama's
 OpenAI endpoint, and Gemini's OpenAI-compatibility layer (`v1beta/openai/`).
 
 Switching deployments is purely a `base_url` / `model` / `api_key` change —
-no code path lives per-vendor. That way we can keep serving classification
-requests from a local gemma-4-e4b while still flipping to Gemini free-tier
-if the Mac mini is down.
+no code path lives per-vendor, so classification can move from the
+self-hosted model to Gemini's free tier if the Mac mini is down.
 """
 
 from __future__ import annotations
@@ -37,9 +36,9 @@ from server.metrics import observe_llm_request
 logger = structlog.get_logger(__name__)
 
 
-# 100K tokens of slack below the E4B 128K context. Bulletins are almost
-# always < 5K chars; this ceiling is only here so a runaway page (giant
-# attached regulation PDF converted to Markdown) can't blow up inference.
+# Bulletins are almost always < 5K chars; this ceiling is only here so a
+# runaway page (giant attached regulation PDF converted to Markdown) can't
+# blow up inference.
 _MAX_BODY_CHARS = 100_000
 
 

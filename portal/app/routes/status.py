@@ -71,7 +71,7 @@ async def status_payload(request: Request) -> JSONResponse:
     # operator hits the status page to diagnose a hung stack.
     pg, llm, containers, version_info = await asyncio.gather(
         postgres_health(settings.database_url),
-        llm_health(settings.llm_base_url),
+        llm_health(settings.llm_base_url, settings.llm_api_key),
         docker_containers(),
         backend_version(),
     )
