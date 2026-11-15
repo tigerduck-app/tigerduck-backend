@@ -350,12 +350,15 @@ into the backend container via `docker-compose.yml`.
   `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
   pauses the whole worker for `sync_job_backoff_base_seconds`. The push
   pipeline's pre-send check has a fetcher of its own, outside the budget.
-- Course announcements take three settings: `announcement_classifier_url`
+- Course announcements take these settings: `announcement_classifier_url`
   (the host's classifier service, `deploy/launchd/ai.tigerduck.classifier.plist`;
   empty turns them off), `course_announcement_requests_per_minute` (20, Moodle
-  requests on a budget of their own beside the sync worker's) and
+  requests on a budget of their own beside the sync worker's),
   `course_announcements_auto_apply` (false, read at start: a change that passes
-  every check still waits for review in the portal).
+  every check still waits for review in the portal), and
+  `course_announcement_llm_base_url` and `course_announcement_llm_model`, the
+  LLM that extracts course changes (empty takes `llm_base_url` and
+  `llm_model`, the bulletins'; a model change needs a re-extract run).
 - The `course_announcement_poll` job runs every minute when the classifier URL
   and credential keys are set (`course_announcements/poller.py`). It polls the
   news forums of the current term's Moodle courses in `user_moodle_courses`,

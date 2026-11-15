@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
@@ -12,6 +13,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -22,6 +24,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import ExternalAccount, ExternalAccountCredential, User
+from server.bulletins.llm.openai_compat import OpenAICompatibleClient
 from server.config import Settings
 from server.course_announcements.classifier import (
     Classification,
@@ -427,3 +430,33 @@ class RecordingClassifier:
                 )
             )
         return results
+
+
+class ScriptedLLM(OpenAICompatibleClient):
+    """The LLM client over an offline transport. Each request takes the next
+    answer, the last repeating: a dict is sent as the JSON content, a str as
+    the content itself, an int as that HTTP status. Records the requests'
+    JSON bodies and never sleeps between retries."""
+
+    def __init__(self, *answers: dict | str | int, model: str = "test-model") -> None:
+        self.answers = list(answers)
+        self.requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(json.loads(request.content))
+            answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+            if isinstance(answer, int):
+                return httpx.Response(answer, json={"error": "scripted"})
+            content = json.dumps(answer, ensure_ascii=False) if isinstance(answer, dict) else answer
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+        async def no_sleep(seconds: float) -> None:
+            pass
+
+        super().__init__(
+            base_url="http://llm.test/v1",
+            api_key="sk-test",
+            model=model,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            sleep=no_sleep,
+        )

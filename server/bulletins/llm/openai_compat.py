@@ -17,7 +17,7 @@ import json
 import re
 import time
 import unicodedata
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -82,6 +82,10 @@ class OpenAICompatibleClient:
             headers={"User-Agent": "TigerDuckBot/0.1"},
         )
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def complete_json(
         self,
         *,
@@ -89,11 +93,14 @@ class OpenAICompatibleClient:
         schema_name: str,
         schema: dict[str, Any],
         parse: Callable[[str], Any] | None = None,
+        extra_body: Mapping[str, Any] | None = None,
     ) -> Any:
         """The answer to `messages` under `schema`, as `parse` reads it from
         the message content: the JSON object by default. `parse` raises
-        `LLMError` for an answer to retry."""
+        `LLMError` for an answer to retry. `extra_body` adds request fields
+        the server reads beyond the standard ones."""
         payload: dict[str, Any] = {
+            **(extra_body or {}),
             "model": self._model,
             "temperature": self._temperature,
             "response_format": {
