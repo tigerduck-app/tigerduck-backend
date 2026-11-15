@@ -10,6 +10,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from server.academic_calendar.models import AcademicHoliday, SemesterTerm
+from server.auth.models import User
+from server.sync.models import UserCourse
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -173,3 +175,171 @@ async def test_meetings_read_each_weekday_once(db_session) -> None:
     )
 
     assert [(weekday, sorted(periods)) for weekday, periods in rows] == [(1, ["2", "6"])]
+
+
+# Monday periods 2 and 6, two meetings; Tuesday 3-4; Friday 10 and A, one meeting
+# across the evening's start.
+_TAKEN = {"1": ["2", "6"], "2": ["3", "4"], "5": ["10", "A"]}
+
+_VIOLATIONS = text(
+    "SELECT code, day, periods, change_id FROM course_change_violations('1151', :course_no,"
+    " :kind, :mode, :first, :last, CAST(:excluded AS smallint[]), CAST(:periods AS text[]),"
+    " :editing) ORDER BY code, day"
+)
+
+
+async def _taken(db_session) -> None:
+    """Term 1151 and one student of CS2001301 at `_TAKEN`."""
+    await _term(db_session)
+    user = User(student_id="b1")
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(
+        UserCourse(
+            user_id=user.id, semester="1151", course_key="client:1151:CS2001301",
+            course_no="CS2001301", course_name="資料結構", schedule_json=_TAKEN,
+        )
+    )
+    await db_session.commit()
+
+
+async def _violations(
+    db_session, first, last=None, *, kind="room", periods=None, excluded=(),
+    editing=None, course_no="CS2001301",
+):
+    rows = await db_session.execute(
+        _VIOLATIONS,
+        {
+            "course_no": course_no, "kind": kind,
+            "mode": "day" if last is None else "range",
+            "first": first, "last": last or first, "excluded": list(excluded),
+            "periods": periods, "editing": editing,
+        },
+    )
+    return [
+        (code, day and day.isoformat(), missing, change_id)
+        for code, day, missing, change_id in rows
+    ]
+
+
+async def _change(db_session, first, last=None, **fields) -> int:
+    mode = {"mode": "range", "end_date": last} if last else {"end_date": first}
+    change_id = await db_session.scalar(
+        _INSERT, {**_ROW, "start_date": first, **mode, **fields}
+    )
+    await db_session.commit()
+    return change_id
+
+
+async def test_a_range_change_clashes_on_each_day_it_covers(db_session) -> None:
+    await _taken(db_session)
+    ranged = await _change(
+        db_session, date(2026, 11, 16), date(2026, 11, 30), kind="room", room="T4-201",
+        excluded_weekdays=[5],
+    )
+
+    assert await _violations(db_session, date(2026, 11, 24)) == [
+        ("clash", "2026-11-24", None, ranged),
+    ]
+    assert await _violations(db_session, date(2026, 11, 27)) == []  # its excluded Friday
+    assert await _violations(db_session, date(2026, 11, 10), date(2026, 11, 17)) == [
+        ("clash", "2026-11-16", None, ranged),
+        ("clash", "2026-11-17", None, ranged),
+    ]
+    assert await _violations(db_session, date(2026, 11, 24), kind="cancelled") == []
+
+
+async def test_changes_of_a_kind_clash_only_where_their_periods_meet(db_session) -> None:
+    await _taken(db_session)
+    second = await _change(
+        db_session, date(2026, 11, 2), kind="room", room="EE-104", periods=["2"]
+    )
+    monday = date(2026, 11, 2)
+
+    assert await _violations(db_session, monday, periods=["6"]) == []
+    assert await _violations(db_session, monday, periods=["2"]) == [
+        ("clash", "2026-11-02", None, second),
+    ]
+    assert await _violations(db_session, monday) == [("clash", "2026-11-02", None, second)]
+    assert await _violations(db_session, monday, kind="note", periods=["2"]) == []
+
+
+@pytest.mark.parametrize(
+    ("day", "periods", "expected"),
+    [
+        (date(2026, 11, 2), None, [("several_meetings", "2026-11-02", None, None)]),
+        (date(2026, 11, 2), ["2", "6"], [("not_one_meeting", "2026-11-02", None, None)]),
+        (date(2026, 11, 2), ["6"], []),
+        (date(2026, 11, 3), ["3"], [("not_one_meeting", "2026-11-03", None, None)]),
+        (date(2026, 11, 3), None, []),
+        (date(2026, 11, 6), None, []),  # 10 and A are back to back
+    ],
+)
+async def test_a_start_change_names_one_meeting_of_its_day(
+    db_session, day, periods, expected
+) -> None:
+    await _taken(db_session)
+
+    assert await _violations(db_session, day, kind="start", periods=periods) == expected
+
+
+async def test_periods_must_meet_on_every_day_of_the_change(db_session) -> None:
+    await _taken(db_session)
+
+    assert await _violations(db_session, date(2026, 11, 3), periods=["4", "5"]) == [
+        ("missing_periods", "2026-11-03", ["5"], None),
+    ]
+    assert await _violations(
+        db_session, date(2026, 11, 2), date(2026, 11, 8), periods=["3"]
+    ) == [
+        ("missing_periods", "2026-11-02", ["3"], None),
+        ("missing_periods", "2026-11-06", ["3"], None),
+    ]
+    assert await _violations(
+        db_session, date(2026, 11, 2), date(2026, 11, 8), periods=["3"], excluded=[1, 5]
+    ) == []
+
+
+async def test_an_edited_change_does_not_clash_with_itself(db_session) -> None:
+    await _taken(db_session)
+    tuesday = date(2026, 11, 3)
+    change = await _change(db_session, tuesday)
+
+    assert await _violations(db_session, tuesday, kind="cancelled", editing=change) == []
+    assert await _violations(db_session, tuesday, kind="cancelled") == [
+        ("clash", "2026-11-03", None, change),
+    ]
+
+
+async def test_a_change_must_cover_a_class_day(db_session) -> None:
+    await _taken(db_session)
+    db_session.add(
+        AcademicHoliday(
+            name_zh="校慶", name_en="Anniversary",
+            start_date=date(2026, 11, 10), end_date=date(2026, 11, 10),
+        )
+    )
+    await db_session.commit()
+    holiday = date(2026, 11, 10)
+
+    assert await _violations(db_session, date(2026, 11, 4)) == [
+        ("no_class_day", "2026-11-04", None, None),
+    ]
+    assert await _violations(db_session, holiday) == [("holiday", "2026-11-10", None, None)]
+    assert await _violations(db_session, holiday, holiday) == [
+        ("no_class_day", "2026-11-10", None, None),
+    ]
+
+
+async def test_a_course_nobody_takes_has_no_meetings(db_session) -> None:
+    await _taken(db_session)
+
+    assert await _violations(db_session, date(2026, 11, 3), course_no="EE2005701") == [
+        ("no_class_day", "2026-11-03", None, None),
+        ("no_meetings", None, None, None),
+    ]
+    # With no change only the course is checked.
+    assert await _violations(db_session, None, kind=None, course_no="EE2005701") == [
+        ("no_meetings", None, None, None),
+    ]
+    assert await _violations(db_session, None, kind=None) == []
