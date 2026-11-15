@@ -4,6 +4,7 @@ Every announcement here is invented."""
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -17,9 +18,11 @@ from structlog.testing import capture_logs
 from server.academic_calendar.models import SemesterTerm
 from server.auth.crypto import CredentialCipher
 from server.auth.models import ExternalAccount, User, UserDevice
+from server.course_announcements.history import import_history, read_export
 from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementCourse,
+    CourseAnnouncementExtraction,
 )
 from server.course_announcements import poller as poller_module
 from server.course_announcements.poller import (
@@ -676,6 +679,49 @@ async def test_a_classifier_down_classifies_later_without_asking_moodle_again(
     row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
     assert row.route == "sent"
     assert len(moodle.polled()) == 1
+
+
+@pytest.mark.parametrize("first", ["poll", "import"])
+async def test_the_history_import_and_a_poll_keep_the_later_version_whichever_comes_first(
+    db_session, poller, moodle, classifier, holder, term, first
+):
+    posted, edited = NOW - timedelta(days=2), NOW - timedelta(days=1)
+    await holder("alice", DS)
+    moodle.forums[7001] = 30
+    moodle.discussions[30] = [dataclasses.replace(_discussion(1, posted), modified_at=edited)]
+    original = {
+        "id": 901,
+        "discussion": 101,
+        "subject": "Class cancelled",
+        "message": "<p>Invented notice 1, before its edit</p>",
+        "created": int(posted.timestamp()),
+        "modified": int(posted.timestamp()),
+        "groupid": -1,
+        "timestart": 0,
+        "attachment": False,
+    }
+    course = {"id": 7001, "idnumber": "1151CS2006301", "fullname": "Data Structures"}
+    export = read_export([json.dumps({"course": course, "discussions": [original]})])
+
+    async def poll() -> None:
+        assert await _tick(poller, NOW) == 1
+
+    async def run_import() -> None:
+        await import_history(poller.session_factory, classifier, export)
+
+    for step in (poll, run_import) if first == "poll" else (run_import, poll):
+        await step()
+
+    row = await db_session.get(CourseAnnouncement, "101-901", populate_existing=True)
+    assert (row.modified_at, row.route, row.course_codes) == (edited, "sent", ["CS2006301"])
+    assert row.text == "Class cancelled\n\n<p>Invented notice 1</p>"
+    extractions = await db_session.execute(
+        select(CourseAnnouncementExtraction.version, CourseAnnouncementExtraction.status)
+        .order_by(CourseAnnouncementExtraction.id)
+        .execution_options(populate_existing=True)
+    )
+    replaced = [(posted, "superseded")] if first == "import" else []
+    assert [tuple(e) for e in extractions] == [*replaced, (edited, "queued")]
 
 
 # --- Wiring ----------------------------------------------------------------------
