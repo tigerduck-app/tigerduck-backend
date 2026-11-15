@@ -201,11 +201,4 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
-RESPONSE_FORMAT: dict[str, Any] = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "BulletinMetadata",
-        "strict": True,
-        "schema": RESPONSE_SCHEMA,
-    },
-}
+RESPONSE_SCHEMA_NAME = "BulletinMetadata"

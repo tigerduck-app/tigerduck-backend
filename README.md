@@ -85,7 +85,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 | DB | Postgres 17（容器化、internal-only network）|
 | 排程 | APScheduler 3.x（IntervalTrigger）|
 | 推播 | `aioapns`（APNs）、`firebase-admin`（FCM）|
-| LLM | OpenAI-compatible client → llama-server (host)、`response_format: json_object` + JSON schema |
+| LLM | OpenAI-compatible client → llama-server (host)、strict `json_schema` 回應格式 |
 | 部署 | Docker Compose + nginx-proxy-manager 反代 |
 | 監控 | Prometheus + Grafana + Loki（Grafana Alloy）、postgres-exporter、sql_exporter |
 
