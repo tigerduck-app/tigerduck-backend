@@ -5,7 +5,7 @@
 # `docker compose build` after a pyproject tweak only rebuilds the deps that
 # actually changed.
 
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.15-slim-bookworm AS builder
 
 # Pinned by tag and digest, like the images in docker-compose.yml, and
 # bumped by Renovate. uv reads any uv.lock of the same schema version.
@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # -------- stage 2: runtime ---------------------------------------------------
-FROM python:3.13-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 # trafilatura / lxml pull libxml2 + libxslt at runtime. slim-bookworm has them
 # in /usr/lib already; no apt install needed. If a future dep requires native
