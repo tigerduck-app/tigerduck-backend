@@ -7,6 +7,7 @@ import dataclasses
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+import sqlalchemy as sa
 import pytest_asyncio
 import structlog
 from sqlalchemy import select
@@ -24,6 +25,7 @@ from server.course_announcements import poller as poller_module
 from server.course_announcements.poller import (
     CourseAnnouncementPoller,
     PollTickFailed,
+    _in_term,
     build_poller,
     poll_interval,
     run_poll_tick,
@@ -31,6 +33,7 @@ from server.course_announcements.poller import (
 from server.db import build_session_factory
 from server.tests.conftest import RecordingClassifier
 from server.scheduler.runtime import build_scheduler
+from server.syncjobs.assignments import moodle_semester
 from server.syncjobs.availability import SUSPENDED_UNTIL_KEY
 from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker
@@ -266,6 +269,27 @@ async def test_a_course_that_never_posted_waits_a_day(db_session, poller, moodle
     assert await _tick(poller, NOW + timedelta(hours=6)) == 0
     assert await _tick(poller, NOW + timedelta(hours=24)) == 1
     assert len(moodle.polled()) == 2
+
+
+@pytest.mark.parametrize("term", ["1151", "114H"])
+@pytest.mark.parametrize(
+    "idnumber",
+    [
+        "1151CS2006301",
+        "1151",
+        "115",
+        "",
+        "114hEE1001301",
+        "114HEE1001301",
+        "1141CS2006301",
+        "x151CS2006301",
+        "115-CS2006301",
+        "\uff11\uff11\uff15\uff11CS2006301",
+    ],
+)
+async def test_the_term_filter_agrees_with_moodle_semester(db_session, idnumber, term):
+    in_term = await db_session.scalar(select(_in_term(sa.literal(idnumber), term)))
+    assert in_term == (moodle_semester(idnumber) == term)
 
 
 # --- When Moodle may be polled ---------------------------------------------------
