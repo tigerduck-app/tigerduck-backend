@@ -347,6 +347,12 @@ into the backend container via `docker-compose.yml`.
   `event_hooks`, so a new Moodle call goes through one of them. An HTTP 429
   pauses the whole worker for `sync_job_backoff_base_seconds`. The push
   pipeline's pre-send check has a fetcher of its own, outside the budget.
+- Course announcements take three settings: `announcement_classifier_url`
+  (the host's classifier service, `deploy/launchd/ai.tigerduck.classifier.plist`;
+  empty turns them off), `course_announcement_requests_per_minute` (20, Moodle
+  requests on a budget of their own beside the sync worker's) and
+  `course_announcements_auto_apply` (false, read at start: a change that passes
+  every check still waits for review in the portal).
 - An FCM token is `standard` only; Live Activity token kinds are APNs.
 - Registering a push token retires the device's other active tokens of
   the same kind (`_retire_superseded_tokens`; scope-narrowed only for

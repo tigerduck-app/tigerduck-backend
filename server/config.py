@@ -350,6 +350,19 @@ class Settings(BaseSettings):
     # run after 05:00 Taipei time.
     course_catalog_refresh_interval_minutes: int = Field(default=120, ge=0)
 
+    # --- Course announcements (server/course_announcements/) ---
+    # The classifier service (deploy/launchd/ai.tigerduck.classifier.plist),
+    # e.g. http://host.docker.internal:40002. Empty turns course announcements
+    # off: no course news forum is polled.
+    announcement_classifier_url: str = ""
+    # Moodle requests a minute for the course news forums, on a budget of their
+    # own beside sync_job_requests_per_minute.
+    course_announcement_requests_per_minute: int = Field(default=20, ge=1)
+    # On, a course change extracted from an announcement that passes every
+    # check is written to course_changes; off, every one waits for review in
+    # the portal. Read at start.
+    course_announcements_auto_apply: bool = False
+
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "sk-local"

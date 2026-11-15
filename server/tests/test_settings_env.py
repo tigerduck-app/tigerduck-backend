@@ -72,3 +72,24 @@ def test_the_refusal_prints_no_setting_values():
     with pytest.raises(ValidationError) as caught:
         Settings(_env_file=None, database_url="postgresql://u:db-value-x@h/d", **secrets)
     assert "value-x" not in str(caught.value)
+
+
+def test_course_announcement_settings_default_to_off():
+    settings = Settings(_env_file=None, **PRODUCTION_SECRETS)
+    assert settings.announcement_classifier_url == ""
+    assert settings.course_announcement_requests_per_minute == 20
+    assert settings.course_announcements_auto_apply is False
+
+
+def test_course_announcement_settings_read_their_variables(monkeypatch):
+    monkeypatch.setenv("TIGERDUCK_ANNOUNCEMENT_CLASSIFIER_URL", "http://classifier.test:40002")
+    monkeypatch.setenv("TIGERDUCK_COURSE_ANNOUNCEMENT_REQUESTS_PER_MINUTE", "7")
+    monkeypatch.setenv("TIGERDUCK_COURSE_ANNOUNCEMENTS_AUTO_APPLY", "true")
+    settings = Settings(_env_file=None, **PRODUCTION_SECRETS)
+    assert settings.announcement_classifier_url == "http://classifier.test:40002"
+    assert settings.course_announcement_requests_per_minute == 7
+    assert settings.course_announcements_auto_apply is True
+
+
+def test_env_example_keeps_automatic_apply_off():
+    assert Settings(_env_file=BACKEND_DIR / ".env.example").course_announcements_auto_apply is False
