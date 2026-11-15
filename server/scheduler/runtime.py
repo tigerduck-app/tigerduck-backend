@@ -23,6 +23,7 @@ from server.bulletins.user_dispatch import dispatch_user_bulletins
 from server.bulletins.llm.openai_compat import OpenAICompatibleProvider
 from server.config import Settings
 from server.course_announcements.extractor import TICK, build_extractor, run_extraction_tick
+from server.course_announcements.items import mark_past_items
 from server.course_announcements.poller import build_poller, run_poll_tick
 from server.course_catalog.refresh import refresh_course_catalog
 from server.links.checker import run_link_checks
@@ -86,6 +87,8 @@ def build_scheduler(
     * `course_announcement_extract` — send one queued course announcement to
       the LLM every minute while no bulletin waits for it (only with an
       `announcement_classifier_url`).
+    * `course_announcement_past` — mark past the course announcement items
+      whose days have all passed, daily at 00:05 Taipei (likewise).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
     * `session_reauth_scan` — ask devices left without a session to sign in
@@ -242,6 +245,19 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=30,
+        )
+
+        async def course_announcement_past() -> None:
+            await mark_past_items(session_factory, datetime.now(UTC))
+
+        scheduler.add_job(
+            course_announcement_past,
+            # Just after midnight in Taipei, when the day's items become past.
+            trigger=CronTrigger(hour=0, minute=5, timezone="Asia/Taipei"),
+            id="course_announcement_past",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
         )
     if push_worker is not None:
 

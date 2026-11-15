@@ -25,6 +25,7 @@ from server.course_announcements.classifier import (
     ClassifierError,
     Post,
 )
+from server.course_announcements.items import refresh_contradictions
 from server.course_announcements.models import (
     EXTRACTION_LIVE_WHERE,
     AnnouncementRoute,
@@ -140,6 +141,7 @@ async def store_announcements(
         stored += (await session.scalars(upsert)).all()
     if stored:
         await _retire_older_versions(session, stored)
+        await refresh_contradictions(session, term_code, course_codes)
     return stored
 
 

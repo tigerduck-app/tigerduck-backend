@@ -10,7 +10,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -18,10 +18,12 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from server.academic_calendar.models import CourseChange, SemesterTerm
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import ExternalAccount, ExternalAccountCredential, User
 from server.bulletins.llm.openai_compat import OpenAICompatibleClient
@@ -32,10 +34,16 @@ from server.course_announcements.classifier import (
     ClassifierInfo,
     Post,
 )
+from server.course_announcements.extractor import Extractor, run_extraction_tick
+from server.course_announcements.ingest import classify_pending, store_announcements
+from server.course_announcements.models import (
+    CourseAnnouncementExtraction,
+    CourseAnnouncementItem,
+)
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
-from server.sync.models import UserAssignment
-from server.syncjobs.moodle_client import FetchedSubmission
+from server.sync.models import UserAssignment, UserCourse
+from server.syncjobs.moodle_client import FetchedDiscussion, FetchedSubmission
 from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
@@ -493,3 +501,140 @@ def extraction_answer(**fields) -> dict:
         "certain": True,
         **fields,
     }
+
+
+class AnnouncementCourse:
+    """Announcements of CS1001301 in term 1151 (2026-09-14 to 2027-01-08),
+    which a student takes on Mondays, periods 3-4, and Thursdays, 6-7: stored
+    and classified as a poll does, and extracted by the extraction job with
+    a scripted LLM. `now` is the job's clock; the first post is Friday
+    2026-11-13, 17:00 in Taipei."""
+
+    POSTED = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
+    MEETS = {"1": ["3", "4"], "4": ["6", "7"]}
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+        self.factory = factory
+        self.settings = settings
+        self.now = datetime(2026, 11, 13, 10, 0, tzinfo=UTC)
+
+    async def create(self) -> None:
+        async with self.factory() as session:
+            session.add(
+                SemesterTerm(code="1151", start_date=date(2026, 9, 14), end_date=date(2027, 1, 8))
+            )
+            user = User()
+            session.add(user)
+            await session.flush()
+            session.add(
+                UserCourse(
+                    user_id=user.id,
+                    semester="1151",
+                    course_key="client:1151:CS1001301",
+                    course_no="CS1001301",
+                    course_name="資料結構",
+                    schedule_json=self.MEETS,
+                )
+            )
+            await session.commit()
+
+    async def post(
+        self,
+        n: int = 1,
+        *,
+        text: str = "11/19（四）停課",
+        posted: timedelta = timedelta(0),
+        edited: timedelta = timedelta(0),
+        scores: Mapping[str, float] | None = None,
+        group_id: int = -1,
+        codes: Sequence[str] = ("CS1001301",),
+    ) -> str:
+        """Store and classify announcement `n`, `posted` after the first, as
+        a cancellation unless `scores` say otherwise. Returns its id."""
+        subject = f"公告 {n}"
+        async with self.factory() as session:
+            await store_announcements(
+                session,
+                term_code="1151",
+                moodle_course_id=7001,
+                course_codes=list(codes),
+                discussions=[
+                    FetchedDiscussion(
+                        discussion_id=100 + n,
+                        post_id=900 + n,
+                        subject=subject,
+                        message=text,
+                        created_at=self.POSTED + posted,
+                        modified_at=self.POSTED + posted + edited,
+                        group_id=group_id,
+                        visible_from=None,
+                        has_attachment=False,
+                        pinned=False,
+                        starred=False,
+                    )
+                ],
+            )
+            await session.commit()
+        classifier = RecordingClassifier({subject: scores or {"class_cancel": 0.98}})
+        await classify_pending(self.factory, classifier)
+        return f"{100 + n}-{900 + n}"
+
+    async def extract(self, answer: dict, *, auto_apply: bool = False) -> bool:
+        """One tick of the extraction job, the LLM answering `answer`."""
+        settings = self.settings.model_copy(
+            update={"course_announcements_auto_apply": auto_apply}
+        )
+        extractor = Extractor(
+            session_factory=self.factory,
+            settings=settings,
+            llm=ScriptedLLM(answer),
+            clock=lambda: self.now,
+        )
+        return await run_extraction_tick(extractor)
+
+    async def items(self, announcement_id: str = "101-901") -> list[CourseAnnouncementItem]:
+        async with self.factory() as session:
+            rows = await session.scalars(
+                select(CourseAnnouncementItem)
+                .join(
+                    CourseAnnouncementExtraction,
+                    CourseAnnouncementExtraction.id == CourseAnnouncementItem.extraction_id,
+                )
+                .where(CourseAnnouncementExtraction.announcement_id == announcement_id)
+                .order_by(CourseAnnouncementItem.id)
+            )
+            return list(rows)
+
+    async def changes(self) -> list[CourseChange]:
+        async with self.factory() as session:
+            return list(await session.scalars(select(CourseChange).order_by(CourseChange.id)))
+
+    async def applied(self, announcement_id: str, day: date, **fields) -> int:
+        """A change of the announcement an operator approved: a cancellation
+        on `day` unless `fields` say otherwise. Returns its id."""
+        async with self.factory() as session:
+            change = CourseChange(
+                **{
+                    "term_code": "1151",
+                    "course_no": "CS1001301",
+                    "kind": "cancelled",
+                    "mode": "day",
+                    "start_date": day,
+                    "end_date": day,
+                    "excluded_weekdays": [],
+                    "created_by": "ops@example.com",
+                    "updated_by": "ops@example.com",
+                    "source_announcement_id": announcement_id,
+                    **fields,
+                }
+            )
+            session.add(change)
+            await session.commit()
+            return change.id
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def announcement_course(db_session, prepared_engine, test_settings) -> AnnouncementCourse:
+    course = AnnouncementCourse(build_session_factory(prepared_engine), test_settings)
+    await course.create()
+    return course

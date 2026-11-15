@@ -25,6 +25,7 @@ from server.bulletins.llm.base import LLMError
 from server.bulletins.llm.openai_compat import OpenAICompatibleClient
 from server.config import Settings
 from server.course_announcements.extraction import build_extraction_llm, extract
+from server.course_announcements.items import record_items, refresh_contradictions
 from server.course_announcements.models import (
     EXTRACTION_LIVE_WHERE,
     AnnouncementRoute,
@@ -299,4 +300,10 @@ async def store_result(
             )
             .values(state=ItemState.superseded.value)
         )
+        await record_items(session, row, announcement, output, now)
+        term, codes = announcement.term_code, list(announcement.course_codes)
+    # Apart, after the course locks are released: an operator's review locks
+    # an item before it takes its course's lock.
+    async with session_scope(extractor.session_factory) as session:
+        await refresh_contradictions(session, term, codes)
     return True
