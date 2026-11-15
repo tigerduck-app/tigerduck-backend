@@ -23,8 +23,9 @@
 # the one monitoring service on proxy-net, served under the portal host at
 # /grafana.
 #
-# llama-server stays NATIVE on the host (Docker Desktop on Mac can't surface
-# Metal GPU). The backend reaches it via Docker Desktop's host-gateway:
+# The LLM is an OpenAI-compatible server outside this stack. In production it
+# runs natively on the host (Docker Desktop on Mac can't surface Metal GPU),
+# and the backend reaches it via Docker Desktop's host-gateway:
 # TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1 in .env.
 
 name: tigerduck
@@ -157,7 +158,7 @@ services:
   # One-shot: creates or refreshes the read-only tigerduck_monitor role the
   # exporter and Grafana log in as, then exits. Runs on every `up`.
   monitor-role:
-    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    image: postgres:17-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
     container_name: tigerduck-monitor-role
     restart: "no"
     networks: [tigerduck-db]
@@ -193,7 +194,7 @@ services:
   # App-level counts from SQL (devices online, push queue, sync jobs, …)
   # as Prometheus gauges, so they get a history.
   sql-exporter:
-    image: burningalchemist/sql_exporter:0.24.9@sha256:6c554722faccd4b54342ccd765f87b26e8e65fba2a8cddc60bec6de336ecf2e0
+    image: burningalchemist/sql_exporter:0.24.13@sha256:befda03e0eae3f0c9b9dd0e5e5b968152f50e44dbdc04c1b68370c6fcbda2b7d
     container_name: tigerduck-sql-exporter
     restart: unless-stopped
     networks: [tigerduck-db, tigerduck-monitoring]
@@ -209,7 +210,7 @@ services:
       - ./monitoring/sql-exporter:/etc/sql_exporter:ro
 
   loki:
-    image: grafana/loki:3.7.8@sha256:1107dd5274e0ada47e42472b7a7e71f3b2a2fe878878108f3e2f9e51528f0193
+    image: grafana/loki:3.7.9@sha256:0db216b630ae1f348a1584c67f3cead8b4c1fc839169a39501db664744158e28
     container_name: tigerduck-loki
     restart: unless-stopped
     networks: [tigerduck-monitoring]
@@ -222,7 +223,7 @@ services:
   # the docker socket, which (even read-only) is root-equivalent on the
   # host, the same trade the portal already makes for its log tabs.
   alloy:
-    image: grafana/alloy:v1.20.1@sha256:2aa2099af76c0098d4af7a4d6e48f86cb66dc1a000222ad927a1c67c6542d13f
+    image: grafana/alloy:v1.21.3@sha256:8ab871206bd2d8f89277f53abffee5f452a293980788d52f85fa183a87a505a4
     container_name: tigerduck-alloy
     restart: unless-stopped
     networks: [tigerduck-monitoring]
@@ -255,7 +256,7 @@ services:
       - tigerduck_prometheus:/prometheus
 
   grafana:
-    image: grafana/grafana:13.2.3@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     container_name: tigerduck-grafana
     restart: unless-stopped
     # proxy-net so NPM can route <portal host>/grafana here, and for the

@@ -51,7 +51,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 ### 📣 公告（`server/bulletins/`）
 - **scraper** — 從 NTUST 公告列表抓 HTML、解 metadata；NTUST 送的 TLS chain 常缺中繼憑證，所以用 certifi 的根憑證加上 repo 內附的 NTUST 中繼憑證驗證，其他缺的中繼憑證經 AIA 補上
 - **dedup** — `content_hash` 去重（同 source、同 hash 視為 repost，標 `skipped` 不重發推播）
-- **LLM 分類** — OpenAI-compatible API（預設指向 host 上的 [llama-server](https://github.com/ggml-org/llama.cpp)），輸出 `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`
+- **LLM 分類** — OpenAI-compatible API（指向營運者另外跑的 LLM server），輸出 `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`
 - **訂閱比對 + dispatch（雙軌）** — 匿名裝置比對 `BulletinSubscription` 走既有 `bulletin_dispatches`；登入使用者比對 `user_bulletin_subscriptions`（規則屬於各裝置，不在 TigerSync 同步範圍）走 `bulletin_user_matches` + `push_jobs`，只推給規則命中、且沒關閉公告推播的裝置。同一實體裝置登入後標記 `linked_user_id`，匿名管道跳過避免重複推播
 - **狀態機** — `pending` → `processed` / `skipped` / `failed`；`failed` 也會在 attempts 未滿前回到 `pending` 重試
 
@@ -85,7 +85,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 | DB | Postgres 17（容器化、internal-only network）|
 | 排程 | APScheduler 3.x（IntervalTrigger）|
 | 推播 | `aioapns`（APNs）、`firebase-admin`（FCM）|
-| LLM | OpenAI-compatible client → llama-server (host)、`response_format: json_object` + JSON schema |
+| LLM | OpenAI-compatible client → 外部 LLM server、strict `json_schema` 回應格式 |
 | 部署 | Docker Compose + nginx-proxy-manager 反代 |
 | 監控 | Prometheus + Grafana + Loki（Grafana Alloy）、postgres-exporter、sql_exporter |
 
@@ -109,8 +109,8 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
                                                │   │           ▲                │
                                                │   │           │                │
                                                │   │  ┌────────────────┐        │
-                                               │   │  │ llama-server   │        │
-                                               │   │  │ (native, Metal)│        │
+                                               │   │  │ LLM server     │        │
+                                               │   │  │ (OpenAI-compat)│        │
                                                │   │  └────────────────┘        │
                                                │   └────────────────────────────┘
                                                │
@@ -121,7 +121,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 - **`proxy-net`**：與 nginx-proxy-manager 共用；backend + portal 都加入
 - **`tigerduck-host`（僅 dev）**：`docker-compose.dev.yml` 開的橋接網路，讓 backend 40000 / portal 40010 / Grafana 40020 / Prometheus 40021 能 publish 到 host port
 - **`tigerduck-monitoring`**：internal-only bridge，給 Prometheus、Loki 和它們收資料的對象用；監控服務裡只有 Grafana 掛 `proxy-net`，見[監控](#監控grafana)
-- **llama-server**：native 跑在 host 上（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連回去
+- **LLM server**：不在這個 repo 與 compose 裡。正式環境是 host 上與其他 app 共用的服務，native 執行（Docker Desktop / macOS 沒辦法直通 Metal GPU），backend 透過 `host.docker.internal` 連過去
 - **portal**：stateless 的操作介面，正式環境放在 Cloudflare Access 後面。每個 `/api/*` request 都要帶 Access 加上的 `Cf-Access-Jwt-Assertion`，portal 驗過簽章、issuer 與 audience 才放行，否則回 403；只有 `TIGERDUCK_ENV=development` 不檢查
 
 ## 取得與部署
@@ -133,7 +133,7 @@ TigerDuck Backend 是 [TigerDuck](https://github.com/tigerduck-app/tigerduck-app
 | 作業系統 | macOS / Linux（任何能跑 Docker Compose 的） |
 | Docker | Docker Engine 24+ / Docker Desktop 4.30+ |
 | Postgres | 17（由 compose 啟動，不需要 host 安裝） |
-| llama-server | 1 顆能跑 instruct 小模型的機器（建議 ≤7B，OpenAI 相容 endpoint）|
+| LLM server | OpenAI 相容 endpoint，支援 strict `json_schema` 回應格式 |
 | 反向代理 | nginx-proxy-manager 或同等物，把 `api.<your-domain>` 導到 `tigerduck-internal:40000` |
 
 ### 一鍵啟動
@@ -231,31 +231,22 @@ Dashboard 都在 **TigerDuck** 資料夾，每張右上角的 TigerDuck 選單�
 - Prometheus 與 Loki 都保留 30 天。
 - 版本都已鎖定：每個監控 image 都以 tag + digest 固定，Grafana 的 plugin 版本寫在 `GF_PLUGINS_PREINSTALL`，重啟不會拉新版。升級方式寫在 `docker-compose.yml` 的註解裡。
 
-### LLM（host 端）
+### LLM
 
-backend 連的 LLM 是 host 上的 [llama-server](https://github.com/ggml-org/llama.cpp)：
+backend 不附 LLM，連的是營運者另外跑的 OpenAI 相容 server（vLLM、llama.cpp server 等），它要：
 
-```bash
-# 範例（gemma-style instruct 小模型）
-llama-server \
-  --hf ggml-org/gemma-4-E4B-it-GGUF \
-  --alias gemma-4-e4b-it \
-  --host 0.0.0.0 --port 40001 \
-  --api-key <your-key> \
-  --json-schema '{}'
-```
+- 在 `/v1/chat/completions` 支援 `response_format` 的 strict `json_schema`
+- 回答不帶 reasoning：JSON parser 只剝 markdown fence，不認 thinking 或 channel marker。會 thinking 的模型要在 server 端預設關掉
 
-對應 `.env`：
+在 `.env` 填它的 URL、模型名稱和 key：
 
 ```dotenv
 TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1
 TIGERDUCK_LLM_API_KEY=<your-key>
-TIGERDUCK_LLM_MODEL=gemma-4-e4b-it
+TIGERDUCK_LLM_MODEL=qwen3.5-9b
 ```
 
-> ⚠️ 帶 reasoning channel（harmony 格式 / `<|channel>thought<channel|>`）的模型目前**不相容** — JSON parser 只剝 markdown fence、不認 channel marker。請挑純 instruct 模型。
-
-macOS 上長期跑可以參考 `deploy/launchd/ai.tigerduck.llm.plist` 把 llama-server 包成 launchd 服務。
+正式環境用的是 host 上與其他 app 共用的服務，從 host 與容器檢查它的方式見 `deploy/launchd/README.md`。
 
 ## 已日落 API
 
@@ -429,7 +420,7 @@ tigerduck-backend/
 ├── monitoring/                  # Grafana（provisioning + dashboards）、Prometheus、Loki、Alloy、sql-exporter collectors
 ├── docs/                        # push-notification-flows.drawio（推播流程圖）
 ├── scripts/                     # backfill / seed 等一次性腳本
-├── deploy/launchd/              # macOS launchd plist（llama-server 等 host-side service）
+├── deploy/launchd/              # macOS launchd plist（每晚異地備份等 host-side service）
 ├── docker-compose.yml           # 基底（backend + postgres + portal 掛 proxy-net，加上監控服務）
 ├── docker-compose.dev.yml       # TIGERDUCK_ENV=development 時自動載入，publish ports + 換成 host bridge
 ├── _compose-files.sh            # 共用：根據 TIGERDUCK_ENV 算出要載入哪些 compose 檔

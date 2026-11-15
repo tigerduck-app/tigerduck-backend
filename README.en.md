@@ -51,7 +51,7 @@ The service is deliberately **containerised, restart-safe, and stateless**: ever
 ### 📣 Bulletins (`server/bulletins/`)
 - **scraper** — Fetches HTML from NTUST bulletin index pages and extracts metadata. NTUST's servers may leave intermediates out of their TLS chain, so it verifies against certifi's roots plus the NTUST intermediates bundled in the repository, and fetches any other missing intermediate through AIA.
 - **dedup** — `content_hash` deduplication (same source + same hash is treated as a repost and marked `skipped`, no re-notification).
-- **LLM classification** — OpenAI-compatible client (defaults to a host-side [llama-server](https://github.com/ggml-org/llama.cpp)). Returns `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`.
+- **LLM classification** — OpenAI-compatible client, pointed at an LLM server the operator runs. Returns `canonical_org` / `content_tags` / `importance` / `title_clean` / `summary` / `body_clean`.
 - **Subscription matching + dispatch (dual-track)** — Anonymous devices match `BulletinSubscription` rules through the existing `bulletin_dispatches` path; logged-in users match `user_bulletin_subscriptions` (rules belong to each device and sit outside TigerSync) through `bulletin_user_matches` + `push_jobs`, and only devices whose rules matched and that have not turned bulletin push off receive it. A physical device that logs in gets a `linked_user_id` marker so the anonymous path skips it — no double pushes.
 - **State machine** — `pending` → `processed` / `skipped` / `failed`. `failed` rows return to `pending` for another tick as long as attempts < max.
 
@@ -85,7 +85,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 | DB | Postgres 17 (containerised, internal-only network) |
 | Scheduling | APScheduler 3.x (IntervalTrigger) |
 | Push | `aioapns` (APNs), `firebase-admin` (FCM) |
-| LLM | OpenAI-compatible client → llama-server (host), `response_format: json_object` + JSON schema |
+| LLM | OpenAI-compatible client → external LLM server, strict `json_schema` response format |
 | Deployment | Docker Compose + nginx-proxy-manager |
 | Monitoring | Prometheus + Grafana + Loki (Grafana Alloy), postgres-exporter, sql_exporter |
 
@@ -109,8 +109,8 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
                                               │   │           ▲                │
                                               │   │           │                │
                                               │   │  ┌────────────────┐        │
-                                              │   │  │ llama-server   │        │
-                                              │   │  │ (native, Metal)│        │
+                                              │   │  │ LLM server     │        │
+                                              │   │  │ (OpenAI-compat)│        │
                                               │   │  └────────────────┘        │
                                               │   └────────────────────────────┘
                                               │
@@ -121,7 +121,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 - **`proxy-net`**: shared with nginx-proxy-manager; both backend and portal join it.
 - **`tigerduck-host` (dev only)**: bridge added by `docker-compose.dev.yml` so backend `:40000`, portal `:40010`, Grafana `:40020` and Prometheus `:40021` can publish to host ports.
 - **`tigerduck-monitoring`**: internal-only bridge for Prometheus, Loki and what they collect from. Grafana is the one monitoring service on `proxy-net`; see [Monitoring](#monitoring-grafana).
-- **llama-server**: runs natively on the host (Docker Desktop / macOS can't pass through Metal GPU). The backend reaches it via `host.docker.internal`.
+- **LLM server**: not part of this repository or the compose stack. In production it is a service on the host shared with other apps, running natively (Docker Desktop / macOS can't pass through Metal GPU); the backend reaches it via `host.docker.internal`.
 - **portal**: stateless operator UI, behind Cloudflare Access in production. Every `/api/*` request must carry the `Cf-Access-Jwt-Assertion` token Access adds; the portal checks its signature, issuer and audience and answers 403 otherwise. Only `TIGERDUCK_ENV=development` skips the check.
 
 ## Deployment
@@ -133,7 +133,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 | OS | macOS / Linux (anything that runs Docker Compose) |
 | Docker | Docker Engine 24+ / Docker Desktop 4.30+ |
 | Postgres | 17 (brought up by compose; no host install needed) |
-| llama-server | One machine that can serve a small instruct model (≤7B recommended) over an OpenAI-compatible endpoint |
+| LLM server | An OpenAI-compatible endpoint with strict `json_schema` response format support |
 | Reverse proxy | nginx-proxy-manager or equivalent, routing `api.<your-domain>` to `tigerduck-internal:40000` |
 
 ### Quick start
@@ -231,31 +231,22 @@ Charts drawn from Prometheus start on the day monitoring is first deployed; SQL 
 - Prometheus and Loki both keep 30 days.
 - Versions are pinned: every monitoring image by tag and digest, and Grafana's plugins in `GF_PLUGINS_PREINSTALL`, so restarts never pull anything new. The comments in `docker-compose.yml` say how to upgrade.
 
-### LLM (host side)
+### LLM
 
-The backend talks to a [llama-server](https://github.com/ggml-org/llama.cpp) running natively on the host:
+The backend ships no LLM. It talks to an OpenAI-compatible server the operator runs (vLLM, llama.cpp server and the like), which must:
 
-```bash
-# Example (a gemma-style instruct small model)
-llama-server \
-  --hf ggml-org/gemma-4-E4B-it-GGUF \
-  --alias gemma-4-e4b-it \
-  --host 0.0.0.0 --port 40001 \
-  --api-key <your-key> \
-  --json-schema '{}'
-```
+- support `response_format` with a strict `json_schema` on `/v1/chat/completions`
+- answer without reasoning: the JSON parser only strips markdown fences, not thinking or channel markers, so a thinking model needs thinking off by default on the server
 
-Matching `.env`:
+Put its URL, model name and key in `.env`:
 
 ```dotenv
 TIGERDUCK_LLM_BASE_URL=http://host.docker.internal:40001/v1
 TIGERDUCK_LLM_API_KEY=<your-key>
-TIGERDUCK_LLM_MODEL=gemma-4-e4b-it
+TIGERDUCK_LLM_MODEL=qwen3.5-9b
 ```
 
-> ⚠️ Models that emit reasoning channels (harmony format, e.g. `<|channel>thought<channel|>`) are **incompatible** — the JSON parser only strips markdown fences, not channel markers. Pick a plain instruct model.
-
-On macOS, `deploy/launchd/ai.tigerduck.llm.plist` wraps llama-server as a launchd service for long-running deployments.
+Production uses a service on the host shared with other apps; `deploy/launchd/README.md` shows how to check it from the host and from the container.
 
 ## Retired APIs
 
@@ -430,7 +421,7 @@ tigerduck-backend/
 ├── monitoring/                  # Grafana (provisioning + dashboards), Prometheus, Loki, Alloy, sql-exporter collectors
 ├── docs/                        # push-notification-flows.drawio (push flow charts)
 ├── scripts/                     # One-shot tools (backfill, seed, etc.)
-├── deploy/launchd/              # macOS launchd plist (llama-server and other host-side services)
+├── deploy/launchd/              # macOS launchd plists (the nightly off-site backup and other host-side services)
 ├── docker-compose.yml           # Base (backend + postgres + portal on proxy-net, plus the monitoring services)
 ├── docker-compose.dev.yml       # Auto-loaded when TIGERDUCK_ENV=development; publishes ports + swaps to a host bridge
 ├── _compose-files.sh            # Shared: derives compose -f flags from TIGERDUCK_ENV

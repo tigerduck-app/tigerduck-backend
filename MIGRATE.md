@@ -32,6 +32,48 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.4.0
+
+- **Course announcements.** With `TIGERDUCK_ANNOUNCEMENT_CLASSIFIER_URL`
+  set, the backend polls each current-term Moodle course's news forum on its
+  own request budget (`TIGERDUCK_COURSE_ANNOUNCEMENT_REQUESTS_PER_MINUTE`,
+  default 20, counted by
+  `tigerduck_course_announcement_moodle_requests_total`), scores each post
+  with the classifier service and extracts class changes, exams and make-up
+  classes with the LLM, one post a minute while no bulletin waits.
+  `TIGERDUCK_COURSE_ANNOUNCEMENTS_AUTO_APPLY` (default false) keeps it in
+  shadow mode: extracted changes wait for review and nothing is written to
+  `course_changes`. Unset the classifier URL to turn it all off.
+- **Classifier service.** Install it on the host before the upgrade, as
+  `deploy/launchd/README.md` describes (`ai.tigerduck.classifier`, port
+  40002), and append to `.env`:
+  `TIGERDUCK_ANNOUNCEMENT_CLASSIFIER_URL=http://host.docker.internal:40002`
+  and `TIGERDUCK_COURSE_ANNOUNCEMENTS_AUTO_APPLY=false`.
+- **History import.** After the upgrade, once:
+  `docker compose exec -T backend python scripts/import_course_announcements.py - < history.jsonl`.
+  It refuses an export holding author fields, is safe to run again and
+  while polling runs, and prints counts only. `--reextract` queues the
+  current term again after an LLM model change.
+- **One course-change validation.** The portal's course-change rules now
+  live in the database function `course_change_violations`, over the new
+  `term_courses` view, which the portal and the announcement writer share.
+- **Shared LLM.** The LLM is an external OpenAI-compatible server with
+  strict `json_schema` support. `TIGERDUCK_LLM_MODEL` now defaults to
+  `qwen3.5-9b`, and `TIGERDUCK_LLM_API_KEY` is sent as a Bearer token by the
+  backend and by the portal's status check.
+  `deploy/launchd/ai.tigerduck.llm.plist` is gone: discard any local edit to
+  it (`git checkout -- deploy/launchd/ai.tigerduck.llm.plist`) before
+  `git pull`.
+- **Migrations** `bbb33844e87e` (the function and the view), then
+  `22370b5daa3b` (the announcement tables and
+  `course_changes.source_announcement_id`). `./start.sh` does not wait for
+  them: for the few seconds until the backend finishes migrating, the
+  portal's course-change pages answer 500.
+- Rollback: stop the backend, run
+  `docker compose run --rm --no-deps backend alembic downgrade 9e90a76a367e`
+  on 4.4.0, then check out 4.3.0 and run `./start.sh`. The downgrade drops
+  the announcement tables.
+
 ## Upgrading to 4.3.0
 
 - **TigerSync edit stamps from `age_ms`.** Every write that takes `hlc` also

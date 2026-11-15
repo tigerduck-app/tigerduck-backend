@@ -89,12 +89,12 @@ def moodle_semester(idnumber: str) -> str | None:
     return prefix.upper() if prefix[3].isnumeric() or prefix[3].isalpha() else None
 
 
-def _course_nos(course: FetchedCourse) -> list[str]:
+def course_nos(idnumber: str, full_name: str) -> list[str]:
     """The idnumber's course number, then the others in the full name."""
-    if moodle_semester(course.idnumber) is None:
+    if moodle_semester(idnumber) is None:
         return []
-    nos = [course.idnumber[4:]]
-    for word in _WORD.findall(course.full_name):
+    nos = [idnumber[4:]]
+    for word in _WORD.findall(full_name):
         if _COURSE_NO.fullmatch(word) and word not in nos:
             nos.append(word)
     return nos
@@ -110,7 +110,7 @@ def listed_courses(
     swift/TigerDuck/Bridge/AppServiceBridge+Assignments.swift: every course
     of the term and every class-table course, one Moodle course per number.
     """
-    nos = {course.moodle_course_id: _course_nos(course) for course in enrolled}
+    nos = {c.moodle_course_id: course_nos(c.idnumber, c.full_name) for c in enrolled}
 
     def primary(course: FetchedCourse) -> str:
         return (nos[course.moodle_course_id] or [""])[0]

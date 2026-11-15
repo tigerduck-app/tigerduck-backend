@@ -350,23 +350,35 @@ class Settings(BaseSettings):
     # run after 05:00 Taipei time.
     course_catalog_refresh_interval_minutes: int = Field(default=120, ge=0)
 
+    # --- Course announcements (server/course_announcements/) ---
+    # The classifier service (deploy/launchd/ai.tigerduck.classifier.plist),
+    # e.g. http://host.docker.internal:40002. Empty turns course announcements
+    # off: no course news forum is polled.
+    announcement_classifier_url: str = ""
+    # Moodle requests a minute for the course news forums, on a budget of their
+    # own beside sync_job_requests_per_minute.
+    course_announcement_requests_per_minute: int = Field(default=20, ge=1)
+    # On, a course change extracted from an announcement that passes every
+    # check is written to course_changes; off, every one waits for review in
+    # the portal. Read at start.
+    course_announcements_auto_apply: bool = False
+
     # --- LLM (OpenAI-compatible endpoint: llama.cpp, Gemini, vLLM, ...) ---
     llm_base_url: str = "http://localhost:8080/v1"
     llm_api_key: str = "sk-local"
-    llm_model: str = "gemma-4-e4b-it"
-    # 120s is generous because multi-slot llama.cpp fans one backend
-    # GPU across concurrent requests, so effective per-request latency
-    # scales with the backfill `--concurrency`. 30s was too tight for
-    # Gemma-4 E4B on Apple Silicon at 3× concurrency.
+    llm_model: str = "qwen3.5-9b"
+    # Generous because a server sharing one GPU across concurrent requests
+    # slows each of them, so per-request latency grows with the backfill
+    # `--concurrency`.
     llm_timeout_seconds: float = 120.0
     llm_max_retries: int = 2
     llm_temperature: float = 0.2
     # Dev-only escape hatch: when true, server/main.py's _wait_for_llm
     # returns immediately instead of polling the LLM /models endpoint
-    # for up to 60s. Useful when iterating locally without llama-server
+    # for up to 60s. Useful when iterating locally without an LLM server
     # running (e.g. UI / push work that doesn't touch bulletins). The
     # bulletin classification job still tries the LLM on its own ticks
-    # and self-heals once llama-server is back up.
+    # and self-heals once the LLM server is back up.
     skip_llm_probe: bool = False
 
     @model_validator(mode="after")

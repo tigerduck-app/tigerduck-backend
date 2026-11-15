@@ -3,30 +3,47 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import subprocess
 import sys
 import uuid
-from collections.abc import AsyncIterator
-from datetime import datetime
+from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from server.academic_calendar.models import CourseChange, SemesterTerm
 from server.auth.crypto import CredentialCipher, build_credential_aad
 from server.auth.models import ExternalAccount, ExternalAccountCredential, User
+from server.bulletins.llm.openai_compat import OpenAICompatibleClient
 from server.config import Settings
+from server.course_announcements.classifier import (
+    Classification,
+    ClassifierError,
+    ClassifierInfo,
+    Post,
+)
+from server.course_announcements.extractor import Extractor, run_extraction_tick
+from server.course_announcements.ingest import classify_pending, store_announcements
+from server.course_announcements.models import (
+    CourseAnnouncementExtraction,
+    CourseAnnouncementItem,
+)
 from server.db import Base, build_engine, build_session_factory
 from server.main import create_app
-from server.sync.models import UserAssignment
-from server.syncjobs.moodle_client import FetchedSubmission
+from server.sync.models import UserAssignment, UserCourse
+from server.syncjobs.moodle_client import FetchedDiscussion, FetchedSubmission
 from server.syncjobs.policies import ensure_default_policies
 
 # PostgreSQL identifiers cannot be passed as bind params in DDL, so we must
@@ -351,3 +368,273 @@ class SubmissionStatusStub:
         if step is None:
             return None
         return FetchedSubmission(moodle_assignment_id=assignment_id, **step)
+
+
+# The service's labels (tigerduck-app/announcement-classifier, labeling_guide.md).
+_LABELS = (
+    "exam_info",
+    "exam_change",
+    "exam_seating",
+    "exam_review",
+    "exam_prep",
+    "grade_release",
+    "assignment_new",
+    "assignment_change",
+    "assignment_note",
+    "class_cancel",
+    "class_change",
+    "class_prep",
+    "attendance",
+    "materials",
+    "grading_policy",
+    "course_info",
+    "grouping",
+    "admin",
+    "survey",
+    "event",
+)
+
+
+class RecordingClassifier:
+    """Test double: scores a post by its subject from `scores` (every label
+    0 otherwise), converts it as the service does, and records the posts it
+    was sent. Set `down` to make every call fail as an unreachable service,
+    and put a subject in `unanswered` to get no result for its posts."""
+
+    def __init__(
+        self,
+        scores: Mapping[str, Mapping[str, float]] | None = None,
+        *,
+        threshold: float = 0.35,
+        release: str | None = "model-test",
+    ) -> None:
+        self.scores = dict(scores or {})
+        self.threshold = threshold
+        self.release = release
+        self.down = False
+        self.unanswered: set[str] = set()
+        self.posts: list[Post] = []
+
+    async def info(self) -> ClassifierInfo:
+        if self.down:
+            raise ClassifierError("ConnectError")
+        return ClassifierInfo(threshold=self.threshold, release=self.release)
+
+    async def classify(self, posts: Sequence[Post]) -> list[Classification | None]:
+        if self.down:
+            raise ClassifierError("ConnectError")
+        self.posts += posts
+        results: list[Classification | None] = []
+        for post in posts:
+            if post.subject in self.unanswered:
+                results.append(None)
+                continue
+            scores = {label: 0.0 for label in _LABELS} | dict(self.scores.get(post.subject, {}))
+            results.append(
+                Classification(
+                    labels=tuple(k for k, v in scores.items() if v >= self.threshold),
+                    scores=scores,
+                    text=f"{post.subject}\n\n{post.message}".strip(),
+                )
+            )
+        return results
+
+
+class ScriptedLLM(OpenAICompatibleClient):
+    """The LLM client over an offline transport. Each request takes the next
+    answer, the last repeating: a dict is sent as the JSON content, a str as
+    the content itself, an int as that HTTP status. Records the requests'
+    JSON bodies and never sleeps between retries."""
+
+    def __init__(self, *answers: dict | str | int, model: str = "test-model") -> None:
+        self.answers = list(answers)
+        self.requests: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.requests.append(json.loads(request.content))
+            answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+            if isinstance(answer, int):
+                return httpx.Response(answer, json={"error": "scripted"})
+            content = json.dumps(answer, ensure_ascii=False) if isinstance(answer, dict) else answer
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+        async def no_sleep(seconds: float) -> None:
+            pass
+
+        super().__init__(
+            base_url="http://llm.test/v1",
+            api_key="sk-test",
+            model=model,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            sleep=no_sleep,
+        )
+
+
+def extracted_change(**fields) -> dict:
+    """A course change as the extraction schema shapes it: a cancellation on
+    Thursday 2026-11-19 unless `fields` say otherwise."""
+    return {
+        "kind": "cancelled",
+        "mode": "day",
+        "start_date": "2026-11-19",
+        "end_date": "2026-11-19",
+        "excluded_weekdays": [],
+        "periods": None,
+        "room": None,
+        "start_time": None,
+        "end_time": None,
+        "note_zh": None,
+        "evidence": "11/19（四）停課",
+        **fields,
+    }
+
+
+def extraction_answer(**fields) -> dict:
+    """An answer under the extraction schema, certain and with no fact
+    unless `fields` add them."""
+    return {
+        "labels": [],
+        "course_changes": [],
+        "held_as_usual": [],
+        "makeup_classes": [],
+        "exams": [],
+        "certain": True,
+        **fields,
+    }
+
+
+class AnnouncementCourse:
+    """Announcements of CS1001301 in term 1151 (2026-09-14 to 2027-01-08),
+    which a student takes on Mondays, periods 3-4, and Thursdays, 6-7: stored
+    and classified as a poll does, and extracted by the extraction job with
+    a scripted LLM. `now` is the job's clock; the first post is Friday
+    2026-11-13, 17:00 in Taipei."""
+
+    POSTED = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
+    MEETS = {"1": ["3", "4"], "4": ["6", "7"]}
+
+    def __init__(self, factory: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+        self.factory = factory
+        self.settings = settings
+        self.now = datetime(2026, 11, 13, 10, 0, tzinfo=UTC)
+
+    async def create(self) -> None:
+        async with self.factory() as session:
+            session.add(
+                SemesterTerm(code="1151", start_date=date(2026, 9, 14), end_date=date(2027, 1, 8))
+            )
+            user = User()
+            session.add(user)
+            await session.flush()
+            session.add(
+                UserCourse(
+                    user_id=user.id,
+                    semester="1151",
+                    course_key="client:1151:CS1001301",
+                    course_no="CS1001301",
+                    course_name="資料結構",
+                    schedule_json=self.MEETS,
+                )
+            )
+            await session.commit()
+
+    async def post(
+        self,
+        n: int = 1,
+        *,
+        text: str = "11/19（四）停課",
+        posted: timedelta = timedelta(0),
+        edited: timedelta = timedelta(0),
+        scores: Mapping[str, float] | None = None,
+        group_id: int = -1,
+        codes: Sequence[str] = ("CS1001301",),
+    ) -> str:
+        """Store and classify announcement `n`, `posted` after the first, as
+        a cancellation unless `scores` say otherwise. Returns its id."""
+        subject = f"公告 {n}"
+        async with self.factory() as session:
+            await store_announcements(
+                session,
+                term_code="1151",
+                moodle_course_id=7001,
+                course_codes=list(codes),
+                discussions=[
+                    FetchedDiscussion(
+                        discussion_id=100 + n,
+                        post_id=900 + n,
+                        subject=subject,
+                        message=text,
+                        created_at=self.POSTED + posted,
+                        modified_at=self.POSTED + posted + edited,
+                        group_id=group_id,
+                        visible_from=None,
+                        has_attachment=False,
+                        pinned=False,
+                        starred=False,
+                    )
+                ],
+            )
+            await session.commit()
+        classifier = RecordingClassifier({subject: scores or {"class_cancel": 0.98}})
+        await classify_pending(self.factory, classifier)
+        return f"{100 + n}-{900 + n}"
+
+    async def extract(self, answer: dict, *, auto_apply: bool = False) -> bool:
+        """One tick of the extraction job, the LLM answering `answer`."""
+        settings = self.settings.model_copy(
+            update={"course_announcements_auto_apply": auto_apply}
+        )
+        extractor = Extractor(
+            session_factory=self.factory,
+            settings=settings,
+            llm=ScriptedLLM(answer),
+            clock=lambda: self.now,
+        )
+        return await run_extraction_tick(extractor)
+
+    async def items(self, announcement_id: str = "101-901") -> list[CourseAnnouncementItem]:
+        async with self.factory() as session:
+            rows = await session.scalars(
+                select(CourseAnnouncementItem)
+                .join(
+                    CourseAnnouncementExtraction,
+                    CourseAnnouncementExtraction.id == CourseAnnouncementItem.extraction_id,
+                )
+                .where(CourseAnnouncementExtraction.announcement_id == announcement_id)
+                .order_by(CourseAnnouncementItem.id)
+            )
+            return list(rows)
+
+    async def changes(self) -> list[CourseChange]:
+        async with self.factory() as session:
+            return list(await session.scalars(select(CourseChange).order_by(CourseChange.id)))
+
+    async def applied(self, announcement_id: str, day: date, **fields) -> int:
+        """A change of the announcement an operator approved: a cancellation
+        on `day` unless `fields` say otherwise. Returns its id."""
+        async with self.factory() as session:
+            change = CourseChange(
+                **{
+                    "term_code": "1151",
+                    "course_no": "CS1001301",
+                    "kind": "cancelled",
+                    "mode": "day",
+                    "start_date": day,
+                    "end_date": day,
+                    "excluded_weekdays": [],
+                    "created_by": "ops@example.com",
+                    "updated_by": "ops@example.com",
+                    "source_announcement_id": announcement_id,
+                    **fields,
+                }
+            )
+            session.add(change)
+            await session.commit()
+            return change.id
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def announcement_course(db_session, prepared_engine, test_settings) -> AnnouncementCourse:
+    course = AnnouncementCourse(build_session_factory(prepared_engine), test_settings)
+    await course.create()
+    return course

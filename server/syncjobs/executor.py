@@ -59,21 +59,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from server.auth.crypto import CredentialCipher
-from server.auth.models import (
-    DevicePushToken,
-    ExternalAccount,
-    ExternalAccountCredential,
-    PushTokenKind,
-    PushTokenStatus,
-    UserDevice,
-)
+from server.auth.models import ExternalAccount, ExternalAccountCredential
 from server.auth.service import try_store_display_name
 from server.config import Settings
 from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.availability import is_moodle_available, manual_suspend_until
 from server.syncjobs.budget import RequestBudget
-from server.syncjobs.courses import apply_fetched_courses
+from server.syncjobs.courses import apply_fetched_courses, store_moodle_courses
+from server.syncjobs.devices import has_syncing_device
 from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential,
@@ -310,28 +304,6 @@ async def _recover_stale_jobs(worker: SyncWorker) -> None:
         )
 
 
-def _has_syncing_device(settings: Settings, now: datetime) -> sa.Exists:
-    """A fetch serves only a device with TigerSync on that is still in use:
-    seen lately, or reached by a push lately. Signing out deletes the device.
-    Until one is back, the job waits unclaimed (tigerduck-backend#85)."""
-    return sa.exists().where(
-        UserDevice.user_id == SyncJob.user_id,
-        UserDevice.deleted_at.is_(None),
-        UserDevice.cloud_sync_enabled.is_(True),
-        sa.or_(
-            UserDevice.last_seen_at
-            > now - timedelta(days=settings.sync_job_device_active_days),
-            sa.exists().where(
-                DevicePushToken.device_id == UserDevice.id,
-                DevicePushToken.token_kind == PushTokenKind.standard.value,
-                DevicePushToken.status == PushTokenStatus.active.value,
-                DevicePushToken.last_success_at
-                > now - timedelta(days=settings.sync_job_device_push_days),
-            ),
-        ),
-    )
-
-
 async def _claim_due_job(worker: SyncWorker) -> tuple[int, int] | None:
     """Claim the next due job and open its run: (job id, run id)."""
     now = datetime.now(UTC)
@@ -358,7 +330,7 @@ async def _claim_due_job(worker: SyncWorker) -> tuple[int, int] | None:
                     .where(
                         SyncJob.status == SyncJobStatus.pending.value,
                         SyncJob.run_after <= now,
-                        _has_syncing_device(worker.settings, now),
+                        has_syncing_device(worker.settings, now, SyncJob.user_id),
                         # One job of a user at a time: both write the user's
                         # rows, and a rejected token disables all of them.
                         ~sa.exists().where(
@@ -469,6 +441,9 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     fetched=fetched,
                     now=now,
                     enrolled=enrolled,
+                )
+                await store_moodle_courses(
+                    session, user_id=user_id, enrolled=enrolled or (), now=now
                 )
             else:
                 await log_sync(session, user_id=user_id, source="executor",

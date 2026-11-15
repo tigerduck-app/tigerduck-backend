@@ -43,6 +43,7 @@ from server.academic_calendar.models import (  # noqa: F401
     SemesterTerm as _SemesterTerm,
     UserHolidayOverride as _UserHolidayOverride,
 )
+from server.course_announcements import models as _course_announcement_models  # noqa: F401
 from server.push.router import build_router
 from server.routes import academics as academics_routes
 from server.routes import auth as auth_routes
@@ -205,8 +206,8 @@ async def stop_admin_server(handle: tuple[_AdminServer, asyncio.Task] | None) ->
         logger.error("admin.server_failed", exc_info=task.exception())
 
 
-# How long startup is willing to wait for the LLM endpoint. 60s comfortably
-# covers a cold `llama-server` load of Gemma-4 E4B Q4 on Apple Silicon.
+# How long startup is willing to wait for the LLM endpoint, enough for a
+# server that is still loading a small model's weights.
 _LLM_READY_WAIT_SECONDS = 60.0
 _LLM_READY_POLL_INTERVAL = 2.0
 
@@ -223,7 +224,7 @@ async def _wait_for_llm(settings: Settings) -> bool:
     * The scheduler's `bulletin_process` job has its own retry/backoff,
       so transient LLM downtime self-heals without server restart.
     * launchd / Docker supervisor would otherwise pin-pong the API
-      process if we hard-failed startup when llama-server is slow to load.
+      process if we hard-failed startup when the LLM server is slow to load.
     """
     base = settings.llm_base_url.rstrip("/")
     url = f"{base}/models"
@@ -301,7 +302,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     sync_worker = None
     if cipher is not None:
-        budget = RequestBudget(settings.sync_job_requests_per_minute)
+        budget = RequestBudget(
+            settings.sync_job_requests_per_minute,
+            observe=metrics.observe_sync_moodle_request,
+        )
         sync_worker = SyncWorker(
             session_factory=jobs_session_factory,
             settings=settings,

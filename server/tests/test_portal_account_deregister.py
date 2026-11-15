@@ -36,7 +36,7 @@ from server.auth.models import (  # noqa: E402
 from server.auth import retention  # noqa: E402
 from server.config import Settings  # noqa: E402
 from server.db import Base, build_session_factory  # noqa: E402
-from server.syncjobs.models import SyncJob, SyncLogEntry, SyncRun  # noqa: E402
+from server.syncjobs.models import SyncJob, SyncLogEntry, SyncRun, UserMoodleCourse  # noqa: E402
 from server.syncjobs.retention import prune_sync_history  # noqa: E402
 from server.auth.moodle import MoodleVerifyResult, StaticMoodleVerifier  # noqa: E402
 from server.tests.test_auth_refresh import LOGIN_BODY, do_login  # noqa: E402
@@ -118,6 +118,29 @@ async def test_deregister_leaves_no_row_of_the_account(db_session, portal_pool):
             if count:
                 left[f"{table.name}.{column.name}"] = count
     assert left == {}
+
+
+async def test_the_deregister_report_counts_the_moodle_course_list(db_session, portal_pool):
+    user = User(student_id="B1")
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add_all(
+        UserMoodleCourse(
+            user_id=user.id,
+            moodle_course_id=course_id,
+            idnumber="1151CS2006301",
+            full_name="Data Structures",
+            last_seen_at=datetime.now(UTC),
+        )
+        for course_id in (7001, 7002)
+    )
+    await db_session.commit()
+
+    result = await deregister_student(
+        DeregisterRequest(student_id="b1"), _REQUEST, pool=portal_pool
+    )
+
+    assert json.loads(result.body)["deleted_counts"]["user_moodle_courses"] == 2
 
 
 async def _blocked_by(task: asyncio.Task, factory, pid: int) -> str:

@@ -263,7 +263,7 @@ async def _preflight_llm(
     except httpx.HTTPError as exc:
         raise SystemExit(
             f"! LLM preflight failed: GET {base}/models → {exc}\n"
-            f"  Is llama-server actually reachable from THIS machine?\n"
+            f"  Is the LLM server actually reachable from THIS machine?\n"
             f"  (If it is on a different host, set TIGERDUCK_LLM_BASE_URL "
             f"to the correct host, or establish an ssh tunnel.)"
         ) from exc
@@ -296,7 +296,7 @@ async def _preflight_llm(
             f"! LLM chat preflight failed: HTTP {r.status_code}\n"
             f"  Body: {r.text[:300]}\n"
             f"  If body says 'model not found', adjust TIGERDUCK_LLM_MODEL "
-            f"to match the model name llama-server actually loaded."
+            f"to match the model name the LLM server actually serves."
         )
     print(f"[preflight] LLM {base} reachable, model {settings.llm_model} ok")
 
@@ -395,7 +395,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--concurrency",
         type=int,
         default=3,
-        help="parallel LLM/detail workers (default 3, llama.cpp tops out around 3-4)",
+        help="parallel LLM/detail workers (default 3)",
     )
     parser.add_argument(
         "--no-suppress-push",
@@ -420,8 +420,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="override per-request LLM timeout in seconds (default from "
-             "TIGERDUCK_LLM_TIMEOUT_SECONDS or 120s). Bump to 240+ if "
-             "running gemma-4-E4B at high concurrency on slower hardware.",
+             "TIGERDUCK_LLM_TIMEOUT_SECONDS or 120s). Bump to 240+ at high "
+             "concurrency on a slow LLM server.",
     )
     return parser
 

@@ -24,6 +24,9 @@ The push pipeline's pre-send check (`check_submission_status`) adds two:
                           timeout, HTTP 5xx or a body that is not JSON.
 * `MoodleRefused`       → Moodle's own exception about one token or one
                           assignment, other than `invalidtoken`.
+
+The course announcement poll's forum calls (`HttpForumFetcher`) raise the
+same four as the pre-send check.
 """
 
 from __future__ import annotations
@@ -31,13 +34,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
 import structlog
+
+from server.db import BIGINT_VALUES, storable_text
 
 logger = structlog.get_logger(__name__)
 
@@ -188,6 +193,25 @@ class FetchedSubmission:
     extension_due_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class FetchedDiscussion:
+    """The first post of a news forum discussion, without its author."""
+
+    discussion_id: int
+    post_id: int
+    subject: str
+    message: str
+    created_at: datetime
+    modified_at: datetime
+    # -1 for all participants, else the one group that sees it.
+    group_id: int
+    # When students first see it; None when they see it from the start.
+    visible_from: datetime | None
+    has_attachment: bool
+    pinned: bool
+    starred: bool
+
+
 class AssignmentFetcher(Protocol):
     async def fetch_assignments(self, *, token: str) -> list[FetchedAssignment]: ...
 
@@ -216,6 +240,16 @@ class CourseFetcher(Protocol):
         on_fullname: Callable[[str], None] | None = None,
         on_userid: Callable[[int], None] | None = None,
     ) -> list[FetchedCourse]: ...
+
+
+class ForumFetcher(Protocol):
+    async def fetch_news_forums(
+        self, *, token: str, course_ids: Sequence[int]
+    ) -> dict[int, int]: ...
+
+    async def fetch_discussions(
+        self, *, token: str, forum_id: int
+    ) -> list[FetchedDiscussion]: ...
 
 
 def _ts(value: object) -> datetime | None:
@@ -340,11 +374,14 @@ async def _get_moodle_userid(
     return userid
 
 
-async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> dict:
-    """One webservice call for `check_submission_status`, telling Moodle
-    failing as a whole (MoodleUnavailable, MoodleRateLimited) from its own
-    answer about this token or assignment (MoodleTokenInvalid,
-    MoodleRefused). Raised codes are fixed strings, never the request."""
+async def _checked_call(
+    client: httpx.AsyncClient, url: str, params: dict, *, answer: type = dict
+) -> Any:
+    """One webservice call, telling Moodle failing as a whole
+    (MoodleUnavailable, MoodleRateLimited) from its own answer about this
+    token or item (MoodleTokenInvalid, MoodleRefused). An answer that is not
+    an `answer` is refused. Raised codes are fixed strings, never the
+    request."""
     try:
         response = await client.get(url, params=params)
     except httpx.RequestError as exc:
@@ -357,13 +394,13 @@ async def _checked_call(client: httpx.AsyncClient, url: str, params: dict) -> di
         body = response.json()
     except ValueError as exc:
         raise MoodleUnavailable("invalid_json") from exc
-    if not isinstance(body, dict):
-        raise MoodleRefused("unexpected_shape")
-    if "exception" in body:
+    if isinstance(body, dict) and "exception" in body:
         errorcode = str(body.get("errorcode") or "moodle_exception")
         if errorcode == "invalidtoken":
             raise MoodleTokenInvalid(errorcode)
         raise MoodleRefused(errorcode)
+    if not isinstance(body, answer):
+        raise MoodleRefused("unexpected_shape")
     return body
 
 
@@ -885,3 +922,159 @@ class HttpCourseFetcher:
             if isinstance(c, dict) and isinstance(c.get("id"), int)
         ]
 
+
+# Moodle's default `perpage` of 0 answers with every discussion of the forum.
+_DISCUSSIONS_PER_PAGE = 20
+# A page only of pinned and starred discussions is followed this far.
+_DISCUSSION_PAGES = 5
+
+
+def parse_discussion(item: object) -> FetchedDiscussion | None:
+    """One entry of `mod_forum_get_forum_discussions`, None when malformed.
+    The author's name, picture and ids in it are never read."""
+    if not isinstance(item, dict):
+        return None
+    post_id, discussion_id = item.get("id"), item.get("discussion")
+    subject, message = item.get("subject"), item.get("message")
+    group_id, time_start = item.get("groupid"), item.get("timestart")
+    if not (
+        type(post_id) is int
+        and type(discussion_id) is int
+        and isinstance(subject, str)
+        and isinstance(message, str)
+        and type(group_id) is int
+        and type(time_start) is int
+        and all(v in BIGINT_VALUES for v in (post_id, discussion_id, group_id))
+    ):
+        return None
+    try:
+        created_at = _ts(item.get("created"))
+        modified_at = _ts(item.get("modified"))
+        visible_from = _ts(time_start)
+    except (ValueError, OverflowError, OSError):
+        return None
+    if created_at is None or modified_at is None:
+        return None
+    return FetchedDiscussion(
+        discussion_id=discussion_id,
+        post_id=post_id,
+        subject=storable_text(subject),
+        message=storable_text(message),
+        created_at=created_at,
+        modified_at=modified_at,
+        group_id=group_id,
+        visible_from=visible_from,
+        has_attachment=item.get("attachment") not in (None, "", "0", 0, False),
+        pinned=item.get("pinned") is True,
+        starred=item.get("starred") is True,
+    )
+
+
+class HttpForumFetcher:
+    """Course news forums for the course announcement poll. Raises as
+    `_checked_call` does, with no cause or context attached: the httpx error
+    a failure came from may name the request, token included. A request
+    `event_hooks` stop raises what they raise, BudgetPaused for a budget's."""
+
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float,
+        transport: httpx.AsyncBaseTransport | None = None,
+        event_hooks: Mapping[str, list[Callable[..., Any]]] | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout_seconds
+        self._transport = transport
+        self._event_hooks = event_hooks
+
+    async def _call(
+        self, token: str, function: str, params: dict, answer: type
+    ) -> Any:
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                transport=self._transport,
+                event_hooks=self._event_hooks,
+            ) as client:
+                return await _checked_call(
+                    client,
+                    f"{self._base_url}{_WS_PATH}",
+                    {
+                        "wstoken": token,
+                        "wsfunction": function,
+                        "moodlewsrestformat": "json",
+                        **params,
+                    },
+                    answer=answer,
+                )
+        except MoodleClientError as exc:
+            error = type(exc)(*exc.args)
+        # Raised outside the handler, so not even `__context__` keeps the cause.
+        raise error
+
+    async def fetch_news_forums(
+        self, *, token: str, course_ids: Sequence[int]
+    ) -> dict[int, int]:
+        """Each course's news forum id, by course id. Moodle leaves out a
+        course the user cannot see without a warning."""
+        forums = await self._call(
+            token,
+            "mod_forum_get_forums_by_courses",
+            {f"courseids[{n}]": course_id for n, course_id in enumerate(course_ids)},
+            list,
+        )
+        found: dict[int, int] = {}
+        for forum in forums:
+            if not isinstance(forum, dict) or forum.get("type") != "news":
+                continue
+            course_id, forum_id = forum.get("course"), forum.get("id")
+            if (
+                type(course_id) is int
+                and type(forum_id) is int
+                and course_id in BIGINT_VALUES
+                and forum_id in BIGINT_VALUES
+            ):
+                found[course_id] = min(forum_id, found.get(course_id, forum_id))
+        return found
+
+    async def fetch_discussions(
+        self, *, token: str, forum_id: int
+    ) -> list[FetchedDiscussion]:
+        """The forum's first page of discussions, as the token's user sees it.
+
+        Moodle orders them pinned first, then the ones this user starred,
+        then by latest activity (a reply, never an edit, moves a discussion
+        up), and leaves out those of another group (separate groups) and
+        those before their `timestart` or past their `timeend`. So a page
+        holding only pinned and starred discussions may hide a new post,
+        and the next page is read until one holds another:
+        `get_forum_discussions` in mod/forum/externallib.php,
+        `mod_forum_get_discussion_summaries` and
+        `mod_forum_get_groups_from_groupid` in mod/forum/lib.php, and
+        `get_sort_order` and `get_hidden_post_sql` in
+        mod/forum/classes/local/vaults/discussion_list.php, at
+        https://github.com/moodle/moodle/tree/MOODLE_405_STABLE/mod/forum.
+        """
+        discussions: list[FetchedDiscussion] = []
+        dropped = 0
+        for page in range(_DISCUSSION_PAGES):
+            body = await self._call(
+                token,
+                "mod_forum_get_forum_discussions",
+                {"forumid": forum_id, "page": page, "perpage": _DISCUSSIONS_PER_PAGE},
+                dict,
+            )
+            items = body.get("discussions")
+            if not isinstance(items, list):
+                raise MoodleRefused("unexpected_shape")
+            parsed = [d for d in map(parse_discussion, items) if d is not None]
+            discussions += parsed
+            dropped += len(items) - len(parsed)
+            if len(items) < _DISCUSSIONS_PER_PAGE or not all(
+                d.pinned or d.starred for d in parsed
+            ):
+                break
+        if dropped:
+            logger.warning("syncjobs.moodle.discussions_dropped", count=dropped)
+        return discussions

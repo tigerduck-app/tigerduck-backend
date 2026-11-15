@@ -10,10 +10,20 @@ import itertools
 import httpx
 import pytest
 
-from server.syncjobs.budget import RequestBudget
-from server.syncjobs.moodle_client import HttpAssignmentFetcher
+from prometheus_client import REGISTRY
+
+from server.metrics import (
+    observe_course_announcement_moodle_request,
+    observe_sync_moodle_request,
+)
+from server.syncjobs.budget import BudgetPaused, RequestBudget
+from server.syncjobs.moodle_client import HttpAssignmentFetcher, HttpForumFetcher
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+def _unobserved() -> None:
+    pass
 
 
 class VirtualClock:
@@ -64,7 +74,7 @@ async def test_jobs_in_flight_share_one_evenly_spaced_budget():
     faster than the budget, however many requests each makes."""
     clock = VirtualClock()
     sent: list[float] = []
-    budget = RequestBudget(10, clock=clock, sleep=clock.sleep)
+    budget = RequestBudget(10, observe=_unobserved, clock=clock, sleep=clock.sleep)
     fetcher = HttpAssignmentFetcher(
         base_url="https://moodle.example.edu",
         timeout_seconds=5.0,
@@ -87,7 +97,7 @@ async def test_requests_woken_together_after_a_stall_still_go_spaced():
     """An event loop stalled past several turns wakes their waiters at
     once; requests that each held a turn then left together."""
     clock = VirtualClock()
-    budget = RequestBudget(10, clock=clock, sleep=clock.sleep)
+    budget = RequestBudget(10, observe=_unobserved, clock=clock, sleep=clock.sleep)
     went: list[float] = []
 
     async def request():
@@ -107,7 +117,7 @@ async def test_requests_woken_together_after_a_stall_still_go_spaced():
 
 async def test_a_pause_holds_back_requests_already_waiting_and_new_ones():
     clock = VirtualClock()
-    budget = RequestBudget(60, clock=clock, sleep=clock.sleep)
+    budget = RequestBudget(60, observe=_unobserved, clock=clock, sleep=clock.sleep)
     went: list[float] = []
 
     async def request():
@@ -126,3 +136,71 @@ async def test_a_pause_holds_back_requests_already_waiting_and_new_ones():
 
     assert went == [0.0, 300.0, 301.0, 302.0]
     assert not budget.paused
+
+
+_SYNC_COUNTER = "tigerduck_sync_moodle_requests_total"
+_ANNOUNCEMENT_COUNTER = "tigerduck_course_announcement_moodle_requests_total"
+
+
+def _count(name: str) -> float:
+    return REGISTRY.get_sample_value(name) or 0.0
+
+
+@pytest.mark.parametrize(
+    ("observe", "counted", "untouched"),
+    [
+        (observe_sync_moodle_request, _SYNC_COUNTER, _ANNOUNCEMENT_COUNTER),
+        (observe_course_announcement_moodle_request, _ANNOUNCEMENT_COUNTER, _SYNC_COUNTER),
+    ],
+    ids=["sync", "course-announcements"],
+)
+async def test_each_budget_counts_its_requests_on_its_own_metric(observe, counted, untouched):
+    clock = VirtualClock()
+    budget = RequestBudget(60, observe=observe, clock=clock, sleep=clock.sleep)
+    before = (_count(counted), _count(untouched))
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+        event_hooks=budget.event_hooks,
+    ) as client:
+        await clock.run(client.get("https://moodle.example.edu/a"), client.get("https://moodle.example.edu/b"))
+
+    assert (_count(counted), _count(untouched)) == (before[0] + 2, before[1])
+
+
+async def test_a_request_stops_unsent_when_a_budget_sharing_the_limit_pauses_meanwhile():
+    clock = VirtualClock()
+    sync = RequestBudget(30, observe=_unobserved, clock=clock, sleep=clock.sleep)
+    counted: list[float] = []
+    budget = RequestBudget(
+        30,
+        observe=lambda: counted.append(clock.now),
+        clock=clock,
+        sleep=clock.sleep,
+        stopped_by=(sync,),
+    )
+    sent: list[float] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        sent.append(clock.now)
+        return httpx.Response(200, json={"discussions": []})
+
+    fetcher = HttpForumFetcher(
+        "https://moodle.example.test",
+        5.0,
+        transport=httpx.MockTransport(answer),
+        event_hooks=budget.event_hooks,
+    )
+    await clock.run(fetcher.fetch_discussions(token="t", forum_id=30))
+    await clock.run(sync.acquire())
+    assert clock.now == 0.0
+
+    async def a_sync_429_meanwhile() -> None:
+        await clock.sleep(1.0)
+        sync.pause(60)
+
+    with pytest.raises(BudgetPaused):
+        await clock.run(
+            fetcher.fetch_discussions(token="t", forum_id=30), a_sync_429_meanwhile()
+        )
+    assert sent == [0.0] and counted == [0.0]
