@@ -413,7 +413,14 @@ function pageNumbers(page: number, pages: number): (number | "gap")[] {
   return out;
 }
 
-function Pager<R>({ table }: { table: TableModel<R> }) {
+/** The page buttons under a table; a server-paged list passes its own page state. */
+export function Pager({
+  table,
+}: {
+  table: Pick<TableModel<unknown>, "page" | "pages" | "perPage" | "total" | "setPage"> & {
+    rows: readonly unknown[];
+  };
+}) {
   const start = (table.page - 1) * table.perPage;
   const nav = "flex size-8 items-center justify-center rounded-lg text-ink-2 hover:bg-soft disabled:opacity-40 disabled:hover:bg-transparent";
   return (
@@ -489,8 +496,16 @@ export function Reveal({
 }
 
 /** The eye button for `showPii`; the state is the page's, hidden on every load. */
-export function PiiToggle({ shown, onToggle }: { shown: boolean; onToggle: () => void }) {
-  const label = shown ? "Hide student IDs and names" : "Show student IDs and names";
+export function PiiToggle({
+  shown,
+  onToggle,
+  what = "student IDs and names",
+}: {
+  shown: boolean;
+  onToggle: () => void;
+  what?: string;
+}) {
+  const label = `${shown ? "Hide" : "Show"} ${what}`;
   const Icon = shown ? Eye : EyeOff;
   return (
     <button

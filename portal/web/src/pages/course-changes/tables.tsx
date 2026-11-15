@@ -96,7 +96,7 @@ function DateCell({ change, course }: { change: Change; course: Course | undefin
   );
 }
 
-function DetailCell({ change, course }: { change: Change; course: Course | undefined }) {
+export function DetailCell({ change, course }: { change: Change; course: Course | undefined }) {
   const d = detailOf(change, course);
   const chip = "rounded-md px-2 py-0.5 text-[13px]";
   const mono = change.kind === "room" ? "font-mono" : "";

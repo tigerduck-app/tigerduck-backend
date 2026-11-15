@@ -47,15 +47,15 @@ import { DeleteDialog } from "./course-changes/DeleteDialog";
 import { AllChanges, courseChangeColumns, courseColumns } from "./course-changes/tables";
 import { TermStrip } from "./course-changes/TermStrip";
 
-const CHANGES_KEY = "course-changes";
+export const CHANGES_KEY = "course-changes";
 
 /** The term today falls in, else the next to start, else the newest. */
-function defaultTerm(terms: readonly Term[], today: string): Term | undefined {
+export function defaultTerm(terms: readonly Term[], today: string): Term | undefined {
   const upcoming = terms.filter((t) => t.end_date >= today).sort((a, b) => a.start_date.localeCompare(b.start_date));
   return upcoming[0] ?? terms[0];
 }
 
-function termMeta(term: Term, today: string): string {
+export function termMeta(term: Term, today: string): string {
   const total = weeks(term.start_date, term.end_date);
   const range = rangeText(term.start_date, term.end_date);
   if (today < term.start_date || today > term.end_date) return `${range} · ${total} weeks`;
@@ -403,7 +403,7 @@ export function CourseChangesPage() {
   );
 }
 
-function TermPicker({ terms, term, onPick }: { terms: readonly Term[]; term: Term; onPick: (code: string) => void }) {
+export function TermPicker({ terms, term, onPick }: { terms: readonly Term[]; term: Term; onPick: (code: string) => void }) {
   const recent = terms.slice(0, 3);
   const older = terms.slice(3);
   const olderPicked = older.some((t) => t.code === term.code);

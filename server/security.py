@@ -8,8 +8,13 @@ and the test suite. Production must set ``TIGERDUCK_API_SHARED_SECRET``.
 from __future__ import annotations
 
 import secrets
+from typing import Annotated
 
 from fastapi import Header, HTTPException, Request, status
+
+# The operator the portal's Cloudflare Access check verified, which the portal
+# sends to an admin endpoint that records it in admin_audit_log.
+AdminActor = Annotated[str, Header(alias="X-Admin-Actor", min_length=1, max_length=320)]
 
 
 async def require_shared_secret(

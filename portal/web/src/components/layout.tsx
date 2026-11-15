@@ -13,6 +13,7 @@ import {
   Lock,
   LogOut,
   Megaphone,
+  Newspaper,
   PanelLeftClose,
   PanelLeftOpen,
   Search,
@@ -28,7 +29,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { AccessSession, BackendVersion, EnvInfo } from "@/types/api";
 
-type NavItem = { to: string; label: string; icon: LucideIcon };
+type NavItem = { to: string; label: string; icon: LucideIcon; pendingReviews?: boolean };
 
 const NAV: { group: string; items: NavItem[] }[] = [
   {
@@ -64,6 +65,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: "Moodle",
     items: [
       { to: "/moodle", label: "Sync", icon: GraduationCap },
+      { to: "/course-announcements", label: "Course announcements", icon: Newspaper, pendingReviews: true },
       { to: "/inspect", label: "Data inspection", icon: Search },
     ],
   },
@@ -223,6 +225,14 @@ function EnvRow({ label, value, detail }: { label: string; value?: string; detai
 function NavItemLink({ item }: { item: NavItem }) {
   const Icon = item.icon;
   const { pathname } = useLocation();
+  // The Course announcements page refreshes this key after each decision.
+  const pending = useQuery({
+    queryKey: ["course-announcements", "pending"],
+    queryFn: () => api<{ pending: number }>("/api/course-announcements/pending"),
+    enabled: item.pendingReviews === true,
+    refetchInterval: 60_000,
+  }).data?.pending;
+  const count = item.pendingReviews ? pending : undefined;
   return (
     <NavLink
       to={item.to}
@@ -244,6 +254,11 @@ function NavItemLink({ item }: { item: NavItem }) {
         <>
           <Icon className={cn("h-4 w-4 shrink-0", isActive && "text-brand")} />
           <span className={cn("rail:hidden", isActive && "phone:inline")}>{item.label}</span>
+          {count ? (
+            <span className="ml-auto min-w-[22px] rounded-full bg-brand px-[7px] py-px text-center text-[11px] font-semibold tabular-nums text-side rail:hidden phone:hidden">
+              {count}
+            </span>
+          ) : null}
         </>
       )}
     </NavLink>

@@ -25,7 +25,7 @@ def backend(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
         return httpx.Response(422, json={"detail": "invalid target: the URL must use https"})
 
     monkeypatch.setattr(
-        links.httpx,
+        httpx,
         "AsyncClient",
         lambda **kw: RealAsyncClient(transport=httpx.MockTransport(answer), **kw),
     )

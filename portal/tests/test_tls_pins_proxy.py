@@ -29,7 +29,7 @@ def backend(monkeypatch: pytest.MonkeyPatch) -> list[httpx.Request]:
 
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
-        tls_pins.httpx,
+        httpx,
         "AsyncClient",
         lambda **kw: real_client(transport=httpx.MockTransport(answer), **kw),
     )
