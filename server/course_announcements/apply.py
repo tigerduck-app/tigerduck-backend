@@ -13,13 +13,19 @@ from collections.abc import Sequence
 from datetime import datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.models import CourseChange
 from server.academic_calendar.terms import TermDates
 from server.admin_audit import AdminAuditLog
-from server.course_announcements.checks import Announcement, check_change, days_of, passes
+from server.course_announcements.checks import (
+    Announcement,
+    check_change,
+    days_of,
+    passes,
+    same_class_time,
+)
 from server.course_announcements.models import (
     CourseAnnouncement,
     CourseAnnouncementExtraction,
@@ -136,7 +142,9 @@ async def _decided_against(
     session: AsyncSession, announcement_id: str, adds: Sequence[CourseAnnouncementItem]
 ) -> bool:
     """Whether an operator rejected or removed an earlier item of the
-    announcement for the course and kind of one of `adds` on one of its days."""
+    announcement for the course and kind of one of `adds` at one of its class
+    times. An applied item whose change is gone was removed: the portal's
+    course changes delete leaves the item and nulls its change."""
     decided = await session.execute(
         select(CourseAnnouncementItem.course_no, CourseAnnouncementItem.payload)
         .join(
@@ -146,16 +154,21 @@ async def _decided_against(
         .where(
             CourseAnnouncementExtraction.announcement_id == announcement_id,
             CourseAnnouncementItem.kind == ItemKind.course_change.value,
-            CourseAnnouncementItem.state.in_(
-                [ItemState.rejected.value, ItemState.removed.value]
+            or_(
+                CourseAnnouncementItem.state.in_(
+                    [ItemState.rejected.value, ItemState.removed.value]
+                ),
+                and_(
+                    CourseAnnouncementItem.state == ItemState.applied.value,
+                    CourseAnnouncementItem.course_change_id.is_(None),
+                ),
             ),
         )
     )
-    refused = [(course_no, payload["kind"], *days_of(payload)) for course_no, payload in decided]
     return any(
-        (course_no, kind) == (item.course_no, item.payload["kind"])
-        and first <= days_of(item.payload)[1]
-        and days_of(item.payload)[0] <= last
-        for course_no, kind, first, last in refused
+        course_no == item.course_no
+        and payload["kind"] == item.payload["kind"]
+        and same_class_time(payload, item.payload)
+        for course_no, payload in decided.all()
         for item in adds
     )

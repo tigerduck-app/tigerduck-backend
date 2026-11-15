@@ -188,10 +188,62 @@ async def test_a_corrected_date_waits_while_another_post_already_asks_to_remove_
     assert [c.id for c in await announcement_course.changes()] == [applied.id]
 
 
+async def test_an_edit_moving_its_applied_day_and_adding_one_waits_for_review(
+    announcement_course,
+):
+    await announcement_course.post()
+    await announcement_course.extract(CANCEL_19, auto_apply=True)
+    (applied,) = await announcement_course.changes()
+
+    await announcement_course.post(
+        text="更正：11/23（一）與 11/30（一）停課", edited=timedelta(hours=1)
+    )
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_cancel"],
+            course_changes=[
+                _cancel("2026-11-23", "11/23（一）與 11/30（一）停課"),
+                _cancel("2026-11-30", "11/23（一）與 11/30（一）停課"),
+            ],
+        ),
+        auto_apply=True,
+    )
+
+    items = await announcement_course.items()
+    assert [(i.action, i.state, i.payload["start_date"]) for i in items] == [
+        ("add", "applied", "2026-11-19"),
+        ("add", "pending", "2026-11-23"),
+        ("add", "pending", "2026-11-30"),
+        ("remove", "pending", "2026-11-19"),
+    ]
+    assert all(i.passes_checks for i in items[1:3])
+    assert [c.id for c in await announcement_course.changes()] == [applied.id]
+
+
 async def test_a_change_an_operator_deleted_is_not_applied_again(announcement_course):
     key = await announcement_course.post()
     await announcement_course.extract(CANCEL_19, auto_apply=True)
-    # What deleting it in Course changes does.
+    # What the portal's delete_change does: the row goes, and its item is left.
+    async with announcement_course.factory() as session:
+        await session.execute(delete(CourseChange))
+        assert await queue_extraction(session, key)
+        await session.commit()
+    announcement_course.now += timedelta(minutes=1)
+
+    await announcement_course.extract(CANCEL_19, auto_apply=True)
+
+    items = await announcement_course.items()
+    assert [(i.state, i.course_change_id) for i in items] == [
+        ("applied", None),
+        ("pending", None),
+    ]
+    assert items[1].passes_checks
+    assert await announcement_course.changes() == []
+
+
+async def test_a_change_marked_removed_is_not_applied_again(announcement_course):
+    key = await announcement_course.post()
+    await announcement_course.extract(CANCEL_19, auto_apply=True)
     async with announcement_course.factory() as session:
         await session.execute(delete(CourseChange))
         await session.execute(update(CourseAnnouncementItem).values(state="removed"))
@@ -201,8 +253,7 @@ async def test_a_change_an_operator_deleted_is_not_applied_again(announcement_co
 
     await announcement_course.extract(CANCEL_19, auto_apply=True)
 
-    items = await announcement_course.items()
-    assert [(i.state, i.passes_checks) for i in items] == [("removed", True), ("pending", True)]
+    assert [i.state for i in await announcement_course.items()] == ["removed", "pending"]
     assert await announcement_course.changes() == []
 
 
