@@ -45,12 +45,15 @@ async def apply_items(
     context: Announcement,
     items: Sequence[CourseAnnouncementItem],
     *,
+    edits_applied: bool,
     term_days: TermDates | None,
     now: datetime,
 ) -> int:
     """Write the add items among `items`, one extraction's, if they may
-    apply. The caller holds the lock of every course code they name.
-    Returns how many were written."""
+    apply: not when `edits_applied`, the extraction asking to replace or
+    remove an applied change, whether or not an item of its own does. The
+    caller holds the lock of every course code they name. Returns how many
+    were written."""
     adds = [
         item
         for item in items
@@ -59,9 +62,7 @@ async def apply_items(
     if (
         not adds
         or not all(item.passes_checks for item in adds)
-        or any(
-            item.action in (ItemAction.replace.value, ItemAction.remove.value) for item in items
-        )
+        or edits_applied
         or await _decided_against(session, announcement.id, adds)
     ):
         return 0

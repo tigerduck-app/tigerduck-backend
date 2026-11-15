@@ -89,6 +89,9 @@ async def record_items(
         )
     )
     items: list[CourseAnnouncementItem] = []
+    # Whether the extraction asks to replace or remove an applied change,
+    # counting a removal another announcement's pending item already asks for.
+    edits_applied = False
     for code in codes:
         if not await has_schedule(session, term, code):
             if facts:
@@ -100,6 +103,7 @@ async def record_items(
             current = next((c for c in own if _covers(c, payload)), None)
             if current is not None and _same(stored_payload(current), payload):
                 continue
+            edits_applied = edits_applied or current is not None
             checks = await check_change(
                 session,
                 term=term,
@@ -138,7 +142,10 @@ async def record_items(
                 held=held,
                 statements=statements,
             )
-            if reason is None or change.id in removing:
+            if reason is None:
+                continue
+            edits_applied = True
+            if change.id in removing:
                 continue
             removing.add(change.id)
             items.append(
@@ -166,7 +173,15 @@ async def record_items(
     session.add_all(items)
     await session.flush()
     if auto_apply:
-        await apply_items(session, announcement, context, items, term_days=term_days, now=now)
+        await apply_items(
+            session,
+            announcement,
+            context,
+            items,
+            edits_applied=edits_applied,
+            term_days=term_days,
+            now=now,
+        )
     return items
 
 

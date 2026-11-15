@@ -148,6 +148,46 @@ async def test_a_corrected_date_waits_for_review_with_automatic_apply_on(announc
     assert [c.id for c in await announcement_course.changes()] == [applied.id]
 
 
+async def test_a_corrected_date_waits_while_another_post_already_asks_to_remove_the_day(
+    announcement_course,
+):
+    """A later post holding 11/19 as usual already asks to remove the applied
+    change, so the edit's own removal is not stored twice; its new date
+    still waits for review."""
+    await announcement_course.post()
+    await announcement_course.extract(CANCEL_19, auto_apply=True)
+    (applied,) = await announcement_course.changes()
+    later = await announcement_course.post(
+        2, text="11/19 照常上課", posted=timedelta(days=1), scores={"class_change": 0.95}
+    )
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_change"],
+            held_as_usual=[{"date": "2026-11-19", "evidence": "11/19 照常上課"}],
+        ),
+        auto_apply=True,
+    )
+    assert [(i.action, i.state) for i in await announcement_course.items(later)] == [
+        ("remove", "pending")
+    ]
+
+    await announcement_course.post(text="更正：11/23（一）停課", edited=timedelta(hours=1))
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["class_cancel"], course_changes=[_cancel("2026-11-23", "11/23（一）停課")]
+        ),
+        auto_apply=True,
+    )
+
+    items = await announcement_course.items()
+    assert [(i.action, i.state, i.payload["start_date"]) for i in items] == [
+        ("add", "applied", "2026-11-19"),
+        ("add", "pending", "2026-11-23"),
+    ]
+    assert items[1].passes_checks
+    assert [c.id for c in await announcement_course.changes()] == [applied.id]
+
+
 async def test_a_change_an_operator_deleted_is_not_applied_again(announcement_course):
     key = await announcement_course.post()
     await announcement_course.extract(CANCEL_19, auto_apply=True)
