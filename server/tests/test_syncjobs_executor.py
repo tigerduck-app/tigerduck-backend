@@ -39,7 +39,14 @@ from server.sync.models import (
 from server.syncjobs import executor as executor_module
 from server.syncjobs.budget import RequestBudget
 from server.syncjobs.executor import SyncWorker, run_sync_tick
-from server.syncjobs.models import SyncJob, SyncJobType, SyncLogEntry, SyncPolicy, SyncRun
+from server.syncjobs.models import (
+    SyncJob,
+    SyncJobType,
+    SyncLogEntry,
+    SyncPolicy,
+    SyncRun,
+    UserMoodleCourse,
+)
 from server.syncjobs.moodle_client import (
     FetchedAssignment,
     FetchedCourse,
@@ -2582,3 +2589,134 @@ async def test_a_name_the_database_refuses_keeps_the_probe_result(
     assert assignment.provider_is_submitted is True
     run = await db_session.scalar(select(SyncRun))
     assert run.status == "succeeded"
+
+
+async def _moodle_courses(session, user_id) -> list[tuple[int, str, str]]:
+    rows = await session.execute(
+        select(
+            UserMoodleCourse.moodle_course_id,
+            UserMoodleCourse.idnumber,
+            UserMoodleCourse.full_name,
+        )
+        .where(UserMoodleCourse.user_id == user_id)
+        .order_by(UserMoodleCourse.moodle_course_id)
+        .execution_options(populate_existing=True)
+    )
+    return [tuple(row) for row in rows.all()]
+
+
+async def test_an_assignments_run_keeps_the_moodle_courses_it_already_fetched(
+    db_session, prepared_engine, test_settings
+):
+    """Course announcements find a course's token holders in the course list
+    the run already asks Moodle for, so it costs no request of its own."""
+    user, _, _ = await _setup_user_job(db_session)
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        function = request.url.params["wsfunction"]
+        asked.append(function)
+        if function == "mod_assign_get_assignments":
+            return httpx.Response(200, json={"courses": [], "warnings": []})
+        if function == "core_webservice_get_site_info":
+            return httpx.Response(200, json={"userid": 42, "fullname": "Student"})
+        assert function == "core_enrol_get_users_courses"
+        return httpx.Response(
+            200,
+            json=[
+                {"id": 7001, "idnumber": "1151CS2006301", "fullname": "Data Structures"},
+                {"id": 7002, "idnumber": "1151GE1001301", "fullname": "GE1001301 GE1001302"},
+            ],
+        )
+
+    transport = httpx.MockTransport(handler)
+    base = "https://moodle.example.edu"
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        fetcher=HttpAssignmentFetcher(base, 5.0, transport=transport),
+        course_fetcher=HttpCourseFetcher(base, 5.0, transport=transport),
+    )
+
+    assert await run_sync_tick(worker) == 1
+
+    assert sorted(asked) == [
+        "core_enrol_get_users_courses",
+        "core_webservice_get_site_info",
+        "mod_assign_get_assignments",
+    ]
+    assert await _moodle_courses(db_session, user.id) == [
+        (7001, "1151CS2006301", "Data Structures"),
+        (7002, "1151GE1001301", "GE1001301 GE1001302"),
+    ]
+
+
+def _enrolled(*course_ids: int) -> list[FetchedCourse]:
+    return [
+        FetchedCourse(
+            moodle_course_id=course_id,
+            short_name=None,
+            full_name=f"Course {course_id}",
+            category_id=None,
+            enrolled_user_count=None,
+            idnumber=f"1151CS{course_id}",
+        )
+        for course_id in course_ids
+    ]
+
+
+async def test_a_course_the_list_leaves_out_is_no_longer_kept(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(results=_enrolled(7001, 7002)),
+    )
+    assert await run_sync_tick(worker) == 1
+
+    await db_session.execute(
+        update(SyncJob)
+        .where(SyncJob.id == job.id)
+        .values(run_after=datetime.now(UTC) - timedelta(minutes=1))
+    )
+    await db_session.commit()
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(results=_enrolled(7002, 7003)),
+    )
+    assert await run_sync_tick(worker) == 1
+
+    assert [row[0] for row in await _moodle_courses(db_session, user.id)] == [7002, 7003]
+
+
+async def test_a_course_list_failure_or_an_empty_list_keeps_the_stored_courses(
+    db_session, prepared_engine, test_settings
+):
+    user, _, job = await _setup_user_job(db_session)
+    worker = _worker(
+        prepared_engine,
+        test_settings,
+        course_fetcher=StubCourseFetcher(results=_enrolled(7001)),
+    )
+    assert await run_sync_tick(worker) == 1
+
+    for course_fetcher in (
+        StubCourseFetcher(errors=[MoodleUnreachable("down")]),
+        StubCourseFetcher(results=[]),
+    ):
+        await db_session.execute(
+            update(SyncJob)
+            .where(SyncJob.id == job.id)
+            .values(
+                status="pending",
+                run_after=datetime.now(UTC) - timedelta(minutes=1),
+            )
+        )
+        await db_session.commit()
+        worker = _worker(prepared_engine, test_settings, course_fetcher=course_fetcher)
+        assert await run_sync_tick(worker) == 1
+
+        assert [row[0] for row in await _moodle_courses(db_session, user.id)] == [7001]

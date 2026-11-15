@@ -73,7 +73,7 @@ from server.db import session_scope
 from server.syncjobs.assignments import apply_fetched_assignments
 from server.syncjobs.availability import is_moodle_available, manual_suspend_until
 from server.syncjobs.budget import RequestBudget
-from server.syncjobs.courses import apply_fetched_courses
+from server.syncjobs.courses import apply_fetched_courses, store_moodle_courses
 from server.syncjobs.credentials import (
     CredentialInvalid,
     load_credential,
@@ -469,6 +469,9 @@ async def _execute_job(worker: SyncWorker, *, job_id: int, run_id: int) -> None:
                     fetched=fetched,
                     now=now,
                     enrolled=enrolled,
+                )
+                await store_moodle_courses(
+                    session, user_id=user_id, enrolled=enrolled or (), now=now
                 )
             else:
                 await log_sync(session, user_id=user_id, source="executor",
