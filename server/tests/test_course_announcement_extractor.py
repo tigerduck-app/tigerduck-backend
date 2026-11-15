@@ -5,21 +5,23 @@ invented."""
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from structlog.testing import capture_logs
 
+from server.academic_calendar.models import SemesterTerm
 from server.bulletins.models import Bulletin
-from server.course_announcements.extractor import (
-    Extractor,
-    queue_extraction,
-    run_extraction_tick,
+from server.course_announcements.extractor import Extractor, run_extraction_tick
+from server.course_announcements.ingest import (
+    classify_pending,
+    queue_extractions,
+    store_announcements,
 )
-from server.course_announcements.ingest import classify_pending, store_announcements
 from server.course_announcements.models import (
+    CourseAnnouncement,
     CourseAnnouncementExtraction,
     CourseAnnouncementItem,
 )
@@ -84,8 +86,12 @@ def make_extractor(factory, test_settings, clock):
 
 
 async def _queued(factory, *discussions) -> None:
-    """Store and classify `discussions` as a cancellation, which queues each."""
+    """Store and classify `discussions` as a cancellation of the current
+    term, which queues each."""
     async with factory() as session:
+        session.add(
+            SemesterTerm(code="1151", start_date=date(2026, 9, 14), end_date=date(2027, 1, 8))
+        )
         await store_announcements(
             session,
             term_code="1151",
@@ -95,6 +101,10 @@ async def _queued(factory, *discussions) -> None:
         )
         await session.commit()
     await classify_pending(factory, RecordingClassifier({SUBJECT: {"class_cancel": 0.98}}))
+
+
+async def _queue_again(session, key: str) -> int:
+    return await queue_extractions(session, "1151", CourseAnnouncement.id == key)
 
 
 async def _extractions(db_session) -> list[CourseAnnouncementExtraction]:
@@ -228,8 +238,8 @@ async def test_a_same_version_re_extract_supersedes_the_earlier_pending_items(
     await db_session.commit()
 
     async with factory() as session:
-        assert await queue_extraction(session, "101-901") is True
-        assert await queue_extraction(session, "101-901") is False
+        assert await _queue_again(session, "101-901") == 1
+        assert await _queue_again(session, "101-901") == 0
         await session.commit()
     clock.now += timedelta(minutes=1)
     await run_extraction_tick(make_extractor(ScriptedLLM(extraction_answer(), model="other")))
@@ -254,8 +264,8 @@ async def test_an_unclassified_announcement_cannot_be_queued(db_session, factory
             course_codes=["CS1001301"],
             discussions=[_discussion()],
         )
-        assert await queue_extraction(session, "101-901") is False
-        assert await queue_extraction(session, "999-999") is False
+        assert await _queue_again(session, "101-901") == 0
+        assert await _queue_again(session, "999-999") == 0
 
 
 async def test_a_claim_a_restart_cut_off_counts_as_a_failed_attempt(
@@ -329,7 +339,7 @@ async def test_failures_wait_1_4_and_16_ticks_then_fail_until_queued_again(
     assert await run_extraction_tick(extractor) is False
 
     async with factory() as session:
-        assert await queue_extraction(session, "101-901") is True
+        assert await _queue_again(session, "101-901") == 1
         await session.commit()
     assert await run_extraction_tick(make_extractor(ScriptedLLM(CANCELLED))) is True
     assert [e.status for e in await _extractions(db_session)] == ["failed", "done"]

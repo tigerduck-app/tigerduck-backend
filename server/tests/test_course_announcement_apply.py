@@ -10,9 +10,16 @@ from sqlalchemy import delete, select, update
 
 from server.academic_calendar.models import CourseChange
 from server.admin_audit import AdminAuditLog
-from server.course_announcements.extractor import queue_extraction
-from server.course_announcements.models import CourseAnnouncementItem
-from server.tests.conftest import AnnouncementCourse, extracted_change, extraction_answer
+from server.course_announcements.ingest import queue_extractions
+from server.course_announcements.models import (
+    CourseAnnouncement,
+    CourseAnnouncementItem,
+)
+from server.tests.conftest import (
+    AnnouncementCourse,
+    extracted_change,
+    extraction_answer,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -226,7 +233,7 @@ async def test_a_change_an_operator_deleted_is_not_applied_again(announcement_co
     # What the portal's delete_change does: the row goes, and its item is left.
     async with announcement_course.factory() as session:
         await session.execute(delete(CourseChange))
-        assert await queue_extraction(session, key)
+        assert await queue_extractions(session, "1151", CourseAnnouncement.id == key) == 1
         await session.commit()
     announcement_course.now += timedelta(minutes=1)
 
@@ -247,7 +254,7 @@ async def test_a_change_marked_removed_is_not_applied_again(announcement_course)
     async with announcement_course.factory() as session:
         await session.execute(delete(CourseChange))
         await session.execute(update(CourseAnnouncementItem).values(state="removed"))
-        assert await queue_extraction(session, key)
+        assert await queue_extractions(session, "1151", CourseAnnouncement.id == key) == 1
         await session.commit()
     announcement_course.now += timedelta(minutes=1)
 
@@ -262,7 +269,7 @@ async def test_a_rejected_change_is_not_applied_after_a_re_extract(announcement_
     await announcement_course.extract(CANCEL_19)
     async with announcement_course.factory() as session:
         await session.execute(update(CourseAnnouncementItem).values(state="rejected"))
-        assert await queue_extraction(session, key)
+        assert await queue_extractions(session, "1151", CourseAnnouncement.id == key) == 1
         await session.commit()
     announcement_course.now += timedelta(minutes=1)
 
@@ -287,7 +294,7 @@ async def test_a_day_inside_a_rejected_range_is_not_applied(announcement_course)
     )
     async with announcement_course.factory() as session:
         await session.execute(update(CourseAnnouncementItem).values(state="rejected"))
-        assert await queue_extraction(session, key)
+        assert await queue_extractions(session, "1151", CourseAnnouncement.id == key) == 1
         await session.commit()
     announcement_course.now += timedelta(minutes=1)
 

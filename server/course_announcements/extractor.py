@@ -16,8 +16,7 @@ from functools import partial
 from typing import Any
 
 import structlog
-from sqlalchemy import exists, or_, select, text, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.bulletins.jobs import claimable_bulletins
@@ -27,8 +26,6 @@ from server.config import Settings
 from server.course_announcements.extraction import extract
 from server.course_announcements.items import record_items, refresh_contradictions
 from server.course_announcements.models import (
-    EXTRACTION_LIVE_WHERE,
-    AnnouncementRoute,
     CourseAnnouncement,
     CourseAnnouncementExtraction,
     CourseAnnouncementItem,
@@ -118,31 +115,6 @@ async def run_extraction_tick(extractor: Extractor) -> bool:
         # Raised outside the handler, so the scheduler's log has no cause to print.
         raise ExtractionTickFailed(failed)
     return True
-
-
-async def queue_extraction(session: AsyncSession, announcement_id: str) -> bool:
-    """Queue the announcement's stored version for extraction, as an operator
-    asks; a version already queued or running stays as it is. Returns
-    whether one was queued."""
-    queued = await session.scalar(
-        pg_insert(CourseAnnouncementExtraction)
-        .from_select(
-            ["announcement_id", "version"],
-            select(CourseAnnouncement.id, CourseAnnouncement.modified_at).where(
-                CourseAnnouncement.id == announcement_id,
-                CourseAnnouncement.route != AnnouncementRoute.unclassified.value,
-            ),
-        )
-        .on_conflict_do_nothing(
-            index_elements=[
-                CourseAnnouncementExtraction.announcement_id,
-                CourseAnnouncementExtraction.version,
-            ],
-            index_where=text(EXTRACTION_LIVE_WHERE),
-        )
-        .returning(CourseAnnouncementExtraction.id)
-    )
-    return queued is not None
 
 
 async def _bulletin_waiting(extractor: Extractor) -> bool:
