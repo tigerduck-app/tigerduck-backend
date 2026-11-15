@@ -300,7 +300,14 @@ async def store_result(
             )
             .values(state=ItemState.superseded.value)
         )
-        await record_items(session, row, announcement, output, now)
+        await record_items(
+            session,
+            row,
+            announcement,
+            output,
+            now,
+            auto_apply=extractor.settings.course_announcements_auto_apply,
+        )
         term, codes = announcement.term_code, list(announcement.course_codes)
     # Apart, after the course locks are released: an operator's review locks
     # an item before it takes its course's lock.

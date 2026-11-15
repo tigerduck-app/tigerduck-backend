@@ -21,6 +21,7 @@ from sqlalchemy import Date, cast, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from server.academic_calendar.models import CourseChange
+from server.course_announcements.apply import apply_items
 from server.course_announcements.checks import (
     Announcement,
     Statement,
@@ -55,10 +56,13 @@ async def record_items(
     announcement: CourseAnnouncement,
     output: Mapping[str, Any],
     now: datetime,
+    *,
+    auto_apply: bool,
 ) -> list[CourseAnnouncementItem]:
     """Store the items of `output`, the stored result of `extraction`, with
-    their checks. Takes the lock of every course code the announcement
-    lists, which the caller's transaction holds until it ends."""
+    their checks, and with `auto_apply` write its add items that may apply.
+    Takes the lock of every course code the announcement lists, which the
+    caller's transaction holds until it ends."""
     term = announcement.term_code
     codes = sorted(set(announcement.course_codes))
     term_days = await lock_courses(session, term, codes)
@@ -161,6 +165,8 @@ async def record_items(
                 item.state = ItemState.past.value
     session.add_all(items)
     await session.flush()
+    if auto_apply:
+        await apply_items(session, announcement, context, items, term_days=term_days, now=now)
     return items
 
 
