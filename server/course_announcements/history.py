@@ -27,7 +27,7 @@ from server.course_announcements.ingest import (
 )
 from server.db import BIGINT_VALUES, session_scope
 from server.syncjobs.assignments import course_nos, moodle_semester
-from server.syncjobs.moodle_client import FetchedCourse, FetchedDiscussion, parse_discussion
+from server.syncjobs.moodle_client import FetchedDiscussion, parse_discussion
 
 RECORD_FIELDS = frozenset({"course", "discussions"})
 COURSE_FIELDS = frozenset({"id", "idnumber", "fullname"})
@@ -98,18 +98,10 @@ def _course(number: int, line: str) -> ExportedCourse:
         or None in discussions
     ):
         raise ExportRefused(f"line {number}: a value is missing or malformed")
-    fetched = FetchedCourse(
-        moodle_course_id=course_id,
-        short_name=None,
-        full_name=full_name,
-        category_id=None,
-        enrolled_user_count=None,
-        idnumber=idnumber,
-    )
     return ExportedCourse(
         moodle_course_id=course_id,
         term_code=moodle_semester(idnumber),
-        course_codes=course_nos(fetched),
+        course_codes=course_nos(idnumber, full_name),
         discussions=discussions,
     )
 
