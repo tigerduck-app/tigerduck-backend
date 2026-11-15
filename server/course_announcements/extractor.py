@@ -261,23 +261,30 @@ async def store_result(
     still at that version, superseding what earlier extractions of the
     announcement left pending. Returns whether it was stored."""
     async with session_scope(extractor.session_factory) as session:
+        announcement_id = await session.scalar(
+            select(CourseAnnouncementExtraction.announcement_id).where(
+                CourseAnnouncementExtraction.id == extraction_id
+            )
+        )
+        if announcement_id is None:
+            return False
+        # The announcement first, as storing an edit locks it before its
+        # extractions. A share lock, so an edit waits and then supersedes this.
+        announcement = await session.get(
+            CourseAnnouncement,
+            announcement_id,
+            with_for_update={"read": True},
+            populate_existing=True,
+        )
         row = await session.get(
             CourseAnnouncementExtraction,
             extraction_id,
             with_for_update=True,
             populate_existing=True,
         )
-        if row is None:
-            return False
-        # A share lock, so an edit stored meanwhile waits and then supersedes this.
-        announcement = await session.get(
-            CourseAnnouncement,
-            row.announcement_id,
-            with_for_update={"read": True},
-            populate_existing=True,
-        )
         if (
             announcement is None
+            or row is None
             or row.status != ExtractionStatus.running.value
             or row.version != announcement.modified_at
         ):

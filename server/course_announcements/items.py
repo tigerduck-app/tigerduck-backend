@@ -196,7 +196,10 @@ async def refresh_contradictions(
                 ),
             )
             .order_by(CourseAnnouncementItem.id)
-            .with_for_update(of=CourseAnnouncementItem)
+            # An item another transaction holds is being superseded or decided
+            # there; waiting for it could deadlock with a store that locked
+            # items in another order.
+            .with_for_update(of=CourseAnnouncementItem, skip_locked=True)
         )
     ).all()
     if not rows:
