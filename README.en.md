@@ -85,7 +85,7 @@ The full push flow charts are in [`docs/push-notification-flows.drawio`](docs/pu
 | DB | Postgres 17 (containerised, internal-only network) |
 | Scheduling | APScheduler 3.x (IntervalTrigger) |
 | Push | `aioapns` (APNs), `firebase-admin` (FCM) |
-| LLM | OpenAI-compatible client → llama-server (host), `response_format: json_object` + JSON schema |
+| LLM | OpenAI-compatible client → llama-server (host), strict `json_schema` response format |
 | Deployment | Docker Compose + nginx-proxy-manager |
 | Monitoring | Prometheus + Grafana + Loki (Grafana Alloy), postgres-exporter, sql_exporter |
 
