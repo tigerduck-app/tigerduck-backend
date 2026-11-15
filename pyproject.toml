@@ -23,7 +23,7 @@ dependencies = [
     # 2.3 writes underline as raw <u> HTML, which the apps show as literal
     # text, and changes body_md enough to break content_hash dedup against
     # bulletins stored before it. test_bulletin_scraper pins the shape.
-    "trafilatura>=2.0.0,<2.3",
+    "trafilatura>=2.3.1,<2.4",
     "prometheus-client>=0.26.0",
     # The TLS pin document: Ed25519 signing, certificate parsing, and
     # Mozilla's roots for its prompt_roots.
