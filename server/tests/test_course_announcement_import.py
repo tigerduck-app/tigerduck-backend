@@ -17,6 +17,7 @@ from server.course_announcements.history import (
     queue_reextraction,
     read_export,
 )
+from server.course_announcements.ingest import classify_pending
 from server.course_announcements.models import CourseAnnouncement, CourseAnnouncementExtraction
 from server.db import build_session_factory
 from server.tests.conftest import RecordingClassifier
@@ -134,6 +135,20 @@ async def test_a_second_run_stores_and_queues_nothing(db_session, factory, class
     assert (result.stored, result.classified) == (0, 0)
     assert len(classifier.posts) == sent
     assert await _extractions(db_session) == [("101-901", POSTED, "done")]
+
+
+async def test_with_the_classifier_down_the_run_stores_and_a_later_tick_classifies(
+    db_session, factory, classifier, term
+):
+    classifier.down = True
+
+    result = await import_history(factory, classifier, read_export(EXPORT))
+
+    assert (result.stored, result.classified) == (3, 0)
+    assert await _extractions(db_session) == []
+    classifier.down = False
+    assert await classify_pending(factory, classifier) == 3
+    assert await _extractions(db_session) == [("101-901", POSTED, "queued")]
 
 
 @pytest.mark.parametrize("field", ["userfullname", "usermodifiedfullname", "userid"])
