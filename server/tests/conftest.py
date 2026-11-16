@@ -580,7 +580,8 @@ class AnnouncementCourse:
         return f"{100 + n}-{900 + n}"
 
     async def extract(self, answer: dict, *, auto_apply: bool = False) -> bool:
-        """One tick of the extraction job, the LLM answering `answer`."""
+        """One tick of the extraction job that extracts one announcement, the
+        latest due, the LLM answering `answer`."""
         settings = self.settings.model_copy(
             update={"course_announcements_auto_apply": auto_apply}
         )
@@ -589,6 +590,7 @@ class AnnouncementCourse:
             settings=settings,
             llm=ScriptedLLM(answer),
             clock=lambda: self.now,
+            tick_budget=timedelta(0),
         )
         return await run_extraction_tick(extractor)
 

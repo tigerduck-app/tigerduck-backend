@@ -1,10 +1,11 @@
-"""The extraction job: every minute, while no bulletin waits for the LLM, one
-queued extraction goes to it and its result is stored.
+"""The extraction job: every minute, while no bulletin waits for the LLM,
+queued extractions go to it one at a time and their results are stored.
 
 The LLM serves bulletins and extraction from one slot, so bulletins go
-first and a tick sends one announcement. The claim commits before the LLM
-is asked, and the answer is kept only if the extraction is still the one
-running for the announcement's stored version.
+first: a tick checks for one before each claim, and a bulletin waits for one
+extraction at most. Each claim commits before the LLM is asked, and the
+answer is kept only if the extraction is still the one running for the
+announcement's stored version.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ from server.db import session_scope
 logger = structlog.get_logger(__name__)
 
 TICK = timedelta(minutes=1)
+# A tick starts no claim after this, so it ends near the next one.
+TICK_BUDGET = timedelta(seconds=45)
 # Ticks a failed attempt waits before the next; after the last, it has failed.
 RETRY_TICKS = (1, 4, 16)
 # Longer than the client's three attempts of llm_timeout_seconds (120 s) and
@@ -51,6 +54,7 @@ class Extractor:
     settings: Settings
     llm: OpenAICompatibleClient
     clock: Callable[[], datetime] = partial(datetime.now, UTC)
+    tick_budget: timedelta = TICK_BUDGET
 
 
 def build_extractor(
@@ -80,15 +84,29 @@ class _Claim:
 
 async def run_extraction_tick(extractor: Extractor) -> bool:
     """Count claims older than `CLAIM_EXPIRES_AFTER` as failed attempts, then
-    extract one queued announcement unless a bulletin waits for the LLM.
-    Returns whether one was sent."""
-    now = extractor.clock()
-    await _expire_claims(extractor.session_factory, now)
-    if await _bulletin_waiting(extractor):
-        return False
-    claim = await _claim(extractor.session_factory, now)
-    if claim is None:
-        return False
+    extract queued announcements one at a time until none is due, a bulletin
+    waits for the LLM, an attempt fails or `tick_budget` has passed. Returns
+    whether one was sent."""
+    started = extractor.clock()
+    await _expire_claims(extractor.session_factory, started)
+    sent = False
+    while not await _bulletin_waiting(extractor):
+        now = extractor.clock()
+        if sent and now - started >= extractor.tick_budget:
+            break
+        claim = await _claim(extractor.session_factory, now)
+        if claim is None:
+            break
+        sent = True
+        # While the LLM is down a tick spends one attempt, not one per queued post.
+        if not await _extract(extractor, claim, now):
+            break
+    return sent
+
+
+async def _extract(extractor: Extractor, claim: _Claim, now: datetime) -> bool:
+    """Ask the LLM about `claim` and store its answer. Returns whether the
+    attempt succeeded; a failed one is recorded, and a store failure raised."""
     try:
         output = await extract(
             extractor.llm,
@@ -105,7 +123,7 @@ async def run_extraction_tick(extractor: Extractor) -> bool:
             status=exc.status,
         )
         await _attempt_failed(extractor, claim.id, exc.code, now)
-        return True
+        return False
     failed: str | None = None
     try:
         await store_result(extractor, claim.id, output, now)
@@ -218,7 +236,7 @@ async def _record_failure(
     failed_at: datetime,
 ) -> None:
     """Queue the running extraction for its next attempt, `RETRY_TICKS`
-    after the tick that began at `now`, or fail it after the last; one
+    after `now`, when it was claimed, or fail it after the last; one
     superseded meanwhile stays superseded."""
     row = await session.get(
         CourseAnnouncementExtraction, extraction_id, with_for_update=True, populate_existing=True

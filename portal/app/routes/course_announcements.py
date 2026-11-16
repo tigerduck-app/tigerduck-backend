@@ -72,7 +72,13 @@ WHERE a.term_code = $1
 # extraction and the one before it of the same version come from different
 # models and hold different facts.
 _LISTED = """
-WITH listed AS (
+WITH named AS (
+    -- Once per request: inside `listed` the view would run for every announcement.
+    SELECT array_agg(t.course_no::text) AS course_nos FROM term_courses AS t
+    WHERE $2::text IS NOT NULL AND t.semester = $1
+      AND (strpos(lower(t.course_name), lower($2)) > 0
+           OR strpos(lower(coalesce(t.course_name_en, '')), lower($2)) > 0)
+), listed AS (
     SELECT a.id, a.course_codes, a.subject, a.text, a.posted_at, a.labels, a.scores,
            a.route, latest.status AS extraction, done.id AS done_id,
            prev.id IS NOT NULL AND prev.model IS DISTINCT FROM done.model
@@ -112,12 +118,7 @@ WITH listed AS (
                SELECT 1 FROM unnest(a.course_codes) AS code
                WHERE strpos(lower(code), lower($2)) > 0
            )
-           OR EXISTS (
-               SELECT 1 FROM term_courses AS t
-               WHERE t.semester = a.term_code AND t.course_no = ANY (a.course_codes)
-                 AND (strpos(lower(t.course_name), lower($2)) > 0
-                      OR strpos(lower(coalesce(t.course_name_en, '')), lower($2)) > 0)
-           ))
+           OR a.course_codes && (SELECT course_nos FROM named))
 )
 """
 

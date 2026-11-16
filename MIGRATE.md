@@ -32,6 +32,17 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.5.1
+
+- **Course announcement extraction** keeps extracting queued announcements,
+  one at a time, for up to 45 seconds of each minute while no bulletin waits
+  for the LLM, instead of one a minute. A failed extraction still ends the
+  minute.
+- **Portal search** of course announcements finds the matching course names
+  once per request instead of once per announcement.
+- No migration and no `.env` change.
+- Rollback: check out 4.5.0 and run `./start.sh`.
+
 ## Upgrading to 4.5.0
 
 - **Portal, Course announcements page** (under Moodle): the review queue of

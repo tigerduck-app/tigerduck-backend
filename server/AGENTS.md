@@ -392,12 +392,14 @@ into the backend container via `docker-compose.yml`.
   `--reextract` queues the current term's announcements again for a new model.
 - The `course_announcement_extract` job runs every minute when the classifier
   URL is set (`course_announcements/extractor.py`). While no bulletin is
-  claimable (`claimable_bulletins`, the LLM's one slot goes to bulletins first)
-  it claims one queued extraction, the latest post first, asks the LLM with no
-  transaction open and keeps the answer only while the extraction still runs
-  for the announcement's stored version. A failed attempt waits 1, 4 and 16
-  ticks, then the extraction fails; a claim older than 10 minutes counts as a
-  failed attempt. A stored result supersedes the announcement's earlier pending
+  claimable (`claimable_bulletins`, the LLM's one slot goes to bulletins first,
+  checked before each claim) it claims queued extractions one at a time, the
+  latest post first, until none is due, an attempt fails or 45 seconds of the
+  tick have passed (`TICK_BUDGET`). It asks the LLM with no transaction open
+  and keeps the answer only while the extraction still runs for the
+  announcement's stored version. A failed attempt waits 1, 4 and 16 ticks,
+  then the extraction fails; a claim older than 10 minutes counts as a failed
+  attempt. A stored result supersedes the announcement's earlier pending
   and informational items and becomes review items (`items.py`) under the lock every
   `course_changes` writer takes (`checks.lock_courses`), checked with the
   database's `course_change_violations`. With automatic apply on, an
