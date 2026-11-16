@@ -5,6 +5,7 @@ invented."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -14,6 +15,7 @@ from structlog.testing import capture_logs
 
 from server.academic_calendar.models import SemesterTerm
 from server.bulletins.models import Bulletin
+from server.course_announcements import extractor as extractor_module
 from server.course_announcements.extractor import Extractor, run_extraction_tick
 from server.course_announcements.ingest import (
     classify_pending,
@@ -133,16 +135,104 @@ async def test_a_queued_announcement_is_extracted_with_its_model_and_answer(
     assert len(llm.requests) == 1
 
 
-async def test_one_announcement_a_tick_the_latest_post_first(db_session, factory, make_extractor):
-    await _queued(factory, _discussion(1), _discussion(2, posted=POSTED + timedelta(hours=1)))
-    extractor = make_extractor(ScriptedLLM(CANCELLED))
+def _three_posts() -> list[FetchedDiscussion]:
+    return [_discussion(n, posted=POSTED + timedelta(hours=n)) for n in (1, 2, 3)]
 
-    await run_extraction_tick(extractor)
 
-    assert [(e.announcement_id, e.status) for e in await _extractions(db_session)] == [
-        ("101-901", "queued"),
-        ("102-902", "done"),
+def _asked(llm: ScriptedLLM) -> list[int]:
+    """The invented announcements the LLM was asked about, in order."""
+    return [
+        int(re.search(r"第 (\d) 則", request["messages"][1]["content"]).group(1))
+        for request in llm.requests
     ]
+
+
+async def test_a_tick_extracts_every_due_announcement_the_latest_post_first(
+    db_session, factory, make_extractor
+):
+    await _queued(factory, *_three_posts())
+    llm = ScriptedLLM(CANCELLED)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    assert [e.status for e in await _extractions(db_session)] == ["done", "done", "done"]
+    assert _asked(llm) == [3, 2, 1]
+
+
+class _BulletinPostingLLM(ScriptedLLM):
+    """Stores a bulletin waiting for the LLM while it is asked."""
+
+    def __init__(self, factory, *answers) -> None:
+        super().__init__(*answers)
+        self.factory = factory
+
+    async def complete_json(self, **kwargs):
+        async with self.factory() as session:
+            session.add(
+                Bulletin(external_id="1", source_url="https://bulletin.test/1", title="Invented")
+            )
+            await session.commit()
+        return await super().complete_json(**kwargs)
+
+
+async def test_a_bulletin_posted_during_a_tick_stops_its_claims(
+    db_session, factory, make_extractor
+):
+    await _queued(factory, *_three_posts())
+    llm = _BulletinPostingLLM(factory, CANCELLED)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    assert [e.status for e in await _extractions(db_session)] == ["queued", "queued", "done"]
+    assert _asked(llm) == [3]
+
+
+async def test_a_tick_starts_no_claim_after_45_seconds(
+    db_session, factory, make_extractor, clock
+):
+    await _queued(factory, *_three_posts(), _discussion(4, posted=POSTED + timedelta(hours=4)))
+    llm = _SlowLLM(clock, timedelta(seconds=20), CANCELLED)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    # Claims start at 0, 20 and 40 seconds; the third ends at 60.
+    assert [e.status for e in await _extractions(db_session)] == ["queued", "done", "done", "done"]
+    assert clock.now == NOW + timedelta(seconds=60)
+
+
+async def test_a_tick_starts_no_claim_once_its_bulletin_check_crosses_45_seconds(
+    db_session, factory, make_extractor, clock, monkeypatch
+):
+    await _queued(factory, *_three_posts())
+    llm = _SlowLLM(clock, timedelta(seconds=42), CANCELLED)
+    bulletin_waiting = extractor_module._bulletin_waiting
+
+    async def slow_bulletin_check(extractor: Extractor) -> bool:
+        clock.now += timedelta(seconds=2)
+        return await bulletin_waiting(extractor)
+
+    monkeypatch.setattr(extractor_module, "_bulletin_waiting", slow_bulletin_check)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    # The claim starts at 2 seconds and ends at 44; the next check ends at 46.
+    assert [e.status for e in await _extractions(db_session)] == ["queued", "queued", "done"]
+    assert clock.now == NOW + timedelta(seconds=46)
+
+
+async def test_a_failed_extraction_is_recorded_and_ends_the_tick(
+    db_session, factory, make_extractor
+):
+    await _queued(factory, *_three_posts())
+    llm = ScriptedLLM(500)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    assert [
+        (e.status, e.attempts, e.error_code) for e in await _extractions(db_session)
+    ] == [("queued", 0, None), ("queued", 0, None), ("queued", 1, "http_status")]
+    # One attempt: the client's request and its two retries.
+    assert len(llm.requests) == 3
 
 
 async def test_a_pending_bulletin_goes_first(db_session, factory, make_extractor):
@@ -346,10 +436,11 @@ async def test_failures_wait_1_4_and_16_ticks_then_fail_until_queued_again(
 
 
 class _SlowLLM(ScriptedLLM):
-    """Fails after the clock has moved on by `takes`."""
+    """Answers, by default with a failure, after the clock has moved on by
+    `takes`."""
 
-    def __init__(self, clock: _Clock, takes: timedelta) -> None:
-        super().__init__(500)
+    def __init__(self, clock: _Clock, takes: timedelta, answer: dict | int = 500) -> None:
+        super().__init__(answer)
         self.clock, self.takes = clock, takes
 
     async def complete_json(self, **kwargs):

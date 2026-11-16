@@ -77,9 +77,9 @@ def build_scheduler(
       and classify what is stored, every minute (only with a `sync_worker`,
       whose tokens and budget it shares, and an
       `announcement_classifier_url`).
-    * `course_announcement_extract` — send one queued course announcement to
-      the LLM every minute while no bulletin waits for it (only with an
-      `announcement_classifier_url`).
+    * `course_announcement_extract` — send queued course announcements to
+      the LLM one at a time every minute, for up to 45s, while no bulletin
+      waits for it (only with an `announcement_classifier_url`).
     * `course_announcement_past` — mark past the course announcement items
       whose days have all passed, daily at 00:05 Taipei (likewise).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
