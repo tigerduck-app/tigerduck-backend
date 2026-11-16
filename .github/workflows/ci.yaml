@@ -129,7 +129,7 @@ jobs:
         with:
           # Vite 8 requires Node 20.19+/22.12+, and vite.config.ts uses
           # `import.meta.dirname`, which needs 20.11+. 22 clears both.
-          node-version: '26'
+          node-version: '22'
           cache: npm
           cache-dependency-path: portal/web/package-lock.json
 

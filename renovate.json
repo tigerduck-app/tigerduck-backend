@@ -27,6 +27,11 @@
       "matchPackageNames": ["postgres"],
       "matchUpdateTypes": ["major"],
       "enabled": false
+    },
+    {
+      "description": "CI builds the portal web with the Node of portal/Dockerfile, so both move in one pull request.",
+      "matchDepNames": ["node"],
+      "groupName": "Node"
     }
   ]
 }
