@@ -15,6 +15,7 @@ from structlog.testing import capture_logs
 
 from server.academic_calendar.models import SemesterTerm
 from server.bulletins.models import Bulletin
+from server.course_announcements import extractor as extractor_module
 from server.course_announcements.extractor import Extractor, run_extraction_tick
 from server.course_announcements.ingest import (
     classify_pending,
@@ -197,6 +198,26 @@ async def test_a_tick_starts_no_claim_after_45_seconds(
     # Claims start at 0, 20 and 40 seconds; the third ends at 60.
     assert [e.status for e in await _extractions(db_session)] == ["queued", "done", "done", "done"]
     assert clock.now == NOW + timedelta(seconds=60)
+
+
+async def test_a_tick_starts_no_claim_once_its_bulletin_check_crosses_45_seconds(
+    db_session, factory, make_extractor, clock, monkeypatch
+):
+    await _queued(factory, *_three_posts())
+    llm = _SlowLLM(clock, timedelta(seconds=42), CANCELLED)
+    bulletin_waiting = extractor_module._bulletin_waiting
+
+    async def slow_bulletin_check(extractor: Extractor) -> bool:
+        clock.now += timedelta(seconds=2)
+        return await bulletin_waiting(extractor)
+
+    monkeypatch.setattr(extractor_module, "_bulletin_waiting", slow_bulletin_check)
+
+    assert await run_extraction_tick(make_extractor(llm)) is True
+
+    # The claim starts at 2 seconds and ends at 44; the next check ends at 46.
+    assert [e.status for e in await _extractions(db_session)] == ["queued", "queued", "done"]
+    assert clock.now == NOW + timedelta(seconds=46)
 
 
 async def test_a_failed_extraction_is_recorded_and_ends_the_tick(

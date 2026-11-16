@@ -92,14 +92,14 @@ async def run_extraction_tick(extractor: Extractor) -> bool:
     sent = False
     while not await _bulletin_waiting(extractor):
         now = extractor.clock()
+        if sent and now - started >= extractor.tick_budget:
+            break
         claim = await _claim(extractor.session_factory, now)
         if claim is None:
             break
         sent = True
         # While the LLM is down a tick spends one attempt, not one per queued post.
         if not await _extract(extractor, claim, now):
-            break
-        if extractor.clock() - started >= extractor.tick_budget:
             break
     return sent
 
