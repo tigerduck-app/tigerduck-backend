@@ -41,7 +41,8 @@ server/
 ├── tls_chain.py               # completes a chain sent without its intermediates
 │                              #   through AIA; the pin watcher and link checker use it
 ├── logging_setup.py           # structlog console/JSON
-├── i18n.py                    # localized push copy from the app-translation bundles
+├── i18n.py                    # localized push copy from the app-translation bundles;
+│                              #   units such as hours in the bundle's language (Babel)
 ├── metrics.py                 # Prometheus metrics, served on their own :9000 (not :40000)
 ├── auth/                      # v3 identity: models, JWT, Moodle creds, cipher;
 │                              #   retirement.py deregisters gone devices daily;
@@ -91,10 +92,12 @@ server/
 │   ├── apns_client.py         # AioApnsSender + RecordingSender (factory)
 │   ├── fcm_client.py          # firebase-admin sender + RecordingFcmSender
 │   ├── router.py              # platform routing for outbound pushes
-│   ├── reminders.py           # assignment reminder scan
+│   ├── reminders.py           # assignment reminder scan; the sync trigger once a
+│   │                          #   sent reminder's due time passes
 │   ├── presend.py             # just before an assignment reminder or countdown start:
 │   │                          #   is the assignment still open? (rows, then Moodle)
-│   ├── client_versions.py     # app versions that still schedule assignment reminders locally
+│   ├── client_versions.py     # app versions that still schedule assignment reminders
+│   │                          #   locally, and those that take a Time Sensitive one
 │   ├── submission_cancel.py   # on submission: cancel reminders, end Live Activity countdowns
 │   ├── sync_trigger.py        # the silent push asking devices to sync after a server write
 │   ├── notification_copy.py   # per-recipient copy: reauth, assignment and class
@@ -311,6 +314,29 @@ into the backend container via `docker-compose.yml`.
   pre-send grace leaves room for the next round; a device still
   unregistered then gets it, as does one whose start did not go out. A
   reminder left out on every device ends `cancelled` (`countdown_start_sent`).
+- An assignment reminder's title states the time left
+  (`push/notification_copy.py`): its offset when it goes out late by less
+  than `REMINDER_ON_TIME` (30 s) or a sixtieth of the offset, whichever is
+  longer, otherwise the time to its `due_epoch`, rounded down to the minute
+  and never under one. Minutes under an hour, hours through 48 hours, days
+  beyond, at most the two largest units that are not zero, in the short unit
+  names of the bundle's language (`i18n.format_units`, which takes CLDR's
+  `other` pattern where Babel would write a long name). A payload with
+  neither an offset nor an integer `due_epoch` keeps the course title. No
+  round sends a reminder once its due time has passed: the pre-send check
+  cancels the first (`due_passed`), and `_send_one` skips the delivery of a
+  retry round (`due_passed`). It goes out `time-sensitive` to an app from
+  `TIME_SENSITIVE_MIN_VERSION` on (`push/client_versions.py`) and as a plain
+  alert to an older one, which lacks the entitlement.
+- Once a sent reminder's due time passes, `wake_at_due_times`
+  (`push/reminders.py`, every `assignment_due_wake_interval_seconds`, 30;
+  0 turns it off) files or rides one sync trigger per user and due time
+  through `enqueue_sync_trigger`, so the app runs and removes the reminder.
+  Only a reminder settled `sent` or `partial_failed` counts, and only for a
+  user `_users_with_a_recipient` still finds; the counted ones are marked
+  `due_wake` in the trigger's transaction and passes take an advisory lock,
+  so a rerun never files a second. A due time more than an hour past gets
+  none.
 - Class reminders and class Live Activity starts (`classPreparing`,
   `inClass`) take the school's course changes (`academic_calendar/changes.py`)
   per day and period: a change applies to the meeting that starts in one of

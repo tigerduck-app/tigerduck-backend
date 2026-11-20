@@ -18,6 +18,9 @@ device left to receive them).
 A key stays valid even after its fire time has passed (the pipeline is
 about to deliver it) — only keys that no longer correspond to an
 eligible (assignment, offset, due) tuple are cancelled.
+
+`wake_at_due_times` asks the app to run once a reminder's due time has
+passed, so it removes the reminder from Notification Center.
 """
 
 from __future__ import annotations
@@ -26,7 +29,8 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import ColumnElement, or_, select
+from sqlalchemy import ColumnElement, case, func, literal, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,6 +48,7 @@ from server.config import Settings
 from server.db import INSERT_CHUNK_ROWS, in_array, session_scope
 from server.push.client_versions import schedules_reminders_locally
 from server.push.notification_copy import has_reminder_copy_inputs
+from server.push.sync_trigger import enqueue_sync_trigger
 from server.sync.models import (
     UserAssignment,
     UserAssignmentOverride,
@@ -56,6 +61,16 @@ logger = structlog.get_logger(__name__)
 
 EXCLUDED_LOCAL_STATUSES = {"locally_completed", "ignored", "archived"}
 CHANNEL = "assignment"
+
+#: A due time passed longer ago than this gets no wake; the app also clears
+#: expired reminders whenever it comes to the foreground.
+DUE_WAKE_MISSED = timedelta(hours=1)
+
+# Marks a sent reminder whose due time has had its wake.
+_DUE_WAKE_MARK = "due_wake"
+
+# "TD_WAKE"
+_DUE_WAKE_LOCK_KEY = 0x54445F57414B45
 
 
 async def file_jobs(session: AsyncSession, rows: list[dict]) -> int:
@@ -451,3 +466,79 @@ async def scan_assignment_reminders(
             upgraded=upgraded,
         )
     return created
+
+
+async def wake_at_due_times(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    """Ask the devices of each user sent an assignment reminder to sync once
+    the reminder's due time has passed, so the app runs and removes it: iOS
+    cannot expire a delivered notification by itself. Returns how many
+    users and due times got a sync trigger.
+
+    One trigger per user and due time, however many assignments share it
+    and reminders went out, and only when a delivery of one was sent: a
+    reminder settled as `sent` or `partial_failed`. Each counted reminder is
+    marked in the transaction that files or rides the trigger, and passes
+    take turns on an advisory lock, so a rerun or an overlapping pass never
+    files a second. The trigger goes through `enqueue_sync_trigger`, which
+    keeps 20 minutes between a user's triggers; filed only after the due
+    time, it never holds back the syncs before it. A due time missed by
+    more than `DUE_WAKE_MISSED` is skipped.
+
+    A user with no device left that takes the reminder
+    (`_users_with_a_recipient`: TigerSync or reminders off since, signed
+    out) gets none, since the trigger would only settle as failed; the due
+    time stays unmarked, so a device back within the hour is still woken.
+    """
+    now = datetime.now(UTC)
+    due_epoch = case(
+        (
+            func.jsonb_typeof(PushJob.payload["due_epoch"]) == "number",
+            PushJob.payload["due_epoch"].as_float(),
+        )
+    )
+    async with session_scope(session_factory) as session:
+        await session.execute(select(func.pg_advisory_xact_lock(_DUE_WAKE_LOCK_KEY)))
+        rows = await session.execute(
+            select(
+                PushJob.id,
+                PushJob.user_id,
+                due_epoch,
+                PushJob.payload.has_key(_DUE_WAKE_MARK),
+            ).where(
+                PushJob.channel == CHANNEL,
+                PushJob.status.in_(
+                    (PushJobStatus.sent.value, PushJobStatus.partial_failed.value)
+                ),
+                due_epoch > (now - DUE_WAKE_MISSED).timestamp(),
+                due_epoch <= now.timestamp(),
+            )
+        )
+        reminders: dict[tuple[uuid.UUID, float], list[int]] = {}
+        woken: set[tuple[uuid.UUID, float]] = set()
+        for job_id, user_id, due, marked in rows:
+            reminders.setdefault((user_id, due), []).append(job_id)
+            if marked:
+                woken.add((user_id, due))
+        to_wake = [key for key in reminders if key not in woken]
+        reachable = await _users_with_a_recipient(
+            session, {user_id for user_id, _ in to_wake}, now
+        )
+        to_wake = [key for key in to_wake if key[0] in reachable]
+        if not to_wake:
+            return 0
+        for user_id, _ in to_wake:
+            await enqueue_sync_trigger(session, user_id)
+        counted = [job_id for key in to_wake for job_id in reminders[key]]
+        await session.execute(
+            update(PushJob)
+            .where(in_array(PushJob.id, counted))
+            .values(
+                payload=PushJob.payload.op("||")(
+                    literal({_DUE_WAKE_MARK: True}, JSONB)
+                )
+            )
+        )
+    logger.info("push.reminders.due_wake", woken=len(to_wake))
+    return len(to_wake)

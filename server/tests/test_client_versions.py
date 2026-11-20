@@ -11,8 +11,10 @@ import pytest
 
 from server.push.client_versions import (
     BACKEND_REMINDERS_MIN_VERSION,
+    TIME_SENSITIVE_MIN_VERSION,
     parse_app_version,
     schedules_reminders_locally,
+    takes_time_sensitive,
 )
 
 
@@ -64,3 +66,25 @@ def test_schedules_reminders_locally(platform, version, expected):
 
 def test_min_version_is_the_release_that_removes_the_local_scheduler():
     assert BACKEND_REMINDERS_MIN_VERSION == (2, 1, 0)
+
+
+@pytest.mark.parametrize(
+    "platform,version,expected",
+    [
+        ("ios", "4.0.0", True),            # the release with the entitlement
+        ("ipados", "4.0.0", True),
+        ("ios", "4.1.0-beta", True),
+        ("ios", "3.9.9", False),           # released without the entitlement
+        ("ios", "2.9.1", False),
+        ("ios", None, False),              # fail closed: an alert as before
+        ("ios", "garbage", False),
+        ("android", "4.0.0", False),       # takes no APNs alert
+        ("macos", "4.0.0", False),
+    ],
+)
+def test_takes_time_sensitive(platform, version, expected):
+    assert takes_time_sensitive(platform, version) is expected
+
+
+def test_time_sensitive_waits_for_the_release_with_the_entitlement():
+    assert TIME_SENSITIVE_MIN_VERSION == (4, 0, 0)
