@@ -1313,15 +1313,18 @@ async def _send_one(
         elif job.channel == COURSE_CHANNEL:
             payload = build_course_reminder_payload(payload, locale=locale)
         else:
+            # A round sends to one device after another, so an earlier send
+            # can outlast the due time: the round's `now` is too old here.
+            sending_at = datetime.now(UTC)
             due_epoch = reminder_due_epoch(payload)
-            if due_epoch is not None and now.timestamp() >= due_epoch:
+            if due_epoch is not None and sending_at.timestamp() >= due_epoch:
                 # A retry round runs no pre-send check, and APNs delivers a
                 # push once even past its expiration: no time is left to state.
                 delivery.status = PushDeliveryStatus.skipped.value
                 delivery.failure_code = "due_passed"
                 return
             payload = build_assignment_reminder_payload(
-                payload, locale=locale, now=now
+                payload, locale=locale, now=sending_at
             )
         if not _has_copy(payload):
             # Sending this would be worse than not sending it. APNs coerces a

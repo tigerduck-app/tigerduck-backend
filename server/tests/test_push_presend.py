@@ -1479,6 +1479,95 @@ async def test_a_retry_round_past_the_due_time_sends_nothing(
     assert (delivery.status, delivery.failure_code) == ("skipped", "due_passed")
 
 
+async def test_a_device_reached_after_the_due_time_gets_nothing(
+    db_session, prepared_engine, test_settings, monkeypatch
+):
+    """A round sends to one device after another. When the first send
+    outlasts the due time, the next device is not sent a time left that is
+    gone."""
+    user, phone = await _iphone_user(db_session)
+    pad = UserDevice(
+        user_id=user.id,
+        client_device_id="ipad-b11203058",
+        platform="ipados",
+        app_version="2.1.0",
+        cloud_sync_enabled=True,
+        sync_assignment_reminders=True,
+    )
+    db_session.add(pad)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=pad.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash="hash-standard-ipad",
+            token_value="standard-ipad",
+            bundle_id="org.ntust.app.TigerDuck",
+        )
+    )
+    job = _reminder(
+        user,
+        57,
+        datetime.now(UTC) + timedelta(minutes=1),
+        offset_hours=5 / 60,
+        fire_at=_ago(4),
+    )
+    job.attempts = 1
+    db_session.add(job)
+    await db_session.flush()
+    tokens = (
+        (
+            await db_session.execute(
+                select(DevicePushToken).where(
+                    DevicePushToken.device_id.in_((phone.id, pad.id)),
+                    DevicePushToken.token_kind == "standard",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for token in tokens:
+        db_session.add(
+            PushDelivery(
+                push_job_id=job.id,
+                user_id=user.id,
+                device_id=token.device_id,
+                push_token_id=token.id,
+                provider="apns",
+                token_kind="standard",
+                token_hash=token.token_hash,
+                next_retry_at=_ago(1),
+            )
+        )
+    await db_session.commit()
+
+    class Clock(datetime):
+        ahead = timedelta(0)
+
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + cls.ahead
+
+    class SendOutlastingTheDueTime(ScriptedSender):
+        async def send(self, request):
+            Clock.ahead = timedelta(minutes=2)
+            return await super().send(request)
+
+    monkeypatch.setattr(pipeline_module, "datetime", Clock)
+    apple = SendOutlastingTheDueTime()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, SubmissionStatusStub(OPEN), apple=apple)
+    )
+
+    assert len(apple.requests) == 1
+    settled = sorted(
+        (d.status, d.failure_code or "") for d in await _deliveries(db_session, job)
+    )
+    assert settled == [("sent", ""), ("skipped", "due_passed")]
+
+
 async def test_a_job_the_check_missed_is_put_back_for_the_next_round(
     db_session,
     prepared_engine,
