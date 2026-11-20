@@ -31,7 +31,7 @@ _INSERT = text(
 _ROWS = text("SELECT id, kind, note_zh, note_en FROM course_changes ORDER BY id")
 
 _MIDTERMS = (14, 17, 18, 19, 20, 21, 33)
-# The term's notes as production holds them before the upgrade.
+# The term's notes before the upgrade, 35 and 36 with invented texts.
 _NOTES = [
     *((n, "note", "期中考", "Midterm exam") for n in _MIDTERMS),
     (15, "note", "補課", "Make-up class"),

@@ -240,14 +240,17 @@ async def test_a_client_gets_only_the_kinds_it_lists(client) -> None:
 
     online_only = await _feed(client, term="1151", kinds="online,exam")
     unknown = await _feed(client, term="1151", kinds="exam")
+    empty = await client.get(PATH, params=[("term", "1151"), ("kinds", ""), ("kinds", ",, ,")])
+    oversized = await _feed(client, term="1151", kinds="," * 2000 + "x" * 2000)
     released = await _feed(client, term="1151")
 
     assert [kind for kind, *_ in _kinds_and_notes(online_only)] == [
         "cancelled", "room", "note", "online", "online",
     ]
-    assert unknown.status_code == 200
-    assert _kinds_and_notes(unknown) == _kinds_and_notes(released)
-    assert unknown.headers["ETag"] == released.headers["ETag"]
+    for other in (unknown, empty, oversized):
+        assert other.status_code == 200
+        assert _kinds_and_notes(other) == _kinds_and_notes(released)
+        assert other.headers["ETag"] == released.headers["ETag"]
 
 
 async def test_listing_the_kinds_answers_the_whole_term_not_304(client) -> None:

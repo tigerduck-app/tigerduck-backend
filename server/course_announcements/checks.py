@@ -35,7 +35,6 @@ _KIND_FIELDS = {
     "online": ("note_zh",),
     "note": ("note_zh",),
 }
-# Kinds whose fields may be left out.
 _OPTIONAL_FIELDS = frozenset({"online"})
 # The labels both the classifier and the extraction must give a change of a kind.
 _LABELS = {
