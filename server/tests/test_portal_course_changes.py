@@ -293,6 +293,10 @@ async def test_a_range_must_cover_a_class_day_inside_the_term(term, pool, dates)
         {"kind": "room", "room": "  "},
         {"kind": "note", "note_en": "Quiz"},
         {"kind": "note", "note_zh": " "},
+        {"kind": "assessment", "note_zh": "期中考"},
+        {"kind": "assessment", "note_zh": "期中考", "note_en": " "},
+        {"kind": "assessment", "note_en": "Midterm exam"},
+        {"kind": "online", "note_en": "Video call"},
         {"kind": "moved"},
         {"mode": "week"},
         {"course_no": ""},
@@ -316,6 +320,25 @@ async def test_times_and_notes_are_kept_as_given(term, pool) -> None:
     assert (end["start"], end["end"]) == (None, "11:40")
     assert (note["note_zh"], note["note_en"]) == ("小考", None)
     assert (exam["note_zh"], exam["note_en"]) == ("期中考", "Midterm exam")
+
+
+async def test_an_assessment_takes_both_names_and_an_online_class_any_description(
+    term, pool
+) -> None:
+    _, exam = await _create(
+        pool, kind="assessment", day="2026-11-05", note_zh=" 期中考 ", note_en="Midterm exam",
+        room="IB-302", start="09:10",
+    )
+    _, online = await _create(pool, kind="online", day="2026-11-10", note_zh=" ", note_en=" ")
+    _, described = await _create(
+        pool, kind="online", day="2026-11-19", periods=["2"], note_zh="同步視訊",
+    )
+
+    assert [exam[k] for k in ("kind", "note_zh", "note_en", "room", "start")] == [
+        "assessment", "期中考", "Midterm exam", None, None,
+    ]
+    assert [online[k] for k in ("kind", "note_zh", "note_en")] == ["online", None, None]
+    assert (described["note_zh"], described["note_en"]) == ("同步視訊", None)
 
 
 async def test_values_of_another_kind_are_dropped(term, pool) -> None:
@@ -599,6 +622,37 @@ async def test_a_change_of_a_course_nobody_takes_any_more_can_only_be_deleted(
     assert response.status_code == 409
     assert "delete" in _body(response)["detail"]
     assert (await delete_change(change["id"], _OTHER, pool=pool)).status_code == 200
+
+
+async def test_a_room_change_and_an_online_class_on_one_meeting_clash(term, pool) -> None:
+    _, room = await _create(pool, kind="room", room="IB-101", day="2026-11-05")
+
+    status, body = await _create(pool, kind="online", day="2026-11-05", periods=["2"])
+    _, online = await _create(pool, kind="online", day="2026-11-10")
+    edit = await update_change(
+        room["id"], _OTHER, pool=pool,
+        body={"kind": "room", "room": "IB-101", "mode": "day", "day": "2026-11-10"},
+    )
+
+    assert (status, body) == (
+        409, {"detail": "2026-11-05 already has a room change", "day": "2026-11-05", "kind": "room"},
+    )
+    assert edit.status_code == 409
+    assert _body(edit)["kind"] == "online"
+
+
+async def test_an_exam_keeps_its_room_change(term, pool) -> None:
+    names = {"note_zh": "期中考", "note_en": "Midterm exam"}
+    room = await _create(pool, kind="room", room="IB-101", day="2026-11-05")
+    exam = await _create(pool, kind="assessment", day="2026-11-05", **names)
+    second = await _create(pool, kind="assessment", day="2026-11-05", periods=["3"], **names)
+
+    assert (room[0], exam[0]) == (200, 200)
+    assert second[0] == 409
+    assert second[1]["kind"] == "assessment"
+    assert [c["kind"] for c in _body(await list_changes("1151", pool=pool))["changes"]] == [
+        "room", "assessment",
+    ]
 
 
 async def test_notes_share_a_day(term, pool) -> None:

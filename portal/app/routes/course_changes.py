@@ -1,5 +1,6 @@
-"""Course changes: the school's cancelled classes, room and time changes and
-notes for one course in a term (tigerduck-backend#177), in `course_changes`
+"""Course changes: the school's cancelled classes, room and time changes,
+assessments, online classes and notes for one course in a term
+(tigerduck-backend#177), in `course_changes`
 (model: server/academic_calendar/models.py).
 
 A change covers one class day, or every class day of a range but the ISO
@@ -28,7 +29,7 @@ from ..db import get_pool
 
 router = APIRouter(prefix="/api/course-changes")
 
-KINDS = ("cancelled", "room", "start", "end", "note")
+KINDS = ("cancelled", "room", "start", "end", "assessment", "online", "note")
 # The columns a request sets, in the order the INSERT and UPDATE bind them.
 _FIELDS = (
     "kind", "mode", "start_date", "end_date", "excluded_weekdays", "periods",
@@ -198,8 +199,9 @@ def _dates(body: dict, term) -> tuple[str, date, date, list[int]] | JSONResponse
 
 
 def _values(body: dict, kind: str) -> dict | JSONResponse:
-    """The new room, time or note; the dialog sends every field, so only the
-    kind's own are read."""
+    """The new room or time, the note, the assessment's names or the online
+    class's description; the dialog sends every field, so only the kind's own
+    are read."""
     values = dict.fromkeys(("room", "start_time", "end_time", "note_zh", "note_en"))
     if kind == "room":
         values["room"] = _text(body.get("room"))
@@ -210,11 +212,13 @@ def _values(body: dict, kind: str) -> dict | JSONResponse:
         if not isinstance(time, str) or not _HHMM.fullmatch(time):
             return _bad(f"{kind} must be HH:mm")
         values[f"{kind}_time"] = time
-    elif kind == "note":
+    elif kind in ("assessment", "online", "note"):
         values["note_zh"] = _text(body.get("note_zh"))
-        if values["note_zh"] is None:
-            return _bad("note_zh required")
         values["note_en"] = _text(body.get("note_en"))
+        if kind == "assessment" and None in (values["note_zh"], values["note_en"]):
+            return _bad("note_zh and note_en required")
+        if values["note_zh"] is None and (kind == "note" or values["note_en"] is not None):
+            return _bad("note_zh required")
     return values
 
 
@@ -316,17 +320,21 @@ async def _check(
         return _bad(f"period {listed} is not one meeting of the course on {split['day']}")
     if clash := broken.get("clash"):
         day = clash["day"].isoformat()
+        # A room change and an online class clash, so the kind is the other change's.
+        kind = await conn.fetchval(
+            "SELECT kind FROM course_changes WHERE id = $1", clash["change_id"]
+        )
         return JSONResponse(
             status_code=409,
-            content={"detail": f"{day} already has a {columns['kind']} change", "day": day},
+            content={"detail": f"{day} already has a {kind} change", "day": day, "kind": kind},
         )
     return columns
 
 
 def kept_note_en(fields: dict, note_zh: str | None, note_en: str | None) -> dict:
-    """`fields`, a replace item's change, with the English note `note_en` of
-    the change it replaces kept while its Chinese note stays `note_zh`; the
-    extraction never states an English note."""
+    """`fields`, a replace item's change, with the English text `note_en` of
+    the change it replaces kept while its Chinese text stays `note_zh`; the
+    extraction states an English text only for an assessment it names."""
     if fields.get("note_en") is None and fields.get("note_zh") == note_zh:
         return {**fields, "note_en": note_en}
     return fields
