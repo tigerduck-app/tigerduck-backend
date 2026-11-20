@@ -32,6 +32,26 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.6.0
+
+- **Assignment reminders state the time left** in their title, per recipient
+  locale (`作業提醒：還有 2 小時`, `Assignment reminder: 2 hr left`), instead of
+  the course name, which stays in the body. A reminder whose due time has
+  passed is not sent in any round.
+- **Time Sensitive.** An assignment reminder carries
+  `interruption-level: time-sensitive` to an iPhone or iPad app at 4.0.0 or
+  later (`TIME_SENSITIVE_MIN_VERSION` in `server/push/client_versions.py`).
+- **Wake at the due time.** A new scheduler job, `assignment_due_wake`, files
+  one sync trigger per user and due time once a sent reminder's due time has
+  passed, so the app runs and removes the reminder. It runs every
+  `TIGERDUCK_ASSIGNMENT_DUE_WAKE_INTERVAL_SECONDS` (default 30; 0 turns it
+  off). The first pass after the upgrade wakes the users whose reminders came
+  due in the hour before it.
+- `babel` is now a declared dependency; the image rebuild installs it from
+  the lock.
+- No migration and no `.env` change.
+- Rollback: check out 4.5.1 and run `./start.sh`.
+
 ## Upgrading to 4.5.1
 
 - **Course announcement extraction** keeps extracting queued announcements,
