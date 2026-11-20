@@ -20,7 +20,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from babel import Locale, UnknownLocaleError
-from babel.units import format_unit
+from babel.numbers import format_decimal
 
 CANONICAL_LOCALE = "en"
 
@@ -131,16 +131,17 @@ def format_units(values: Sequence[tuple[int, str]], locale: str | None) -> str:
     """Whole numbers of CLDR units, such as `(2, "duration-hour")`, with
     short unit names, in the language of the bundle `locale` resolves to.
 
+    A count whose plural class the locale's short data has no pattern for
+    takes its `other` pattern, as CLDR specifies; Babel's `format_unit`
+    writes the long name there instead ("1 horas" in Spanish).
+
     Two values are joined by CLDR's pattern for a pair of units. Babel's
     data leaves out the patterns many locales inherit (its `format_list`
     raises for them), so a missing one is looked for in the `unit` style,
     then taken from CLDR's root.
     """
     babel_locale = _babel_locale(resolve_locale(locale))
-    parts = [
-        format_unit(value, unit, length="short", locale=babel_locale)
-        for value, unit in values
-    ]
+    parts = [_short_unit(value, unit, babel_locale) for value, unit in values]
     if len(parts) < 2:
         return "".join(parts)
     patterns = babel_locale.list_patterns
@@ -153,3 +154,11 @@ def format_units(values: Sequence[tuple[int, str]], locale: str | None) -> str:
         "{0}, {1}",
     )
     return pair.format(*parts)
+
+
+def _short_unit(value: int, unit: str, babel_locale: Locale) -> str:
+    # Babel has no public accessor for unit patterns; `format_unit` reads
+    # the same table.
+    patterns = babel_locale._data["unit_patterns"][unit]["short"]
+    pattern = patterns.get(babel_locale.plural_form(value)) or patterns["other"]
+    return pattern.format(format_decimal(value, locale=babel_locale))

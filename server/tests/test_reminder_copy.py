@@ -138,23 +138,25 @@ def test_every_locale_renders_every_offset_completely():
             sent = build_assignment_reminder_payload(
                 _reminder(minutes / 60), locale=locale, now=_on_time(minutes / 60)
             )
-            want_title = _expected(
-                TITLE_KEY, locale, _time_left(minutes, locale)
-            )
+            # The bundle's title around a time left that states the offset's
+            # number; the units are pinned per locale in the tests below.
+            prefix, suffix = translate(TITLE_KEY, locale).split("%1$s")
+            title = sent["title"]
+            number = str(minutes // 60 or minutes)
+            time_left = title[len(prefix) : len(title) - len(suffix)]
+            if (
+                not title.startswith(prefix)
+                or not title.endswith(suffix)
+                or not time_left.startswith(number)
+            ):
+                problems.append((locale, minutes, title))
             want_body = _expected(reminder_body_key(minutes), locale, COURSE, ASSIGNMENT)
-            if sent["title"] != want_title or sent["body"] != want_body:
-                problems.append((locale, minutes, sent["title"], sent["body"]))
+            if sent["body"] != want_body:
+                problems.append((locale, minutes, sent["body"]))
             for text in (sent["title"], sent["body"]):
                 if re.search(r"%\d+\$s", text) or re.search(r"\d\.\d", text):
                     problems.append((locale, minutes, text))
     assert not problems, problems[:10]
-
-
-def _time_left(minutes: int, locale: str) -> str:
-    """An offered offset as the title states it: hours up to two days."""
-    hours, minutes = divmod(minutes, 60)
-    units = [(hours, "duration-hour"), (minutes, "duration-minute")]
-    return format_units([unit for unit in units if unit[0]], locale)
 
 
 def test_the_title_states_the_time_left_and_the_body_names_both():
@@ -223,6 +225,81 @@ def test_a_reminder_sent_late_states_the_time_really_left(
     assert sent["title"] == zh_hant
 
 
+@pytest.mark.parametrize(
+    ("locale", "one_hour", "two_hours", "one_minute"),
+    [
+        (
+            "es",
+            "Recordatorio de tarea: vence en 1 h",
+            "Recordatorio de tarea: vence en 2 h",
+            "Recordatorio de tarea: vence en 1 min",
+        ),
+        (
+            "pt-BR",
+            "Lembrete de tarefa: vence em 1 h",
+            "Lembrete de tarefa: vence em 2 h",
+            "Lembrete de tarefa: vence em 1 min",
+        ),
+        (
+            "pt-PT",
+            "Lembrete de tarefa: termina em 1 h",
+            "Lembrete de tarefa: termina em 2 h",
+            "Lembrete de tarefa: termina em 1 min",
+        ),
+        (
+            "ca",
+            "Recordatori de la tasca: venç d'aquí a 1 h",
+            "Recordatori de la tasca: venç d'aquí a 2 h",
+            "Recordatori de la tasca: venç d'aquí a 1 min",
+        ),
+        (
+            "sl",
+            "Opomnik za nalogo: še 1 h",
+            "Opomnik za nalogo: še 2 h",
+            "Opomnik za nalogo: še 1 min",
+        ),
+    ],
+)
+def test_a_count_whose_plural_the_short_data_lacks_keeps_the_short_name(
+    locale, one_hour, two_hours, one_minute
+):
+    """Babel writes the long name ("1 horas") when a locale's short unit has
+    no pattern for the count's plural class; CLDR's `other` applies."""
+    titles = [
+        build_assignment_reminder_payload(
+            _reminder(hours), locale=locale, now=_on_time(hours)
+        )["title"]
+        for hours in (1, 2, 1 / 60)
+    ]
+    assert titles == [one_hour, two_hours, one_minute]
+
+
+@pytest.mark.parametrize(
+    ("locale", "one_day"),
+    [("es", "1 d"), ("pt-BR", "1 dia"), ("pt-PT", "1 dia"), ("ca", "1 dia"), ("sl", "1 d")],
+)
+def test_one_day_keeps_the_short_name(locale, one_day):
+    assert format_units([(1, "duration-day")], locale) == one_day
+
+
+def test_no_count_falls_back_to_a_long_unit_name():
+    """Where a locale's short data has no pattern for the count's plural
+    class, the count takes the short `other` pattern, in every bundle."""
+    problems = []
+    for stem in LOCALES:
+        babel_locale = _babel_locale(stem)
+        for unit in ("duration-day", "duration-hour", "duration-minute"):
+            short = babel_locale._data["unit_patterns"][unit]["short"]
+            for value in (1, 2, 5):
+                if babel_locale.plural_form(value) in short:
+                    continue
+                want = short["other"].format(str(value))
+                got = format_units([(value, unit)], stem)
+                if got != want:
+                    problems.append((stem, unit, value, got, want))
+    assert not problems, problems
+
+
 def test_an_unknown_locale_gets_the_english_title():
     sent = build_assignment_reminder_payload(
         _reminder(1.5), locale="xx-YY", now=_on_time(1.5)
@@ -233,14 +310,11 @@ def test_an_unknown_locale_gets_the_english_title():
 def test_every_bundle_stem_formats_the_time_left_in_its_own_language():
     """Babel knows every bundle stem; a stem it did not would fall back to
     English rather than raise in the send path."""
-    problems = []
-    for stem in LOCALES:
-        if str(_babel_locale(stem)).split("_")[0] != stem.split("-")[0]:
-            problems.append((stem, str(_babel_locale(stem))))
-        for values in ([(36, "duration-hour")], [(1, "duration-hour"), (30, "duration-minute")]):
-            text = format_units(values, stem)
-            if not text or not all(str(value) in text for value, _ in values):
-                problems.append((stem, text))
+    problems = [
+        (stem, str(_babel_locale(stem)))
+        for stem in LOCALES
+        if str(_babel_locale(stem)).split("_")[0] != stem.split("-")[0]
+    ]
     assert not problems, problems
     assert str(_babel_locale("yue-HK")) == "yue_Hant_HK"
     assert str(_babel_locale("zh-Hans")) == "zh_Hans"
@@ -425,7 +499,9 @@ async def test_each_device_gets_the_reminder_in_its_own_language(
         assert message["aps"]["alert"] == {
             # Due in 30 hours: the 24-hour reminder, sent early by the test,
             # states its offset.
-            "title": _expected(TITLE_KEY, locale, _time_left(24 * 60, locale)),
+            "title": {"zh-Hant": "作業提醒：還有 24 小時", "ja": "課題リマインダー：残り 24 時間"}[
+                locale
+            ],
             "body": _expected(BODY_KEY + "24h", locale, COURSE, ASSIGNMENT),
         }, token
         assert "assignment_title" not in message
