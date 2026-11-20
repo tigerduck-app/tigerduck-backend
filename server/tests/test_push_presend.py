@@ -1436,6 +1436,49 @@ async def test_a_retry_round_is_not_checked_again(
     assert moodle.asked == []
 
 
+async def test_a_retry_round_past_the_due_time_sends_nothing(
+    db_session, prepared_engine, test_settings
+):
+    """A retry round runs no check, and APNs still delivers once a push whose
+    expiration has passed, so a round after the due time would show a time
+    left that is gone. The delivery is settled as `due_passed` instead."""
+    user, device = await _iphone_user(db_session)
+    job = _reminder(user, 56, _ago(1), offset_hours=5 / 60, fire_at=_ago(6))
+    job.attempts = 1
+    db_session.add(job)
+    await db_session.flush()
+    token = (
+        await db_session.execute(
+            select(DevicePushToken).where(
+                DevicePushToken.device_id == device.id,
+                DevicePushToken.token_kind == "standard",
+            )
+        )
+    ).scalar_one()
+    db_session.add(
+        PushDelivery(
+            push_job_id=job.id,
+            user_id=user.id,
+            device_id=device.id,
+            push_token_id=token.id,
+            provider="apns",
+            token_kind="standard",
+            token_hash=token.token_hash,
+            next_retry_at=_ago(1),
+        )
+    )
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(
+        _worker(prepared_engine, test_settings, SubmissionStatusStub(OPEN), apple=apple)
+    )
+
+    assert apple.requests == []
+    [delivery] = await _deliveries(db_session, job)
+    assert (delivery.status, delivery.failure_code) == ("skipped", "due_passed")
+
+
 async def test_a_job_the_check_missed_is_put_back_for_the_next_round(
     db_session,
     prepared_engine,

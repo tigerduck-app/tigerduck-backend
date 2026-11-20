@@ -87,6 +87,7 @@ from server.push.notification_copy import (
     build_assignment_reminder_payload,
     build_course_reminder_payload,
     build_reauth_payload,
+    reminder_due_epoch,
 )
 from server.push.payload import _to_unix_seconds
 from server.push.presend import (
@@ -1312,6 +1313,13 @@ async def _send_one(
         elif job.channel == COURSE_CHANNEL:
             payload = build_course_reminder_payload(payload, locale=locale)
         else:
+            due_epoch = reminder_due_epoch(payload)
+            if due_epoch is not None and now.timestamp() >= due_epoch:
+                # A retry round runs no pre-send check, and APNs delivers a
+                # push once even past its expiration: no time is left to state.
+                delivery.status = PushDeliveryStatus.skipped.value
+                delivery.failure_code = "due_passed"
+                return
             payload = build_assignment_reminder_payload(
                 payload, locale=locale, now=now
             )
