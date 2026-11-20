@@ -153,7 +153,9 @@ _ASSESSMENTS = (
     (16, "期中分組簡報", None, "期中分組簡報", "Midterm group presentation"),
     (54, "期末報告", "Final Presentation", "期末簡報", "Final presentation"),
 )
-# Term 1151's notes that move a whole class online; their text stays as the description.
+# Term 1151's notes that move a whole class online, with the text a row must
+# still hold to be converted; the text stays as the description.
+_ONLINE_TEXT = "因排程衝突，11/16 無實體課改為線上，請自行學習 Module 5。"
 _ONLINE = (35, 36)
 _TERM = "1151"
 
@@ -164,7 +166,7 @@ _TO_ASSESSMENT = sa.text(
 )
 _TO_ONLINE = sa.text(
     "UPDATE course_changes SET kind = 'online', updated_at = now()"
-    " WHERE id = :id AND term_code = :term AND kind = 'note'"
+    " WHERE id = :id AND term_code = :term AND kind = 'note' AND note_zh = :note_zh"
 )
 _BACK_TO_NOTE = sa.text(
     "UPDATE course_changes SET kind = 'note', note_zh = :note_zh, note_en = :note_en,"
@@ -198,7 +200,7 @@ def upgrade() -> None:
              "name_zh": name_zh, "name_en": name_en},
         )
     for change_id in _ONLINE:
-        bind.execute(_TO_ONLINE, {"id": change_id, "term": _TERM})
+        bind.execute(_TO_ONLINE, {"id": change_id, "term": _TERM, "note_zh": _ONLINE_TEXT})
 
 
 def downgrade() -> None:

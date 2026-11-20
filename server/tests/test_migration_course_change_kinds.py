@@ -31,14 +31,15 @@ _INSERT = text(
 _ROWS = text("SELECT id, kind, note_zh, note_en FROM course_changes ORDER BY id")
 
 _MIDTERMS = (14, 17, 18, 19, 20, 21, 33)
-# The term's notes before the upgrade, 35 and 36 with invented texts.
+_ONLINE_TEXT = "因排程衝突，11/16 無實體課改為線上，請自行學習 Module 5。"
+# The term's notes before the upgrade.
 _NOTES = [
     *((n, "note", "期中考", "Midterm exam") for n in _MIDTERMS),
     (15, "note", "補課", "Make-up class"),
     (16, "note", "期中分組簡報", None),
     (23, "note", "期末考", "Final exam"),
-    (35, "note", "改為線上上課", None),
-    (36, "note", "線上非同步", "Online, asynchronous"),
+    (35, "note", _ONLINE_TEXT, None),
+    (36, "note", _ONLINE_TEXT, None),
     (54, "note", "期末報告", "Final Presentation"),
 ]
 _CONVERTED = [
@@ -46,8 +47,8 @@ _CONVERTED = [
     (15, "note", "補課", "Make-up class"),
     (16, "assessment", "期中分組簡報", "Midterm group presentation"),
     (23, "assessment", "期末考", "Final exam"),
-    (35, "online", "改為線上上課", None),
-    (36, "online", "線上非同步", "Online, asynchronous"),
+    (35, "online", _ONLINE_TEXT, None),
+    (36, "online", _ONLINE_TEXT, None),
     (54, "assessment", "期末簡報", "Final presentation"),
 ]
 
@@ -129,7 +130,7 @@ async def test_other_rows_at_those_ids_stay_as_they_are(migration_db_url: str) -
         (16, "note", "期中簡報", None),
         (17, "cancelled", None, None),
         (23, "note", "期末考 ", "Final exam"),
-        (35, "room", None, None),
+        (35, "note", "改為線上上課", None),
         (54, "note", "期末簡報", "Final presentation"),
     ]
     _alembic(migration_db_url, "upgrade", BEFORE)
@@ -154,13 +155,16 @@ async def test_other_rows_at_those_ids_stay_as_they_are(migration_db_url: str) -
                      "room": "IB-101" if kind == "room" else None},
                 )
         # The same texts in another term.
-        await _seed(engine, [(33, "note", "期中考", "Midterm exam"), (36, "note", "線上", None)],
-                    term="1152")
+        await _seed(
+            engine,
+            [(33, "note", "期中考", "Midterm exam"), (36, "note", _ONLINE_TEXT, None)],
+            term="1152",
+        )
 
         _alembic(migration_db_url, "upgrade", REVISION)
 
         assert await _rows(engine) == _sorted(
-            [*others, (33, "note", "期中考", "Midterm exam"), (36, "note", "線上", None)]
+            [*others, (33, "note", "期中考", "Midterm exam"), (36, "note", _ONLINE_TEXT, None)]
         )
     finally:
         await engine.dispose()
