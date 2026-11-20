@@ -37,10 +37,12 @@ On every Bearer endpoint: 401 `missing_bearer_token`, `invalid_access_token` or 
 | 25 | GET `/bulletin-subscriptions` | Bearer | | `items[{id, name, orgs, tags, mode, enabled, revision}]` | 400 `device_id_required` | iOS |
 | 26 | PUT `/bulletin-subscriptions` | Bearer | `rules[{name, orgs, tags, mode, enabled}]` | `items`; every rule re-created with a new id | 400 | iOS |
 | 27 | GET `/calendar/semesters` | none, ETag | | terms, holidays | 304 | iOS, Mac |
-| 28 | GET `/calendar/course-changes?term` | none, ETag | | `term, changes` | 304, 404 `term_not_found` | iOS, Mac |
+| 28 | GET `/calendar/course-changes?term&kinds` | none, ETag | | `term, changes` | 304, 404 `term_not_found` | iOS, Mac |
 | 29 | GET `/course-catalog/{semester}?language` | Bearer, ETag, gzip | | snapshot | 304, 404 `course_catalog_not_found` | iOS, Mac |
 
 Unversioned and untouched: `/ping`, `/links/{name}`, `/.well-known/tigerduck/tls-pins.json`.
+
+**Course change kinds (28).** A change's `kind` is `cancelled`, `room`, `start`, `end` or `note`, and `assessment` or `online` for a client that lists the kind in `kinds`, comma-separated or repeated (`kinds=assessment,online`); a value the backend does not know is ignored. `note_zh` and `note_en` hold a note's text (no English falls back to the Chinese), an assessment's names, both always set (期中考 / Midterm exam), or an online class's optional description. A request that does not list a kind gets each change of it as a `note` with the same id and class days: an assessment's names as its texts, an online class's description or, without one, 線上 / Online (`course_change_online`). The other five kinds go out as they are. The ETag covers the listed kinds, so a client that starts listing one gets the whole term with a 200 even when it sends the ETag it stored before. Released apps list none (ADR 0031 in the app repository).
 
 ## 2. The `/v4` contract
 
