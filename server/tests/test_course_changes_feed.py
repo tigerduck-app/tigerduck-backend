@@ -229,7 +229,6 @@ async def test_a_released_app_gets_the_new_kinds_as_notes(client) -> None:
         ("note", None, "線上", "Online"),
         ("note", None, "同步視訊", None),
     ]
-    # The same changes, ids and class days.
     assert [
         (c["id"], c["class_days"], c["day"]) for c in released.json()["changes"]
     ] == [(c["id"], c["class_days"], c["day"]) for c in listed]

@@ -32,7 +32,6 @@ _ROWS = text("SELECT id, kind, note_zh, note_en FROM course_changes ORDER BY id"
 
 _MIDTERMS = (14, 17, 18, 19, 20, 21, 33)
 _ONLINE_TEXT = "因排程衝突，11/16 無實體課改為線上，請自行學習 Module 5。"
-# The term's notes before the upgrade.
 _NOTES = [
     *((n, "note", "期中考", "Midterm exam") for n in _MIDTERMS),
     (15, "note", "補課", "Make-up class"),
