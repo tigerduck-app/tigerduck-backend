@@ -13,7 +13,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from server.push.dedupe import SCHEDULE_CHANNEL
-from server.push.notification_copy import REAUTH_SCENARIO, SESSION_REAUTH_REASON
+from server.push.notification_copy import (
+    REAUTH_SCENARIO,
+    SESSION_REAUTH_REASON,
+    reminder_due_epoch,
+)
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -90,8 +94,8 @@ def _alert_expiration(
     reminder is held until its due time at most: a phone offline until
     after the deadline must not show "due in 2 hours" when it comes back."""
     expiration = timestamp + ttl_seconds
-    due_epoch = payload.get("due_epoch")
-    if channel == REMINDER_CHANNEL and type(due_epoch) is int:
+    due_epoch = reminder_due_epoch(payload)
+    if channel == REMINDER_CHANNEL and due_epoch is not None:
         return min(expiration, due_epoch)
     return expiration
 
@@ -113,6 +117,7 @@ def build_apns_for_job(
     now: datetime | None = None,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     attributes_type: str | None = None,
+    time_sensitive: bool = False,
 ) -> ApnsRequest:
     """Build the APNs request for one delivery of `payload` on `channel`.
 
@@ -120,6 +125,10 @@ def build_apns_for_job(
     `ActivityAttributes` type name the client registered its push-to-start
     token under (the token's `scope_key`), which ActivityKit needs to know
     which attributes struct to decode `attributes` into.
+
+    `time_sensitive`, whether the recipient's app takes a Time Sensitive
+    alert (`client_versions.takes_time_sensitive`), is only read for an
+    assignment reminder.
     """
     timestamp = int((now or datetime.now(UTC)).timestamp())
     collapse = _collapse_key(channel, payload)
@@ -253,6 +262,10 @@ def build_apns_for_job(
         },
         **_extras(payload),
     }
+    if channel == REMINDER_CHANNEL and time_sensitive:
+        # Breaks through a Focus and the scheduled summary, which would
+        # otherwise hold a reminder past the due time it warns of.
+        message["aps"]["interruption-level"] = "time-sensitive"
     return ApnsRequest(
         device_token=token_value,
         topic=bundle_id,

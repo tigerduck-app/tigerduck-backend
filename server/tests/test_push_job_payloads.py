@@ -144,3 +144,39 @@ def test_missing_title_falls_back_to_empty():
     request = build_fcm_for_job(payload={}, channel="system", token_value="t")
     assert request.title == ""
     assert request.data["android_channel_id"] == "system"
+
+
+def test_an_assignment_reminder_is_time_sensitive_on_an_app_that_takes_it():
+    request = build_apns_for_job(
+        payload=PAYLOAD,
+        channel="assignment",
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+        time_sensitive=True,
+    )
+    assert request.message["aps"]["interruption-level"] == "time-sensitive"
+
+
+def test_an_assignment_reminder_is_a_plain_alert_on_an_app_without_it():
+    request = build_apns_for_job(
+        payload=PAYLOAD,
+        channel="assignment",
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+    )
+    assert "interruption-level" not in request.message["aps"]
+
+
+@pytest.mark.parametrize("channel", ["course", "bulletin", "system", "custom"])
+def test_only_assignment_reminders_are_time_sensitive(channel):
+    request = build_apns_for_job(
+        payload=PAYLOAD,
+        channel=channel,
+        token_value="tok-abc",
+        bundle_id="org.ntust.app.TigerDuck",
+        now=NOW,
+        time_sensitive=True,
+    )
+    assert "interruption-level" not in request.message["aps"]
