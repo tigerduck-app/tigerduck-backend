@@ -71,7 +71,10 @@ from server.config import Settings
 from server.db import lift_timeouts, session_scope
 from server.push.apns_client import SendResult
 from server.push.class_starts import recheck_class_start
-from server.push.client_versions import schedules_reminders_locally
+from server.push.client_versions import (
+    schedules_reminders_locally,
+    takes_time_sensitive,
+)
 from server.push.course_reminders import CHANNEL as COURSE_CHANNEL
 from server.push.course_reminders import recheck_class_reminder
 from server.push.dedupe import SCHEDULE_CHANNEL, activity_end_key, schedule_key
@@ -1282,6 +1285,7 @@ async def _send_one(
 
     payload = job.payload or {}
     is_reauth = job.scenario == REAUTH_SCENARIO
+    device: UserDevice | None = None
     if is_reauth or job.channel in (REMINDER_CHANNEL, COURSE_CHANNEL):
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
@@ -1349,6 +1353,8 @@ async def _send_one(
                 if token.token_kind == PushTokenKind.push_to_start.value
                 else None
             ),
+            time_sensitive=device is not None
+            and takes_time_sensitive(device.platform, device.app_version),
         )
         send = worker.router.send_apple
     else:

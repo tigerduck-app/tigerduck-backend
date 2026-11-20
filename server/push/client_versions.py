@@ -1,4 +1,5 @@
-"""Which client versions still schedule their own assignment reminders.
+"""Which client versions still schedule their own assignment reminders,
+and which take a Time Sensitive one.
 
 The backend started sending assignment reminders in 2.1.0, the same
 release that removed the iOS local scheduler. Between the backend
@@ -27,6 +28,12 @@ from server.auth.models import APPLE_HANDHELD_PLATFORMS
 #: tigerduck-app and `versionName` in tigerduck-app-android.
 BACKEND_REMINDERS_MIN_VERSION: tuple[int, ...] = (2, 1, 0)
 
+#: The first release whose iOS app carries the Time Sensitive Notifications
+#: entitlement. Apple does not document what a build without it does with
+#: `interruption-level`, so an older build gets a plain alert. Keep in step
+#: with the app release that adds the entitlement.
+TIME_SENSITIVE_MIN_VERSION: tuple[int, ...] = (4, 0, 0)
+
 #: Leading dotted integers only. Anything after them -- the F-Droid
 #: flavor's "-fdroid", a "+build" tag -- is ignored, and anything that
 #: does not start with a digit does not parse at all.
@@ -54,3 +61,14 @@ def schedules_reminders_locally(platform: str, app_version: str | None) -> bool:
     if parsed is None:
         return True  # fail closed -- see the module docstring
     return parsed < BACKEND_REMINDERS_MIN_VERSION
+
+
+def takes_time_sensitive(platform: str, app_version: str | None) -> bool:
+    """Whether an assignment reminder to this device may be Time Sensitive:
+    an iPhone or iPad shown to run `TIME_SENSITIVE_MIN_VERSION` or later."""
+    parsed = parse_app_version(app_version)
+    return (
+        platform in APPLE_HANDHELD_PLATFORMS
+        and parsed is not None
+        and parsed >= TIME_SENSITIVE_MIN_VERSION
+    )

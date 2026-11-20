@@ -207,6 +207,77 @@ async def test_assignment_reminder_gate(
     assert (device.id in delivered) is expect_delivered, case
 
 
+async def test_only_a_reminder_to_an_app_with_the_entitlement_is_time_sensitive(
+    db_session, prepared_engine, test_settings, make_assignment, store_moodle_token
+):
+    # A released build lacks the Time Sensitive entitlement, and Apple does
+    # not document what it does with the level, so it gets a plain alert.
+    user = User(student_id="b11203058")
+    db_session.add(user)
+    await db_session.flush()
+    await _device_with_token(
+        db_session, user, client_device_id="released", app_version="2.9.1"
+    )
+    await _device_with_token(
+        db_session, user, client_device_id="entitled", app_version="4.0.0"
+    )
+    due_at = datetime.now(UTC) + timedelta(days=1)
+    await make_assignment(user_id=user.id, moodle_assignment_id=3, due_at=due_at)
+    await store_moodle_token(user.id)
+    db_session.add(
+        _job(
+            user,
+            dedupe_key="assignment:test:time-sensitive",
+            payload={
+                "title": "t",
+                "body": "b",
+                "moodle_assignment_id": 3,
+                "due_epoch": int(due_at.timestamp()),
+            },
+        )
+    )
+    # A class reminder and a bulletin to the same devices stay plain alerts.
+    db_session.add(
+        await _course_reminder(db_session, user, dedupe_key="course:test:time-sensitive")
+    )
+    db_session.add(
+        _job(
+            user,
+            channel="bulletin",
+            scenario="bulletin_post",
+            dedupe_key="bulletin:test:time-sensitive",
+        )
+    )
+    await db_session.commit()
+
+    apple = ScriptedSender()
+    await run_push_tick(
+        PushPipelineWorker(
+            session_factory=build_session_factory(prepared_engine),
+            settings=test_settings,
+            router=PushRouter(apple=apple, android=ScriptedSender()),
+            worker_id="reminder-gating-test-worker",
+            cipher=CredentialCipher.from_settings(test_settings),
+            fetcher=SubmissionStatusStub(),
+        )
+    )
+
+    levels = {
+        (r.message["aps"]["thread-id"], r.device_token): r.message["aps"].get(
+            "interruption-level"
+        )
+        for r in apple.requests
+    }
+    assert levels == {
+        ("assignment", "tok-entitled"): "time-sensitive",
+        ("assignment", "tok-released"): None,
+        ("course", "tok-entitled"): None,
+        ("course", "tok-released"): None,
+        ("other", "tok-entitled"): None,
+        ("other", "tok-released"): None,
+    }
+
+
 @pytest.mark.parametrize(
     "case,platform,app_version",
     [
