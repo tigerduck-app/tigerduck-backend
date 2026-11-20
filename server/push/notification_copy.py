@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timedelta
 from typing import Any
 
-from server.i18n import format_units, translate
+from server.i18n import format_units, is_chinese, translate
 
 REAUTH_SCENARIO = "reauth_required"
 
@@ -27,6 +27,17 @@ SESSION_REAUTH_REASON = "session"
 #: per recipient. `push/reminders.py` writes these; the payload a device
 #: receives has them replaced by the finished `title` and `body`.
 REMINDER_COPY_INPUTS = ("assignment_title", "course_name")
+
+#: In a class reminder's or class Live Activity start's payload: the class is
+#: held online (`push/course_reminders.py`, `push/class_starts.py`), so the
+#: room reads `course_change_online` in the recipient's language.
+ONLINE = "online"
+
+#: What a class reminder's payload carries so its copy can be written per
+#: recipient: the course's name, an assessment's names and `ONLINE`.
+CLASS_REMINDER_COPY_INPUTS = ("course_name", "assessment_zh", "assessment_en", ONLINE)
+
+_ONLINE_KEY = "course_change_online"
 
 _REMINDER_TITLE_KEY = "notification_assignment_reminder_title_time_left"
 
@@ -235,17 +246,37 @@ def build_assignment_reminder_payload(
 def build_course_reminder_payload(
     payload: dict[str, Any], *, locale: str | None
 ) -> dict[str, Any]:
-    """The class reminder one recipient receives, titled in `locale`.
+    """The class reminder one recipient receives, in `locale`.
 
-    The body, the class's start time and room, reads the same in every
-    language and is written when the scan files the job. A job filed before
-    the title moved to send time carries a Chinese title and goes out as
-    filed; the scan files reminders at most 48 hours ahead.
+    The body is the class's start time and room, written when the scan files
+    the job, which read the same in every language. An online class has
+    `course_change_online` in place of its room, and an assessment's name
+    comes first, Chinese for a Chinese locale and English for any other:
+    "期中考 · 09:10 · IB-101". A job filed before the title moved to send time
+    carries a Chinese title and goes out as filed; the scan files reminders
+    at most 48 hours ahead.
     """
     if "course_name" not in payload:
         return payload
-    delivered = {key: value for key, value in payload.items() if key != "course_name"}
+    delivered = {
+        key: value for key, value in payload.items() if key not in CLASS_REMINDER_COPY_INPUTS
+    }
     delivered["title"] = _render(
         translate(_CLASS_REMINDER_TITLE_KEY, locale), str(payload["course_name"] or "")
     )
+    assessment = payload.get("assessment_zh" if is_chinese(locale) else "assessment_en")
+    online = translate(_ONLINE_KEY, locale) if payload.get(ONLINE) else None
+    delivered["body"] = " · ".join(
+        str(part) for part in (assessment, payload.get("body"), online) if part
+    )
+    return delivered
+
+
+def build_class_start_payload(payload: dict[str, Any], *, locale: str | None) -> dict[str, Any]:
+    """The class Live Activity start one recipient receives: an online
+    class's location `course_change_online` in `locale`."""
+    if ONLINE not in payload:
+        return payload
+    delivered = {key: value for key, value in payload.items() if key != ONLINE}
+    delivered["locationText"] = translate(_ONLINE_KEY, locale)
     return delivered

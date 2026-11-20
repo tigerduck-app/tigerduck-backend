@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -41,6 +42,7 @@ from server.auth.models import (
 )
 from server.config import Settings
 from server.db import in_array, session_scope
+from server.push.notification_copy import CLASS_REMINDER_COPY_INPUTS, ONLINE
 from server.push.reminders import file_jobs
 from server.sync.models import (
     UserCourse,
@@ -178,12 +180,22 @@ def class_meetings(
     return sorted(occurrences.items())
 
 
+class Meeting(NamedTuple):
+    """A class meeting as the school's course changes leave it."""
+
+    start: datetime
+    #: None for an online class.
+    room: str | None
+    #: The assessment's Chinese and English names.
+    assessment: tuple[str, str] | None
+    online: bool
+
+
 def changed_meeting(
     changes: Sequence[Row], course: UserCourse, occurrence: datetime, period: str, tz: tzinfo
-) -> tuple[datetime, str | None] | None:
-    """The start and room of the meeting of `course` that starts in `period`
-    at `occurrence`, as the school's course changes leave them; None when it
-    is cancelled."""
+) -> Meeting | None:
+    """The meeting of `course` that starts in `period` at `occurrence`, as
+    the school's course changes leave it; None when it is cancelled."""
     day = occurrence.astimezone(tz).date()
     changed = (
         meeting_changes(
@@ -197,14 +209,27 @@ def changed_meeting(
     if "start" in changed:
         hour, minute = changed["start"].start_time.split(":")
         occurrence = datetime.combine(day, time(int(hour), int(minute)), tzinfo=tz)
-    room = changed["room"].room if "room" in changed else course.classroom
-    return occurrence.astimezone(UTC), room
+    online = "online" in changed
+    room = None if online else changed["room"].room if "room" in changed else course.classroom
+    exam = changed.get("assessment")
+    return Meeting(
+        occurrence.astimezone(UTC), room, exam and (exam.note_zh, exam.note_en), online
+    )
 
 
-def _reminder_body(start: datetime, room: str | None, tz: tzinfo) -> str:
-    # The start time and room, as Android's own class reminder shows them; the
-    # same in every language.
-    return " · ".join(part for part in (f"{start.astimezone(tz):%H:%M}", room) if part)
+def _reminder_copy(meeting: Meeting, tz: tzinfo) -> dict:
+    """The payload's body, the start time and room as Android's own class
+    reminder shows them, and the inputs the rest of its copy is written from
+    per recipient (`notification_copy.build_course_reminder_payload`)."""
+    body = " · ".join(
+        part for part in (f"{meeting.start.astimezone(tz):%H:%M}", meeting.room) if part
+    )
+    copy: dict = {"body": body}
+    if meeting.assessment:
+        copy["assessment_zh"], copy["assessment_en"] = meeting.assessment
+    if meeting.online:
+        copy[ONLINE] = True
+    return copy
 
 
 async def recheck_class_reminder(
@@ -240,10 +265,15 @@ async def recheck_class_reminder(
         period_times=period_times,
     ):
         meeting = changed_meeting(changes, course, occurrence, period, tz)
-        if meeting is not None and meeting[0] == start:
+        if meeting is not None and meeting.start == start:
             if "course_name" not in payload:
                 return payload
-            return {**payload, "body": _reminder_body(*meeting, tz)}
+            kept = {
+                key: value
+                for key, value in payload.items()
+                if key == "course_name" or key not in CLASS_REMINDER_COPY_INPUTS
+            }
+            return {**kept, **_reminder_copy(meeting, tz)}
     return None
 
 
@@ -370,7 +400,8 @@ async def scan_course_reminders(
     user_course_skipped_dates are excluded, and so are days no published
     term runs on (`outside_term`). The school's course changes apply
     (`changed_meeting`): a cancelled class files nothing, a new start moves
-    the reminder and a new room reaches its body. Cancellation mirrors
+    the reminder, and a new room, an online class and an assessment reach
+    its body. Cancellation mirrors
     assignment reminders: pending jobs whose dedupe key no longer maps to an
     eligible (course, occurrence, offset) tuple are cancelled, under SKIP
     LOCKED so a job the pipeline is claiming concurrently is left alone.
@@ -597,12 +628,12 @@ async def scan_course_reminders(
                 meeting = changed_meeting(changes, course, occurrence, period, tz)
                 if meeting is None:
                     continue
-                occurrence, room = meeting
+                occurrence = meeting.start
                 # Begun, so it files nothing and its pending reminders go below.
                 if occurrence <= now:
                     continue
                 start_epoch = int(occurrence.timestamp())
-                body = _reminder_body(occurrence, room, tz)
+                copy = _reminder_copy(meeting, tz)
                 for offset in offsets:
                     fire_at = occurrence - timedelta(minutes=offset)
                     key = _dedupe_key(course.id, offset, start_epoch)
@@ -624,7 +655,7 @@ async def scan_course_reminders(
                                 # language at send time
                                 # (`notification_copy.build_course_reminder_payload`).
                                 "course_name": display_name,
-                                "body": body,
+                                **copy,
                                 "semester": course.semester,
                                 "course_key": course.course_key,
                                 "user_course_id": course.id,

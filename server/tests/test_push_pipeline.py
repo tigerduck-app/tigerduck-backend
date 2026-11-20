@@ -1992,6 +1992,71 @@ async def test_a_change_to_the_days_other_meeting_leaves_the_start_alone(
     assert _sent_snapshot(apple)["locationText"] == "TR-412"
 
 
+_MIDTERM = {"note_zh": "期中考", "note_en": "Midterm exam"}
+
+
+async def test_a_class_start_says_its_class_is_an_assessment(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(
+        db_session,
+        scenario="classPreparing",
+        changes=[("assessment", _MIDTERM), ("room", {"room": "IB-101"})],
+    )
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    snapshot = _sent_snapshot(apple)
+    assert (snapshot["assessment"], snapshot["locationText"], snapshot["roomChanged"]) == (
+        True, "IB-101", True,
+    )
+
+
+async def test_a_class_start_drops_an_assessment_the_school_no_longer_lists(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(db_session, scenario="inClass", changes=[])
+    job.payload = {**job.payload, "assessment": True}
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    snapshot = _sent_snapshot(apple)
+    assert "assessment" not in snapshot
+    assert "roomChanged" not in snapshot
+
+
+@pytest.mark.parametrize(("locale", "location"), [("en-US", "Online"), ("zh-Hant-TW", "線上")])
+async def test_an_online_class_start_reads_online_in_the_devices_language(
+    db_session, prepared_engine, test_settings, locale, location
+):
+    job, _ = await _changed_class_start(
+        db_session, scenario="classPreparing", changes=[("online", {"note_zh": "同步視訊"})]
+    )
+    (await db_session.scalar(select(UserDevice))).locale = locale
+    await db_session.commit()
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    snapshot = _sent_snapshot(apple)
+    assert (snapshot["locationText"], snapshot["roomChanged"]) == (location, True)
+    assert "online" not in snapshot and "assessment" not in snapshot
+
+
+async def test_a_cancelled_assessment_starts_no_activity(
+    db_session, prepared_engine, test_settings
+):
+    job, _ = await _changed_class_start(
+        db_session, scenario="classPreparing",
+        changes=[("assessment", _MIDTERM), ("online", {}), ("cancelled", {})],
+    )
+
+    apple = await _tick(db_session, prepared_engine, test_settings, [job])
+
+    assert apple.requests == []
+    assert (job.status, job.last_error) == ("cancelled", "class_changed")
+
+
 async def test_a_class_start_is_dropped_when_its_check_fails(
     db_session, prepared_engine, test_settings, monkeypatch
 ):
