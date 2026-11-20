@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import structlog
-from typing import Annotated
-
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 
@@ -132,7 +131,7 @@ async def get_course_changes(
     response: Response,
     session: SessionDep,
     term: str | None = None,
-    kinds: Annotated[list[str], Query()] = [],
+    kinds: Annotated[list[str] | None, Query()] = None,
 ) -> CourseChangesResponse | Response:
     """A term's course changes, the current term's (`current_term_code`)
     when `term` is left out.
@@ -146,7 +145,7 @@ async def get_course_changes(
     class days: a client that starts listing a kind, a delete, an edit and a
     calendar edit that moves a change's class days each change it.
     """
-    listed = {kind.strip() for value in kinds for kind in value.split(",")} & LISTED_KINDS
+    listed = {kind.strip() for value in kinds or () for kind in value.split(",")} & LISTED_KINDS
     code = term or await current_term_code(session, datetime.now(UTC))
     if code is None or await session.get(SemesterTerm, code) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="term_not_found")
