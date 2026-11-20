@@ -30,12 +30,17 @@ REMINDER_COPY_INPUTS = ("assignment_title", "course_name")
 
 _REMINDER_TITLE_KEY = "notification_assignment_reminder_title_time_left"
 
-#: How late an assignment reminder may go out and still state its offset as
-#: the time left. The pipeline sends a due reminder within its 5-second tick
-#: and the pre-send check's 5 seconds; every path that holds one back (a
-#: retry round, an unverified check, the countdown wait, a restart) adds a
-#: minute or more. Within 30 seconds the offset is also the time left
-#: rounded to the nearest minute.
+# The apps' title, naming the course, for a reminder whose payload holds no
+# time to count the time left from.
+_REMINDER_COURSE_TITLE_KEY = "notification_assignment_reminder_title"
+
+#: How late an assignment reminder may go out and still state its offset:
+#: less than this or a sixtieth of the offset, whichever is longer. The
+#: pipeline sends a due reminder within its 5-second tick and the pre-send
+#: check's 5 seconds, but a burst of checks holds some longer, and a 24-hour
+#: reminder must not read "23 hr, 59 min" over its "24 hours left" body.
+#: Within a sixtieth the offset is still the time left, rounded, in its own
+#: unit; within 30 seconds, to the nearest minute.
 REMINDER_ON_TIME = timedelta(seconds=30)
 
 _TWO_DAYS_MINUTES = 48 * 60
@@ -128,14 +133,32 @@ def _render(template: str, *args: str) -> str:
     return _PLACEHOLDER.sub(substitute, template)
 
 
-def _minutes_left(offset_minutes: int, due_epoch: Any, now: datetime) -> int:
+def reminder_due_epoch(payload: dict[str, Any]) -> int | None:
+    """The due time a reminder was filed for, in unix seconds, as the scan
+    writes it, or None."""
+    due_epoch = payload.get("due_epoch")
+    return due_epoch if type(due_epoch) is int else None
+
+
+def _minutes_left(payload: dict[str, Any], now: datetime) -> int | None:
     """The time left the title states, in whole minutes: the offset for a
-    reminder sent within `REMINDER_ON_TIME` of its fire time, otherwise the
-    time from `now` to the due time, rounded down."""
-    if type(due_epoch) is not int:
+    reminder sent on time (`REMINDER_ON_TIME`), otherwise the time from
+    `now` to the due time, rounded down. None when the payload holds
+    neither."""
+    offset_hours = payload.get("offset_hours")
+    offset_minutes = (
+        round(offset_hours * 60)
+        if isinstance(offset_hours, (int, float)) and not isinstance(offset_hours, bool)
+        else None
+    )
+    due_epoch = reminder_due_epoch(payload)
+    if due_epoch is None:
         return offset_minutes
     seconds_left = due_epoch - now.timestamp()
-    if seconds_left >= offset_minutes * 60 - REMINDER_ON_TIME.total_seconds():
+    # A sixtieth of the offset, in seconds, is the offset's count of minutes.
+    if offset_minutes is not None and offset_minutes * 60 - seconds_left < max(
+        REMINDER_ON_TIME.total_seconds(), offset_minutes
+    ):
         return offset_minutes
     return int(seconds_left // 60)
 
@@ -159,8 +182,8 @@ def build_assignment_reminder_payload(
 ) -> dict[str, Any]:
     """The assignment reminder one recipient receives at `now`, in `locale`.
 
-    The title states the time left until the due time (`_minutes_left`).
-    The body is the apps' own, from when they scheduled these reminders
+    The title states the time left until the due time (`_minutes_left`),
+    or names the course when there is no time to count it from. The body is the apps' own, from when they scheduled these reminders
     themselves: it names the course and the assignment, and its wording
     follows the offset (`reminder_body_key`). No body states a fractional
     hour -- only `24h` names a number at all.
@@ -178,12 +201,17 @@ def build_assignment_reminder_payload(
     course_name = str(payload.get("course_name") or "")
     offset_minutes = round(float(payload.get("offset_hours") or 0) * 60)
 
-    title = _render(
-        translate(_REMINDER_TITLE_KEY, locale),
-        _time_left_text(
-            _minutes_left(offset_minutes, payload.get("due_epoch"), now), locale
-        ),
-    )
+    minutes_left = _minutes_left(payload, now)
+    if minutes_left is None:
+        title = _render(
+            translate(_REMINDER_COURSE_TITLE_KEY, locale),
+            course_name or assignment_title,
+        )
+    else:
+        title = _render(
+            translate(_REMINDER_TITLE_KEY, locale),
+            _time_left_text(minutes_left, locale),
+        )
     body = _render(
         translate(reminder_body_key(offset_minutes), locale),
         course_name,

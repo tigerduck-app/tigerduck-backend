@@ -13,7 +13,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from server.push.dedupe import SCHEDULE_CHANNEL
-from server.push.notification_copy import REAUTH_SCENARIO, SESSION_REAUTH_REASON
+from server.push.notification_copy import (
+    REAUTH_SCENARIO,
+    SESSION_REAUTH_REASON,
+    reminder_due_epoch,
+)
 from server.push.payload import (
     ApnsRequest,
     FcmRequest,
@@ -90,8 +94,8 @@ def _alert_expiration(
     reminder is held until its due time at most: a phone offline until
     after the deadline must not show "due in 2 hours" when it comes back."""
     expiration = timestamp + ttl_seconds
-    due_epoch = payload.get("due_epoch")
-    if channel == REMINDER_CHANNEL and type(due_epoch) is int:
+    due_epoch = reminder_due_epoch(payload)
+    if channel == REMINDER_CHANNEL and due_epoch is not None:
         return min(expiration, due_epoch)
     return expiration
 

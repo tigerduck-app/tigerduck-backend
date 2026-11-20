@@ -204,14 +204,18 @@ def test_a_reminder_sent_on_time_states_its_offset(offset_hours, zh_hant, en):
 @pytest.mark.parametrize(
     ("offset_hours", "late", "zh_hant"),
     [
-        # Within the pipeline's usual lateness the offset still holds, to
-        # the nearest minute.
-        (5 / 60, timedelta(seconds=30), "作業提醒：還有 5 分鐘"),
-        # Later, the time really left, rounded down to the minute.
-        (5 / 60, timedelta(seconds=31), "作業提醒：還有 4 分鐘"),
-        (24, timedelta(minutes=5), "作業提醒：還有 23 小時 55 分鐘"),
-        (48, timedelta(minutes=2), "作業提醒：還有 47 小時 58 分鐘"),
-        (72, timedelta(minutes=1), "作業提醒：還有 2 天 23 小時"),
+        # Late by less than max(30 s, a sixtieth of the offset), the offset
+        # still holds; later, the time really left, rounded down.
+        (5 / 60, timedelta(seconds=29), "作業提醒：還有 5 分鐘"),
+        (5 / 60, timedelta(seconds=30), "作業提醒：還有 4 分鐘"),
+        (0.5, timedelta(seconds=29), "作業提醒：還有 30 分鐘"),
+        (0.5, timedelta(seconds=30), "作業提醒：還有 29 分鐘"),
+        (1, timedelta(seconds=59), "作業提醒：還有 1 小時"),
+        (1, timedelta(seconds=60), "作業提醒：還有 59 分鐘"),
+        (24, timedelta(minutes=23, seconds=59), "作業提醒：還有 24 小時"),
+        (24, timedelta(minutes=24), "作業提醒：還有 23 小時 36 分鐘"),
+        (48, timedelta(minutes=50), "作業提醒：還有 47 小時 10 分鐘"),
+        (72, timedelta(hours=2), "作業提醒：還有 2 天 22 小時"),
         (1, timedelta(minutes=60), "作業提醒：還有 1 分鐘"),
         (1, timedelta(minutes=75), "作業提醒：還有 1 分鐘"),
     ],
@@ -335,6 +339,44 @@ def test_the_babel_locale_cache_holds_one_entry_per_bundle():
     for n in range(200):
         format_units([(1, "duration-hour")], f"zz-{n}")
     assert _babel_locale.cache_info().currsize <= len(LOCALES) + 2
+
+
+@pytest.mark.parametrize(
+    "due_epoch",
+    [str(int(DUE.timestamp())), DUE.timestamp(), None],
+    ids=["string", "float", "missing"],
+)
+def test_a_title_with_no_time_to_state_names_the_course(due_epoch):
+    """Without an offset and a due time the scan writes, no time left can be
+    computed, so the title is the one the apps used, naming the course."""
+    payload = _reminder(24.0)
+    del payload["offset_hours"]
+    if due_epoch is None:
+        del payload["due_epoch"]
+    else:
+        payload["due_epoch"] = due_epoch
+    sent = build_assignment_reminder_payload(
+        payload, locale="en", now=_on_time(24.0)
+    )
+    assert sent["title"] == f"Assignment reminder: {COURSE}"
+
+
+def test_a_title_without_an_offset_states_the_time_to_the_due_time():
+    payload = _reminder(24.0)
+    del payload["offset_hours"]
+    sent = build_assignment_reminder_payload(
+        payload, locale="en", now=_on_time(1.5)
+    )
+    assert sent["title"] == "Assignment reminder: 1 hr, 30 min left"
+
+
+def test_a_title_without_a_due_time_states_the_offset():
+    payload = _reminder(2.0)
+    payload["due_epoch"] = "soon"
+    sent = build_assignment_reminder_payload(
+        payload, locale="en", now=_on_time(1.0)
+    )
+    assert sent["title"] == "Assignment reminder: 2 hr left"
 
 
 def test_an_unknown_course_leaves_no_double_space():
