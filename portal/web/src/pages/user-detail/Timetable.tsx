@@ -45,7 +45,7 @@ export function isoDate(start: string, offset: number): string {
 
 /** Each meeting split into runs of consecutive periods. */
 function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
-  const rooms = changes.filter((c) => c.kind === "room");
+  const rooms = changes.filter((c) => c.kind === "room" || c.kind === "online");
   const cancels = changes.filter((c) => c.kind === "cancelled");
   const out: Block[] = [];
   for (const c of courses) {
