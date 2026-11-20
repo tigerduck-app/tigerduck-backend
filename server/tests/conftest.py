@@ -489,6 +489,22 @@ def extracted_change(**fields) -> dict:
     }
 
 
+def extracted_exam(**fields) -> dict:
+    """An exam as the extraction schema shapes it: the midterm on Monday
+    2026-11-16 unless `fields` say otherwise."""
+    return {
+        "kind": "midterm",
+        "name": None,
+        "date": "2026-11-16",
+        "start_time": None,
+        "end_time": None,
+        "room": None,
+        "scope": None,
+        "evidence": "11/16（一）期中考",
+        **fields,
+    }
+
+
 def extraction_answer(**fields) -> dict:
     """An answer under the extraction schema, certain and with no fact
     unless `fields` add them."""

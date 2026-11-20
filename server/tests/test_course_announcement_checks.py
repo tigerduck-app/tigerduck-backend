@@ -17,13 +17,14 @@ from server.course_announcements.checks import (
     change_payload,
     check_change,
     contradiction,
+    exam_payload,
     has_schedule,
     lock_courses,
     passes,
     stated_weekdays,
 )
 from server.sync.models import UserCourse
-from server.tests.conftest import extracted_change
+from server.tests.conftest import extracted_change, extracted_exam
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -73,14 +74,16 @@ async def course(db_session):
     await db_session.commit()
 
 
-async def _check(db_session, fact=None, *, announcement=None, course_no="CS1001301", **kw):
+async def _check(
+    db_session, fact=None, *, announcement=None, course_no="CS1001301", payload=None, **kw
+):
     term_days = await lock_courses(db_session, "1151", [course_no])
     checks = await check_change(
         db_session,
         term="1151",
         term_days=term_days,
         course_no=course_no,
-        payload=change_payload(fact or extracted_change()),
+        payload=payload or change_payload(fact or extracted_change()),
         evidence=(fact or extracted_change())["evidence"],
         announcement=announcement or _announcement(),
         **kw,
@@ -239,6 +242,46 @@ async def test_the_classifier_and_the_llm_must_agree_on_the_kind(
     )
 
     assert checks["labels"]["ok"] is ok
+
+
+@pytest.mark.parametrize(
+    ("classifier", "llm", "ok"),
+    [
+        (["exam_info"], ["exam_info"], True),
+        (["exam_change"], ["exam_info", "class_change"], True),
+        (["class_change"], ["exam_info"], False),
+        (["exam_info"], ["class_change"], False),
+    ],
+)
+async def test_an_assessment_takes_an_exam_label_from_both(
+    db_session, course, classifier, llm, ok
+):
+    exam = extracted_exam(date="2026-11-19", evidence="11/19（四）停課")
+
+    checks = await _check(
+        db_session, exam, payload=exam_payload(exam),
+        announcement=_announcement(labels=classifier, llm_labels=llm),
+    )
+
+    assert checks["labels"]["ok"] is ok
+    assert checks["rules"]["ok"]
+
+
+async def test_an_assessment_without_its_english_name_breaks_the_rules(db_session, course):
+    exam = extracted_exam(kind="other", name="期中專題", date="2026-11-19")
+
+    payload = exam_payload(exam)
+    checks = await _check(db_session, exam, payload=payload)
+
+    assert (payload["note_zh"], payload["note_en"]) == ("期中專題", None)
+    assert checks["rules"] == {"ok": False, "codes": ["format"], "change_ids": []}
+
+
+async def test_an_online_class_needs_no_description(db_session, course):
+    fact = extracted_change(kind="online", note_zh="  ")
+
+    assert (await _check(db_session, extracted_change(kind="online")))["rules"]["ok"]
+    assert (await _check(db_session, fact))["rules"]["codes"] == ["format"]
 
 
 async def test_an_uncertain_extraction_fails_the_certainty_check(db_session, course):

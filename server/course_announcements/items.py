@@ -1,7 +1,9 @@
 """Review items: what one extraction asks of `course_changes`, per course
 code, and the make-up classes and exams it shows.
 
-A course change becomes an add item, or a replace item when the
+An exam dated on a class day of a course is an assessment of that day for
+the course (`exam_payload`); an exam with no date or on no class day stays
+information. A course change becomes an add item, or a replace item when the
 announcement already has an applied change of that kind on its day. An
 applied change of the announcement that the extraction no longer states, or
 whose day this or a later announcement of the course holds as usual,
@@ -31,7 +33,9 @@ from server.course_announcements.checks import (
     contradiction,
     course_statements,
     covers_day,
+    exam_payload,
     has_schedule,
+    is_class_day,
     lock_courses,
     passes,
     same_class_time,
@@ -47,7 +51,8 @@ from server.course_announcements.models import (
 )
 from server.db import in_array, session_scope
 
-# Fields a stored change keeps that an extraction never states.
+# Fields a stored change keeps that an extraction does not state, or states
+# only as a default an operator may have edited: the English text.
 _UNSTATED = ("note_en",)
 
 
@@ -69,6 +74,9 @@ async def record_items(
     term_days = await lock_courses(session, term, codes)
     statements = await course_statements(session, term, codes)
     facts = _unique((change_payload(fact), fact["evidence"]) for fact in output["course_changes"])
+    dated = [(n, exam) for n, exam in enumerate(output["exams"]) if exam["date"]]
+    # The exams that are an assessment of some course's class day, by index.
+    assessed: set[int] = set()
     held = [(date.fromisoformat(h["date"]), h["evidence"]) for h in output["held_as_usual"]]
     context = Announcement(
         text=announcement.text or "",
@@ -98,10 +106,17 @@ async def record_items(
             if facts:
                 items.append(_item(extraction, code, state=ItemState.skipped))
             continue
+        exams = [
+            (n, exam)
+            for n, exam in dated
+            if await is_class_day(session, term, code, date.fromisoformat(exam["date"]))
+        ]
+        assessed |= {n for n, _ in exams}
+        stated = facts + _unique((exam_payload(exam), exam["evidence"]) for _, exam in exams)
         sourced = await _sourced_changes(session, term, code)
         own = [change for change, _ in sourced if change.source_announcement_id == announcement.id]
-        replaced = _pair(own, [payload for payload, _ in facts])
-        for (payload, evidence), current in zip(facts, replaced, strict=True):
+        replaced = _pair(own, [payload for payload, _ in stated])
+        for (payload, evidence), current in zip(stated, replaced, strict=True):
             if current is not None and _same(stored_payload(current), payload):
                 continue
             edits_applied = edits_applied or current is not None
@@ -160,7 +175,9 @@ async def record_items(
                 )
             )
     for kind, key in ((ItemKind.makeup, "makeup_classes"), (ItemKind.exam, "exams")):
-        for fact in output[key]:
+        for n, fact in enumerate(output[key]):
+            if kind == ItemKind.exam and n in assessed:
+                continue
             payload = {field: value for field, value in fact.items() if field != "evidence"}
             items.append(
                 _item(extraction, None, kind=kind, state=ItemState.info, payload=payload,

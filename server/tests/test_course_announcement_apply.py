@@ -18,6 +18,7 @@ from server.course_announcements.models import (
 from server.tests.conftest import (
     AnnouncementCourse,
     extracted_change,
+    extracted_exam,
     extraction_answer,
 )
 
@@ -92,6 +93,43 @@ async def test_automatic_apply_writes_the_change_with_its_source_actor_and_audit
         "kind": "cancelled",
         "announcement_id": key,
     }
+
+
+async def test_automatic_apply_writes_a_midterm_with_exam_labels_from_both(announcement_course):
+    await announcement_course.post(text="11/16（一）期中考", scores={"exam_info": 0.98})
+
+    await announcement_course.extract(
+        extraction_answer(labels=["exam_change"], exams=[extracted_exam()]), auto_apply=True
+    )
+
+    (item,) = await announcement_course.items()
+    (change,) = await announcement_course.changes()
+    assert (item.state, item.course_change_id) == ("applied", change.id)
+    assert (change.kind, change.note_zh, change.note_en, change.start_date) == (
+        "assessment", "期中考", "Midterm exam", date(2026, 11, 16),
+    )
+
+
+@pytest.mark.parametrize(
+    ("scores", "labels", "exam"),
+    [
+        ({"class_change": 0.98}, ["class_change"], extracted_exam()),
+        ({"exam_info": 0.98}, ["exam_info"], extracted_exam(kind="other", name="期中考")),
+    ],
+    ids=["class-labels", "no-english-name"],
+)
+async def test_an_assessment_waits_without_exam_labels_or_an_english_name(
+    announcement_course, scores, labels, exam
+):
+    await announcement_course.post(text="11/16（一）期中考", scores=scores)
+
+    await announcement_course.extract(
+        extraction_answer(labels=labels, exams=[exam]), auto_apply=True
+    )
+
+    (item,) = await announcement_course.items()
+    assert (item.state, item.passes_checks) == ("pending", False)
+    assert await announcement_course.changes() == []
 
 
 async def test_one_failing_change_holds_every_change_of_the_announcement(announcement_course):

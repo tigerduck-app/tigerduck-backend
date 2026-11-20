@@ -2,9 +2,9 @@
 is read: the course changes, the days held as usual, the make-up classes and
 the exams it states, each with a span quoted from the text.
 
-The rules and schema are the benchmarked ones with the days held as usual
-added, and the text is the unmasked one the portal shows, against which
-the evidence is checked.
+The rules and schema are the benchmarked ones with the days held as usual,
+the online class and an exam's name added, and the text is the unmasked one
+the portal shows, against which the evidence is checked.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ RULES = """# 課程公告抽取規則
 
 ## course_changes：這門課既有上課的變動
 
-- `cancelled`：停課。`room`：改教室，`room` 填新教室。`start` / `end`：上課時間提早或延後，填新的 `HH:mm`。`note`：其他變動，例如改線上、改非同步，`note_zh` 寫 40 字內的中文說明。
+- `cancelled`：停課。`room`：改教室，`room` 填新教室。`start` / `end`：上課時間提早或延後，填新的 `HH:mm`。`online`：那次課改線上，同步或非同步都算，`note_zh` 寫 40 字內的中文說明，沒有說明就 null。`note`：其他變動，`note_zh` 寫 40 字內的中文說明。
 - 每個受影響的日期一筆，`mode` 為 `day`，`end_date` 等於 `start_date`。原文明寫一段連續期間（「12/1 到 12/15 停課」）才用 `range`。`excluded_weekdays` 除非原文寫明，一律空陣列。
 - `periods`：原文寫了節次才填（NTUST 節次字串，如 "3"、"A"），否則 null。沒寫的欄位一律 null。
 - 補課不放這裡，放 `makeup_classes`。照常上課不放這裡，放 `held_as_usual`。
@@ -50,7 +50,7 @@ RULES = """# 課程公告抽取規則
 ## makeup_classes 與 exams
 
 - `makeup_classes`：另外加開的補課，填日期、時間或節次、教室。
-- `exams`：有寫考試的公告。`kind` 是 `midterm`（期中）、`final`（期末）、`quiz`（小考）或 `other`。沒寫日期時 `date` 為 null。`scope` 是 40 字內的考試範圍，沒寫就 null。
+- `exams`：有寫考試的公告。`kind` 是 `midterm`（期中）、`final`（期末）、`quiz`（小考）或 `other`。`name` 是原文寫的考試名稱，沒寫就 null。沒寫日期時 `date` 為 null。`scope` 是 40 字內的考試範圍，沒寫就 null。
 
 ## evidence
 
@@ -112,7 +112,7 @@ SCHEMA: dict[str, Any] = {
     "properties": {
         "labels": {"type": "array", "items": {"enum": list(LABELS)}},
         "course_changes": _facts(
-            kind={"enum": ["cancelled", "room", "start", "end", "note"]},
+            kind={"enum": ["cancelled", "room", "start", "end", "online", "note"]},
             mode={"enum": ["day", "range"]},
             start_date=_DATE,
             end_date=_DATE,
@@ -138,6 +138,7 @@ SCHEMA: dict[str, Any] = {
         ),
         "exams": _facts(
             kind={"enum": ["midterm", "final", "quiz", "other"]},
+            name=_TEXT,
             date={**_DATE, "type": ["string", "null"]},
             start_time=_TEXT,
             end_time=_TEXT,
