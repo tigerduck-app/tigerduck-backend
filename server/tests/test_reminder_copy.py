@@ -21,7 +21,7 @@ from sqlalchemy import select
 from server.auth.crypto import CredentialCipher
 from server.auth.models import DevicePushToken, PushJob, User, UserDevice
 from server.db import build_session_factory
-from server.i18n import _BUNDLE_DIR, translate
+from server.i18n import _BUNDLE_DIR, _babel_locale, format_units, translate
 from server.push.apns_client import SendResult
 from server.push.notification_copy import (
     build_assignment_reminder_payload,
@@ -39,7 +39,7 @@ from server.tests.conftest import SubmissionStatusStub
 # warns when the asyncio mark reaches one (same note in test_reauth_push.py).
 asyncio_session = pytest.mark.asyncio(loop_scope="session")
 
-TITLE_KEY = "notification_assignment_reminder_title"
+TITLE_KEY = "notification_assignment_reminder_title_time_left"
 BODY_KEY = "notification_assignment_reminder_body_"
 COURSE = "資料結構"
 ASSIGNMENT = "HW3"
@@ -64,6 +64,8 @@ IOS_OFFSET_BODIES = [
 
 LOCALES = sorted(path.stem for path in _BUNDLE_DIR.glob("*.json"))
 
+DUE = datetime(2026, 9, 20, tzinfo=UTC)
+
 
 def _reminder(offset_hours: float, *, course: str | None = COURSE) -> dict:
     """A payload in the shape `scan_assignment_reminders` files."""
@@ -73,10 +75,15 @@ def _reminder(offset_hours: float, *, course: str | None = COURSE) -> dict:
         "course_name": course,
         "moodle_assignment_id": 3,
         "moodle_course_id": 7001,
-        "due_at": "2026-09-20T00:00:00+00:00",
-        "due_epoch": 1_789_862_400,
+        "due_at": DUE.isoformat(),
+        "due_epoch": int(DUE.timestamp()),
         "offset_hours": offset_hours,
     }
+
+
+def _on_time(offset_hours: float) -> datetime:
+    """The reminder's fire time, when the pipeline sends one on time."""
+    return DUE - timedelta(hours=offset_hours)
 
 
 def _expected(key: str, locale: str, *args: str) -> str:
@@ -129,9 +136,11 @@ def test_every_locale_renders_every_offset_completely():
     for locale in LOCALES:
         for minutes, _ in IOS_OFFSET_BODIES:
             sent = build_assignment_reminder_payload(
-                _reminder(minutes / 60), locale=locale
+                _reminder(minutes / 60), locale=locale, now=_on_time(minutes / 60)
             )
-            want_title = _expected(TITLE_KEY, locale, COURSE)
+            want_title = _expected(
+                TITLE_KEY, locale, _time_left(minutes, locale)
+            )
             want_body = _expected(reminder_body_key(minutes), locale, COURSE, ASSIGNMENT)
             if sent["title"] != want_title or sent["body"] != want_body:
                 problems.append((locale, minutes, sent["title"], sent["body"]))
@@ -141,24 +150,132 @@ def test_every_locale_renders_every_offset_completely():
     assert not problems, problems[:10]
 
 
-def test_the_title_names_the_course_and_the_body_names_both():
-    """The apps' argument order: title (course), body (course, assignment)."""
-    sent = build_assignment_reminder_payload(_reminder(24.0), locale="en")
-    assert sent["title"] == _expected(TITLE_KEY, "en", COURSE)
-    assert COURSE in sent["title"] and ASSIGNMENT not in sent["title"]
+def _time_left(minutes: int, locale: str) -> str:
+    """An offered offset as the title states it: hours up to two days."""
+    hours, minutes = divmod(minutes, 60)
+    units = [(hours, "duration-hour"), (minutes, "duration-minute")]
+    return format_units([unit for unit in units if unit[0]], locale)
+
+
+def test_the_title_states_the_time_left_and_the_body_names_both():
+    """The title leaves the course to the body, which names the course and
+    the assignment as the apps' bodies do."""
+    sent = build_assignment_reminder_payload(
+        _reminder(24.0), locale="en", now=_on_time(24.0)
+    )
+    assert sent["title"] == "Assignment reminder: 24 hr left"
+    assert COURSE not in sent["title"] and ASSIGNMENT not in sent["title"]
     assert sent["body"] == _expected(BODY_KEY + "24h", "en", COURSE, ASSIGNMENT)
 
 
-def test_an_unknown_course_leaves_no_empty_title_and_no_double_space():
-    sent = build_assignment_reminder_payload(_reminder(24.0, course=None), locale="en")
-    assert sent["title"] == _expected(TITLE_KEY, "en", ASSIGNMENT)
+# Minutes below an hour, hours from one hour through two days, days beyond;
+# at most the two largest units that are not zero.
+OFFER_TITLES = [
+    (48, "作業提醒：還有 48 小時", "Assignment reminder: 48 hr left"),
+    (24, "作業提醒：還有 24 小時", "Assignment reminder: 24 hr left"),
+    (16, "作業提醒：還有 16 小時", "Assignment reminder: 16 hr left"),
+    (8, "作業提醒：還有 8 小時", "Assignment reminder: 8 hr left"),
+    (4, "作業提醒：還有 4 小時", "Assignment reminder: 4 hr left"),
+    (2, "作業提醒：還有 2 小時", "Assignment reminder: 2 hr left"),
+    (1, "作業提醒：還有 1 小時", "Assignment reminder: 1 hr left"),
+    (0.5, "作業提醒：還有 30 分鐘", "Assignment reminder: 30 min left"),
+    (0.25, "作業提醒：還有 15 分鐘", "Assignment reminder: 15 min left"),
+    (10 / 60, "作業提醒：還有 10 分鐘", "Assignment reminder: 10 min left"),
+    (5 / 60, "作業提醒：還有 5 分鐘", "Assignment reminder: 5 min left"),
+    # Offsets no app offers: a document edited by hand, the server default.
+    (1.5, "作業提醒：還有 1 小時 30 分鐘", "Assignment reminder: 1 hr, 30 min left"),
+    (36, "作業提醒：還有 36 小時", "Assignment reminder: 36 hr left"),
+    (50, "作業提醒：還有 2 天 2 小時", "Assignment reminder: 2 days, 2 hr left"),
+    (72, "作業提醒：還有 3 天", "Assignment reminder: 3 days left"),
+]
+
+
+@pytest.mark.parametrize(("offset_hours", "zh_hant", "en"), OFFER_TITLES)
+def test_a_reminder_sent_on_time_states_its_offset(offset_hours, zh_hant, en):
+    for locale, want in (("zh-Hant-TW", zh_hant), ("en", en)):
+        sent = build_assignment_reminder_payload(
+            _reminder(offset_hours), locale=locale, now=_on_time(offset_hours)
+        )
+        assert sent["title"] == want
+
+
+@pytest.mark.parametrize(
+    ("offset_hours", "late", "zh_hant"),
+    [
+        # Within the pipeline's usual lateness the offset still holds, to
+        # the nearest minute.
+        (5 / 60, timedelta(seconds=30), "作業提醒：還有 5 分鐘"),
+        # Later, the time really left, rounded down to the minute.
+        (5 / 60, timedelta(seconds=31), "作業提醒：還有 4 分鐘"),
+        (24, timedelta(minutes=5), "作業提醒：還有 23 小時 55 分鐘"),
+        (48, timedelta(minutes=2), "作業提醒：還有 47 小時 58 分鐘"),
+        (72, timedelta(minutes=1), "作業提醒：還有 2 天 23 小時"),
+        (1, timedelta(minutes=60), "作業提醒：還有 1 分鐘"),
+        (1, timedelta(minutes=75), "作業提醒：還有 1 分鐘"),
+    ],
+)
+def test_a_reminder_sent_late_states_the_time_really_left(
+    offset_hours, late, zh_hant
+):
+    sent = build_assignment_reminder_payload(
+        _reminder(offset_hours), locale="zh-Hant", now=_on_time(offset_hours) + late
+    )
+    assert sent["title"] == zh_hant
+
+
+def test_an_unknown_locale_gets_the_english_title():
+    sent = build_assignment_reminder_payload(
+        _reminder(1.5), locale="xx-YY", now=_on_time(1.5)
+    )
+    assert sent["title"] == "Assignment reminder: 1 hr, 30 min left"
+
+
+def test_every_bundle_stem_formats_the_time_left_in_its_own_language():
+    """Babel knows every bundle stem; a stem it did not would fall back to
+    English rather than raise in the send path."""
+    problems = []
+    for stem in LOCALES:
+        if str(_babel_locale(stem)).split("_")[0] != stem.split("-")[0]:
+            problems.append((stem, str(_babel_locale(stem))))
+        for values in ([(36, "duration-hour")], [(1, "duration-hour"), (30, "duration-minute")]):
+            text = format_units(values, stem)
+            if not text or not all(str(value) in text for value, _ in values):
+                problems.append((stem, text))
+    assert not problems, problems
+    assert str(_babel_locale("yue-HK")) == "yue_Hant_HK"
+    assert str(_babel_locale("zh-Hans")) == "zh_Hans"
+    assert str(_babel_locale("pt-PT")) == "pt_PT"
+    assert str(_babel_locale("en-GB")) == "en_GB"
+    assert format_units([(36, "duration-hour")], "yue-HK") == "36 小時"
+    assert format_units([(1, "duration-hour"), (30, "duration-minute")], "zh-Hans") == "1小时30分钟"
+    assert format_units([(36, "duration-hour")], "en-GB") == "36 hrs"
+
+
+def test_a_stem_babel_does_not_know_formats_in_english():
+    assert str(_babel_locale("qq-ZZ")) == "en"
+    assert format_units([(2, "duration-day")], "qq-ZZ") == "2 days"
+
+
+def test_the_babel_locale_cache_holds_one_entry_per_bundle():
+    """A device sends any tag it likes; the cache must not grow with them."""
+    for n in range(200):
+        format_units([(1, "duration-hour")], f"zz-{n}")
+    assert _babel_locale.cache_info().currsize <= len(LOCALES) + 2
+
+
+def test_an_unknown_course_leaves_no_double_space():
+    sent = build_assignment_reminder_payload(
+        _reminder(24.0, course=None), locale="en", now=_on_time(24.0)
+    )
     assert ASSIGNMENT in sent["body"]
     assert "  " not in sent["body"]
     assert sent["body"] == sent["body"].strip()
 
 
 def test_the_device_gets_copy_and_routing_keys_but_not_the_copy_inputs():
-    sent = build_assignment_reminder_payload(_reminder(2.0), locale="ja")
+    sent = build_assignment_reminder_payload(
+        _reminder(2.0), locale="ja", now=_on_time(2.0)
+    )
     assert "assignment_title" not in sent
     assert "course_name" not in sent
     assert sent["kind"] == "assignment_reminder"
@@ -175,7 +292,10 @@ def test_a_job_filed_with_finished_copy_goes_out_as_filed():
         "moodle_assignment_id": 3,
         "offset_hours": 24.0,
     }
-    assert build_assignment_reminder_payload(dict(filed), locale="ja") == filed
+    assert (
+        build_assignment_reminder_payload(dict(filed), locale="ja", now=_on_time(24.0))
+        == filed
+    )
 
 
 # --- end to end: scan -> pipeline -> each device ---------------------------
@@ -303,7 +423,9 @@ async def test_each_device_gets_the_reminder_in_its_own_language(
     for token, locale in (("tok-iphone-tw", "zh-Hant"), ("tok-ipad-jp", "ja")):
         message = messages[token]
         assert message["aps"]["alert"] == {
-            "title": _expected(TITLE_KEY, locale, COURSE),
+            # Due in 30 hours: the 24-hour reminder, sent early by the test,
+            # states its offset.
+            "title": _expected(TITLE_KEY, locale, _time_left(24 * 60, locale)),
             "body": _expected(BODY_KEY + "24h", locale, COURSE, ASSIGNMENT),
         }, token
         assert "assignment_title" not in message

@@ -15,8 +15,12 @@ directory is not the same question as mapping it to a bundle.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
+
+from babel import Locale, UnknownLocaleError
+from babel.units import format_unit
 
 CANONICAL_LOCALE = "en"
 
@@ -110,3 +114,42 @@ def translate(key: str, locale: str | None) -> str:
         if value is not None:
             return value
     return MISSING_KEY_SENTINEL
+
+
+@lru_cache(maxsize=None)
+def _babel_locale(stem: str) -> Locale:
+    """The Babel locale of bundle `stem`, or English for a stem Babel does
+    not know. Keyed by stem, not by the tag a device sent, so the cache
+    holds one entry per bundle."""
+    try:
+        return Locale.parse(stem, sep="-")
+    except (UnknownLocaleError, ValueError):
+        return Locale.parse(CANONICAL_LOCALE)
+
+
+def format_units(values: Sequence[tuple[int, str]], locale: str | None) -> str:
+    """Whole numbers of CLDR units, such as `(2, "duration-hour")`, with
+    short unit names, in the language of the bundle `locale` resolves to.
+
+    Two values are joined by CLDR's pattern for a pair of units. Babel's
+    data leaves out the patterns many locales inherit (its `format_list`
+    raises for them), so a missing one is looked for in the `unit` style,
+    then taken from CLDR's root.
+    """
+    babel_locale = _babel_locale(resolve_locale(locale))
+    parts = [
+        format_unit(value, unit, length="short", locale=babel_locale)
+        for value, unit in values
+    ]
+    if len(parts) < 2:
+        return "".join(parts)
+    patterns = babel_locale.list_patterns
+    pair = next(
+        (
+            patterns[style]["2"]
+            for style in ("unit-short", "unit")
+            if style in patterns and "2" in patterns[style]
+        ),
+        "{0}, {1}",
+    )
+    return pair.format(*parts)

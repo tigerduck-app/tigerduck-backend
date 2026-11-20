@@ -1308,7 +1308,9 @@ async def _send_one(
         elif job.channel == COURSE_CHANNEL:
             payload = build_course_reminder_payload(payload, locale=locale)
         else:
-            payload = build_assignment_reminder_payload(payload, locale=locale)
+            payload = build_assignment_reminder_payload(
+                payload, locale=locale, now=now
+            )
         if not _has_copy(payload):
             # Sending this would be worse than not sending it. APNs coerces a
             # missing title to "" and delivers a banner that rings with no

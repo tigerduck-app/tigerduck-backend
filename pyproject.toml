@@ -29,6 +29,8 @@ dependencies = [
     # Mozilla's roots for its prompt_roots.
     "cryptography>=42.0.0",
     "certifi>=2024.2.2",
+    # CLDR unit names for the time left in push copy, per recipient locale.
+    "babel>=2.18.0",
 ]
 
 [dependency-groups]
