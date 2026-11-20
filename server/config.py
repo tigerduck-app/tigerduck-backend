@@ -259,6 +259,10 @@ class Settings(BaseSettings):
 
     # --- Assignment reminders (Phase 4a) ---
     assignment_reminder_scan_interval_seconds: int = 300
+    # How often push/reminders.py asks the devices of a user sent a reminder
+    # whose due time has passed to sync, so the app removes it: within a
+    # minute of the due time with the pipeline's tick. 0 turns it off.
+    assignment_due_wake_interval_seconds: int = 30
     # Server-side default when a user has no `notification` settings
     # document. Deliberately lighter than the client's six-offset default.
     assignment_reminder_default_offsets_hours: list[float] = Field(

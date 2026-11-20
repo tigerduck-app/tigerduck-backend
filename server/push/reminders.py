@@ -485,6 +485,11 @@ async def wake_at_due_times(
     keeps 20 minutes between a user's triggers; filed only after the due
     time, it never holds back the syncs before it. A due time missed by
     more than `DUE_WAKE_MISSED` is skipped.
+
+    A user with no device left that takes the reminder
+    (`_users_with_a_recipient`: TigerSync or reminders off since, signed
+    out) gets none, since the trigger would only settle as failed; the due
+    time stays unmarked, so a device back within the hour is still woken.
     """
     now = datetime.now(UTC)
     due_epoch = case(
@@ -517,6 +522,10 @@ async def wake_at_due_times(
             if marked:
                 woken.add((user_id, due))
         to_wake = [key for key in reminders if key not in woken]
+        reachable = await _users_with_a_recipient(
+            session, {user_id for user_id, _ in to_wake}, now
+        )
+        to_wake = [key for key in to_wake if key[0] in reachable]
         if not to_wake:
             return 0
         for user_id, _ in to_wake:

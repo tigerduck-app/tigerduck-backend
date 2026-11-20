@@ -213,6 +213,47 @@ async def test_no_wake_without_a_sent_reminder(
 
 
 @asyncio_session
+@pytest.mark.parametrize("due_epoch", ["word", "number-as-text", "missing"])
+async def test_a_reminder_without_a_numeric_due_time_wakes_nothing(
+    db_session, prepared_engine, due_epoch
+):
+    """The scan writes the due time as a JSON number; anything else is left
+    alone rather than read, or cast and failing the pass."""
+    user = await _user(db_session)
+    job = await _reminder(db_session, user, due_at=_ago(seconds=10))
+    payload = dict(job.payload)
+    if due_epoch == "missing":
+        del payload["due_epoch"]
+    elif due_epoch == "word":
+        payload["due_epoch"] = "soon"
+    else:
+        payload["due_epoch"] = str(payload["due_epoch"])
+    job.payload = payload
+    await db_session.commit()
+
+    assert await wake_at_due_times(build_session_factory(prepared_engine)) == 0
+    assert await _triggers(db_session, user) == []
+
+
+@asyncio_session
+async def test_no_trigger_for_a_user_with_no_device_to_take_it(
+    db_session, prepared_engine, test_settings
+):
+    """With TigerSync turned off since the reminder, a trigger would only
+    settle as failed (`no_active_tokens`), one row per due time."""
+    user = await _user(db_session)
+    await _reminder(db_session, user, due_at=_ago(seconds=10))
+    device = (
+        await db_session.execute(select(UserDevice).where(UserDevice.user_id == user.id))
+    ).scalar_one()
+    device.cloud_sync_enabled = False
+    await db_session.commit()
+
+    assert await wake_at_due_times(build_session_factory(prepared_engine)) == 0
+    assert await _triggers(db_session, user) == []
+
+
+@asyncio_session
 async def test_a_partly_sent_reminder_counts(db_session, prepared_engine):
     user = await _user(db_session)
     await _reminder(db_session, user, due_at=_ago(seconds=10), status="partial_failed")
@@ -383,20 +424,32 @@ async def test_the_wake_reaches_the_device_as_a_background_push(
     assert request.message == {"aps": {"content-available": 1}, "kind": "sync_trigger"}
 
 
-def test_the_wake_runs_with_the_push_pipeline_every_half_minute(test_settings):
+def _scheduled_wake(settings):
     router = PushRouter(apple=RecordingSender(), android=RecordingFcmSender())
     scheduler = build_scheduler(
         async_sessionmaker(),
         router,
-        test_settings,
+        settings,
         llm=object(),
         push_worker=PushPipelineWorker(
             session_factory=async_sessionmaker(),
-            settings=test_settings,
+            settings=settings,
             router=router,
             worker_id="w",
         ),
     )
-    job = scheduler.get_job("assignment_due_wake")
+    return scheduler.get_job("assignment_due_wake")
+
+
+def test_the_wake_runs_with_the_push_pipeline_every_half_minute(test_settings):
+    assert test_settings.assignment_due_wake_interval_seconds == 30
+    job = _scheduled_wake(test_settings)
     assert job is not None
     assert job.trigger.interval == timedelta(seconds=30)
+
+
+def test_an_interval_of_zero_turns_the_wake_off(test_settings):
+    settings = test_settings.model_copy(
+        update={"assignment_due_wake_interval_seconds": 0}
+    )
+    assert _scheduled_wake(settings) is None

@@ -85,7 +85,8 @@ def build_scheduler(
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
     * `assignment_due_wake` — a sync trigger to the users sent an assignment
-      reminder whose due time has just passed, every 30s (likewise).
+      reminder whose due time has just passed, every 30s (only with a
+      `push_worker`, and not at all with its interval set to 0).
     * `session_reauth_scan` — ask devices left without a session to sign in
       again every 10 min (only with a `push_worker`, which delivers it, and
       not at all with its interval set to 0).
@@ -292,15 +293,17 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=60,
         )
-        scheduler.add_job(
-            assignment_due_wake,
-            # Within a minute of a due time, with the pipeline's own tick.
-            trigger=IntervalTrigger(seconds=30),
-            id="assignment_due_wake",
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=30,
-        )
+        if settings.assignment_due_wake_interval_seconds > 0:
+            scheduler.add_job(
+                assignment_due_wake,
+                trigger=IntervalTrigger(
+                    seconds=settings.assignment_due_wake_interval_seconds
+                ),
+                id="assignment_due_wake",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
         scheduler.add_job(
             course_reminder_scan,
             trigger=IntervalTrigger(
