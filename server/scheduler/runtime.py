@@ -33,7 +33,7 @@ from server.push.router import PushRouter
 from server.push.course_reminders import scan_course_reminders
 from server.push.pipeline import PushPipelineWorker, run_push_tick
 from server.push.retention import prune_terminal_push_jobs
-from server.push.reminders import scan_assignment_reminders
+from server.push.reminders import scan_assignment_reminders, wake_at_due_times
 from server.push.session_reauth import scan_sessionless_devices
 from server.sync.retention import purge_expired_changelog
 from server.syncjobs.executor import SyncWorker, run_sync_tick
@@ -84,6 +84,8 @@ def build_scheduler(
       whose days have all passed, daily at 00:05 Taipei (likewise).
     * `push_pipeline_tick` — user push_jobs delivery pipeline every 5s
       (only when a `push_worker` is provided).
+    * `assignment_due_wake` — a sync trigger to the users sent an assignment
+      reminder whose due time has just passed, every 30s (likewise).
     * `session_reauth_scan` — ask devices left without a session to sign in
       again every 10 min (only with a `push_worker`, which delivers it, and
       not at all with its interval set to 0).
@@ -260,6 +262,9 @@ def build_scheduler(
         async def assignment_reminder_scan() -> None:
             await scan_assignment_reminders(session_factory, settings)
 
+        async def assignment_due_wake() -> None:
+            await wake_at_due_times(session_factory)
+
         async def course_reminder_scan() -> None:
             await scan_course_reminders(session_factory, settings)
 
@@ -286,6 +291,15 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            assignment_due_wake,
+            # Within a minute of a due time, with the pipeline's own tick.
+            trigger=IntervalTrigger(seconds=30),
+            id="assignment_due_wake",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
         )
         scheduler.add_job(
             course_reminder_scan,
