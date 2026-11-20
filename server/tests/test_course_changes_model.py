@@ -59,6 +59,10 @@ async def _term(db_session) -> None:
         {"kind": "end", "end_time": "11:40"},
         {"kind": "note", "note_zh": "期中考", "note_en": "Midterm exam"},
         {"kind": "note", "note_zh": "小考"},
+        {"kind": "assessment", "note_zh": "期中考", "note_en": "Midterm exam"},
+        {"kind": "online"},
+        {"kind": "online", "note_zh": "同步視訊", "note_en": "Video call"},
+        {"kind": "online", "note_zh": "同步視訊"},
         {
             "mode": "range",
             "end_date": date(2027, 1, 4),
@@ -103,6 +107,20 @@ async def test_a_change_of_each_kind_is_stored(db_session, fields) -> None:
         {"kind": "note", "note_en": "Quiz"},
         {"kind": "note", "note_zh": "小考", "note_en": " "},
         {"note_en": "Quiz"},
+        {"kind": "exam", "note_zh": "期中考", "note_en": "Midterm exam"},
+        {"kind": "assessment"},
+        {"kind": "assessment", "note_zh": "期中考"},
+        {"kind": "assessment", "note_zh": "期中考", "note_en": " "},
+        {"kind": "assessment", "note_zh": " ", "note_en": "Midterm exam"},
+        {"kind": "assessment", "note_en": "Midterm exam"},
+        {"kind": "assessment", "note_zh": "期中考", "note_en": "Midterm exam", "room": "IB-101"},
+        {"kind": "assessment", "note_zh": "期中考", "note_en": "Midterm exam",
+         "start_time": "09:10"},
+        {"kind": "online", "room": "IB-101"},
+        {"kind": "online", "end_time": "11:00"},
+        {"kind": "online", "note_en": "Video call"},
+        {"kind": "online", "note_zh": " "},
+        {"kind": "cancelled", "note_zh": "停課"},
     ],
 )
 async def test_a_change_the_rules_rule_out_is_refused(db_session, fields) -> None:
@@ -262,6 +280,44 @@ async def test_changes_of_a_kind_clash_only_where_their_periods_meet(db_session)
     ]
     assert await _violations(db_session, monday) == [("clash", "2026-11-02", None, second)]
     assert await _violations(db_session, monday, kind="note", periods=["2"]) == []
+
+
+async def test_a_room_change_and_an_online_class_clash(db_session) -> None:
+    await _taken(db_session)
+    tuesday = date(2026, 11, 3)
+    room = await _change(db_session, tuesday, kind="room", room="IB-101")
+    online = await _change(db_session, date(2026, 11, 10), kind="online")
+
+    assert await _violations(db_session, tuesday, kind="online") == [
+        ("clash", "2026-11-03", None, room),
+    ]
+    assert await _violations(db_session, date(2026, 11, 10)) == [
+        ("clash", "2026-11-10", None, online),
+    ]
+    assert await _violations(db_session, date(2026, 11, 10), kind="online") == [
+        ("clash", "2026-11-10", None, online),
+    ]
+
+
+async def test_an_assessment_clashes_with_assessments_alone(db_session) -> None:
+    """An exam may move to another room or start earlier."""
+    await _taken(db_session)
+    tuesday = date(2026, 11, 3)
+    names = {"note_zh": "期中考", "note_en": "Midterm exam"}
+    exam = await _change(db_session, tuesday, kind="assessment", **names)
+    for fields in (
+        {"kind": "room", "room": "IB-101"},
+        {"kind": "start", "start_time": "09:00"},
+        {"kind": "online"},
+        {"kind": "note", "note_zh": "帶計算機"},
+    ):
+        await _change(db_session, tuesday, **fields)
+
+    assert await _violations(db_session, tuesday, kind="assessment") == [
+        ("clash", "2026-11-03", None, exam),
+    ]
+    for kind in ("cancelled", "end"):
+        assert await _violations(db_session, tuesday, kind=kind) == []
 
 
 @pytest.mark.parametrize(
