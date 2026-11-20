@@ -18,6 +18,12 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.models import CourseChange
+from server.i18n import translate
+
+#: The kinds a client reads only when it lists them in the feed's `kinds`;
+#: any other client gets each as a note (`as_note`), since released apps drop
+#: a change of a kind they do not know.
+LISTED_KINDS = frozenset({"assessment", "online"})
 
 _CHANGES = text(
     """
@@ -87,3 +93,15 @@ def meeting_changes(
         and day.isoweekday() in change.meeting_weekdays
         and (change.periods is None or period in change.periods)
     }
+
+
+def as_note(change: Row) -> tuple[str | None, str | None]:
+    """The texts of the note an assessment or online change goes out as to a
+    client that does not read its kind: the assessment's names, or the online
+    class's description, else `course_change_online` in Chinese and English."""
+    if change.kind == "online" and change.note_zh is None:
+        return (
+            translate("course_change_online", "zh-Hant"),
+            translate("course_change_online", "en"),
+        )
+    return change.note_zh, change.note_en
