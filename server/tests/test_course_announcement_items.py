@@ -132,10 +132,11 @@ async def test_a_midterm_announced_for_a_class_day_is_a_pending_assessment(
         extraction_answer(labels=["exam_info"], exams=[extracted_exam(scope="第一到四章")])
     )
 
-    (item,) = await announcement_course.items()
+    item, exam = await announcement_course.items()
     assert (item.course_no, item.kind, item.action, item.state) == (
         "CS1001301", "course_change", "add", "pending",
     )
+    assert (exam.kind, exam.state, exam.payload["scope"]) == ("exam", "info", "第一到四章")
     assert item.payload == {
         "kind": "assessment",
         "mode": "day",
@@ -150,7 +151,97 @@ async def test_a_midterm_announced_for_a_class_day_is_a_pending_assessment(
         "note_en": "Midterm exam",
     }
     assert item.evidence == "11/16（一）期中考"
+    assert item.checks["exam_details"] == {"ok": True}
     assert item.passes_checks
+
+
+@pytest.mark.parametrize(
+    "details",
+    [{"room": "TR-313"}, {"start_time": "13:00"}, {"end_time": "15:00"}],
+    ids=["room", "start", "end"],
+)
+async def test_an_exam_in_its_own_room_or_time_waits_for_review(announcement_course, details):
+    await announcement_course.post(text="11/16（一）期中考", scores=EXAM_INFO)
+
+    await announcement_course.extract(
+        extraction_answer(labels=["exam_info"], exams=[extracted_exam(**details)]),
+        auto_apply=True,
+    )
+
+    item, exam = await announcement_course.items()
+    assert (item.payload["kind"], item.state, item.passes_checks) == ("assessment", "pending", False)
+    assert item.checks["exam_details"] == {"ok": False}
+    assert {field: exam.payload[field] for field in details} == details
+    assert await announcement_course.changes() == []
+
+
+async def test_an_exam_whose_room_and_start_are_extracted_changes_applies(announcement_course):
+    text = "11/16（一）期中考改至 TR-313，13:00 開始"
+    await announcement_course.post(text=text, scores={"exam_info": 0.98, "class_change": 0.98})
+
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["exam_info", "class_change"],
+            exams=[extracted_exam(room=" TR-313", start_time="13:00", evidence=text)],
+            course_changes=[
+                extracted_change(kind=kind, start_date="2026-11-16", end_date="2026-11-16",
+                                 evidence=text, **field)
+                for kind, field in (("room", {"room": "TR-313"}), ("start", {"start_time": "13:00"}))
+            ],
+        ),
+        auto_apply=True,
+    )
+
+    assert sorted(c.kind for c in await announcement_course.changes()) == [
+        "assessment", "room", "start",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "contradicted"), [("quiz", True), ("midterm", False)], ids=["another", "the-same"]
+)
+async def test_a_later_post_stating_another_assessment_contradicts_an_older_one(
+    announcement_course, kind, contradicted
+):
+    await announcement_course.post(text="11/16（一）期中考", scores=EXAM_INFO)
+    later = await announcement_course.post(
+        2, text="11/16（一）期中考", posted=timedelta(days=1), scores=EXAM_INFO
+    )
+    # The later post goes to the LLM first, in shadow mode.
+    await announcement_course.extract(
+        extraction_answer(labels=["exam_info"], exams=[extracted_exam(kind=kind)])
+    )
+    await announcement_course.extract(
+        extraction_answer(labels=["exam_info"], exams=[extracted_exam()]), auto_apply=True
+    )
+
+    item, _ = await announcement_course.items()
+    assert item.checks["contradiction"] == {
+        "ok": not contradicted, "announcement_id": later if contradicted else None,
+    }
+    assert [c.kind for c in await announcement_course.changes()] == (
+        [] if contradicted else ["assessment"]
+    )
+
+
+async def test_a_later_post_stating_another_assessment_marks_a_pending_one(announcement_course):
+    await announcement_course.post(text="11/16（一）期中考", scores=EXAM_INFO)
+    await announcement_course.extract(
+        extraction_answer(labels=["exam_info"], exams=[extracted_exam()])
+    )
+
+    later = await announcement_course.post(
+        2, text="11/16（一）小考", posted=timedelta(days=1), scores=EXAM_INFO
+    )
+    await announcement_course.extract(
+        extraction_answer(
+            labels=["exam_info"], exams=[extracted_exam(kind="quiz", evidence="11/16（一）小考")]
+        )
+    )
+
+    item, _ = await announcement_course.items()
+    assert (item.state, item.passes_checks) == ("pending", False)
+    assert item.checks["contradiction"] == {"ok": False, "announcement_id": later}
 
 
 @pytest.mark.parametrize(
@@ -166,7 +257,7 @@ async def test_an_exam_is_named_by_its_kind(announcement_course, kind, names):
         )
     )
 
-    (item,) = await announcement_course.items()
+    item, _ = await announcement_course.items()
     assert (item.payload["note_zh"], item.payload["note_en"]) == names
 
 
@@ -185,7 +276,7 @@ async def test_an_exam_of_another_kind_keeps_its_name_and_waits_for_an_english_o
         auto_apply=True,
     )
 
-    (item,) = await announcement_course.items()
+    item, _ = await announcement_course.items()
     assert (item.state, item.payload["note_zh"], item.payload["note_en"]) == (
         "pending", "期中專題展示", None,
     )

@@ -102,7 +102,7 @@ async def test_automatic_apply_writes_a_midterm_with_exam_labels_from_both(annou
         extraction_answer(labels=["exam_change"], exams=[extracted_exam()]), auto_apply=True
     )
 
-    (item,) = await announcement_course.items()
+    item, _ = await announcement_course.items()
     (change,) = await announcement_course.changes()
     assert (item.state, item.course_change_id) == ("applied", change.id)
     assert (change.kind, change.note_zh, change.note_en, change.start_date) == (
@@ -127,7 +127,7 @@ async def test_an_assessment_waits_without_exam_labels_or_an_english_name(
         extraction_answer(labels=labels, exams=[exam]), auto_apply=True
     )
 
-    (item,) = await announcement_course.items()
+    item, _ = await announcement_course.items()
     assert (item.state, item.passes_checks) == ("pending", False)
     assert await announcement_course.changes() == []
 

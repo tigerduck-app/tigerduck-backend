@@ -443,10 +443,14 @@ into the backend container via `docker-compose.yml`.
   and informational items and becomes review items (`items.py`) under the lock every
   `course_changes` writer takes (`checks.lock_courses`), checked with the
   database's `course_change_violations`. An exam dated on a class day of a
-  course becomes an `assessment` add item named by its kind
-  (`checks.EXAM_NAMES`); one of another kind has no English name and waits
-  for an operator, and an assessment takes `exam_info` or `exam_change` from
-  both models in place of `class_change`. With automatic apply on, an
+  course also becomes an `assessment` add item named by its kind
+  (`checks.EXAM_NAMES`), and stays an informational item with its room,
+  times and scope; one of another kind has no English name and waits for an
+  operator, and so does one whose room or time no extracted room, start or
+  end change of its day states (`checks.exam_details`). An assessment takes
+  `exam_info` or `exam_change` from both models in place of `class_change`,
+  and an announcement's dated exams count as its assessments in the
+  contradiction check. With automatic apply on, an
   extraction's add items are written all or none (`apply.py`), by and audited
   as `course-announcements`; replace and remove items always wait for review.
   `course_announcement_past` marks past the items whose days have passed,

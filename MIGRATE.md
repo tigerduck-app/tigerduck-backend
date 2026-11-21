@@ -53,8 +53,10 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
   in the device's language (`期中考 · 09:10 · IB-101`); an online class shows
   線上 / Online for its room in reminders and class Live Activity starts,
   which also carry `assessment`.
-- **Course announcements.** An exam dated on a class day becomes a pending
-  `assessment` item and a class moved online an `online` item. The prompt
+- **Course announcements.** An exam dated on a class day also becomes a
+  pending `assessment` item, which waits for review when the exam states a
+  room or time no extracted change does, and a class moved online an
+  `online` item. The prompt
   and schema gained the online kind and an exam's name; extractions stored
   before keep their items, and `scripts/import_course_announcements.py
   --reextract` asks the current term's posts again.

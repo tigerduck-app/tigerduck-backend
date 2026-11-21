@@ -42,6 +42,8 @@ _LABELS = {
     "assessment": frozenset({"exam_info", "exam_change"}),
 }
 _CLASS_CHANGE = frozenset({"class_change"})
+# An exam's own room and times, each with the kind of change that states it.
+_EXAM_DETAILS = (("room", "room"), ("start_time", "start"), ("end_time", "end"))
 #: The assessment an extracted exam of each kind becomes, named as the
 #: portal's presets name it (portal/web/src/pages/course-changes/ChangeDialog.tsx).
 EXAM_NAMES = {
@@ -117,6 +119,28 @@ def exam_payload(exam: Mapping[str, Any]) -> dict[str, Any]:
         "end_time": None,
         "note_zh": note_zh,
         "note_en": note_en,
+    }
+
+
+def exam_details(
+    exams: Iterable[Mapping[str, Any]], changes: Iterable[Mapping[str, Any]]
+) -> dict[str, bool]:
+    """The exam details check of an assessment: each room and time its exams
+    state is one an extracted change of the exam's day states too, since an
+    assessment keeps the meeting's own room and times."""
+    changes = list(changes)
+
+    def stated(exam: Mapping[str, Any], field: str, kind: str) -> bool:
+        value = _strip(exam[field])
+        return not value or any(
+            change["kind"] == kind
+            and change[field] == value
+            and covers_day(change, date.fromisoformat(exam["date"]))
+            for change in changes
+        )
+
+    return {
+        "ok": all(stated(exam, field, kind) for exam in exams for field, kind in _EXAM_DETAILS)
     }
 
 
@@ -354,7 +378,8 @@ async def course_statements(
             announcement_id=row.id,
             posted_at=row.posted_at,
             course_codes=frozenset(row.course_codes),
-            changes=tuple(change_payload(fact) for fact in row.raw_output["course_changes"]),
+            changes=tuple(change_payload(fact) for fact in row.raw_output["course_changes"])
+            + tuple(exam_payload(exam) for exam in row.raw_output["exams"] if exam["date"]),
             held=tuple(date.fromisoformat(h["date"]) for h in row.raw_output["held_as_usual"]),
         )
         for row in rows

@@ -1,15 +1,15 @@
 """Review items: what one extraction asks of `course_changes`, per course
 code, and the make-up classes and exams it shows.
 
-An exam dated on a class day of a course is an assessment of that day for
-the course (`exam_payload`); an exam with no date or on no class day stays
-information. A course change becomes an add item, or a replace item when the
-announcement already has an applied change of that kind on its day. An
-applied change of the announcement that the extraction no longer states, or
-whose day this or a later announcement of the course holds as usual,
-becomes a remove item. A code no student has class times for is listed as
-skipped. An item whose days have all passed in Taipei is past, at
-extraction or by the daily pass.
+An exam dated on a class day of a course is also an assessment of that day
+for the course (`exam_payload`); every exam stays information, which keeps
+its room, times and scope in view. A course change becomes an add item, or
+a replace item when the announcement already has an applied change of that
+kind on its day. An applied change of the announcement that the extraction
+no longer states, or whose day this or a later announcement of the course
+holds as usual, becomes a remove item. A code no student has class times
+for is listed as skipped. An item whose days have all passed in Taipei is
+past, at extraction or by the daily pass.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from server.course_announcements.checks import (
     contradiction,
     course_statements,
     covers_day,
+    exam_details,
     exam_payload,
     has_schedule,
     is_class_day,
@@ -74,9 +75,7 @@ async def record_items(
     term_days = await lock_courses(session, term, codes)
     statements = await course_statements(session, term, codes)
     facts = _unique((change_payload(fact), fact["evidence"]) for fact in output["course_changes"])
-    dated = [(n, exam) for n, exam in enumerate(output["exams"]) if exam["date"]]
-    # The exams that are an assessment of some course's class day, by index.
-    assessed: set[int] = set()
+    dated = [exam for exam in output["exams"] if exam["date"]]
     held = [(date.fromisoformat(h["date"]), h["evidence"]) for h in output["held_as_usual"]]
     context = Announcement(
         text=announcement.text or "",
@@ -107,12 +106,11 @@ async def record_items(
                 items.append(_item(extraction, code, state=ItemState.skipped))
             continue
         exams = [
-            (n, exam)
-            for n, exam in dated
+            exam
+            for exam in dated
             if await is_class_day(session, term, code, date.fromisoformat(exam["date"]))
         ]
-        assessed |= {n for n, _ in exams}
-        stated = facts + _unique((exam_payload(exam), exam["evidence"]) for _, exam in exams)
+        stated = facts + _unique((exam_payload(exam), exam["evidence"]) for exam in exams)
         sourced = await _sourced_changes(session, term, code)
         own = [change for change, _ in sourced if change.source_announcement_id == announcement.id]
         replaced = _pair(own, [payload for payload, _ in stated])
@@ -137,6 +135,11 @@ async def record_items(
                 posted_at=announcement.posted_at,
                 statements=statements,
             )
+            if payload["kind"] == "assessment":
+                checks["exam_details"] = exam_details(
+                    (exam for exam in exams if exam_payload(exam) == payload),
+                    (change for change, _ in facts),
+                )
             items.append(
                 _item(
                     extraction,
@@ -175,9 +178,7 @@ async def record_items(
                 )
             )
     for kind, key in ((ItemKind.makeup, "makeup_classes"), (ItemKind.exam, "exams")):
-        for n, fact in enumerate(output[key]):
-            if kind == ItemKind.exam and n in assessed:
-                continue
+        for fact in output[key]:
             payload = {field: value for field, value in fact.items() if field != "evidence"}
             items.append(
                 _item(extraction, None, kind=kind, state=ItemState.info, payload=payload,
