@@ -89,8 +89,12 @@ export function Timetable({ user }: { user: UserDetail }) {
   const meetings = all.length;
   const cancelled = all.filter((b) => b.cancelled).map((b) => b.name);
   const moved = all.filter((b) => b.tags.length).map((b) => `${b.name} ${b.tags.join("; ")}`);
-  // A one-period meeting with a tag gets a row tall enough to show it, since a touch screen cannot hover.
-  const tall = new Set(all.filter((b) => b.from === b.to && (b.tags.length || b.cancelled)).map((b) => b.from));
+  // A meeting with tags gets rows tall enough to show them all, since a touch screen cannot hover.
+  const tall = new Set(
+    all
+      .filter((b) => b.tags.length || b.cancelled)
+      .flatMap((b) => Array.from({ length: b.to - b.from + 1 }, (_, i) => b.from + i)),
+  );
 
   return (
     <div className="overflow-x-auto">
