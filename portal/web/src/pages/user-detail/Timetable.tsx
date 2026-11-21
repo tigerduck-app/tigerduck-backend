@@ -35,7 +35,7 @@ type Block = {
   from: number;
   to: number;
   cancelled: boolean;
-  tag: string | null;
+  tags: string[];
 };
 
 export function isoDate(start: string, offset: number): string {
@@ -46,7 +46,8 @@ export function isoDate(start: string, offset: number): string {
 
 /** Each meeting split into runs of consecutive periods. */
 function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
-  const tagged = changes.filter((c) => ["room", "online", "assessment"].includes(c.kind));
+  const places = changes.filter((c) => c.kind === "room" || c.kind === "online");
+  const assessments = changes.filter((c) => c.kind === "assessment");
   const cancels = changes.filter((c) => c.kind === "cancelled");
   const out: Block[] = [];
   for (const c of courses) {
@@ -63,10 +64,12 @@ function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[
         // Period by period, since a change may cover only some of a meeting's periods.
         const one = { code, day, from: row, to: row };
         const cancelled = skipped || changeFor(one, cancels)?.date === date;
-        const tag = cancelled ? null : (changeFor(one, tagged)?.label ?? null);
+        const labels = [changeFor(one, assessments)?.label, changeFor(one, places)?.label];
+        const tags = cancelled ? [] : labels.filter((label): label is string => Boolean(label));
         const last = out[out.length - 1];
-        if (i > 0 && last.to === row - 1 && last.cancelled === cancelled && last.tag === tag) last.to = row;
-        else out.push({ name: c.name, code, room: c.classroom ?? "", day, from: row, to: row, cancelled, tag });
+        if (i > 0 && last.to === row - 1 && last.cancelled === cancelled && last.tags.join("\n") === tags.join("\n"))
+          last.to = row;
+        else out.push({ name: c.name, code, room: c.classroom ?? "", day, from: row, to: row, cancelled, tags });
       });
     }
   }
@@ -85,9 +88,13 @@ export function Timetable({ user }: { user: UserDetail }) {
   );
   const meetings = all.length;
   const cancelled = all.filter((b) => b.cancelled).map((b) => b.name);
-  const moved = all.filter((b) => b.tag).map((b) => `${b.name} ${b.tag}`);
-  // A one-period meeting with a tag gets a row tall enough to show it, since a touch screen cannot hover.
-  const tall = new Set(all.filter((b) => b.from === b.to && (b.tag || b.cancelled)).map((b) => b.from));
+  const moved = all.filter((b) => b.tags.length).map((b) => `${b.name} ${b.tags.join("; ")}`);
+  // A meeting with tags gets rows tall enough to show them all, since a touch screen cannot hover.
+  const tall = new Set(
+    all
+      .filter((b) => b.tags.length || b.cancelled)
+      .flatMap((b) => Array.from({ length: b.to - b.from + 1 }, (_, i) => b.from + i)),
+  );
 
   return (
     <div className="overflow-x-auto">
@@ -140,7 +147,7 @@ export function Timetable({ user }: { user: UserDetail }) {
                 : "bg-badge-info text-ink",
             )}
             style={{ gridColumn: b.day + 1, gridRow: `${b.from + 2} / span ${b.to - b.from + 1}` }}
-            title={[b.name, b.room, b.cancelled ? "Cancelled" : b.tag].filter(Boolean).join(" · ")}
+            title={[b.name, b.room, b.cancelled ? "Cancelled" : b.tags.join("; ")].filter(Boolean).join(" · ")}
           >
             <span className={cn("shrink-0 truncate text-xs font-semibold", b.cancelled && "line-through")}>
               {b.name}
@@ -151,12 +158,17 @@ export function Timetable({ user }: { user: UserDetail }) {
                 Cancelled
               </span>
             )}
-            {b.tag && (
-              <span
-                className="mt-auto max-w-full self-start truncate rounded-full bg-surface px-1.5 py-px text-[10px] font-semibold text-badge-info-fg"
-              >
-                {b.tag}
-              </span>
+            {b.tags.length > 0 && (
+              <div className="mt-auto flex max-w-full flex-col items-start gap-px">
+                {b.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="max-w-full truncate rounded-full bg-surface px-1.5 py-px text-[10px] font-semibold text-badge-info-fg"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
         ))}
