@@ -344,8 +344,22 @@ into the backend container via `docker-compose.yml`.
   pipeline again right before the first delivery: a cancelled class, or a
   reminder's class moved since, is cancelled (`class_changed`), a start takes
   the new room and times and waits for a later start, and a check that
-  cannot answer cancels the push (`unverified_before_send`). Android paths
-  read none of it; the app applies the feed itself.
+  cannot answer cancels the push (`unverified_before_send`). An assessment's
+  name begins a reminder's body, Chinese for a Chinese device locale
+  (`i18n.is_chinese`) and English otherwise, and an online class reads
+  `course_change_online` for its room in the device's language; both are
+  written per delivery in `_send_one` (`notification_copy`). A start sets
+  `assessment` and, for a new room or an online class, `roomChanged`.
+  Android paths read none of it; the app applies the feed itself.
+- The course change kinds are `cancelled`, `room`, `start`, `end`,
+  `assessment`, `online` and `note`. `note_zh` / `note_en` hold a note's
+  text, an assessment's two names (both required) or an online class's
+  optional description. The feed sends `assessment` and `online`
+  (`LISTED_KINDS`) only to a request that lists them in `kinds`, and any
+  other request each as a note (`as_note`), since released apps drop a kind
+  they do not know; a later kind joins `LISTED_KINDS` with a note fallback.
+  A room change and an online class clash on one meeting; an assessment
+  clashes with assessments alone (`course_change_violations`).
 - An iOS alert's `thread-id` comes from its channel (`thread_id_for` in
   `push/payload.py`): `course`, `assignment`, or `other` for the rest.
   Class and homework reminders carry no collapse id: on iOS a shared one
@@ -428,7 +442,15 @@ into the backend container via `docker-compose.yml`.
   attempt. A stored result supersedes the announcement's earlier pending
   and informational items and becomes review items (`items.py`) under the lock every
   `course_changes` writer takes (`checks.lock_courses`), checked with the
-  database's `course_change_violations`. With automatic apply on, an
+  database's `course_change_violations`. An exam dated on a class day of a
+  course also becomes an `assessment` add item named by its kind
+  (`checks.EXAM_NAMES`), and stays an informational item with its room,
+  times and scope; one of another kind has no English name and waits for an
+  operator, and so does one whose room or time no extracted room, start or
+  end change of its day states (`checks.exam_details`). An assessment takes
+  `exam_info` or `exam_change` from both models in place of `class_change`,
+  and an announcement's dated exams count as its assessments in the
+  contradiction check. With automatic apply on, an
   extraction's add items are written all or none (`apply.py`), by and audited
   as `course-announcements`; replace and remove items always wait for review.
   `course_announcement_past` marks past the items whose days have passed,

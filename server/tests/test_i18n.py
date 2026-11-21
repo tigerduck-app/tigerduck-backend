@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from server.i18n import MISSING_KEY_SENTINEL, resolve_locale, translate
+from server.i18n import MISSING_KEY_SENTINEL, is_chinese, resolve_locale, translate
 
 
 @pytest.mark.parametrize(
@@ -28,6 +28,18 @@ from server.i18n import MISSING_KEY_SENTINEL, resolve_locale, translate
 )
 def test_resolve_locale(requested, expected):
     assert resolve_locale(requested) == expected
+
+
+@pytest.mark.parametrize(
+    ("locale", "chinese"),
+    [
+        ("zh", True), ("zh-Hant", True), ("zh_Hant_TW", True), ("zh-Hans", True),
+        ("yue", True), ("yue-HK", True), ("en", False), ("ja", False), ("", False),
+        (None, False),
+    ],
+)
+def test_is_chinese(locale, chinese):
+    assert is_chinese(locale) is chinese
 
 
 def test_translate_returns_localized_string():

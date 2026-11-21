@@ -1206,6 +1206,121 @@ async def test_a_changed_room_and_start_reach_the_reminder(
     assert job.dedupe_key.endswith(f":{int(start.timestamp())}")
 
 
+async def _two_languages(db_session, user) -> None:
+    """The user's iPhone in Traditional Chinese and an iPad in English."""
+    (await db_session.execute(select(UserDevice))).scalar_one().locale = "zh-Hant-TW"
+    ipad = UserDevice(user_id=user.id, client_device_id="ipad", platform="ipados", locale="en")
+    db_session.add(ipad)
+    await db_session.flush()
+    db_session.add(
+        DevicePushToken(
+            device_id=ipad.id, provider="apns", token_kind="standard",
+            token_hash="hash-ipad", token_value="tok-ipad",
+        )
+    )
+    await db_session.commit()
+
+
+def _bodies(apple) -> dict[str, str]:
+    return {r.device_token: r.message["aps"]["alert"]["body"] for r in apple.requests}
+
+
+_MIDTERM = {"kind": "assessment", "note_zh": "期中考", "note_en": "Midterm exam"}
+
+
+async def test_a_reminder_for_an_exam_in_another_room_begins_with_its_name(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(
+        db_session, local, schedule,
+        _course_change(local, **_MIDTERM),
+        _course_change(local, kind="room", room="IB-101"),
+    )
+    await _two_languages(db_session, user)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert _bodies(apple) == {
+        "tok-b11203058": f"期中考 · {local:%H:%M} · IB-101",
+        "tok-ipad": f"Midterm exam · {local:%H:%M} · IB-101",
+    }
+    assert not any("assessment_zh" in r.message for r in apple.requests)
+
+
+async def test_an_online_class_reminder_reads_online_for_its_room(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, kind="online", note_zh="同步視訊"),
+    )
+    await _two_languages(db_session, user)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    (job,) = await _jobs(db_session, user.id)
+    assert (job.payload["body"], job.payload["online"]) == (f"{local:%H:%M}", True)
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert _bodies(apple) == {
+        "tok-b11203058": f"{local:%H:%M} · 線上",
+        "tok-ipad": f"{local:%H:%M} · Online",
+    }
+    assert not any("online" in r.message for r in apple.requests)
+
+
+async def test_an_exam_and_online_class_added_after_filing_reach_the_reminder_at_send(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(db_session, local, schedule)
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    db_session.add_all(
+        [_course_change(local, **_MIDTERM), _course_change(local, kind="online")]
+    )
+    await db_session.commit()
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert _bodies(apple) == {"tok-b11203058": f"Midterm exam · {local:%H:%M} · Online"}
+
+
+async def test_an_exam_removed_after_filing_leaves_the_reminder_at_send(
+    db_session, prepared_engine, test_settings
+):
+    local, schedule = _occurrence_in(0.5)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, **_MIDTERM)
+    )
+    factory = build_session_factory(prepared_engine)
+    settings = _scan_settings(test_settings, local)
+    assert await scan_course_reminders(factory, settings) == 1
+    await db_session.execute(delete(CourseChange))
+    await db_session.commit()
+
+    apple = await _send_due(factory, settings, db_session, user)
+
+    assert _bodies(apple) == {"tok-b11203058": f"{local:%H:%M} · TR-212"}
+
+
+async def test_no_reminder_for_a_cancelled_exam(db_session, prepared_engine, test_settings):
+    local, schedule = _occurrence_in(26)
+    user = await _course_with_change(
+        db_session, local, schedule, _course_change(local, **_MIDTERM), _course_change(local),
+    )
+
+    factory = build_session_factory(prepared_engine)
+    assert await scan_course_reminders(factory, _scan_settings(test_settings, local)) == 0
+    assert await _jobs(db_session, user.id) == []
+
+
 async def test_a_change_reaches_a_holiday_the_user_put_back(
     db_session, prepared_engine, test_settings
 ):

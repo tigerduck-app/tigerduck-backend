@@ -21,7 +21,7 @@ export function DeleteDialog({
 }) {
   const d = detailOf(change, course);
   const first = firstDay(change);
-  const what = d.note || [d.old, d.next].filter(Boolean).join(" → ");
+  const what = [[d.old, d.next].filter(Boolean).join(" → "), d.note].filter(Boolean).join(" · ");
   return (
     <FormDialog
       open

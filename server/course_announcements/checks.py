@@ -27,11 +27,32 @@ from server.push.course_reminders import PERIOD_RANK
 ROOM_MAX = 128
 # The fields of a change besides its days, which tell two changes of a day apart.
 VALUE_FIELDS = ("periods", "room", "start_time", "end_time", "note_zh")
+# As in `course_change_violations` (server/academic_calendar/models.py), a room
+# change and an online class clash, since both say where the class is held.
+_PLACE_KINDS = frozenset({"room", "online"})
 _KIND_FIELDS = {
     "room": ("room",),
     "start": ("start_time",),
     "end": ("end_time",),
+    "assessment": ("note_zh", "note_en"),
+    "online": ("note_zh",),
     "note": ("note_zh",),
+}
+_OPTIONAL_FIELDS = frozenset({"online"})
+# The labels both the classifier and the extraction must give a change of a kind.
+_LABELS = {
+    "cancelled": frozenset({"class_cancel"}),
+    "assessment": frozenset({"exam_info", "exam_change"}),
+}
+_CLASS_CHANGE = frozenset({"class_change"})
+# An exam's own room and times, each with the kind of change that states it.
+_EXAM_DETAILS = (("room", "room"), ("start_time", "start"), ("end_time", "end"))
+#: The assessment an extracted exam of each kind becomes, named as the
+#: portal's presets name it (portal/web/src/pages/course-changes/ChangeDialog.tsx).
+EXAM_NAMES = {
+    "midterm": ("期中考", "Midterm exam"),
+    "final": ("期末考", "Final exam"),
+    "quiz": ("小考", "Quiz"),
 }
 
 _LOCK = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
@@ -80,6 +101,49 @@ def change_payload(fact: Mapping[str, Any]) -> dict[str, Any]:
         "periods": periods,
         **{field: _strip(fact[field]) if field in own else None for field in VALUE_FIELDS[1:]},
         "note_en": None,
+    }
+
+
+def exam_payload(exam: Mapping[str, Any]) -> dict[str, Any]:
+    """An extracted exam with a date as an assessment of the course's
+    meetings that day, named by its kind (`EXAM_NAMES`); an exam of another
+    kind keeps its extracted Chinese name and has no English one, which an
+    operator gives it."""
+    note_zh, note_en = EXAM_NAMES.get(exam["kind"], (_strip(exam.get("name")), None))
+    return {
+        "kind": "assessment",
+        "mode": "day",
+        "start_date": exam["date"],
+        "end_date": exam["date"],
+        "excluded_weekdays": [],
+        "periods": None,
+        "room": None,
+        "start_time": None,
+        "end_time": None,
+        "note_zh": note_zh,
+        "note_en": note_en,
+    }
+
+
+def exam_details(
+    exams: Iterable[Mapping[str, Any]], changes: Iterable[Mapping[str, Any]]
+) -> dict[str, bool]:
+    """The exam details check of an assessment: each room and time its exams
+    state is one an extracted change of the exam's day states too, since an
+    assessment keeps the meeting's own room and times."""
+    changes = list(changes)
+
+    def stated(exam: Mapping[str, Any], field: str, kind: str) -> bool:
+        value = _strip(exam[field])
+        return not value or any(
+            change["kind"] == kind
+            and change[field] == value
+            and covers_day(change, date.fromisoformat(exam["date"]))
+            for change in changes
+        )
+
+    return {
+        "ok": all(stated(exam, field, kind) for exam in exams for field, kind in _EXAM_DETAILS)
     }
 
 
@@ -154,6 +218,18 @@ async def has_schedule(session: AsyncSession, term: str, course_no: str) -> bool
     return not await session.scalar(_NO_MEETINGS, {"term": term, "course": course_no})
 
 
+async def is_class_day(session: AsyncSession, term: str, course_no: str, day: date) -> bool:
+    """Whether the course meets on `day` in the term, a holiday not."""
+    found = await session.execute(
+        _VIOLATIONS,
+        {
+            "term": term, "course": course_no, "kind": "assessment", "mode": "day",
+            "first": day, "last": day, "excluded": [], "periods": None, "editing": None,
+        },
+    )
+    return not {row.code for row in found} & _NOT_CLASS_DAY
+
+
 @dataclass(frozen=True)
 class Announcement:
     """What the checks read of an announcement and its extraction."""
@@ -205,7 +281,7 @@ async def check_change(
     ).all()
     codes = {row.code for row in found}
     broken = sorted(codes - _NOT_CLASS_DAY) + ([] if well_formed else ["format"])
-    wanted = "class_cancel" if payload["kind"] == "cancelled" else "class_change"
+    wanted = _LABELS.get(payload["kind"], _CLASS_CHANGE)
     return {
         "evidence": {"ok": bool(evidence.strip()) and evidence in announcement.text},
         "term": {
@@ -219,7 +295,8 @@ async def check_change(
             "change_ids": sorted({row.change_id for row in found if row.code == "clash"}),
         },
         "labels": {
-            "ok": wanted in announcement.labels and wanted in announcement.llm_labels
+            "ok": bool(wanted & set(announcement.labels))
+            and bool(wanted & set(announcement.llm_labels))
         },
         "certain": {"ok": announcement.certain},
         "visibility": {
@@ -256,6 +333,7 @@ def _well_formed(payload: Mapping[str, Any], first: date, last: date) -> bool:
     values = all(
         isinstance(payload[field], str) and payload[field].strip()
         for field in _KIND_FIELDS.get(kind, ())
+        if kind not in _OPTIONAL_FIELDS or payload[field] is not None
     )
     room = payload["room"]
     return (
@@ -303,11 +381,16 @@ async def course_statements(
             announcement_id=row.id,
             posted_at=row.posted_at,
             course_codes=frozenset(row.course_codes),
-            changes=tuple(change_payload(fact) for fact in row.raw_output["course_changes"]),
+            changes=tuple(change_payload(fact) for fact in row.raw_output["course_changes"])
+            + tuple(exam_payload(exam) for exam in row.raw_output["exams"] if exam["date"]),
             held=tuple(date.fromisoformat(h["date"]) for h in row.raw_output["held_as_usual"]),
         )
         for row in rows
     ]
+
+
+def _same_rule(one: str, other: str) -> bool:
+    return one == other or {one, other} <= _PLACE_KINDS
 
 
 def contradiction(
@@ -320,7 +403,8 @@ def contradiction(
 ) -> dict[str, Any]:
     """The contradiction check: whether an announcement of the course posted
     later holds a day of the change as usual, or states another change of
-    that kind for it, naming the latest that does."""
+    that kind for it (a room change or an online class for either), naming the
+    latest that does."""
     by: Statement | None = None
     for statement in statements:
         if (
@@ -331,7 +415,7 @@ def contradiction(
         ):
             continue
         if any(covers_day(payload, day) for day in statement.held) or any(
-            other["kind"] == payload["kind"]
+            _same_rule(other["kind"], payload["kind"])
             and same_class_time(other, payload)
             and any(other[field] != payload[field] for field in VALUE_FIELDS)
             for other in statement.changes

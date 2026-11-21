@@ -174,6 +174,7 @@ const CHECKS: [string, string, string][] = [
   ["certain", "Marked certain", "Not certain"],
   ["visibility", "Whole course", "Group post"],
   ["contradiction", "Not contradicted", "Contradicted"],
+  ["exam_details", "Exam room and time extracted", "Exam room or time"],
 ];
 
 export type Check = {

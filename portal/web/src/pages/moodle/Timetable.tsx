@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { monthDay } from "@/lib/format";
 import { Skeleton } from "@/components/ui/skeleton";
+import { KINDS } from "../course-changes/model";
 import { LoadError, Segmented } from "./controls";
 import { errorText, termLabel } from "./format";
 import type { CourseChange, TimetableResponse } from "./types";
@@ -20,13 +21,7 @@ const PERIODS: [string, string][] = [
   ["A", "18:25"], ["B", "19:20"], ["C", "20:15"], ["D", "21:10"],
 ];
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const TAG: Record<CourseChange["kind"], string> = {
-  room: "bg-badge-info text-badge-info-fg",
-  cancelled: "bg-badge-danger text-badge-danger-fg",
-  start: "bg-badge-orange text-badge-orange-fg",
-  end: "bg-badge-orange text-badge-orange-fg",
-  note: "bg-badge-violet text-badge-violet-fg",
-};
+const TAG = Object.fromEntries(KINDS.map((k) => [k.id, cn(k.soft, k.text)])) as Record<CourseChange["kind"], string>;
 
 type Block = {
   key: string;
@@ -70,6 +65,7 @@ export function changeFor(
     : c.kind === "room" ? c.room ?? ""
     : c.kind === "start" ? `starts ${c.start_time ?? ""}`
     : c.kind === "end" ? `ends ${c.end_time ?? ""}`
+    : c.kind === "online" ? "Online"
     : c.note_zh ?? c.note_en ?? "";
   const day = monthDay(`${date}T00:00:00Z`, true);
   return { kind: c.kind, label: `${c.mode === "range" ? `From ${day}` : day}: ${what}`, date };

@@ -32,6 +32,45 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 
 ---
 
+## Upgrading to 4.7.0
+
+- **Course change kinds `assessment` and `online`.** An assessment marks a
+  class meeting in which the whole course is assessed and carries both
+  names; an online class carries an optional description. `GET
+  /calendar/course-changes` sends them only to a request listing them in
+  `kinds`; released apps get each as a note with the same text. A room
+  change and an online class on one meeting clash.
+- **Migration `fefd80be557b`** replaces the `chk_course_change_kind` and
+  `chk_course_change_note` checks and `course_change_violations`, then
+  converts term 1151's notes by id, each only while it is still a note
+  with its Chinese text: 14, 17, 18, 19,
+  20, 21, 33 (期中考) and 23 (期末考), 16 (期中分組簡報, given the English
+  name Midterm group presentation) and 54 (期末報告, renamed 期末簡報 /
+  Final presentation) to `assessment`, and 35 and 36 to `online` with their
+  text as the description. Before the deploy, list those rows read-only and
+  compare.
+- **Class pushes.** A class reminder for an assessment begins with its name
+  in the device's language (`期中考 · 09:10 · IB-101`); an online class shows
+  線上 / Online for its room in reminders and class Live Activity starts,
+  which also carry `assessment`.
+- **Course announcements.** An exam dated on a class day also becomes a
+  pending `assessment` item, which waits for review when the exam states a
+  room or time no extracted change does, and a class moved online an
+  `online` item. The prompt
+  and schema gained the online kind and an exam's name; extractions stored
+  before keep their items, and `scripts/import_course_announcements.py
+  --reextract` asks the current term's posts again.
+- **Portal.** The change dialog offers both kinds, with the assessment
+  presets 期中考, 期末考, 小考, 期中簡報 and 期末簡報; the note keeps 補課.
+- The `app-translation` submodule adds `course_change_assessment` and
+  `course_change_online`: run `git submodule update --init` before
+  `./start.sh`. No `.env` change.
+- Rollback: stop the backend, run
+  `docker compose run --rm --no-deps backend alembic downgrade 22370b5daa3b`
+  on 4.7.0, which turns every assessment and online change into the note a
+  released app reads and gives the converted rows their texts back, then
+  check out 4.6.0 and run `./start.sh`.
+
 ## Upgrading to 4.6.0
 
 - **Assignment reminders state the time left** in their title, per recipient

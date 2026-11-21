@@ -85,6 +85,7 @@ from server.push.notification_copy import (
     REAUTH_SCENARIO,
     SESSION_REAUTH_REASON,
     build_assignment_reminder_payload,
+    build_class_start_payload,
     build_course_reminder_payload,
     build_reauth_payload,
     reminder_due_epoch,
@@ -1287,7 +1288,13 @@ async def _send_one(
     payload = job.payload or {}
     is_reauth = job.scenario == REAUTH_SCENARIO
     device: UserDevice | None = None
-    if is_reauth or job.channel in (REMINDER_CHANNEL, COURSE_CHANNEL):
+    if job.channel == SCHEDULE_CHANNEL:
+        # An online class's location is a word, in the recipient's language.
+        device = await session.get(UserDevice, delivery.device_id)
+        payload = build_class_start_payload(
+            payload, locale=device.locale if device is not None else None
+        )
+    elif is_reauth or job.channel in (REMINDER_CHANNEL, COURSE_CHANNEL):
         # Copy is resolved here, not at enqueue time: one job fans out to
         # every device on the account and they can be in different
         # languages, so the only place the right language is known is the

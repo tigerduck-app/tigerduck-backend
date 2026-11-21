@@ -44,6 +44,14 @@ _SHAPE = text(
     """
 ).bindparams(tables=[*_TABLES, "course_changes"])
 
+# fefd80be557b replaces these checks of course_changes.
+_LATER = ("chk_course_change_kind", "chk_course_change_note")
+
+
+def _now(shapes) -> set[str]:
+    return {shape for shape in shapes if not any(name in shape for name in _LATER)}
+
+
 _LEFT = text(
     "SELECT count(*) FROM pg_class WHERE relname = ANY(:tables) AND relkind = 'r'"
 ).bindparams(tables=list(_TABLES))
@@ -57,20 +65,20 @@ _SOURCE_COLUMN = text(
 async def test_upgrade_builds_the_tables_the_models_declare(
     migration_db_url: str, db_session
 ) -> None:
-    declared = set((await db_session.scalars(_SHAPE)).all())
+    declared = _now((await db_session.scalars(_SHAPE)).all())
     assert any("source_announcement_id" in shape for shape in declared)
     assert any("ux_course_announcement_extractions_live" in shape for shape in declared)
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)
     try:
         async with engine.connect() as conn:
-            assert set((await conn.scalars(_SHAPE)).all()) == declared
+            assert _now((await conn.scalars(_SHAPE)).all()) == declared
 
         # A second run, after a rollback that kept the tables, changes nothing.
         _alembic(migration_db_url, "stamp", BEFORE)
         _alembic(migration_db_url, "upgrade", REVISION)
         async with engine.connect() as conn:
-            assert set((await conn.scalars(_SHAPE)).all()) == declared
+            assert _now((await conn.scalars(_SHAPE)).all()) == declared
 
         _alembic(migration_db_url, "downgrade", BEFORE)
         async with engine.connect() as conn:

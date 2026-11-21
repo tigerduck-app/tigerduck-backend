@@ -56,7 +56,8 @@ class CourseChangeOut(BaseModel):
 
     id: int
     course_no: str
-    #: `cancelled`, `room`, `start`, `end` or `note`.
+    #: `cancelled`, `room`, `start`, `end` or `note`, and `assessment` or
+    #: `online` for a client that lists it in `kinds`.
     kind: str
     #: `day` uses `day`; `range` uses `from`, `to` and `excluded_weekdays`.
     mode: str
@@ -71,6 +72,8 @@ class CourseChangeOut(BaseModel):
     room: str | None
     start: str | None
     end: str | None
+    #: A note's text (English None falls back to Chinese), an assessment's
+    #: names, or an online class's optional description.
     note_zh: str | None
     note_en: str | None
     updated_at: datetime

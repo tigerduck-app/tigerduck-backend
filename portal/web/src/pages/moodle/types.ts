@@ -1,5 +1,7 @@
 // Shapes the /api/moodle routes answer with (portal/app/routes/moodle/).
 
+import type { Kind } from "../course-changes/model";
+
 export type MoodleStatus = {
   suspended_until: string | null;
   job_counts: {
@@ -63,7 +65,7 @@ export type ScheduleEntry = { day?: unknown; periods?: unknown };
 
 export type CourseChange = {
   course_no: string;
-  kind: "cancelled" | "room" | "start" | "end" | "note";
+  kind: Kind;
   mode: "day" | "range";
   start_date: string;
   end_date: string;

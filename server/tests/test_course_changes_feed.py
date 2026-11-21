@@ -176,6 +176,97 @@ async def test_each_kind_carries_its_own_value(client) -> None:
     assert changes[0]["periods"] == ["3", "4"]
 
 
+_EXAM = {"kind": "assessment", "note_zh": "期中考", "note_en": "Midterm exam"}
+
+
+async def _new_kinds(client) -> None:
+    await _term_1151(client)
+    await _seed(
+        client,
+        _change(date(2026, 11, 3)),
+        _change(date(2026, 11, 5), kind="room", room="IB-302"),
+        _change(date(2026, 11, 10), **_EXAM),
+        _change(date(2026, 11, 17), kind="online"),
+        _change(date(2026, 11, 19), kind="online", note_zh="同步視訊"),
+    )
+
+
+def _kinds_and_notes(response) -> list[tuple]:
+    return [
+        (c["kind"], c["room"], c["note_zh"], c["note_en"]) for c in response.json()["changes"]
+    ]
+
+
+async def test_an_app_that_reads_the_new_kinds_gets_them(client) -> None:
+    await _new_kinds(client)
+
+    listed = await _feed(client, term="1151", kinds="assessment,online")
+    repeated = await client.get(
+        PATH, params=[("term", "1151"), ("kinds", "online"), ("kinds", " assessment")]
+    )
+
+    assert _kinds_and_notes(listed) == [
+        ("cancelled", None, None, None),
+        ("room", "IB-302", None, None),
+        ("assessment", None, "期中考", "Midterm exam"),
+        ("online", None, None, None),
+        ("online", None, "同步視訊", None),
+    ]
+    assert _kinds_and_notes(repeated) == _kinds_and_notes(listed)
+    assert repeated.headers["ETag"] == listed.headers["ETag"]
+
+
+async def test_a_released_app_gets_the_new_kinds_as_notes(client) -> None:
+    await _new_kinds(client)
+
+    released = await _feed(client, term="1151")
+    listed = (await _feed(client, term="1151", kinds="assessment,online")).json()["changes"]
+
+    assert _kinds_and_notes(released) == [
+        ("cancelled", None, None, None),
+        ("room", "IB-302", None, None),
+        ("note", None, "期中考", "Midterm exam"),
+        ("note", None, "線上", "Online"),
+        ("note", None, "同步視訊", None),
+    ]
+    assert [
+        (c["id"], c["class_days"], c["day"]) for c in released.json()["changes"]
+    ] == [(c["id"], c["class_days"], c["day"]) for c in listed]
+
+
+async def test_a_client_gets_only_the_kinds_it_lists(client) -> None:
+    await _new_kinds(client)
+
+    online_only = await _feed(client, term="1151", kinds="online,exam")
+    unknown = await _feed(client, term="1151", kinds="exam")
+    empty = await client.get(PATH, params=[("term", "1151"), ("kinds", ""), ("kinds", ",, ,")])
+    oversized = await _feed(client, term="1151", kinds="," * 2000 + "x" * 2000)
+    released = await _feed(client, term="1151")
+
+    assert [kind for kind, *_ in _kinds_and_notes(online_only)] == [
+        "cancelled", "room", "note", "online", "online",
+    ]
+    for other in (unknown, empty, oversized):
+        assert other.status_code == 200
+        assert _kinds_and_notes(other) == _kinds_and_notes(released)
+        assert other.headers["ETag"] == released.headers["ETag"]
+
+
+async def test_listing_the_kinds_answers_the_whole_term_not_304(client) -> None:
+    await _new_kinds(client)
+    released = await _feed(client, term="1151")
+
+    upgraded = await client.get(
+        PATH,
+        params={"term": "1151", "kinds": "assessment,online"},
+        headers={"If-None-Match": released.headers["ETag"]},
+    )
+
+    assert upgraded.status_code == 200
+    assert upgraded.headers["ETag"] != released.headers["ETag"]
+    assert len(upgraded.json()["changes"]) == 5
+
+
 async def test_a_range_resolves_its_class_days(client) -> None:
     """Holidays and excluded weekdays come out, so the apps need not."""
     await _term_1151(client)

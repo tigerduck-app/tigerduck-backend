@@ -2,7 +2,7 @@
 // the page derives from them: class days, the regular time and room a change
 // replaces, and the conflict copy for the API's 409 answers.
 
-import { CalendarX, Clock, FileText, Hourglass, MapPin, type LucideIcon } from "lucide-react";
+import { CalendarX, Clock, FileText, GraduationCap, Hourglass, MapPin, MonitorPlay, type LucideIcon } from "lucide-react";
 import type { Tone } from "@/components/page";
 import { ApiError } from "@/lib/api";
 import {
@@ -35,7 +35,7 @@ export type Course = {
   changes: number;
 };
 
-export type Kind = "cancelled" | "room" | "start" | "end" | "note";
+export type Kind = "cancelled" | "room" | "start" | "end" | "assessment" | "online" | "note";
 
 export type Change = {
   id: number;
@@ -99,6 +99,16 @@ export const KINDS: KindInfo[] = [
     id: "end", label: "End time", short: "End time", tone: "orange", icon: Hourglass,
     fill: "bg-badge-orange-fg", text: "text-badge-orange-fg", soft: "bg-badge-orange",
     card: "border-badge-orange-fg bg-badge-orange",
+  },
+  {
+    id: "assessment", label: "Assessment", short: "Assessment", tone: "neutral", icon: GraduationCap,
+    fill: "bg-badge-neutral-fg", text: "text-badge-neutral-fg", soft: "bg-badge-neutral",
+    card: "border-badge-neutral-fg bg-badge-neutral",
+  },
+  {
+    id: "online", label: "Online", short: "Online", tone: "success", icon: MonitorPlay,
+    fill: "bg-badge-success-fg", text: "text-badge-success-fg", soft: "bg-badge-success",
+    card: "border-badge-success-fg bg-badge-success",
   },
   {
     id: "note", label: "Note", short: "Note", tone: "violet", icon: FileText,
@@ -167,6 +177,9 @@ export function detailOf(change: Change, course: Course | undefined): Detail {
       return { ...detail, old: span?.[0] ?? "", next: change.start ?? "" };
     case "end":
       return { ...detail, old: span?.[1] ?? "", next: change.end ?? "" };
+    case "online":
+      return { ...detail, old: room, next: "Online", note: noteText(change.note_zh, change.note_en) };
+    case "assessment":
     case "note":
       return { ...detail, note: noteText(change.note_zh, change.note_en) };
   }
@@ -188,12 +201,15 @@ export function rangeSub(c: Change, course: Course | undefined): string {
 /** The API's 409s as the dialog's conflict copy; other errors as the API words them. */
 export function changeError(e: unknown, kind: Kind | null): string {
   if (e instanceof ApiError && e.status === 409) {
-    const day = (e.body as { day?: unknown } | null)?.day;
+    const body = (e.body as { day?: unknown; kind?: unknown } | null) ?? {};
+    // The existing change's kind: a room change and an online class clash.
+    const existing = typeof body.kind === "string" && body.kind in KIND ? (body.kind as Kind) : (kind ?? "room");
     // The stale edit's detail ends "so the change can only be deleted".
     if (e.message.includes("can only be deleted")) return "No class day is left for this change. Delete it instead.";
-    if (typeof day !== "string") return asMessage(e);
-    if (kind === "cancelled") return `${dayDate(day)} is already cancelled.`;
-    return `${dayDate(day)} already has a ${KIND[kind ?? "room"].label.toLowerCase()}.`;
+    if (typeof body.day !== "string") return asMessage(e);
+    if (existing === "cancelled") return `${dayDate(body.day)} is already cancelled.`;
+    const label = existing === "online" ? "online class" : KIND[existing].label.toLowerCase();
+    return `${dayDate(body.day)} already has ${/^[aeiou]/.test(label) ? "an" : "a"} ${label}.`;
   }
   return asMessage(e);
 }
