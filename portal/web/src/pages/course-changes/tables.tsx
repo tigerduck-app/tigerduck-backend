@@ -100,11 +100,10 @@ export function DetailCell({ change, course }: { change: Change; course: Course 
   const d = detailOf(change, course);
   const chip = "rounded-md px-2 py-0.5 text-[13px]";
   const mono = change.kind === "room" ? "font-mono" : "";
+  const tint = cn(KIND[change.kind].soft, KIND[change.kind].text);
   return (
     <div className="flex flex-wrap items-center gap-1.5">
-      {change.kind === "note" ? (
-        <span className="rounded-full bg-badge-violet px-2 py-0.5 text-[13px] font-semibold text-badge-violet-fg">{d.note}</span>
-      ) : (
+      {d.next && (
         <>
           {d.old && (
             <>
@@ -112,11 +111,10 @@ export function DetailCell({ change, course }: { change: Change; course: Course 
               <ArrowRight className="h-3.5 w-3.5 shrink-0 text-ink-3" />
             </>
           )}
-          <span className={cn(chip, mono, "font-semibold", KIND[change.kind].soft, KIND[change.kind].text)}>
-            {d.next}
-          </span>
+          <span className={cn(chip, mono, "font-semibold", tint)}>{d.next}</span>
         </>
       )}
+      {d.note && <span className={cn("rounded-full px-2 py-0.5 text-[13px] font-semibold", tint)}>{d.note}</span>}
       {d.periods && <span className="text-xs text-ink-3">{d.periods}</span>}
     </div>
   );

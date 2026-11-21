@@ -39,28 +39,31 @@ _FUNCTIONS = text(
     "SELECT count(*) FROM pg_proc WHERE proname IN ('course_meetings', 'course_class_days')"
 )
 
+# What later revisions change: 22370b5daa3b adds the source column and its key,
+# fefd80be557b replaces the kind and note checks.
+_LATER = ("source_announcement_id", "chk_course_change_kind", "chk_course_change_note")
+
+
+def _now(shapes) -> set[str]:
+    return {shape for shape in shapes if not any(name in shape for name in _LATER)}
+
 
 async def test_upgrade_builds_the_table_the_model_declares(
     migration_db_url: str, db_session
 ) -> None:
-    # A later revision (22370b5daa3b) adds the source column and its key.
-    declared = {
-        shape
-        for shape in (await db_session.scalars(_SHAPE)).all()
-        if "source_announcement_id" not in shape
-    }
+    declared = _now((await db_session.scalars(_SHAPE)).all())
     assert len([shape for shape in declared if "FUNCTION" in shape]) == 2
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)
     try:
         async with engine.connect() as conn:
-            assert set((await conn.scalars(_SHAPE)).all()) == declared
+            assert _now((await conn.scalars(_SHAPE)).all()) == declared
 
         # A second run, after a rollback that kept the table, changes nothing.
         _alembic(migration_db_url, "stamp", BEFORE)
         _alembic(migration_db_url, "upgrade", REVISION)
         async with engine.connect() as conn:
-            assert set((await conn.scalars(_SHAPE)).all()) == declared
+            assert _now((await conn.scalars(_SHAPE)).all()) == declared
 
         _alembic(migration_db_url, "downgrade", BEFORE)
         async with engine.connect() as conn:

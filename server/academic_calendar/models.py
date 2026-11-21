@@ -16,7 +16,8 @@ Tables
   locally and never create a row here.
 * `course_changes` — the school's exceptions to one course's classes in a
   term (`course_no` as in `user_courses`), recorded in the portal: a
-  cancelled class, a new room, start or end time, or a note.
+  cancelled class, a new room, start or end time, an assessment, an online
+  class, or a note.
 """
 
 from __future__ import annotations
@@ -149,7 +150,8 @@ class UserHolidayOverride(Base):
 class CourseChange(Base):
     """One exception to a course's classes: on one day, or on every class
     day of a range but the weekdays left out. Keep in step with
-    `ea77513de257_course_changes.py` and `22370b5daa3b_course_announcements.py`."""
+    `ea77513de257_course_changes.py`, `22370b5daa3b_course_announcements.py`
+    and `fefd80be557b_course_change_kinds.py`."""
 
     __tablename__ = "course_changes"
 
@@ -174,8 +176,9 @@ class CourseChange(Base):
     # "HH:mm", Asia/Taipei.
     start_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
     end_time: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    # A note's text, an assessment's name, or an online class's description.
     note_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # None falls back to note_zh.
+    # None falls back to note_zh; an assessment always has one.
     note_en: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -198,7 +201,7 @@ class CourseChange(Base):
     # that is there.
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('cancelled', 'room', 'start', 'end', 'note')",
+            "kind IN ('cancelled', 'room', 'start', 'end', 'assessment', 'online', 'note')",
             name="chk_course_change_kind",
         ),
         CheckConstraint(
@@ -229,8 +232,11 @@ class CourseChange(Base):
             name="chk_course_change_end",
         ),
         CheckConstraint(
-            "(kind = 'note') = (note_zh IS NOT NULL) AND btrim(note_zh) <> ''"
-            " AND (note_en IS NULL OR kind = 'note') AND btrim(note_en) <> ''",
+            "(kind IN ('assessment', 'online', 'note') OR note_zh IS NULL)"
+            " AND (kind NOT IN ('assessment', 'note') OR note_zh IS NOT NULL)"
+            " AND (kind <> 'assessment' OR note_en IS NOT NULL)"
+            " AND (note_en IS NULL OR note_zh IS NOT NULL)"
+            " AND btrim(note_zh) <> '' AND btrim(note_en) <> ''",
             name="chk_course_change_note",
         ),
         Index("ix_course_changes_term_course", "term_code", "course_no"),
@@ -318,9 +324,10 @@ ORDER BY semester, course_no, (source = 'ntust_portal') DESC, updated_at DESC
 #   several_meetings  a start or end change names no periods on a `day` the course
 #                     meets more than once
 #   not_one_meeting   a start or end change's periods are not one meeting on `day`
-#   clash             change `change_id` of the same kind covers `day` in a period
-#                     the change covers too, or in any when either names none; notes
-#                     never clash, since an exam and a make-up class can share a day
+#   clash             change `change_id` of the same kind, or a room change against
+#                     an online one, covers `day` in a period the change covers too,
+#                     or in any when either names none; notes never clash, since a
+#                     make-up class and another note can share a day
 # The days are the ones the course meets on, holidays too: the apps apply a
 # change on a holiday the user put back. `editing` is the change being
 # replaced, so it is no clash; with a NULL kind only no_meetings is checked.
@@ -424,7 +431,9 @@ AS $$
         SELECT 'clash', d.day, NULL, c.id
         FROM days AS d
         JOIN course_changes AS c
-          ON c.term_code = term AND c.course_no = course AND c.kind = change_kind
+          ON c.term_code = term AND c.course_no = course
+         AND (c.kind = change_kind
+              OR (c.kind IN ('room', 'online') AND change_kind IN ('room', 'online')))
          AND c.id IS DISTINCT FROM editing
          AND d.day BETWEEN c.start_date AND c.end_date
          AND extract(isodow FROM d.day)::smallint <> ALL (c.excluded_weekdays)

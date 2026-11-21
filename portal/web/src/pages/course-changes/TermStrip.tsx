@@ -17,6 +17,8 @@ const LEGEND: [string, string][] = [
   ["bg-badge-danger-fg", "Cancelled"],
   ["bg-badge-info-fg", "Room"],
   ["bg-badge-orange-fg", "Time"],
+  ["bg-badge-neutral-fg", "Assessment"],
+  ["bg-badge-success-fg", "Online"],
   ["bg-badge-violet-fg", "Note"],
   ["ring-2 ring-inset ring-ink", "Today"],
 ];

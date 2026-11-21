@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.academic_calendar.changes import load_course_changes, meeting_changes
 from server.academic_calendar.terms import current_term_code
+from server.push.notification_copy import ONLINE
 from server.push.payload import _to_unix_seconds
 
 # The app's `CourseTimeSlot.id`: the course, the day and the meeting's first period.
@@ -25,7 +26,10 @@ async def recheck_class_start(
 ) -> tuple[dict | None, timedelta]:
     """The class start's payload as the school's course changes leave its
     meeting, and how much later than filed it is due; None when the meeting
-    is cancelled or its changed start (in class: end) has passed.
+    is cancelled or its changed start (in class: end) has passed. A new room
+    or an online class (`ONLINE`, its location written per recipient by
+    `notification_copy.build_class_start_payload`) sets `roomChanged`, and
+    `assessment` is true only for an assessment's meeting.
 
     A source id that is not a slot id names no course, as for the portal's
     test starts, and goes out as filed. Raises ValueError for a changed start
@@ -48,9 +52,15 @@ async def recheck_class_start(
     )
     if "cancelled" in changed:
         return None, timedelta(0)
-    snapshot = dict(payload)
+    snapshot = {key: value for key, value in payload.items() if key not in ("assessment", ONLINE)}
+    if "assessment" in changed:
+        snapshot["assessment"] = True
     if "room" in changed:
         snapshot["locationText"] = changed["room"].room
+        snapshot["roomChanged"] = True
+    if "online" in changed:
+        snapshot[ONLINE] = True
+        snapshot["roomChanged"] = True
     if "start" not in changed and "end" not in changed:
         return snapshot, timedelta(0)
 

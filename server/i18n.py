@@ -103,6 +103,13 @@ def require_fallback_bundle() -> None:
     load_bundle(CANONICAL_LOCALE)
 
 
+def is_chinese(locale: str | None) -> bool:
+    """Whether `locale` is a Chinese one (zh, zh-Hant, zh-Hans, yue), which
+    reads the Chinese of a name the backend stores in Chinese and English."""
+    tag = (locale or "").strip().replace("_", "-").split("-")[0].lower()
+    return tag in ("zh", "yue")
+
+
 def translate(key: str, locale: str | None) -> str:
     """Localized string for `key`, or `MISSING_KEY_SENTINEL` if absent."""
     resolved = resolve_locale(locale)

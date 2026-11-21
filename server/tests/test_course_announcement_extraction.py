@@ -94,6 +94,7 @@ async def test_a_notice_held_as_usual_lists_the_day_and_no_change():
 async def test_an_exam_without_a_date_is_kept():
     exam = {
         "kind": "midterm",
+        "name": "期中考",
         "date": None,
         "start_time": None,
         "end_time": None,

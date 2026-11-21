@@ -37,12 +37,15 @@ const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
-const NOTE_PRESETS: [string, string][] = [
+// The first three are the names server/course_announcements/checks.py gives an extracted exam.
+const ASSESSMENT_PRESETS: [string, string][] = [
   ["期中考", "Midterm exam"],
   ["期末考", "Final exam"],
   ["小考", "Quiz"],
-  ["補課", "Make-up class"],
+  ["期中簡報", "Midterm presentation"],
+  ["期末簡報", "Final presentation"],
 ];
+const NOTE_PRESETS: [string, string][] = [["補課", "Make-up class"]];
 const NO_HOLIDAYS: ReadonlyMap<string, string> = new Map();
 const HHMM = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 const mins = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5));
@@ -159,13 +162,15 @@ export function ChangeDialog({
     setMonth(toIso(Date.UTC(y, m - 1 + n, 1)).slice(0, 7));
   };
 
+  const needsChinese = kind === "note" || kind === "assessment" || (kind === "online" && noteEn.trim() !== "");
   const valid =
     kind !== null &&
     hasDates &&
     days.length > 0 &&
     periods.length > 0 &&
     (kind !== "room" || room.trim() !== "") &&
-    (kind !== "note" || noteZh.trim() !== "") &&
+    (!needsChinese || noteZh.trim() !== "") &&
+    (kind !== "assessment" || noteEn.trim() !== "") &&
     (kind !== "start" || HHMM.test(startNew)) &&
     (kind !== "end" || HHMM.test(endNew));
 
@@ -278,7 +283,7 @@ export function ChangeDialog({
         </div>
 
         <div className="flex min-w-0 flex-[1_1_400px] flex-col gap-[18px]">
-          <div role="radiogroup" aria-label="Change" className="grid grid-cols-5 gap-2 max-[720px]:grid-cols-3">
+          <div role="radiogroup" aria-label="Change" className="grid grid-cols-4 gap-2 max-[720px]:grid-cols-3">
             {KINDS.map((k) => {
               const on = kind === k.id;
               const Icon = k.icon;
@@ -373,36 +378,47 @@ export function ChangeDialog({
               {regStart && <TimeAxis regular={[regStart, regEnd]} changed={[startNew, endNew]} />}
             </div>
           )}
-          {kind === "note" && (
+          {(kind === "assessment" || kind === "online" || kind === "note") && (
             <div className="flex flex-col gap-2.5">
-              <div role="group" aria-label="Common notes" className="flex flex-wrap gap-1.5">
-                {NOTE_PRESETS.map(([zh, en]) => (
-                  <button
-                    key={zh}
-                    type="button"
-                    onClick={() => {
-                      setNoteZh(zh);
-                      setNoteEn(en);
-                    }}
-                    className="min-h-8 rounded-full border border-field bg-surface px-3 text-[13px] hover:bg-row-hover"
-                  >
-                    {zh} {en}
-                  </button>
-                ))}
-              </div>
+              {kind === "online" ? (
+                <span className="text-xs font-medium text-ink-3">Description</span>
+              ) : (
+                <div
+                  role="group"
+                  aria-label={kind === "assessment" ? "Common assessments" : "Common notes"}
+                  className="flex flex-wrap gap-1.5"
+                >
+                  {(kind === "assessment" ? ASSESSMENT_PRESETS : NOTE_PRESETS).map(([zh, en]) => (
+                    <button
+                      key={zh}
+                      type="button"
+                      onClick={() => {
+                        setNoteZh(zh);
+                        setNoteEn(en);
+                      }}
+                      className="min-h-8 rounded-full border border-field bg-surface px-3 text-[13px] hover:bg-row-hover"
+                    >
+                      {zh} {en}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex flex-wrap gap-3">
                 <label className="flex flex-[1_1_180px] flex-col gap-1.5 text-[13px] font-medium">
-                  Chinese
+                  <span>
+                    Chinese {kind === "online" && <span className="font-normal text-ink-3">optional</span>}
+                  </span>
                   <input value={noteZh} onChange={(e) => setNoteZh(e.target.value)} className={cn(fieldClass, "px-3 font-normal")} />
                 </label>
                 <label className="flex flex-[1_1_180px] flex-col gap-1.5 text-[13px] font-medium">
                   <span>
-                    English <span className="font-normal text-ink-3">optional</span>
+                    English {kind !== "assessment" && <span className="font-normal text-ink-3">optional</span>}
                   </span>
                   <input
                     value={noteEn}
                     onChange={(e) => setNoteEn(e.target.value)}
-                    placeholder={noteZh}
+                    // English left empty reads the Chinese in the apps, except an assessment's.
+                    placeholder={kind === "assessment" ? undefined : noteZh}
                     className={cn(fieldClass, "px-3 font-normal")}
                   />
                 </label>
@@ -416,7 +432,7 @@ export function ChangeDialog({
               name={course.name}
               start={[regStart, startNew]}
               end={[regEnd, endNew]}
-              room={[regRoom, room.trim()]}
+              room={[regRoom, kind === "online" ? "Online" : room.trim()]}
               note={noteZh.trim() ? (noteEn.trim() ? `${noteZh.trim()} · ${noteEn.trim()}` : noteZh.trim()) : ""}
             />
           )}
@@ -620,7 +636,7 @@ function Preview({
   const cancelled = kind === "cancelled";
   const startChanged = kind === "start" && start[1] !== start[0];
   const endChanged = kind === "end" && end[1] !== end[0];
-  const roomChanged = kind === "room" && room[1] !== "";
+  const roomChanged = (kind === "room" || kind === "online") && room[1] !== "";
   const struck = "text-dot-off line-through";
   return (
     <div className="flex flex-col gap-2">
@@ -634,7 +650,15 @@ function Preview({
         </div>
         <div aria-hidden="true" className={cn("w-1 rounded-full", cancelled ? "bg-field" : "bg-chart-1")} />
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-          <span className={cn("font-semibold", cancelled ? struck : "text-ink")}>{name}</span>
+          <span
+            className={cn(
+              "font-semibold",
+              cancelled ? struck : "text-ink",
+              kind === "assessment" && "underline decoration-dashed decoration-2 underline-offset-4",
+            )}
+          >
+            {name}
+          </span>
           <div className="flex flex-wrap items-center gap-1.5">
             {room[0] && (
               <span
@@ -649,11 +673,13 @@ function Preview({
             {roomChanged && (
               <>
                 <ArrowRight className="h-3.5 w-3.5 text-ink-3" />
-                <span className="rounded-md bg-badge-info px-2 py-0.5 font-mono text-xs font-medium text-badge-info-fg">{room[1]}</span>
+                <span className={cn("rounded-md px-2 py-0.5 text-xs font-medium", KIND[kind].soft, KIND[kind].text, kind === "room" && "font-mono")}>
+                  {room[1]}
+                </span>
               </>
             )}
-            {kind === "note" && note && (
-              <span className="rounded-full bg-badge-violet px-2 py-0.5 text-xs font-semibold text-badge-violet-fg">{note}</span>
+            {(kind === "note" || kind === "assessment" || kind === "online") && note && (
+              <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold", KIND[kind].soft, KIND[kind].text)}>{note}</span>
             )}
             {cancelled && (
               <span className="rounded-full bg-badge-danger px-2 py-0.5 text-xs font-semibold text-badge-danger-fg">Cancelled</span>

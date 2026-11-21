@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
 
-from server.academic_calendar.changes import load_course_changes
+from server.academic_calendar.changes import LISTED_KINDS, as_note, load_course_changes
 from server.academic_calendar.models import AcademicHoliday, SemesterTerm
 from server.academic_calendar.schemas import (
     AcademicCalendarResponse,
@@ -126,16 +127,25 @@ async def get_academic_calendar(
 
 @router.get("/course-changes", response_model=CourseChangesResponse)
 async def get_course_changes(
-    request: Request, response: Response, session: SessionDep, term: str | None = None
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    term: str | None = None,
+    kinds: Annotated[list[str] | None, Query()] = None,
 ) -> CourseChangesResponse | Response:
     """A term's course changes, the current term's (`current_term_code`)
     when `term` is left out.
 
+    `kinds` lists, comma-separated, the kinds of `LISTED_KINDS` the client
+    reads; a change of a kind it leaves out goes out as a note (`as_note`),
+    and a value the backend does not know is ignored.
+
     Always the whole term, so a client replaces its copy of the term on each
-    200. The ETag hashes each change's id, edit time and class days: a
-    delete, an edit and a calendar edit that moves a change's class days
-    each change it.
+    200. The ETag hashes the listed kinds and each change's id, edit time and
+    class days: a client that starts listing a kind, a delete, an edit and a
+    calendar edit that moves a change's class days each change it.
     """
+    listed = {kind.strip() for value in kinds or () for kind in value.split(",")} & LISTED_KINDS
     code = term or await current_term_code(session, datetime.now(UTC))
     if code is None or await session.get(SemesterTerm, code) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="term_not_found")
@@ -143,6 +153,9 @@ async def get_course_changes(
     rows = [row for row in await load_course_changes(session, [code]) if row.class_days]
 
     digest = hashlib.sha256(code.encode())
+    if listed:
+        # Only then, so a client that lists none keeps the tag it stored.
+        digest.update(f"|kinds={','.join(sorted(listed))}".encode())
     for row in rows:
         days = ",".join(day.isoformat() for day in row.class_days)
         digest.update(f"|{row.id}:{row.updated_at.isoformat()}:{days}".encode())
@@ -156,26 +169,30 @@ async def get_course_changes(
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = _CACHE_CONTROL
     return CourseChangesResponse(
-        term=code,
-        changes=[
-            CourseChangeOut(
-                id=row.id,
-                course_no=row.course_no,
-                kind=row.kind,
-                mode=row.mode,
-                day=row.start_date if row.mode == "day" else None,
-                from_=row.start_date if row.mode == "range" else None,
-                to=row.end_date if row.mode == "range" else None,
-                excluded_weekdays=row.excluded_weekdays,
-                periods=row.periods,
-                class_days=row.class_days,
-                room=row.room,
-                start=row.start_time,
-                end=row.end_time,
-                note_zh=row.note_zh,
-                note_en=row.note_en,
-                updated_at=row.updated_at.astimezone(_TAIPEI).replace(microsecond=0),
-            )
-            for row in rows
-        ],
+        term=code, changes=[_change_out(row, listed) for row in rows]
+    )
+
+
+def _change_out(row, listed: set[str]) -> CourseChangeOut:
+    kind, note_zh, note_en = row.kind, row.note_zh, row.note_en
+    if kind in LISTED_KINDS and kind not in listed:
+        kind = "note"
+        note_zh, note_en = as_note(row)
+    return CourseChangeOut(
+        id=row.id,
+        course_no=row.course_no,
+        kind=kind,
+        mode=row.mode,
+        day=row.start_date if row.mode == "day" else None,
+        from_=row.start_date if row.mode == "range" else None,
+        to=row.end_date if row.mode == "range" else None,
+        excluded_weekdays=row.excluded_weekdays,
+        periods=row.periods,
+        class_days=row.class_days,
+        room=row.room,
+        start=row.start_time,
+        end=row.end_time,
+        note_zh=note_zh,
+        note_en=note_en,
+        updated_at=row.updated_at.astimezone(_TAIPEI).replace(microsecond=0),
     )

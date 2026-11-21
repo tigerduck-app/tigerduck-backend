@@ -19,13 +19,28 @@ _DEFINITIONS = text(
     " UNION ALL SELECT pg_get_viewdef(oid) FROM pg_class"
     " WHERE relname = 'term_courses' AND relkind = 'v'"
 )
+# fefd80be557b changes the function's clash rule; until then it is this
+# revision's, the model's with a change clashing with its own kind alone.
+_CLASH = (
+    "c.course_no = course\n"
+    "         AND (c.kind = change_kind\n"
+    "              OR (c.kind IN ('room', 'online') AND change_kind IN ('room', 'online')))\n"
+)
+
+
+def _then(definitions) -> set[str]:
+    return {
+        d.replace(_CLASH, "c.course_no = course AND c.kind = change_kind\n")
+        for d in definitions
+    }
 
 
 async def test_upgrade_builds_the_function_and_view_the_model_declares(
     migration_db_url: str, db_session
 ) -> None:
-    declared = set((await db_session.scalars(_DEFINITIONS)).all())
+    declared = _then((await db_session.scalars(_DEFINITIONS)).all())
     assert len(declared) == 2
+    assert not any("'online'" in definition for definition in declared)
     _alembic(migration_db_url, "upgrade", REVISION)
     engine = create_async_engine(migration_db_url)
     try:
