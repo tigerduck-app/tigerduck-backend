@@ -27,6 +27,9 @@ from server.push.course_reminders import PERIOD_RANK
 ROOM_MAX = 128
 # The fields of a change besides its days, which tell two changes of a day apart.
 VALUE_FIELDS = ("periods", "room", "start_time", "end_time", "note_zh")
+# As in `course_change_violations` (server/academic_calendar/models.py), a room
+# change and an online class clash, since both say where the class is held.
+_PLACE_KINDS = frozenset({"room", "online"})
 _KIND_FIELDS = {
     "room": ("room",),
     "start": ("start_time",),
@@ -386,6 +389,10 @@ async def course_statements(
     ]
 
 
+def _same_rule(one: str, other: str) -> bool:
+    return one == other or {one, other} <= _PLACE_KINDS
+
+
 def contradiction(
     *,
     course_no: str,
@@ -396,7 +403,8 @@ def contradiction(
 ) -> dict[str, Any]:
     """The contradiction check: whether an announcement of the course posted
     later holds a day of the change as usual, or states another change of
-    that kind for it, naming the latest that does."""
+    that kind for it (a room change or an online class for either), naming the
+    latest that does."""
     by: Statement | None = None
     for statement in statements:
         if (
@@ -407,7 +415,7 @@ def contradiction(
         ):
             continue
         if any(covers_day(payload, day) for day in statement.held) or any(
-            other["kind"] == payload["kind"]
+            _same_rule(other["kind"], payload["kind"])
             and same_class_time(other, payload)
             and any(other[field] != payload[field] for field in VALUE_FIELDS)
             for other in statement.changes

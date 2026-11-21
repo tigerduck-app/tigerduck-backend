@@ -402,3 +402,22 @@ async def test_only_a_different_change_of_the_kind_contradicts():
         "ok": False,
         "announcement_id": "1-1",
     }
+
+
+async def test_a_later_online_class_contradicts_a_room_change_and_the_reverse():
+    room = extracted_change(kind="room", room="IB-302")
+    online = extracted_change(kind="online", room=None)
+    later = POSTED + timedelta(hours=1)
+
+    def mark(payload, stated):
+        return contradiction(
+            course_no="CS1001301",
+            payload=change_payload(payload),
+            announcement_id="0-0",
+            posted_at=POSTED,
+            statements=[_statement(1, later, changes=[stated])],
+        )
+
+    assert mark(room, online) == {"ok": False, "announcement_id": "1-1"}
+    assert mark(online, room) == {"ok": False, "announcement_id": "1-1"}
+    assert mark(online, online)["ok"]
