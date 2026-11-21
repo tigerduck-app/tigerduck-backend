@@ -46,7 +46,8 @@ export function isoDate(start: string, offset: number): string {
 
 /** Each meeting split into runs of consecutive periods. */
 function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
-  const tagged = changes.filter((c) => ["room", "online", "assessment"].includes(c.kind));
+  const places = changes.filter((c) => c.kind === "room" || c.kind === "online");
+  const assessments = changes.filter((c) => c.kind === "assessment");
   const cancels = changes.filter((c) => c.kind === "cancelled");
   const out: Block[] = [];
   for (const c of courses) {
@@ -63,7 +64,8 @@ function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[
         // Period by period, since a change may cover only some of a meeting's periods.
         const one = { code, day, from: row, to: row };
         const cancelled = skipped || changeFor(one, cancels)?.date === date;
-        const tag = cancelled ? null : (changeFor(one, tagged)?.label ?? null);
+        const tags = [changeFor(one, assessments)?.label, changeFor(one, places)?.label].filter(Boolean);
+        const tag = cancelled || tags.length === 0 ? null : tags.join("; ");
         const last = out[out.length - 1];
         if (i > 0 && last.to === row - 1 && last.cancelled === cancelled && last.tag === tag) last.to = row;
         else out.push({ name: c.name, code, room: c.classroom ?? "", day, from: row, to: row, cancelled, tag });
