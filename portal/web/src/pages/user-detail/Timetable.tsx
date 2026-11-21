@@ -1,6 +1,7 @@
 // This week's classes for one user: the term's course meetings on a
 // weekday-by-period grid, with the dates the user skipped or the school
-// cancelled struck through and the school's coming room changes tagged.
+// cancelled struck through and the school's coming room changes, online
+// classes and assessments tagged.
 
 import { cn } from "@/lib/cn";
 import type { UserDetail } from "@/types/api";
@@ -45,7 +46,7 @@ export function isoDate(start: string, offset: number): string {
 
 /** Each meeting split into runs of consecutive periods. */
 function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[] {
-  const rooms = changes.filter((c) => c.kind === "room" || c.kind === "online");
+  const tagged = changes.filter((c) => ["room", "online", "assessment"].includes(c.kind));
   const cancels = changes.filter((c) => c.kind === "cancelled");
   const out: Block[] = [];
   for (const c of courses) {
@@ -62,7 +63,7 @@ function blocks({ courses, changes, week_start: weekStart }: UserDetail): Block[
         // Period by period, since a change may cover only some of a meeting's periods.
         const one = { code, day, from: row, to: row };
         const cancelled = skipped || changeFor(one, cancels)?.date === date;
-        const tag = cancelled ? null : (changeFor(one, rooms)?.label ?? null);
+        const tag = cancelled ? null : (changeFor(one, tagged)?.label ?? null);
         const last = out[out.length - 1];
         if (i > 0 && last.to === row - 1 && last.cancelled === cancelled && last.tag === tag) last.to = row;
         else out.push({ name: c.name, code, room: c.classroom ?? "", day, from: row, to: row, cancelled, tag });
@@ -92,7 +93,7 @@ export function Timetable({ user }: { user: UserDetail }) {
     <div className="overflow-x-auto">
       <div
         role="img"
-        aria-label={`Timetable for this week with ${meetings} class meetings${cancelled.length ? `; cancelled: ${[...new Set(cancelled)].join(", ")}` : ""}${moved.length ? `; room changes: ${moved.join(", ")}` : ""}`}
+        aria-label={`Timetable for this week with ${meetings} class meetings${cancelled.length ? `; cancelled: ${[...new Set(cancelled)].join(", ")}` : ""}${moved.length ? `; changes: ${moved.join(", ")}` : ""}`}
         className="grid min-w-[820px] gap-[3px] phone:min-w-[560px] phone:[--tt-col:100px] phone:[--tt-head:32px]"
         style={{
           gridTemplateColumns: `var(--tt-head, 44px) repeat(${dayCount}, minmax(var(--tt-col, 150px), 1fr))`,
