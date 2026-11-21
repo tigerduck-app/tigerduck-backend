@@ -43,7 +43,7 @@ The named volume `tigerduck_pgdata` survives `up -d --build` and even
 - **Migration `fefd80be557b`** replaces the `chk_course_change_kind` and
   `chk_course_change_note` checks and `course_change_violations`, then
   converts term 1151's notes by id, each only while it is still a note
-  (35 and 36), or a note with its Chinese text (the rest): 14, 17, 18, 19,
+  with its Chinese text: 14, 17, 18, 19,
   20, 21, 33 (期中考) and 23 (期末考), 16 (期中分組簡報, given the English
   name Midterm group presentation) and 54 (期末報告, renamed 期末簡報 /
   Final presentation) to `assessment`, and 35 and 36 to `online` with their
