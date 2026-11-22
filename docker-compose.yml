@@ -194,7 +194,7 @@ services:
   # App-level counts from SQL (devices online, push queue, sync jobs, …)
   # as Prometheus gauges, so they get a history.
   sql-exporter:
-    image: burningalchemist/sql_exporter:0.24.13@sha256:befda03e0eae3f0c9b9dd0e5e5b968152f50e44dbdc04c1b68370c6fcbda2b7d
+    image: burningalchemist/sql_exporter:0.24.14@sha256:9ca0661972dbe8a31b7ebe38f9e3fe11699a1e0104a3bd887701cf9fc7d89e82
     container_name: tigerduck-sql-exporter
     restart: unless-stopped
     networks: [tigerduck-db, tigerduck-monitoring]
